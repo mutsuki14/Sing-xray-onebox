@@ -205,6 +205,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 **国内 VPS 下载失败？** 设置 `GH_PROXY=https://ghfast.top/`（或其他可用的 GitHub 加速前缀）后重新运行。
 
 **纯 IPv6 VPS？** GitHub 不支持 IPv6，下载内核需要借助支持 IPv6 的 GitHub 加速前缀（如 `GH_PROXY=https://ghproxy.net/`）或先配置 WARP / NAT64。
+配置了 WARP 时，脚本会识别出 WARP 出口地址（不能用于入站连接），默认改用本机 IPv6 作为客户端连接地址。
 
 **支持哪些老系统？** CentOS 7 与 Debian 10 已停止维护，脚本会自动把软件源切换到 vault.centos.org / archive.debian.org。
 sing-box 使用 musl 静态构建，不依赖系统 glibc 版本。
@@ -214,6 +215,13 @@ sing-box 使用 musl 静态构建，不依赖系统 glibc 版本。
 
 **如何更新？** `onebox update` 更新内核（可指定版本，如 `onebox update singbox 1.14.2`；新内核不接受当前配置时自动恢复旧版本），
 `onebox update-script` 更新脚本（会用新脚本重新生成配置，凭据不变）。
+
+**使用已有证书（certbot 等）？** 选择“使用已有证书文件”时脚本直接引用原文件，续期后 sing-box 自动加载新证书；
+Xray 需要重启，可在 certbot 的续期钩子中加入 `onebox restart`（例如 `--deploy-hook "onebox restart"`）。
+不受公共 CA 信任的证书（如 Cloudflare 源证书）会被识别出来，直连客户端改为固定证书指纹。
+
+**安全相关的默认设置**：服务端拒绝通过代理访问内网、回环地址以及本机自身的公网地址（防止借代理访问 VPS 上只对防火墙开放的服务）；
+屏蔽 BT；Xray 不记录访问日志；日志目录权限 700；mihomo / sing-box 客户端控制接口带随机密钥；Cloudflare Token 输入不回显。
 
 **修改失败会不会把节点搞坏？** 不会。所有修改（添加 / 删除协议、改端口、换证书、重装等）都会先用内核校验新配置，
 校验通过后才替换；若新配置下服务无法启动，脚本会自动回滚到修改前的配置并以非零状态退出。

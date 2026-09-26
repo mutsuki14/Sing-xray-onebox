@@ -215,7 +215,8 @@ setup_round() {
 		;;
 	custom)
 		TLS_MODE=custom DOMAIN=onebox.test TLS_SNI=onebox.test
-		cert_custom "$WORK/pki/onebox.test.pem" "$WORK/pki/onebox.test.key"
+		cert_custom "$WORK/pki/onebox.test.pem" "$WORK/pki/onebox.test.key" >/dev/null
+		[ "$CERT_PINNED" = 0 ] || echo "  警告: 测试 CA 未被识别为受信任, 本轮将以指纹固定方式测试"
 		;;
 	esac
 }
@@ -397,9 +398,10 @@ run_round() {
 	local name=$1 prefer=$2 tls=$3 list=${4:-$ALL_PROTOCOLS} p c r tcp udp
 	echo
 	echo "=== 轮次 ${name}: 优先内核=${prefer} 证书=${tls} ==="
-	setup_round "$name" "$prefer" "$tls" "$list"
-	# 信任本地测试 CA (REALITY/ShadowTLS 目标站点与 ca-* 轮次的证书由它签发)
+	# 信任本地测试 CA (REALITY/ShadowTLS 目标站点与 ca-* 轮次的证书由它签发);
+	# 需在 setup_round 之前设置, 以便自有证书被识别为受信任 (客户端严格校验而非固定指纹)
 	export SSL_CERT_FILE="$WORK/pki/bundle.pem"
+	setup_round "$name" "$prefer" "$tls" "$list"
 	if ! start_servers; then
 		FAILED=$((FAILED + 1))
 		TOTAL=$((TOTAL + 1))

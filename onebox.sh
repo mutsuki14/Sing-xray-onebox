@@ -228,6 +228,20 @@ urlencode() {
 	printf '%s' "$out"
 }
 
+# ask_secret VAR "提示"  —— 读取不回显的敏感输入 (如 API Token)
+ask_secret() {
+	local _k_var=$1 _k_val=""
+	if is_interactive; then
+		printf '%s: ' "$2" >&2
+		IFS= read -rs _k_val <"$TTY_IN" || _k_val=""
+		printf '\n' >&2
+	fi
+	printf -v "$_k_var" '%s' "${_k_val//[[:cntrl:][:space:]]/}"
+}
+
+valid_ipv4() { [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] && [ "${BASH_REMATCH[1]}" -le 255 ] && [ "${BASH_REMATCH[2]}" -le 255 ] && [ "${BASH_REMATCH[3]}" -le 255 ] && [ "${BASH_REMATCH[4]}" -le 255 ]; }
+valid_ipv6() { [[ "$1" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$1" == *:*:* ]]; }
+
 # 合法域名 (至少包含一个点, 仅字母数字与连字符)
 valid_domain() {
 	[[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
@@ -504,6 +518,7 @@ fix_eol_repos() {
 		warn "CentOS 7 已停止维护, 软件源切换到 vault.centos.org"
 		sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
 			-e 's|^#[[:space:]]*baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/7.9.2009|' \
+			-e 's|^#[[:space:]]*baseurl=http://mirror.centos.org/altarch/\$releasever|baseurl=https://vault.centos.org/altarch/7.9.2009|' \
 			/etc/yum.repos.d/CentOS-*.repo
 		yum clean all >/dev/null 2>&1
 	fi
@@ -511,10 +526,9 @@ fix_eol_repos() {
 		! grep -qs 'archive.debian.org' /etc/apt/sources.list; then
 		warn "Debian 10 已停止维护, 软件源切换到 archive.debian.org"
 		sed -i -E \
-			-e 's#^(deb(-src)?[[:space:]]+)https?://[^[:space:]]+/debian-security/?[[:space:]]+buster/updates#\1http://archive.debian.org/debian-security buster/updates#' \
-			-e 's#^(deb(-src)?[[:space:]]+)https?://[^[:space:]]+/debian/?[[:space:]]+buster#\1http://archive.debian.org/debian buster#' \
+			-e 's#^(deb(-src)?[[:space:]]+)https?://[^[:space:]]+/debian-security/?[[:space:]]+buster/updates#\1[check-valid-until=no] http://archive.debian.org/debian-security buster/updates#' \
+			-e 's#^(deb(-src)?[[:space:]]+)https?://[^[:space:]]+/debian/?[[:space:]]+buster#\1[check-valid-until=no] http://archive.debian.org/debian buster#' \
 			/etc/apt/sources.list
-		echo 'Acquire::Check-Valid-Until "false";' >/etc/apt/apt.conf.d/99onebox-archive
 	fi
 }
 
@@ -616,6 +630,16 @@ detect_public_ip() {
 		SERVER_IPV6=$(_ip_from 6 "$u")
 		[ -n "$SERVER_IPV6" ] && break
 	done
+	# 出口经过 Cloudflare WARP 时, 检测到的是 WARP 出口地址, 无法用于入站连接
+	SERVER_IPV4_WARP=0 SERVER_IPV6_WARP=0
+	if [ -n "$SERVER_IPV4" ] && curl -4 -fsS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -qE '^warp=(on|plus)'; then
+		SERVER_IPV4_WARP=1
+		warn "IPv4 出口经过 Cloudflare WARP (${SERVER_IPV4}), 该地址不能用于客户端连接"
+	fi
+	if [ -n "$SERVER_IPV6" ] && curl -6 -fsS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -qE '^warp=(on|plus)'; then
+		SERVER_IPV6_WARP=1
+		warn "IPv6 出口经过 Cloudflare WARP (${SERVER_IPV6}), 该地址不能用于客户端连接"
+	fi
 	if [ -z "$SERVER_IPV4" ] && [ -n "$SERVER_IPV6" ] && [ -z "$GH_PROXY" ]; then
 		warn "检测到纯 IPv6 服务器: GitHub 不支持 IPv6, 下载内核可能失败"
 		warn "可设置支持 IPv6 的加速前缀后重试, 例如: GH_PROXY=https://ghproxy.net/ onebox, 或先配置 WARP / NAT64"
@@ -670,7 +694,7 @@ WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
 HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP
 SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
 TLS_MODE DOMAIN TLS_SNI CERT_FILE KEY_FILE ACME_METHOD
-SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT VMESS_TLS INSTALLED_AT"
+SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT VMESS_TLS CLASH_SECRET CERT_PINNED INSTALLED_AT"
 
 # 状态变量通过 STATE_KEYS 间接读写, shellcheck 无法追踪
 # shellcheck disable=SC2034
@@ -715,6 +739,8 @@ load_state() {
 	reset_state
 	# shellcheck disable=SC1090
 	. "$STATE_FILE"
+	# 旧版本状态文件没有 CLASH_SECRET: 生成随机密钥
+	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
 	# 旧版本状态文件没有 VMESS_TLS: 按当时的规则推导并固定下来
 	if proto_enabled vmess-ws && [ -z "${VMESS_TLS:-}" ]; then
 		if vmess_tls_default; then VMESS_TLS=1; else VMESS_TLS=0; fi
@@ -854,8 +880,8 @@ tls_server_name() {
 	fi
 }
 
-# 客户端是否需要跳过证书校验 (自签证书)
-tls_insecure() { [ "$TLS_MODE" = self ]; }
+# 客户端是否需要固定证书指纹 (自签证书, 或不受公共 CA 信任的自有证书如 Cloudflare 源证书)
+tls_insecure() { [ "$TLS_MODE" = self ] || [ "${CERT_PINNED:-0}" = 1 ]; }
 
 # 分享链接/客户端配置中使用的服务器地址 (IPv6 需加方括号的场合由调用方处理)
 server_host() { printf '%s' "$SERVER_ADDR"; }
@@ -1085,6 +1111,18 @@ svc_args() {
 	esac
 }
 
+# 文件描述符上限: min(硬上限, 1048576), 容器内硬上限可能更低
+nofile_limit() {
+	local h
+	h=$(ulimit -Hn 2>/dev/null)
+	case "$h" in "" | unlimited) h=1048576 ;; esac
+	[ "$h" -gt 1048576 ] 2>/dev/null && h=1048576
+	printf '%s' "$h"
+}
+
+# 日志超过 10MB 时清空 (OpenRC / 无 init 模式下日志写入文件, 没有轮转)
+trim_log() { [ -f "$1" ] && [ "$(wc -c <"$1" 2>/dev/null || echo 0)" -gt 10485760 ] && : >"$1"; return 0; }
+
 svc_write() {
 	local core=$1 name bin args extra=""
 	name=$(svc_name "$core") bin=$(svc_bin "$core") args=$(svc_args "$core")
@@ -1124,7 +1162,9 @@ command_args="${args}"
 output_log="${LOG_DIR}/${core}.log"
 error_log="${LOG_DIR}/${core}.log"
 respawn_delay=5
-respawn_max=0
+respawn_max=10
+respawn_period=120
+rc_ulimit="-n $(nofile_limit)"
 
 depend() {
 	want net
@@ -1132,7 +1172,9 @@ depend() {
 }
 
 start_pre() {
-	checkpath -d -m 0755 "${LOG_DIR}"
+	checkpath -d -m 0700 "${LOG_DIR}"
+	# 日志超过 10MB 时清空
+	[ -f "${LOG_DIR}/${core}.log" ] && [ "\$(wc -c <"${LOG_DIR}/${core}.log")" -gt 10485760 ] && : >"${LOG_DIR}/${core}.log"
 }
 EOF
 		chmod 755 "/etc/init.d/${name}"
@@ -1176,16 +1218,21 @@ _none_running() {
 }
 
 _none_start() {
-	local core=$1
+	local core=$1 log
 	_none_running "$core" && return 0
-	mkdir -p "$RUN_DIR" "$LOG_DIR"
+	log="${LOG_DIR}/${core}.log"
+	(umask 077 && mkdir -p "$RUN_DIR" "$LOG_DIR" && : >>"$log")
+	trim_log "$log"
 	# setsid: 脱离当前会话, 关闭 SSH 终端不会影响. svc_args 需要按空格拆分
 	# shellcheck disable=SC2046
-	if has setsid; then
-		setsid "$(svc_bin "$core")" $(svc_args "$core") >>"${LOG_DIR}/${core}.log" 2>&1 </dev/null &
-	else
-		nohup "$(svc_bin "$core")" $(svc_args "$core") >>"${LOG_DIR}/${core}.log" 2>&1 </dev/null &
-	fi
+	(
+		ulimit -n "$(nofile_limit)" 2>/dev/null
+		if has setsid; then
+			exec setsid "$(svc_bin "$core")" $(svc_args "$core") >>"$log" 2>&1 </dev/null
+		else
+			exec nohup "$(svc_bin "$core")" $(svc_args "$core") >>"$log" 2>&1 </dev/null
+		fi
+	) &
 	echo $! >"$(_none_pidfile "$core")"
 }
 
@@ -1207,11 +1254,14 @@ _none_stop() {
 
 # 无 init 系统时, 借助 crontab @reboot 实现开机自启
 _none_autostart_add() {
-	has crontab || return 0
+	if ! has crontab; then
+		warn "未检测到 init 系统与 crontab, 服务不会开机自启; 重启后请执行: onebox net-apply && onebox start"
+		return 0
+	fi
 	crontab -l 2>/dev/null | grep -q "${CMD_PATH} start" && return 0
 	(
 		crontab -l 2>/dev/null
-		echo "@reboot ${CMD_PATH} start >/dev/null 2>&1"
+		echo "@reboot ${CMD_PATH} net-apply >/dev/null 2>&1; ${CMD_PATH} start >/dev/null 2>&1"
 	) | crontab - 2>/dev/null
 	return 0
 }
@@ -1261,9 +1311,29 @@ svc_active() {
 	name=$(svc_name "$core")
 	case "$INIT" in
 	systemd) systemctl is-active --quiet "$name" ;;
-	openrc) rc-service "$name" status >/dev/null 2>&1 ;;
+	openrc)
+		# supervise-daemon 在子进程反复崩溃时仍报告 started, 需检查其记录的子进程
+		rc-service "$name" status >/dev/null 2>&1 || return 1
+		local cp
+		cp=$(cat "/run/openrc/options/${name}/child_pid" 2>/dev/null)
+		if [ -n "$cp" ]; then
+			kill -0 "$cp" 2>/dev/null
+		else
+			_proc_running_bin "$(svc_bin "$core")"
+		fi
+		;;
 	none) _none_running "$core" ;;
 	esac
+}
+
+# 是否有以该可执行文件运行的进程
+_proc_running_bin() {
+	local p a
+	for p in /proc/[0-9]*; do
+		a=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+		case "$a" in "$1 "*) return 0 ;; esac
+	done
+	return 1
 }
 
 svc_exists() {
@@ -1370,10 +1440,15 @@ _ipt_rule() {
 		"$t" -t "$table" -I "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null ||
 			"$t" -t "$table" -I "$chain" "${m[@]}" "${j[@]}" 2>/dev/null
 		;;
-	del)
+	del | delc | delp)
+		# del: 两种形式都删; delc: 仅删带 onebox 注释的; delp: 仅删无注释的 (仅用于本脚本在缺少 xt_comment 时添加的规则)
 		local n=0
-		while "$t" -t "$table" -D "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
-		while "$t" -t "$table" -D "$chain" "${m[@]}" "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
+		if [ "$act" != delp ]; then
+			while "$t" -t "$table" -D "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
+		fi
+		if [ "$act" != delc ]; then
+			while "$t" -t "$table" -D "$chain" "${m[@]}" "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
+		fi
 		[ "$n" -gt 0 ]
 		;;
 	esac
@@ -1412,15 +1487,36 @@ _fw_nft() {
 	return 0
 }
 
+# 防火墙台账: 记录本脚本实际添加的放行规则 ("后端 端口/协议"), 关闭时只删除台账中的规则,
+# 不会误删用户自己事先为同一端口添加的规则
+_fw_ledger() { printf '%s' "$ONEBOX_DIR/firewall.list"; }
+_fw_ledger_has() { grep -qxF "$1" "$(_fw_ledger)" 2>/dev/null; }
+_fw_ledger_add() {
+	_fw_ledger_has "$1" && return 0
+	mkdir -p "$ONEBOX_DIR" && printf '%s\n' "$1" >>"$(_fw_ledger)"
+}
+_fw_ledger_del() {
+	local f
+	f=$(_fw_ledger)
+	[ -f "$f" ] || return 0
+	grep -vxF "$1" "$f" >"$f.tmp" 2>/dev/null
+	mv -f "$f.tmp" "$f"
+}
+
 # fw_rule open|close 端口或范围(a-b) tcp|udp
 fw_rule() {
-	local act=$1 port=$2 proto=$3 ipt_port=${2/-/:} t
+	local act=$1 port=$2 proto=$3 ipt_port=${2/-/:} t key="${2}/${3}"
 	# ufw / firewalld 自己管理 INPUT, 此时不再直接改 iptables (否则规则重复, 且 ufw 下 INPUT 策略恒为 DROP)
 	if _fw_ufw_active; then
 		if [ "$act" = open ]; then
-			ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1
-		else
+			_fw_ledger_has "ufw $key" && return 0
+			# 用户已自行放行该端口: 不接管
+			ufw status 2>/dev/null | grep -qE "^${ipt_port}(/${proto})?[[:space:]].*ALLOW" && return 0
+			ufw allow "${ipt_port}/${proto}" comment onebox >/dev/null 2>&1 || ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1
+			_fw_ledger_add "ufw $key"
+		elif _fw_ledger_has "ufw $key"; then
 			ufw delete allow "${ipt_port}/${proto}" >/dev/null 2>&1
+			_fw_ledger_del "ufw $key"
 		fi
 		return 0
 	fi
@@ -1432,11 +1528,16 @@ fw_rule() {
 		[ -n "$dev" ] && zone=$(firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null)
 		[ -n "$zone" ] && z=(--zone="$zone")
 		if [ "$act" = open ]; then
+			if ! _fw_ledger_has "firewalld $key"; then
+				firewall-cmd "${z[@]}" --permanent --query-port="${port}/${proto}" >/dev/null 2>&1 && return 0
+				_fw_ledger_add "firewalld $key"
+			fi
 			firewall-cmd "${z[@]}" --add-port="${port}/${proto}" >/dev/null 2>&1
 			firewall-cmd "${z[@]}" --permanent --add-port="${port}/${proto}" >/dev/null 2>&1
-		else
+		elif _fw_ledger_has "firewalld $key"; then
 			firewall-cmd "${z[@]}" --remove-port="${port}/${proto}" >/dev/null 2>&1
 			firewall-cmd "${z[@]}" --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1
+			_fw_ledger_del "firewalld $key"
 		fi
 		return 0
 	fi
@@ -1446,9 +1547,13 @@ fw_rule() {
 		if [ "$act" = open ]; then
 			_fw_iptables_blocking "$t" || continue
 			_ipt_rule "$t" check filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && continue
-			_ipt_rule "$t" add filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
+			_ipt_rule "$t" add filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && _fw_ledger_add "$t $key"
 		else
-			_ipt_rule "$t" del filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
+			_ipt_rule "$t" delc filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
+			if _fw_ledger_has "$t $key"; then
+				_ipt_rule "$t" delp filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
+				_fw_ledger_del "$t $key"
+			fi
 		fi
 	done
 	_fw_nft "$act" "$port" "$proto"
@@ -1497,7 +1602,7 @@ _hop_nft() {
 table ${fam} onebox_hop {
 	chain prerouting {
 		type nat hook prerouting priority -100; policy accept;
-		udp dport ${range} redirect to :${port}
+		fib daddr type local udp dport ${range} redirect to :${port}
 	}
 }
 EOF
@@ -1506,28 +1611,30 @@ EOF
 
 # hop_rules add|del
 hop_rules() {
-	local act=$1 port range t ok=1
+	local act=$1 port range t ok=1 m
 	port=$(pget PORT hysteria2)
 	range=$HY2_HOP
 	[ -n "$port" ] && [ -n "$range" ] || return 0
+	# 只改写发往本机地址的 UDP (addrtype LOCAL), 不影响 Docker / WireGuard 等转发流量
+	m=(-p udp --dport "${range/-/:}" -m addrtype --dst-type LOCAL)
 	for t in iptables ip6tables; do
 		has "$t" || continue
-		_ipt_rule "$t" del nat PREROUTING -p udp --dport "${range/-/:}" -- -j REDIRECT --to-ports "$port"
-		# 兼容旧版本写入的 onebox-hop 注释
+		_ipt_rule "$t" del nat PREROUTING "${m[@]}" -- -j REDIRECT --to-ports "$port"
+		# 兼容旧版本写入的规则 (无 addrtype 限制 / onebox-hop 注释)
+		_ipt_rule "$t" delc nat PREROUTING -p udp --dport "${range/-/:}" -- -j REDIRECT --to-ports "$port"
 		while "$t" -t nat -D PREROUTING -p udp --dport "${range/-/:}" -m comment --comment onebox-hop -j REDIRECT --to-ports "$port" 2>/dev/null; do :; done
 	done
 	has nft && _hop_nft del
 	[ "$act" = add ] || return 0
-	if has iptables && _ipt_rule iptables add nat PREROUTING -p udp --dport "${range/-/:}" -- -j REDIRECT --to-ports "$port"; then
+	if has iptables && _ipt_rule iptables add nat PREROUTING "${m[@]}" -- -j REDIRECT --to-ports "$port"; then
 		ok=0
 		if host_has_ipv6 && has ip6tables; then
-			_ipt_rule ip6tables add nat PREROUTING -p udp --dport "${range/-/:}" -- -j REDIRECT --to-ports "$port" ||
+			_ipt_rule ip6tables add nat PREROUTING "${m[@]}" -- -j REDIRECT --to-ports "$port" ||
 				warn "ip6tables 添加端口跳跃规则失败 (IPv6 客户端将无法使用端口跳跃)"
 		fi
 	elif has nft && _hop_nft add "$port" "$range"; then
 		ok=0
 	fi
-	[ "$ok" = 0 ] || warn "未能设置端口跳跃规则 (需要 iptables 或 nftables 以及内核 NAT 支持)"
 	return "$ok"
 }
 
@@ -1584,7 +1691,15 @@ EOF
 
 hop_setup() {
 	if proto_enabled hysteria2 && [ -n "$HY2_HOP" ]; then
-		hop_rules add
+		if ! hop_rules add; then
+			# 缺少 iptables / nftables 时先尝试安装
+			{ ensure_cmds iptables >/dev/null 2>&1 || ensure_cmds nft >/dev/null 2>&1; } && hop_rules add
+		fi
+		if [ $? -ne 0 ] || ! { has iptables || has nft; }; then
+			warn "无法设置 Hysteria2 端口跳跃规则 (需要 iptables 或 nftables 以及内核 NAT 支持), 已关闭端口跳跃"
+			HY2_HOP=""
+			save_state
+		fi
 	else
 		hop_rules del
 	fi
@@ -1675,7 +1790,7 @@ EOF
 		rm -f "$cnf"
 		chmod 600 "$TLS_DIR/key.pem"
 		chmod 644 "$TLS_DIR/cert.pem"
-		CERT_FILE="$TLS_DIR/cert.pem" KEY_FILE="$TLS_DIR/key.pem"
+		CERT_FILE="$TLS_DIR/cert.pem" KEY_FILE="$TLS_DIR/key.pem" CERT_PINNED=0
 		info "已生成自签证书 (CN=${cn}, 有效期 10 年)"
 		return 0
 	fi
@@ -1832,7 +1947,9 @@ cert_acme() {
 	*) return 1 ;;
 	esac
 	info "申请证书: ${d} (Let's Encrypt, ECC)"
-	acme --issue -d "$d" "${args[@]}" -k ec-256 --server letsencrypt
+	# Cloudflare 凭据只传给 acme.sh (其会保存到 account.conf 供续期使用)
+	CF_Token=${CF_Token:-} CF_Account_ID=${CF_Account_ID:-} CF_Zone_ID=${CF_Zone_ID:-} CF_Key=${CF_Key:-} CF_Email=${CF_Email:-} \
+		acme --issue -d "$d" "${args[@]}" -k ec-256 --server letsencrypt
 	rc=$?
 	# rc=2: 证书已存在且未到续期时间 (acme.sh RENEW_SKIP), 视为成功
 	if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then
@@ -1848,12 +1965,14 @@ cert_acme() {
 		return 1
 	}
 	chmod 600 "$TLS_DIR/key.pem"
-	CERT_FILE="$TLS_DIR/cert.pem" KEY_FILE="$TLS_DIR/key.pem"
+	CERT_FILE="$TLS_DIR/cert.pem" KEY_FILE="$TLS_DIR/key.pem" CERT_PINNED=0
 	info "证书已安装, 将由 acme.sh 自动续期"
 }
 
 cert_custom() {
 	local c=$1 k=$2
+	c=$(readlink -f "$c" 2>/dev/null || printf '%s' "$c")
+	k=$(readlink -f "$k" 2>/dev/null || printf '%s' "$k")
 	[ -f "$c" ] && [ -f "$k" ] || {
 		err "证书或私钥文件不存在"
 		return 1
@@ -1867,9 +1986,21 @@ cert_custom() {
 		err "证书与私钥不匹配"
 		return 1
 	fi
-	mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
-	cp -f "$c" "$TLS_DIR/cert.pem" && cp -f "$k" "$TLS_DIR/key.pem" && chmod 600 "$TLS_DIR/key.pem"
-	CERT_FILE="$TLS_DIR/cert.pem" KEY_FILE="$TLS_DIR/key.pem"
+	# 证书需覆盖所填域名
+	if [ -n "$DOMAIN" ] && openssl x509 -help 2>&1 | grep -q -- '-checkhost' &&
+		! openssl x509 -in "$c" -noout -checkhost "$DOMAIN" 2>/dev/null | grep -q 'does match'; then
+		err "证书不包含域名 ${DOMAIN}"
+		return 1
+	fi
+	# 不受公共 CA 信任的证书 (如 Cloudflare 源证书): 客户端改为固定证书指纹
+	CERT_PINNED=0
+	if ! openssl verify -untrusted "$c" "$c" >/dev/null 2>&1; then
+		CERT_PINNED=1
+		warn "该证书不受公共 CA 信任 (如 Cloudflare 源证书), 直连的客户端将固定证书指纹"
+	fi
+	# 直接引用原文件 (certbot 等续期后自动生效; Xray 需重启: 可在续期钩子中执行 onebox restart)
+	CERT_FILE=$c KEY_FILE=$k
+	info "使用证书: ${c}"
 }
 
 # 本机时钟与 HTTPS 服务器 Date 头的偏差 (秒, 绝对值); 获取失败返回 1
@@ -2091,6 +2222,9 @@ gen_singbox_server() {
 		# 先解析域名再匹配私有地址, 否则 localhost 之类的域名会绕过拦截
 		rules+=("      { \"action\": \"resolve\", \"strategy\": \"${strategy}\" }")
 		rules+=('      { "ip_is_private": true, "action": "reject" }')
+		local own
+		own=$(own_ip_cidrs)
+		[ -n "$own" ] && rules+=("      { \"ip_cidr\": [${own}], \"action\": \"reject\" }")
 	fi
 	cat <<EOF
 {
@@ -2111,6 +2245,24 @@ $(json_join "${rules[@]}")
   }
 }
 EOF
+}
+
+# 本机的公网 / 全局地址: 代理用户经本机地址访问本机服务时会绕过防火墙与云安全组, 需一并屏蔽
+own_ip_list() {
+	{
+		[ -n "${SERVER_IPV4:-}" ] && [ "${SERVER_IPV4_WARP:-0}" != 1 ] && printf '%s\n' "$SERVER_IPV4"
+		[ -n "${SERVER_IPV6:-}" ] && [ "${SERVER_IPV6_WARP:-0}" != 1 ] && printf '%s\n' "$SERVER_IPV6"
+		ip -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}'
+	} | grep -E '^[0-9a-fA-F:.]+$' | grep -E '\.|:' | sort -u
+}
+
+# own_ip_cidrs  -> JSON 字符串列表 (不含方括号), 例如 "1.2.3.4/32", "2001:db8::1/128"
+own_ip_cidrs() {
+	local ip out=""
+	for ip in $(own_ip_list); do
+		case "$ip" in *:*) out+="\"${ip}/128\", " ;; *) out+="\"${ip}/32\", " ;; esac
+	done
+	printf '%s' "${out%, }"
 }
 
 # 仅有 IPv4 或仅有 IPv6 出口时, 让域名解析优先对应协议栈
@@ -2356,7 +2508,9 @@ gen_xray_server() {
 	fi
 	[ "${BLOCK_BT:-1}" = 1 ] && rules+=('      { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" }')
 	if [ "${BLOCK_PRIVATE:-1}" = 1 ]; then
-		rules+=("      { \"type\": \"field\", \"ip\": [${PRIVATE_CIDRS}], \"outboundTag\": \"block\" }")
+		local own
+		own=$(own_ip_cidrs)
+		rules+=("      { \"type\": \"field\", \"ip\": [${PRIVATE_CIDRS}${own:+, ${own}}], \"outboundTag\": \"block\" }")
 		ds=IPIfNonMatch # 仅在存在 IP 规则时才需要为域名解析 IP
 	else
 		# Xray >= 26.4 的 freedom 默认阻止 VLESS/VMess/Trojan/SS/Hysteria 入站访问私有地址, 关闭屏蔽时需显式放行
@@ -2643,7 +2797,8 @@ mh_min_version() {
 
 # 外部控制 API 密钥: 由 UUID 派生, 重新生成配置时保持不变
 # (未设密钥时, 默认 CORS 允许任意网页调用本机 API, 可直接 PUT /configs 替换整个配置)
-mh_secret() { printf 'onebox-mihomo-%s' "$UUID" | openssl dgst -sha256 2>/dev/null | sed 's/.*= *//' | cut -c1-24; }
+# 外部控制 API 密钥: 随机生成并保存在状态中 (不能由分享链接中的 UUID 推导)
+mh_secret() { printf '%s' "${CLASH_SECRET:-}"; }
 
 gen_mihomo() {
 	local p names=()
@@ -3343,13 +3498,14 @@ choose_tls() {
 			ACME_METHOD=cf
 			if [ -z "${CF_Token:-}" ] && { [ -z "${CF_Key:-}" ] || [ -z "${CF_Email:-}" ]; }; then
 				while :; do
-					ask d "Cloudflare API Token (需 Zone.DNS 编辑权限)" ""
+					ask_secret d "Cloudflare API Token (需 Zone.DNS 编辑权限, 输入不回显)"
 					[ -n "$d" ] && break
 					is_interactive || die "未提供 Cloudflare API Token (请设置环境变量 CF_Token)"
 				done
-				export CF_Token="$d"
+				# 不 export: 仅在调用 acme.sh 时传入 (见 cert_acme), 避免泄露给之后启动的内核进程
+				CF_Token=$d
 				ask d "Cloudflare Account ID (可留空)" ""
-				[ -n "$d" ] && export CF_Account_ID="$d"
+				[ -n "$d" ] && CF_Account_ID=$d
 			fi
 		fi
 		;;
@@ -3470,6 +3626,10 @@ choose_address() {
 	echo "  IPv6: ${SERVER_IPV6:-无}"
 	if [ "$TLS_MODE" = acme ] || [ "$TLS_MODE" = custom ]; then
 		def=$DOMAIN
+	elif [ -n "$SERVER_IPV4" ] && [ "${SERVER_IPV4_WARP:-0}" != 1 ]; then
+		def=$SERVER_IPV4
+	elif [ -n "$SERVER_IPV6" ] && [ "${SERVER_IPV6_WARP:-0}" != 1 ]; then
+		def=$SERVER_IPV6
 	else
 		def=${SERVER_IPV4:-$SERVER_IPV6}
 	fi
@@ -3477,10 +3637,15 @@ choose_address() {
 	def=${OPT_ADDR:-${SERVER_ADDR:-$def}}
 	while :; do
 		ask SERVER_ADDR "客户端连接使用的地址 (IP 或域名)" "$def"
+		SERVER_ADDR=${SERVER_ADDR#*://}
+		SERVER_ADDR=${SERVER_ADDR%%/*}
 		SERVER_ADDR=${SERVER_ADDR#[}
 		SERVER_ADDR=${SERVER_ADDR%]}
-		[ -n "$SERVER_ADDR" ] && break
-		is_interactive || die "无法检测公网 IP, 请使用 --addr 指定"
+		if valid_ipv4 "$SERVER_ADDR" || valid_ipv6 "$SERVER_ADDR" || valid_domain "$SERVER_ADDR"; then
+			break
+		fi
+		[ -n "$SERVER_ADDR" ] && warn "地址无效 (只填 IP 或域名, 不带端口): ${SERVER_ADDR}"
+		is_interactive || die "无法确定客户端连接地址, 请使用 --addr 指定 IP 或域名"
 	done
 	local h
 	h=$(hostname 2>/dev/null | cut -d. -f1 | LC_ALL=C tr -cd 'A-Za-z0-9_-')
@@ -3525,6 +3690,7 @@ gen_credentials() {
 	SHADOWTLS_PASSWORD=$(rand_str 20)
 	SHADOWTLS_SS_PASSWORD=$(gen_ss_password 2022-blake3-aes-128-gcm)
 	REALITY_GUARD_PORT=$(pick_guard_port)
+	CLASH_SECRET=$(rand_str 24)
 }
 
 # 按需补齐缺失的凭据 (添加协议时使用, 不改变已有凭据)
@@ -3545,6 +3711,7 @@ fill_missing_credentials() {
 	[ -n "$SHADOWTLS_PASSWORD" ] || SHADOWTLS_PASSWORD=$(rand_str 20)
 	[ -n "$SHADOWTLS_SS_PASSWORD" ] || SHADOWTLS_SS_PASSWORD=$(gen_ss_password 2022-blake3-aes-128-gcm)
 	[ -n "$REALITY_GUARD_PORT" ] || REALITY_GUARD_PORT=$(pick_guard_port)
+	[ -n "$CLASH_SECRET" ] || CLASH_SECRET=$(rand_str 24)
 	return 0
 }
 

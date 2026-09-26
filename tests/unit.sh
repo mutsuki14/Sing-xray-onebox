@@ -182,6 +182,30 @@ eq "VMESS_TLS=1 覆盖自签默认" "$(yes_ vmess_tls_enabled)" yes
 TLS_MODE=acme VMESS_TLS=0
 eq "VMESS_TLS=0 覆盖 ACME 默认" "$(yes_ vmess_tls_enabled)" no
 
+# 地址校验
+eq "IPv4 合法" "$(yes_ valid_ipv4 1.2.3.4)" yes
+eq "IPv4 越界" "$(yes_ valid_ipv4 1.2.3.256)" no
+eq "IPv6 合法" "$(yes_ valid_ipv6 2001:db8::1)" yes
+eq "IPv6 非法" "$(yes_ valid_ipv6 example.com)" no
+
+# 屏蔽本机地址 (排除 WARP 出口)
+ip() { :; }
+SERVER_IPV4=203.0.113.5 SERVER_IPV6=2001:db8::5 SERVER_IPV4_WARP=0 SERVER_IPV6_WARP=0
+eq "本机地址 CIDR" "$(own_ip_cidrs)" '"2001:db8::5/128", "203.0.113.5/32"'
+SERVER_IPV4_WARP=1
+eq "WARP 出口不计入本机地址" "$(own_ip_cidrs)" '"2001:db8::5/128"'
+unset -f ip
+
+# 防火墙台账: 只记录本脚本添加的规则
+ONEBOX_DIR="$WORK/fw" && mkdir -p "$ONEBOX_DIR"
+_fw_ledger_add "ufw 443/tcp"
+_fw_ledger_add "ufw 443/tcp"
+_fw_ledger_add "iptables 8443/udp"
+eq "台账去重" "$(wc -l <"$(_fw_ledger)" | tr -d ' ')" 2
+_fw_ledger_del "ufw 443/tcp"
+eq "台账删除" "$(yes_ _fw_ledger_has "ufw 443/tcp")|$(yes_ _fw_ledger_has "iptables 8443/udp")" "no|yes"
+ONEBOX_DIR="$WORK/etc"
+
 # 显示宽度补齐
 eq "pad 中文" "$(pad 协议 6)|" "协议  |"
 eq "pad ASCII" "$(pad ab 4)|" "ab  |"
