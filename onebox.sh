@@ -2385,18 +2385,20 @@ gen_links() {
 	done
 }
 
+
 # ---------------------------------------------------------------------------
 # 客户端: mihomo (Clash Meta)
 # ---------------------------------------------------------------------------
+# 内核版本要求 (按协议): AnyTLS >= 1.19.3, VLESS-XHTTP >= 1.19.22, Hysteria2 端口跳跃 >= 1.18.2
 # YAML 单引号字符串
 yq() { printf "'%s'" "${1//\'/\'\'}"; }
 
 _mh_tls_common() {
-	# 证书类协议的 sni; 自签证书时跳过 CA 校验并固定证书指纹
+	# 证书类协议的 sni; 自签证书时跳过 CA 校验并固定证书指纹 (mihomo 在设置 fingerprint 时始终校验指纹)
 	printf '    %s: %s\n' "${1:-sni}" "$(yq "$(tls_server_name)")"
 	if tls_insecure; then
 		printf '    skip-cert-verify: true\n'
-		printf '    fingerprint: %s\n' "$(cert_sha256)"
+		printf '    fingerprint: %s\n' "$(yq "$(cert_sha256)")"
 	fi
 	return 0
 }
@@ -2404,6 +2406,13 @@ _mh_tls_common() {
 _mh_reality() {
 	printf '    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: %s\n      short-id: %s\n' \
 		"$(yq "$REALITY_SNI")" "$(yq "$REALITY_PUBLIC_KEY")" "$(yq "$REALITY_SHORT_ID")"
+}
+
+# WebSocket 选项: 路径 / Host / 0-RTT 早期数据 (与 sing-box 服务端 max_early_data 2048 一致, Xray 服务端自动识别)
+_mh_ws_opts() {
+	printf '    ws-opts:\n      path: %s\n' "$(yq "$1")"
+	[ -n "${2:-}" ] && printf '      headers:\n        Host: %s\n' "$(yq "$2")"
+	printf '      max-early-data: 2048\n      early-data-header-name: Sec-WebSocket-Protocol\n'
 }
 
 mh_proxy() {
@@ -2429,17 +2438,17 @@ mh_proxy() {
 	vless-ws)
 		printf '    type: vless\n    uuid: %s\n    network: ws\n    udp: true\n    tls: true\n    client-fingerprint: chrome\n    alpn: [http/1.1]\n' "$UUID"
 		_mh_tls_common servername
-		printf '    ws-opts:\n      path: %s\n      headers:\n        Host: %s\n' "$(yq "$WS_PATH")" "$(yq "$(tls_server_name)")"
+		_mh_ws_opts "$WS_PATH" "$(tls_server_name)"
 		;;
 	vmess-ws)
 		printf '    type: vmess\n    uuid: %s\n    alterId: 0\n    cipher: auto\n    network: ws\n    udp: true\n' "$UUID"
 		if vmess_tls_enabled; then
-			printf '    tls: true\n    client-fingerprint: chrome\n'
+			printf '    tls: true\n    client-fingerprint: chrome\n    alpn: [http/1.1]\n'
 			_mh_tls_common servername
-			printf '    ws-opts:\n      path: %s\n      headers:\n        Host: %s\n' "$(yq "$VMESS_PATH")" "$(yq "$(tls_server_name)")"
+			_mh_ws_opts "$VMESS_PATH" "$(tls_server_name)"
 		else
-			printf '    tls: false\n    ws-opts:\n      path: %s\n' "$(yq "$VMESS_PATH")"
-			[ -n "$DOMAIN" ] && printf '      headers:\n        Host: %s\n' "$(yq "$DOMAIN")"
+			printf '    tls: false\n'
+			_mh_ws_opts "$VMESS_PATH" "${DOMAIN:-}"
 		fi
 		;;
 	trojan)
@@ -2451,12 +2460,14 @@ mh_proxy() {
 		;;
 	hysteria2)
 		printf '    type: hysteria2\n    password: %s\n    alpn: [h3]\n' "$(yq "$PASSWORD")"
-		[ -n "$HY2_HOP" ] && printf '    ports: %s\n' "$(yq "$HY2_HOP")"
+		# 端口跳跃: 设置 ports 后客户端只在该范围内随机选端口 (port 仅作展示/兼容), 默认每 30 秒换一次
+		[ -n "$HY2_HOP" ] && printf '    ports: %s\n    hop-interval: 30\n' "$(yq "$HY2_HOP")"
 		[ "$HY2_OBFS" = 1 ] && printf '    obfs: salamander\n    obfs-password: %s\n' "$(yq "$HY2_OBFS_PASSWORD")"
 		_mh_tls_common sni
 		;;
 	tuic)
-		printf '    type: tuic\n    uuid: %s\n    password: %s\n    alpn: [h3]\n    congestion-controller: bbr\n    udp-relay-mode: native\n    reduce-rtt: true\n' "$UUID" "$(yq "$PASSWORD")"
+		# 服务端未开启 0-RTT (zero_rtt_handshake=false), 客户端同样不启用 reduce-rtt
+		printf '    type: tuic\n    uuid: %s\n    password: %s\n    alpn: [h3]\n    congestion-controller: bbr\n    udp-relay-mode: native\n' "$UUID" "$(yq "$PASSWORD")"
 		_mh_tls_common sni
 		;;
 	anytls)
@@ -2470,15 +2481,28 @@ mh_proxy() {
 	esac
 }
 
+# 所需的最低 mihomo 内核版本 (取所含协议的最大值)
+mh_min_version() {
+	local v=1.18.2
+	proto_enabled anytls && v=1.19.3
+	proto_enabled vless-xhttp && v=1.19.22
+	printf '%s' "$v"
+}
+
+# 外部控制 API 密钥: 由 UUID 派生, 重新生成配置时保持不变
+# (未设密钥时, 默认 CORS 允许任意网页调用本机 API, 可直接 PUT /configs 替换整个配置)
+mh_secret() { printf 'onebox-mihomo-%s' "$UUID" | openssl dgst -sha256 2>/dev/null | sed 's/.*= *//' | cut -c1-24; }
+
 gen_mihomo() {
 	local p names=()
 	for p in $PROTOCOLS; do
 		proto_client_ok "$p" mihomo || continue
 		names+=("$(node_name "$p")")
 	done
-	cat <<'EOF'
+	cat <<EOF
 # Sing-Xray-Onebox 生成的 mihomo (Clash Meta) 配置
 # 适用: Clash Verge Rev / Mihomo Party / FlClash / ClashMi / Clash Meta for Android 等
+# 需要 mihomo 内核 >= $(mh_min_version), 请使用客户端最新版 (旧内核不认识 anytls 会拒绝整个配置; 1.19.22 之前 XHTTP 节点无法连接)
 mixed-port: 7890
 allow-lan: false
 mode: rule
@@ -2486,8 +2510,10 @@ log-level: info
 ipv6: true
 unified-delay: true
 tcp-concurrent: true
-find-process-mode: strict
 external-controller: 127.0.0.1:9090
+secret: $(yq "$(mh_secret)")
+EOF
+	cat <<'EOF'
 profile:
   store-selected: true
   store-fake-ip: true
@@ -2511,6 +2537,9 @@ sniffer:
       ports: [443, 8443]
     QUIC:
       ports: [443, 8443]
+  skip-domain:
+    - 'Mijia Cloud'
+    - '+.push.apple.com'
 
 tun:
   enable: false
@@ -2523,16 +2552,24 @@ tun:
 dns:
   enable: true
   ipv6: true
-  listen: 0.0.0.0:1053
+  listen: 127.0.0.1:1053
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:
-    - '*.lan'
-    - '*.local'
-    - '+.msftconnecttest.com'
-    - '+.msftncsi.com'
+    - 'geosite:private'
+    - 'geosite:connectivity-check'
+    - '+.lan'
+    - '+.local'
+    - '+.home.arpa'
     - 'time.*.com'
     - 'ntp.*.com'
+    - '+.pool.ntp.org'
+    - '+.stun.*.*'
+    - '+.stun.*.*.*'
+    - '+.srv.nintendo.net'
+    - '+.stun.playstation.net'
+    - 'xbox.*.microsoft.com'
+    - '+.xboxlive.com'
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
@@ -2543,9 +2580,12 @@ dns:
     - https://dns.alidns.com/dns-query
     - https://doh.pub/dns-query
   nameserver-policy:
+    'geosite:cn':
+      - https://dns.alidns.com/dns-query
+      - https://doh.pub/dns-query
     'geosite:geolocation-!cn':
-      - https://dns.cloudflare.com/dns-query#节点选择
-      - https://dns.google/dns-query#节点选择
+      - 'https://dns.cloudflare.com/dns-query#节点选择'
+      - 'https://dns.google/dns-query#节点选择'
 
 proxies:
 EOF
@@ -2575,6 +2615,7 @@ rules:
   - GEOIP,private,DIRECT,no-resolve
   - GEOSITE,category-ads-all,REJECT
   - GEOSITE,cn,DIRECT
+  - GEOSITE,geolocation-!cn,节点选择
   - GEOIP,CN,DIRECT
   - MATCH,节点选择
 EOF
@@ -2735,7 +2776,7 @@ $(json_join "${outs[@]}"),
   },
   "experimental": {
     "cache_file": { "enabled": true },
-    "clash_api": { "external_controller": "127.0.0.1:9090", "default_mode": "Rule" }
+    "clash_api": { "external_controller": "127.0.0.1:9090", "secret": "$(mh_secret)", "default_mode": "Rule" }
   }
 }
 EOF
@@ -3441,6 +3482,8 @@ show_info() {
 	echo "  sing-box (TUN)    : ${CLIENT_DIR}/sing-box.json"
 	echo "  sing-box (代理端口): ${CLIENT_DIR}/sing-box-notun.json"
 	[ -f "$CLIENT_DIR/xray.json" ] && echo "  Xray              : ${CLIENT_DIR}/xray.json"
+	echo "  mihomo / sing-box 本地控制面板 (127.0.0.1:9090) 密钥: $(mh_secret)"
+	echo "  mihomo 需要内核 >= $(mh_min_version) (请使用客户端最新版)"
 	echo "  查看: onebox client mihomo | singbox | singbox-notun | xray | sub | links"
 }
 
