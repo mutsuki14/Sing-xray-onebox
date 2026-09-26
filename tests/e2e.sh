@@ -402,7 +402,18 @@ run_round() {
 	# 需在 setup_round 之前设置, 以便自有证书被识别为受信任 (客户端严格校验而非固定指纹)
 	export SSL_CERT_FILE="$WORK/pki/bundle.pem"
 	setup_round "$name" "$prefer" "$tls" "$list"
-	if ! start_servers; then
+	local started=0
+	if start_servers; then
+		started=1
+	elif grep -qs 'address already in use' "$RDIR"/*-server.log; then
+		# 端口在分配后被本机其他程序抢占 (与测试无关的竞争): 重新分配端口后再试一次
+		echo "  端口被其他程序占用, 重新分配端口后重试"
+		stop_all_round
+		rm -f "$RDIR"/*-server.log
+		setup_round "$name" "$prefer" "$tls" "$list"
+		start_servers && started=1
+	fi
+	if [ "$started" = 0 ]; then
 		FAILED=$((FAILED + 1))
 		TOTAL=$((TOTAL + 1))
 		RESULTS+=("$name server-start FAIL")
