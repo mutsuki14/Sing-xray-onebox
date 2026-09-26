@@ -42,8 +42,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 # 或 wget
 bash <(wget -qO- https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 
-# Alpine 默认没有 bash 与 curl, 先安装:
-apk add --no-cache bash curl
+# Alpine 默认没有 bash 与 curl: 可先 apk add --no-cache bash curl, 或者下载后用 sh 运行 (脚本会自动安装 bash):
+wget -O onebox.sh https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh && sh onebox.sh
 
 # 国内服务器 (GitHub 访问困难) 可设置加速前缀:
 GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
@@ -193,7 +193,10 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 
 **国内 VPS 下载失败？** 设置 `GH_PROXY=https://ghfast.top/`（或其他可用的 GitHub 加速前缀）后重新运行。
 
-**纯 IPv6 VPS？** GitHub 不支持 IPv6，下载内核需要借助支持 IPv6 的 GitHub 加速前缀（`GH_PROXY`）或先配置 WARP / NAT64。
+**纯 IPv6 VPS？** GitHub 不支持 IPv6，下载内核需要借助支持 IPv6 的 GitHub 加速前缀（如 `GH_PROXY=https://ghproxy.net/`）或先配置 WARP / NAT64。
+
+**支持哪些老系统？** CentOS 7 与 Debian 10 已停止维护，脚本会自动把软件源切换到 vault.centos.org / archive.debian.org。
+sing-box 使用 musl 静态构建，不依赖系统 glibc 版本。
 
 **SS-2022 / ShadowTLS / VMess 连接失败？** 这些协议对时间敏感：SS-2022 要求服务器与客户端时间误差在 30 秒以内，VMess 为 120 秒。
 脚本安装时会检测服务器时间偏差，请开启时间同步（`timedatectl set-ntp true` 或安装 chrony）。

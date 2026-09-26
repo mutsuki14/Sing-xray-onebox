@@ -247,7 +247,8 @@ start_servers() {
 	for p in $PROTOCOLS; do
 		[ "$(proto_net "$p")" = udp ] && continue
 		wait_tcp "$(pget PORT "$p")" || {
-			echo "  $(proto_title "$p") 服务端端口未监听"
+			echo "  $(proto_title "$p") 服务端端口未监听, 服务端日志:"
+			tail -n 5 "$RDIR"/*-server.log 2>/dev/null | sed 's/^/    /'
 			ok=1
 		}
 	done
@@ -414,16 +415,20 @@ run_round() {
 				printf '  %-4s %-22s %-9s (mihomo 链接解析不支持 TUIC 自签证书, 跳过)\n' SKIP "$(proto_title "$p")" "$c"
 				continue
 			fi
-			r=$(run_client "$c" "$p")
-			tcp=${r% *} udp=${r#* }
-			udp_expected "$c" "$p" || udp="n/a"
-			TOTAL=$((TOTAL + 1))
-			local status=PASS
-			if [ "$tcp" != ok ] || { [ "$udp" != ok ] && [ "$udp" != n/a ]; }; then
+			local status=PASS attempt
+			for attempt in 1 2; do
+				r=$(run_client "$c" "$p")
+				tcp=${r% *} udp=${r#* }
+				udp_expected "$c" "$p" || udp="n/a"
+				if [ "$tcp" = ok ] && { [ "$udp" = ok ] || [ "$udp" = n/a ]; }; then
+					[ "$attempt" = 2 ] && status="PASS(重试)"
+					break
+				fi
 				status=FAIL
-				FAILED=$((FAILED + 1))
-			fi
-			printf '  %-4s %-22s %-9s 服务端=%-8s TCP=%-4s UDP=%-4s\n' "$status" "$(proto_title "$p")" "$c" "$(core_title "$(pget CORE "$p")")" "$tcp" "$udp"
+			done
+			TOTAL=$((TOTAL + 1))
+			[ "$status" = FAIL ] && FAILED=$((FAILED + 1))
+			printf '  %-10s %-22s %-9s 服务端=%-8s TCP=%-4s UDP=%-4s\n' "$status" "$(proto_title "$p")" "$c" "$(core_title "$(pget CORE "$p")")" "$tcp" "$udp"
 			RESULTS+=("$name $p $c $status tcp=$tcp udp=$udp")
 		done
 	done

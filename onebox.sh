@@ -199,14 +199,18 @@ rand_base64() { head -c "${1:-16}" /dev/urandom | base64 | tr -d '\n'; }
 # 10000-30000 之间的随机端口 (避开常见的临时端口范围)
 rand_port() { printf '%s' $(((RANDOM * 32768 + RANDOM) % 20001 + 10000)); }
 
-# URL 编码 (用于分享链接中的参数与备注)
+# URL 编码. musl 的 C 区域把 0x80-0xFF 字节映射为 U+DF80..U+DFFF, bash 的 printf "'c"
+# 在 Alpine 上会得到 0xDFE4 而不是 0xE4, 因此只取最后两位十六进制.
 urlencode() {
-	local LC_ALL=C s=$1 i c out=""
+	local LC_ALL=C s=$1 i c o out=""
 	for ((i = 0; i < ${#s}; i++)); do
 		c=${s:i:1}
 		case "$c" in
 		[A-Za-z0-9.~_-]) out+=$c ;;
-		*) out+=$(printf '%%%02X' "'$c") ;;
+		*)
+			printf -v o '%02X' "'$c"
+			out+="%${o: -2}"
+			;;
 		esac
 	done
 	printf '%s' "$out"
@@ -320,7 +324,8 @@ detect_os() {
 detect_init() {
 	if [ -d /run/systemd/system ] && has systemctl; then
 		INIT=systemd
-	elif [ -x /sbin/openrc-run ] || has openrc-run; then
+	elif has openrc-run && has rc-service && { [ -d /run/openrc ] || [ -f /run/openrc/softlevel ]; }; then
+		# 仅当 OpenRC 真正作为 init 运行时 (Alpine 的 docker 镜像装了 openrc 但未启动)
 		INIT=openrc
 	else
 		INIT=none
@@ -337,18 +342,25 @@ detect_virt() {
 			VIRT=openvz
 		elif [ -f /.dockerenv ]; then
 			VIRT=docker
+		elif [ -f /run/.containerenv ]; then
+			VIRT=podman
 		elif grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
 			VIRT=lxc
 		elif grep -qa 'container=' /proc/1/environ 2>/dev/null; then
 			VIRT=container
+		elif grep -qaE 'lxcfs|/lxc/' /proc/1/cgroup 2>/dev/null; then
+			VIRT=lxc
 		fi
 	fi
 	[ -n "$VIRT" ] || VIRT=none
 }
 
 is_container_virt() {
-	case "$VIRT" in openvz | lxc | lxc-libvirt | docker | podman | container | systemd-nspawn | wsl) return 0 ;; *) return 1 ;; esac
+	case "$VIRT" in openvz | lxc | lxc-libvirt | docker | podman | rkt | container | systemd-nspawn | wsl | proot | pouch) return 0 ;; *) return 1 ;; esac
 }
+
+# 本机字节序: 读取 ELF 头第 6 字节 (EI_DATA: 01=小端 02=大端). MIPS 的 uname -m 不区分字节序.
+_elf_le() { [ "$(od -An -tx1 -j5 -N1 /proc/self/exe 2>/dev/null | tr -d ' \n')" = 01 ]; }
 
 detect_arch() {
 	ARCH_RAW=$(uname -m)
@@ -358,19 +370,18 @@ detect_arch() {
 	armv7* | armv8l) SB_ARCH=armv7 XR_ARCH=arm32-v7a ;;
 	aarch64 | arm64 | armv8*) SB_ARCH=arm64 XR_ARCH=arm64-v8a ;;
 	armv6*) SB_ARCH=armv6 XR_ARCH=arm32-v6 ;;
-	armv5* | armv4* | arm) SB_ARCH=armv5 XR_ARCH=arm32-v5 ;;
+	armv5* | arm) SB_ARCH=armv5 XR_ARCH=arm32-v5 ;;
 	s390x) SB_ARCH=s390x XR_ARCH=s390x ;;
 	riscv64) SB_ARCH=riscv64 XR_ARCH=riscv64 ;;
 	loongarch64 | loong64) SB_ARCH=loong64 XR_ARCH=loong64 ;;
 	ppc64le) SB_ARCH=ppc64le XR_ARCH=ppc64le ;;
-	mips64el | mips64le) SB_ARCH=mips64le XR_ARCH=mips64le ;;
-	mips64) SB_ARCH=mips64 XR_ARCH=mips64 ;;
-	mipsel | mipsle) SB_ARCH=mipsle XR_ARCH=mips32le ;;
-	mips) SB_ARCH=mips XR_ARCH=mips32 ;;
+	ppc64) SB_ARCH="" XR_ARCH=ppc64 ;; # sing-box 无 ppc64 (大端) 构建
+	mips64*) if _elf_le; then SB_ARCH=mips64le XR_ARCH=mips64le; else SB_ARCH=mips64 XR_ARCH=mips64; fi ;;
+	mips*) if _elf_le; then SB_ARCH=mipsle XR_ARCH=mips32le; else SB_ARCH=mips XR_ARCH=mips32; fi ;;
 	*) die "暂不支持的 CPU 架构: ${ARCH_RAW}" ;;
 	esac
-	# 32 位 ARM 若内核报告 v7 但无硬件浮点, 退回 v6
-	if [ "$SB_ARCH" = armv7 ] && [ -r /proc/cpuinfo ] && ! grep -qiE 'vfpv3|vfpv4|neon' /proc/cpuinfo; then
+	# 32 位 ARM 若内核报告 v7 但无硬件浮点 (VFPv3), 退回 v6
+	if [ "$SB_ARCH" = armv7 ] && [ -r /proc/cpuinfo ] && ! grep -qiE 'vfpv3|vfpv4|neon|asimd' /proc/cpuinfo; then
 		SB_ARCH=armv6 XR_ARCH=arm32-v6
 	fi
 }
@@ -383,11 +394,11 @@ pkg_update() {
 	[ "$_PKG_UPDATED" = 1 ] && return 0
 	_PKG_UPDATED=1
 	case "$PKG" in
-	apt) DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 ;;
+	apt) DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq >/dev/null 2>&1 ;;
 	apk) apk update >/dev/null 2>&1 ;;
-	pacman) pacman -Sy --noconfirm >/dev/null 2>&1 ;;
+	pacman) : ;; # 不单独 -Sy (部分升级风险), 见 pkg_install
 	zypper) zypper -n refresh >/dev/null 2>&1 ;;
-	xbps) xbps-install -S >/dev/null 2>&1 ;;
+	xbps) xbps-install -S >/dev/null 2>&1 || { xbps-install -Syu xbps >/dev/null 2>&1; } ;;
 	esac
 	return 0
 }
@@ -395,74 +406,118 @@ pkg_update() {
 pkg_install() {
 	[ $# -gt 0 ] || return 0
 	case "$PKG" in
-	apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$@" >/dev/null 2>&1 ;;
+	apt) DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y -qq --no-install-recommends "$@" >/dev/null 2>&1 ;;
 	dnf) dnf install -y -q "$@" >/dev/null 2>&1 ;;
 	yum) yum install -y -q "$@" >/dev/null 2>&1 ;;
 	apk) apk add --no-cache "$@" >/dev/null 2>&1 ;;
-	pacman) pacman -S --noconfirm --needed "$@" >/dev/null 2>&1 ;;
-	zypper) zypper -n install -y "$@" >/dev/null 2>&1 ;;
+	pacman)
+		# 先尝试不刷新数据库; 失败 (数据库过旧导致 404) 时整体升级后再装, 避免 -Sy 部分升级
+		pacman -S --noconfirm --needed "$@" >/dev/null 2>&1 || pacman -Syu --noconfirm --needed "$@" >/dev/null 2>&1
+		;;
+	zypper) zypper -n install -y --no-recommends "$@" >/dev/null 2>&1 ;;
 	xbps) xbps-install -y "$@" >/dev/null 2>&1 ;;
-	emerge) emerge --quiet --noreplace "$@" >/dev/null 2>&1 ;;
+	emerge) emerge --ask=n --quiet --noreplace "$@" >/dev/null 2>&1 ;;
 	*) return 1 ;;
 	esac
 }
 
-# 命令 -> 各包管理器下的包名
+# 命令 -> 各包管理器下的包名; 多个候选用空格分隔, 依次尝试
 pkg_name_of() {
 	local cmd=$1
 	case "$cmd:$PKG" in
 	ss:dnf | ss:yum) echo iproute ;;
+	ss:apk) echo "iproute2-ss iproute2" ;;
 	ss:emerge) echo sys-apps/iproute2 ;;
 	ss:*) echo iproute2 ;;
-	qrencode:apk) echo libqrencode-tools ;;
+	qrencode:apk) echo "libqrencode-tools libqrencode" ;; # Alpine <=3.18 的 qrencode 在 libqrencode 包内
 	qrencode:emerge) echo media-gfx/qrencode ;;
 	crontab:apt) echo cron ;;
 	crontab:apk) echo cronie ;;
-	crontab:xbps) echo cronie ;;
 	crontab:emerge) echo sys-process/cronie ;;
 	crontab:*) echo cronie ;;
 	update-ca-certificates:* | ca-certificates:*) echo ca-certificates ;;
 	base64:* | od:* | head:*) echo coreutils ;;
+	unzip:emerge) echo app-arch/unzip ;;
 	*) echo "$cmd" ;;
 	esac
 }
 
-# ensure_cmds cmd1 cmd2 ...  —— 缺少的命令自动安装对应软件包
+# RHEL 系启用 EPEL (qrencode 在 EL9/EL10 仅 EPEL 提供; EL7/EL8 在 base/AppStream)
+enable_epel() {
+	case "$PKG" in dnf | yum) ;; *) return 1 ;; esac
+	local major=${OS_VER%%.*}
+	case "$OS_ID" in
+	ol) pkg_install "oracle-epel-release-el${major}" ;;
+	amzn) [ "$major" = 2 ] && has amazon-linux-extras && amazon-linux-extras install -y epel >/dev/null 2>&1 ;;
+	rhel) pkg_install "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${major}.noarch.rpm" ;;
+	fedora | openeuler) return 1 ;;
+	*) pkg_install epel-release ;;
+	esac
+}
+
 ensure_cmds() {
-	local c missing=() pkgs=()
+	local c n missing=() pkgs=() cands
 	for c in "$@"; do has "$c" || missing+=("$c"); done
 	[ ${#missing[@]} -eq 0 ] && return 0
 	[ -n "$PKG" ] || {
 		warn "未识别的包管理器, 请手动安装: ${missing[*]}"
 		return 1
 	}
-	for c in "${missing[@]}"; do pkgs+=("$(pkg_name_of "$c")"); done
+	for c in "${missing[@]}"; do
+		cands=$(pkg_name_of "$c")
+		pkgs+=("${cands%% *}")
+	done
 	info "安装依赖: ${pkgs[*]}"
 	pkg_update
-	pkg_install "${pkgs[@]}" || {
-		# 逐个安装, 避免一个包名不存在导致全部失败
-		for c in "${pkgs[@]}"; do pkg_install "$c" || true; done
-	}
+	pkg_install "${pkgs[@]}" || true
+	# 批量安装失败或仍缺失时: 逐个尝试候选包名 (一个包名不存在不影响其他)
+	for c in "${missing[@]}"; do
+		has "$c" && continue
+		for n in $(pkg_name_of "$c"); do
+			pkg_install "$n" && has "$c" && break
+		done
+		if ! has "$c" && [ "$c" = qrencode ] && enable_epel; then
+			pkg_install qrencode
+		fi
+	done
 	for c in "${missing[@]}"; do has "$c" || return 1; done
 	return 0
 }
 
+# EOL 发行版的软件源修正 (CentOS 7 -> vault, Debian 10 -> archive)
+fix_eol_repos() {
+	if [ "$OS_ID" = centos ] && [ "${OS_VER%%.*}" = 7 ] && ls /etc/yum.repos.d/CentOS-*.repo >/dev/null 2>&1 &&
+		grep -q '^mirrorlist=http://mirrorlist.centos.org' /etc/yum.repos.d/CentOS-*.repo; then
+		warn "CentOS 7 已停止维护, 软件源切换到 vault.centos.org"
+		sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
+			-e 's|^#[[:space:]]*baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/7.9.2009|' \
+			/etc/yum.repos.d/CentOS-*.repo
+		yum clean all >/dev/null 2>&1
+	fi
+	if [ "$OS_ID" = debian ] && [ "${OS_VER%%.*}" = 10 ] && grep -qsE '^deb.*[[:space:]]buster' /etc/apt/sources.list &&
+		! grep -qs 'archive.debian.org' /etc/apt/sources.list; then
+		warn "Debian 10 已停止维护, 软件源切换到 archive.debian.org"
+		sed -i -E \
+			-e 's#^(deb(-src)?[[:space:]]+)https?://[^[:space:]]+/debian-security/?[[:space:]]+buster/updates#\1http://archive.debian.org/debian-security buster/updates#' \
+			-e 's#^(deb(-src)?[[:space:]]+)https?://[^[:space:]]+/debian/?[[:space:]]+buster#\1http://archive.debian.org/debian buster#' \
+			/etc/apt/sources.list
+		echo 'Acquire::Check-Valid-Until "false";' >/etc/apt/apt.conf.d/99onebox-archive
+	fi
+}
+
 install_base_deps() {
-	local need=(tar openssl base64 od awk sed grep head)
-	has curl || has wget || need+=(curl)
+	fix_eol_repos
+	local need=(curl tar openssl base64 od awk sed grep head)
 	has ss || has netstat || need+=(ss)
-	[ -d /etc/ssl/certs ] || need+=(ca-certificates)
 	ensure_cmds "${need[@]}" || true
-	# CA 证书: 某些精简镜像默认不带
-	if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/pki/tls/certs/ca-bundle.crt ] && [ ! -s /etc/ssl/ca-bundle.pem ]; then
+	if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/pki/tls/certs/ca-bundle.crt ] && [ ! -s /etc/ssl/ca-bundle.pem ] && [ ! -s /etc/ssl/cert.pem ]; then
 		pkg_update
 		pkg_install ca-certificates || true
 	fi
 	local c
-	for c in tar openssl base64 od awk sed grep head; do
+	for c in curl tar openssl base64 od awk sed grep head; do
 		has "$c" || die "缺少必需命令: $c, 请手动安装后重试"
 	done
-	has curl || has wget || die "缺少 curl 或 wget, 请手动安装后重试"
 }
 
 # ---------------------------------------------------------------------------
@@ -473,7 +528,8 @@ http_get() {
 	local url=$1 out=${2:-}
 	if has curl; then
 		if [ -n "$out" ]; then
-			curl -fsSL --retry 2 --connect-timeout 10 --max-time 300 -o "$out" "$url"
+			# 不限制总时长 (大文件在慢速线路上可能需要数分钟), 改为: 连续 60 秒低于 1KB/s 才判定失败
+			curl -fsSL --retry 2 --connect-timeout 15 --speed-limit 1024 --speed-time 60 -o "$out" "$url"
 		else
 			curl -fsSL --retry 2 --connect-timeout 10 --max-time 30 "$url"
 		fi
@@ -496,15 +552,29 @@ gh_url() {
 	fi
 }
 
-# 获取 GitHub 仓库最新 release 的版本号 (不带 v 前缀)
+# 最新 release 版本号 (不带 v). 依次尝试: API 直连 -> API 经加速 -> releases/latest 跳转/页面 (直连, 经加速)
+_gh_tag_from_page() {
+	local out
+	out=$(curl -sS -D - --connect-timeout 10 --max-time 25 "$1" 2>/dev/null | tr -d '\r')
+	{
+		printf '%s\n' "$out" | sed -n 's#^[Ll]ocation:.*/releases/tag/\([^/?#[:space:]]*\).*#\1#p'
+		printf '%s\n' "$out" | grep -o '/releases/tag/v\{0,1\}[0-9][^"&?#<>/[:space:]\\]*' | sed 's#.*/##'
+	} | head -n1
+}
+
 gh_latest_version() {
-	local repo=$1 tag=""
-	tag=$(http_get "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null |
-		sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-	if [ -z "$tag" ] && has curl; then
-		# 备用: 解析 releases/latest 跳转地址
-		tag=$(curl -fsSI --connect-timeout 10 --max-time 20 "$(gh_url "https://github.com/${repo}/releases/latest")" 2>/dev/null |
-			tr -d '\r' | sed -n 's#^[Ll]ocation:.*/releases/tag/\(.*\)$#\1#p' | tail -n1)
+	local repo=$1 tag="" u
+	for u in "https://api.github.com/repos/${repo}/releases/latest" "$(gh_url "https://api.github.com/repos/${repo}/releases/latest")"; do
+		tag=$(http_get "$u" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+		[ -n "$tag" ] && break
+		[ -n "$GH_PROXY" ] || break
+	done
+	if [ -z "$tag" ]; then
+		for u in "https://github.com/${repo}/releases/latest" "$(gh_url "https://github.com/${repo}/releases/latest")"; do
+			tag=$(_gh_tag_from_page "$u")
+			[ -n "$tag" ] && break
+			[ -n "$GH_PROXY" ] || break
+		done
 	fi
 	tag=${tag#v}
 	[[ "$tag" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || tag=""
@@ -512,13 +582,8 @@ gh_latest_version() {
 }
 
 _ip_from() {
-	# _ip_from 4|6 URL
 	local fam=$1 url=$2 ip=""
-	if has curl; then
-		ip=$(curl -"$fam" -fsS --connect-timeout 4 --max-time 6 "$url" 2>/dev/null)
-	else
-		ip=$(wget -"$fam" -q -T 6 -t 1 -O - "$url" 2>/dev/null)
-	fi
+	ip=$(curl -"$fam" -fsS --connect-timeout 4 --max-time 6 "$url" 2>/dev/null)
 	ip=$(printf '%s' "$ip" | tr -d ' \r\n')
 	case "$fam" in
 	4) [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || ip="" ;;
@@ -530,14 +595,18 @@ _ip_from() {
 detect_public_ip() {
 	SERVER_IPV4="" SERVER_IPV6=""
 	local u
-	for u in https://api.ipify.org https://ipv4.icanhazip.com https://api-ipv4.ip.sb/ip https://ifconfig.co/ip; do
+	for u in https://api.ipify.org https://ipv4.icanhazip.com https://api-ipv4.ip.sb/ip https://ipv4.ddnspod.com https://ifconfig.co/ip; do
 		SERVER_IPV4=$(_ip_from 4 "$u")
 		[ -n "$SERVER_IPV4" ] && break
 	done
-	for u in https://api64.ipify.org https://ipv6.icanhazip.com https://api-ipv6.ip.sb/ip https://ifconfig.co/ip; do
+	for u in https://api64.ipify.org https://ipv6.icanhazip.com https://api-ipv6.ip.sb/ip https://ipv6.ddnspod.com https://ifconfig.co/ip; do
 		SERVER_IPV6=$(_ip_from 6 "$u")
 		[ -n "$SERVER_IPV6" ] && break
 	done
+	if [ -z "$SERVER_IPV4" ] && [ -n "$SERVER_IPV6" ] && [ -z "$GH_PROXY" ]; then
+		warn "检测到纯 IPv6 服务器: GitHub 不支持 IPv6, 下载内核可能失败"
+		warn "可设置支持 IPv6 的加速前缀后重试, 例如: GH_PROXY=https://ghproxy.net/ onebox, 或先配置 WARP / NAT64"
+	fi
 	if [ -z "$SERVER_IPV4" ] && [ -z "$SERVER_IPV6" ]; then
 		# 离线兜底: 取默认路由网卡上的地址
 		SERVER_IPV4=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n1)
@@ -776,16 +845,32 @@ _install_bin() {
 	cp -f "$1" "$2.new" && chmod 755 "$2.new" && mv -f "$2.new" "$2"
 }
 
+# 下载/解压用的临时目录: 放在安装目录旁 (部分 VPS 的 /tmp 为 noexec 或很小的 tmpfs)
+core_tmpdir() { mkdir -p "${BIN_DIR%/*}" && mktemp -d "${BIN_DIR%/*}/.dl.XXXXXX"; }
+
 sb_installed_version() { [ -x "$SB_BIN" ] && "$SB_BIN" version 2>/dev/null | awk 'NR==1{print $3}'; }
 xr_installed_version() { [ -x "$XR_BIN" ] && "$XR_BIN" version 2>/dev/null | awk 'NR==1{print $2}'; }
 
-# sing-box 候选安装包: 优先 musl 静态构建 (glibc / musl 系统通用, 不依赖 glibc 版本)
+# sing-box 候选安装包 (按优先级). 依据 v1.14.2 / v1.12.25 实际 release 资产:
+#  - 1.13+: amd64/arm64/386/armv7/riscv64/loong64 有 -musl (CGO+musl 静态, glibc/musl 通用) 与 -glibc (动态);
+#    无后缀的 amd64/arm64 包是 purego 构建 (动态链接 glibc, Alpine 上 "not found"), 其余架构无后缀包为纯静态.
+#  - mips/mips64 只有 -softfloat; mipsle 为 -softfloat-musl / (hardfloat) / -softfloat; 不存在 amd64v3.
 sb_asset_candidates() {
-	local v=$1
-	printf '%s\n' "sing-box-${v}-linux-${SB_ARCH}-musl.tar.gz" "sing-box-${v}-linux-${SB_ARCH}.tar.gz"
-	[ "$SB_ARCH" = amd64 ] && printf '%s\n' "sing-box-${v}-linux-amd64v3.tar.gz"
+	local p="sing-box-${1}-linux-"
+	case "$SB_ARCH" in
+	amd64 | arm64) printf '%s\n' "${p}${SB_ARCH}-musl.tar.gz" "${p}${SB_ARCH}.tar.gz" "${p}${SB_ARCH}-glibc.tar.gz" ;;
+	386) printf '%s\n' "${p}386.tar.gz" "${p}386-musl.tar.gz" "${p}386-softfloat.tar.gz" ;;
+	armv7 | riscv64 | loong64) printf '%s\n' "${p}${SB_ARCH}.tar.gz" "${p}${SB_ARCH}-musl.tar.gz" ;;
+	mipsle) printf '%s\n' "${p}mipsle-softfloat.tar.gz" "${p}mipsle-softfloat-musl.tar.gz" "${p}mipsle.tar.gz" ;;
+	mips64le) printf '%s\n' "${p}mips64le.tar.gz" "${p}mips64le-softfloat.tar.gz" ;;
+	mips | mips64) printf '%s\n' "${p}${SB_ARCH}-softfloat.tar.gz" ;;
+	armv5 | armv6 | s390x | ppc64le) printf '%s\n' "${p}${SB_ARCH}.tar.gz" ;;
+	esac
 	return 0
 }
+
+# Xray .dgst: 由 `openssl dgst -sha256 FILE | sed 's/([^)]*)//g'` 生成 -> "SHA2-256= <hex>" (OpenSSL 3), 旧版为 "SHA256= <hex>"
+xr_dgst_sha256() { sed -n 's/^SHA2\{0,1\}-\{0,1\}256= *\([0-9a-fA-F]\{64\}\).*/\1/p' "$1" | head -n1; }
 
 install_singbox() {
 	local ver=${1:-} tmp asset url bin="" got=""
@@ -796,6 +881,10 @@ install_singbox() {
 		SB_VERSION=$(sb_installed_version)
 		return 0
 	fi
+	[ -n "$SB_ARCH" ] || {
+		err "sing-box 未提供 ${ARCH_RAW} 架构的构建"
+		return 1
+	}
 	if [ -z "$ver" ]; then
 		info "查询 sing-box 最新版本..."
 		ver=$(gh_latest_version SagerNet/sing-box)
@@ -804,13 +893,17 @@ install_singbox() {
 			ver=$FALLBACK_SB_VERSION
 		}
 	fi
-	tmp=$(mktemp -d)
+	tmp=$(core_tmpdir) || {
+		err "无法创建临时目录"
+		return 1
+	}
 	for asset in $(sb_asset_candidates "$ver"); do
 		url=$(gh_url "https://github.com/SagerNet/sing-box/releases/download/v${ver}/${asset}")
 		info "下载 ${asset}"
 		rm -rf "${tmp:?}"/*
 		http_get "$url" "$tmp/pkg.tar.gz" || continue
 		tar -xzf "$tmp/pkg.tar.gz" -C "$tmp" 2>/dev/null || continue
+		rm -f "$tmp/pkg.tar.gz"
 		bin=$(find "$tmp" -type f -name sing-box 2>/dev/null | head -n1)
 		[ -n "$bin" ] || continue
 		chmod +x "$bin"
@@ -837,7 +930,7 @@ install_singbox() {
 }
 
 install_xray() {
-	local ver=${1:-} tmp asset url sum want
+	local ver=${1:-} tmp asset url sum want b bin=""
 	if [ -n "$LOCAL_XR_BIN" ]; then
 		[ -x "$LOCAL_XR_BIN" ] || die "本地 xray 文件不可执行: $LOCAL_XR_BIN"
 		info "使用本地 Xray: $LOCAL_XR_BIN"
@@ -859,7 +952,10 @@ install_xray() {
 	fi
 	asset="Xray-linux-${XR_ARCH}.zip"
 	url=$(gh_url "https://github.com/XTLS/Xray-core/releases/download/v${ver}/${asset}")
-	tmp=$(mktemp -d)
+	tmp=$(core_tmpdir) || {
+		err "无法创建临时目录"
+		return 1
+	}
 	info "下载 ${asset} (v${ver})"
 	if ! http_get "$url" "$tmp/xray.zip"; then
 		rm -rf "$tmp"
@@ -867,9 +963,9 @@ install_xray() {
 		[ -z "$GH_PROXY" ] && warn "若服务器访问 GitHub 困难, 可设置加速前缀后重试, 例如: GH_PROXY=https://ghfast.top/ onebox"
 		return 1
 	fi
-	# 校验 SHA256 (官方 .dgst 文件)
+	# 校验 SHA256 (官方 .dgst: "SHA2-256= <hex>")
 	if has sha256sum && http_get "${url}.dgst" "$tmp/xray.dgst" 2>/dev/null; then
-		want=$(sed -n 's/^SHA2-256= *//p' "$tmp/xray.dgst" | tr -d '\r' | head -n1)
+		want=$(xr_dgst_sha256 "$tmp/xray.dgst")
 		sum=$(sha256sum "$tmp/xray.zip" | awk '{print $1}')
 		if [ -n "$want" ] && [ "$want" != "$sum" ]; then
 			rm -rf "$tmp"
@@ -877,18 +973,20 @@ install_xray() {
 			return 1
 		fi
 	fi
-	if ! unzip -qo "$tmp/xray.zip" -d "$tmp/x" >/dev/null 2>&1 || [ ! -f "$tmp/x/xray" ]; then
+	# 只解压可执行文件 (geoip.dat/geosite.dat 约 30MB, 服务端配置未使用)
+	unzip -qo "$tmp/xray.zip" 'xray*' -d "$tmp/x" >/dev/null 2>&1
+	# mips32/mips32le 包内同时有 xray (hardfloat) 与 xray_softfloat, 无 FPU 的设备需用后者
+	for b in $(case "$XR_ARCH" in mips32*) echo "xray_softfloat xray" ;; *) echo xray ;; esac); do
+		[ -f "$tmp/x/$b" ] || continue
+		chmod +x "$tmp/x/$b"
+		"$tmp/x/$b" version >/dev/null 2>&1 && bin="$tmp/x/$b" && break
+	done
+	if [ -z "$bin" ]; then
 		rm -rf "$tmp"
-		err "Xray 安装包解压失败"
+		err "Xray 解压失败或无法在本机运行 (架构: ${XR_ARCH})"
 		return 1
 	fi
-	chmod +x "$tmp/x/xray"
-	if ! "$tmp/x/xray" version >/dev/null 2>&1; then
-		rm -rf "$tmp"
-		err "下载的 Xray 无法在本机运行 (架构: ${XR_ARCH})"
-		return 1
-	fi
-	_install_bin "$tmp/x/xray" "$XR_BIN" || {
+	_install_bin "$bin" "$XR_BIN" || {
 		rm -rf "$tmp"
 		err "安装 Xray 失败"
 		return 1

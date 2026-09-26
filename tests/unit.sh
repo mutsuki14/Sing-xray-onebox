@@ -62,11 +62,15 @@ eq "i686" "$(arch_of i686)" "386|32"
 eq "s390x" "$(arch_of s390x)" "s390x|s390x"
 eq "riscv64" "$(arch_of riscv64)" "riscv64|riscv64"
 eq "loongarch64" "$(arch_of loongarch64)" "loong64|loong64"
+# uname -m 对 MIPS 不区分字节序, 按本机 ELF 头判断 (测试机为小端)
+eq "mips (小端主机)" "$(arch_of mips)" "mipsle|mips32le"
+eq "mips64 (小端主机)" "$(arch_of mips64)" "mips64le|mips64le"
 
 # --- 编码与转义 -------------------------------------------------------------
 eq "urlencode ASCII" "$(urlencode 'a b#c&d?e=f%g+h/')" "a%20b%23c%26d%3Fe%3Df%25g%2Bh%2F"
 eq "urlencode 中文" "$(urlencode '香港')" "%E9%A6%99%E6%B8%AF"
 eq "urlencode 保留字符" "$(urlencode 'A-z_0.9~')" "A-z_0.9~"
+eq "urlencode emoji" "$(urlencode '🇭🇰')" "%F0%9F%87%AD%F0%9F%87%B0"
 eq "json_str 转义" "$(json_str 'a"b\c')" '"a\"b\\c"'
 eq "yq 单引号转义" "$(yq "it's")" "'it''s'"
 eq "b64" "$(printf 'hello' | b64)" "aGVsbG8="
