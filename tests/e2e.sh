@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 状态变量由被加载的 onebox.sh 函数间接使用
+# shellcheck disable=SC2034
 #
 # 端到端测试: 用 onebox.sh 的生成函数产出服务端与客户端配置,
 # 在本机回环地址上启动真实的 sing-box / Xray 服务端, 再分别用
@@ -337,7 +339,7 @@ EOF
 
 # run_client 客户端类型 协议  -> 输出 "tcp结果 udp结果"
 run_client() {
-	local c=$1 p=$2 port dir cfg pid tcp="FAIL" udp="FAIL" out
+	local c=$1 p=$2 port dir pid tcp="FAIL" udp="FAIL" out
 	free_port
 	port=$FREE_PORT
 	dir="$RDIR/client-$c-$p"

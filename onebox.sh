@@ -45,7 +45,7 @@ umask 022
 # ---------------------------------------------------------------------------
 readonly SCRIPT_VERSION="1.0.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
-readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/${SCRIPT_REPO}/main/onebox.sh"
+readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/main/onebox.sh}"
 
 ONEBOX_DIR="${ONEBOX_DIR:-/etc/onebox}"
 BIN_DIR="${ONEBOX_BIN_DIR:-/opt/onebox/bin}"
@@ -212,6 +212,28 @@ urlencode() {
 	printf '%s' "$out"
 }
 
+# 合法域名 (至少包含一个点, 仅字母数字与连字符)
+valid_domain() {
+	[[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+# ask_domain VAR "提示" "默认值"  —— 读取并校验域名
+ask_domain() {
+	local _d_var=$1 _d_prompt=$2 _d_def=${3-} _d_val
+	while :; do
+		ask _d_val "$_d_prompt" "$_d_def"
+		_d_val=${_d_val#http://}
+		_d_val=${_d_val#https://}
+		_d_val=${_d_val%%/*}
+		if valid_domain "$_d_val"; then
+			printf -v "$_d_var" '%s' "$_d_val"
+			return 0
+		fi
+		warn "请输入合法的域名, 例如 www.example.com"
+		is_interactive || die "域名无效: ${_d_val:-<空>}"
+	done
+}
+
 # base64 单行输出 (兼容 busybox)
 b64() { base64 | tr -d '\n'; }
 
@@ -245,7 +267,7 @@ ver_ge() {
 # ---------------------------------------------------------------------------
 # 系统检测
 # ---------------------------------------------------------------------------
-OS_ID="" OS_LIKE="" OS_VER="" OS_NAME="" PKG="" INIT="" VIRT="" ARCH_RAW=""
+OS_ID="" OS_VER="" OS_NAME="" PKG="" INIT="" VIRT="" ARCH_RAW=""
 SB_ARCH="" XR_ARCH=""
 
 require_root() {
@@ -260,11 +282,10 @@ _osr_get() {
 detect_os() {
 	if [ -r "${OS_RELEASE_FILE:-/etc/os-release}" ]; then
 		OS_ID=$(_osr_get ID | tr 'A-Z' 'a-z')
-		OS_LIKE=$(_osr_get ID_LIKE | tr 'A-Z' 'a-z')
 		OS_VER=$(_osr_get VERSION_ID)
 		OS_NAME=$(_osr_get PRETTY_NAME)
 	elif [ -r /etc/redhat-release ]; then
-		OS_ID=centos OS_LIKE="rhel fedora"
+		OS_ID=centos
 		OS_NAME=$(head -n1 /etc/redhat-release)
 		OS_VER=$(grep -oE '[0-9]+' /etc/redhat-release | head -n1)
 	elif [ -r /etc/alpine-release ]; then
@@ -569,6 +590,8 @@ SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
 TLS_MODE DOMAIN TLS_SNI CERT_FILE KEY_FILE ACME_METHOD
 SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT INSTALLED_AT"
 
+# 状态变量通过 STATE_KEYS 间接读写, shellcheck 无法追踪
+# shellcheck disable=SC2034
 # 初始化全部状态变量为空 (避免继承同名环境变量)
 reset_state() {
 	local k p
@@ -927,9 +950,19 @@ svc_bin() { case "$1" in singbox) echo "$SB_BIN" ;; xray) echo "$XR_BIN" ;; esac
 svc_conf() { case "$1" in singbox) echo "$SB_CONF" ;; xray) echo "$XR_CONF" ;; esac; }
 core_title() { case "$1" in singbox) echo "sing-box" ;; xray) echo "Xray" ;; esac; }
 
+# 内核的运行参数: sing-box 输出到文件时需 --disable-color, 否则日志里全是 ANSI 转义码
+svc_args() {
+	case "$1" in
+	singbox) echo "run --disable-color -c $(svc_conf singbox)" ;;
+	xray) echo "run -c $(svc_conf xray)" ;;
+	esac
+}
+
 svc_write() {
-	local core=$1 name bin conf
-	name=$(svc_name "$core") bin=$(svc_bin "$core") conf=$(svc_conf "$core")
+	local core=$1 name bin args extra=""
+	name=$(svc_name "$core") bin=$(svc_bin "$core") args=$(svc_args "$core")
+	# Xray 配置错误时退出码为 23, 不必无限重启 (与官方 Xray-install 一致)
+	[ "$core" = xray ] && extra="RestartPreventExitStatus=23"
 	case "$INIT" in
 	systemd)
 		cat >"/etc/systemd/system/${name}.service" <<EOF
@@ -941,9 +974,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${bin} run -c ${conf}
+ExecStart=${bin} ${args}
 Restart=on-failure
 RestartSec=5s
+${extra}
 LimitNOFILE=1048576
 
 [Install]
@@ -959,16 +993,15 @@ name="${name}"
 description="Sing-Xray-Onebox $(core_title "$core") Service"
 supervisor="supervise-daemon"
 command="${bin}"
-command_args="run -c ${conf}"
+command_args="${args}"
 output_log="${LOG_DIR}/${core}.log"
 error_log="${LOG_DIR}/${core}.log"
 respawn_delay=5
 respawn_max=0
-rc_ulimit="-n 1048576"
 
 depend() {
-	need net
-	after firewall dns
+	want net
+	after net firewall dns
 }
 
 start_pre() {
@@ -1008,7 +1041,41 @@ _none_running() {
 	pf=$(_none_pidfile "$1")
 	[ -f "$pf" ] || return 1
 	pid=$(cat "$pf" 2>/dev/null)
-	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+	# 防止 pid 被其他进程复用: 进程命令行里应包含内核路径
+	# (不用 /proc/PID/exe: 更新内核后会变成 "... (deleted)", 符号链接时也对不上)
+	[ -r "/proc/$pid/cmdline" ] || return 0
+	tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF "$(svc_bin "$1")"
+}
+
+_none_start() {
+	local core=$1
+	_none_running "$core" && return 0
+	mkdir -p "$RUN_DIR" "$LOG_DIR"
+	# setsid: 脱离当前会话, 关闭 SSH 终端不会影响. svc_args 需要按空格拆分
+	# shellcheck disable=SC2046
+	if has setsid; then
+		setsid "$(svc_bin "$core")" $(svc_args "$core") >>"${LOG_DIR}/${core}.log" 2>&1 </dev/null &
+	else
+		nohup "$(svc_bin "$core")" $(svc_args "$core") >>"${LOG_DIR}/${core}.log" 2>&1 </dev/null &
+	fi
+	echo $! >"$(_none_pidfile "$core")"
+}
+
+_none_stop() {
+	local core=$1 pf pid i
+	pf=$(_none_pidfile "$core")
+	if _none_running "$core"; then
+		pid=$(cat "$pf")
+		kill "$pid" 2>/dev/null
+		# 等待退出 (最多 5 秒), 否则紧接着的 start 会因端口仍被占用而失败
+		for i in 1 2 3 4 5; do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 1
+		done
+		kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+	fi
+	rm -f "$pf"
 }
 
 # 无 init 系统时, 借助 crontab @reboot 实现开机自启
@@ -1035,29 +1102,17 @@ svc_start() {
 	case "$INIT" in
 	systemd) systemctl start "$name" >/dev/null 2>&1 ;;
 	openrc) rc-service "$name" start >/dev/null 2>&1 ;;
-	none)
-		_none_running "$core" && return 0
-		mkdir -p "$RUN_DIR" "$LOG_DIR"
-		nohup "$(svc_bin "$core")" run -c "$(svc_conf "$core")" >>"${LOG_DIR}/${core}.log" 2>&1 &
-		echo $! >"$(_none_pidfile "$core")"
-		;;
+	none) _none_start "$core" ;;
 	esac
 }
 
 svc_stop() {
-	local core=$1 name pf
+	local core=$1 name
 	name=$(svc_name "$core")
 	case "$INIT" in
 	systemd) systemctl stop "$name" >/dev/null 2>&1 ;;
 	openrc) rc-service "$name" stop >/dev/null 2>&1 ;;
-	none)
-		pf=$(_none_pidfile "$core")
-		if _none_running "$core"; then
-			kill "$(cat "$pf")" 2>/dev/null
-			sleep 1
-		fi
-		rm -f "$pf"
-		;;
+	none) _none_stop "$core" ;;
 	esac
 	return 0
 }
@@ -1154,71 +1209,124 @@ apply_services() {
 	return $ok
 }
 
+
 # ---------------------------------------------------------------------------
 # 防火墙
 # ---------------------------------------------------------------------------
 _fw_ufw_active() { has ufw && ufw status 2>/dev/null | grep -q '^Status: active'; }
 _fw_firewalld_active() { has firewall-cmd && [ "$(firewall-cmd --state 2>/dev/null)" = running ]; }
 
-# iptables 的 INPUT 链是否会拦截新端口 (默认策略为 DROP 或存在 REJECT/DROP 规则, 如甲骨文云镜像)
+# iptables 的 INPUT 链是否会拦截新端口 (默认策略 DROP, 或存在无条件 REJECT/DROP, 如甲骨文云镜像)
 _fw_iptables_blocking() {
-	local t=$1
-	has "$t" || return 1
-	"$t" -S INPUT 2>/dev/null | grep -qE '^-P INPUT (DROP|REJECT)|-j (REJECT|DROP)'
+	has "$1" || return 1
+	# 宁可多判: 多加几条 ACCEPT 无害, 漏判则端口不通
+	"$1" -S INPUT 2>/dev/null | grep -qE '^-P INPUT (DROP|REJECT)|-j (REJECT|DROP)'
 }
 
-_fw_iptables_persist() {
-	if has netfilter-persistent; then
-		netfilter-persistent save >/dev/null 2>&1
-	elif [ -d /etc/iptables ]; then
-		iptables-save >/etc/iptables/rules.v4 2>/dev/null
-		has ip6tables-save && ip6tables-save >/etc/iptables/rules.v6 2>/dev/null
-	elif [ -f /etc/sysconfig/iptables ] && has service; then
-		service iptables save >/dev/null 2>&1
-		[ -f /etc/sysconfig/ip6tables ] && service ip6tables save >/dev/null 2>&1
-	elif [ "$INIT" = openrc ] && [ -x /etc/init.d/iptables ]; then
-		/etc/init.d/iptables save >/dev/null 2>&1
-		[ -x /etc/init.d/ip6tables ] && /etc/init.d/ip6tables save >/dev/null 2>&1
-	fi
+# _ipt_rule 命令 check|add|del 表 链 匹配条件... -- 目标...
+# 带 onebox 注释; 内核缺少 xt_comment 时退回无注释形式. check/del 两种形式都尝试,
+# 否则无注释规则会在每次运行时重复添加且永远删不掉. (-m comment 必须位于 -j 之前)
+_ipt_rule() {
+	local t=$1 act=$2 table=$3 chain=$4 m=() j=()
+	shift 4
+	while [ $# -gt 0 ] && [ "$1" != -- ]; do m+=("$1"); shift; done
+	shift
+	j=("$@")
+	case "$act" in
+	check)
+		"$t" -t "$table" -C "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null ||
+			"$t" -t "$table" -C "$chain" "${m[@]}" "${j[@]}" 2>/dev/null
+		;;
+	add)
+		"$t" -t "$table" -I "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null ||
+			"$t" -t "$table" -I "$chain" "${m[@]}" "${j[@]}" 2>/dev/null
+		;;
+	del)
+		local n=0
+		while "$t" -t "$table" -D "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
+		while "$t" -t "$table" -D "$chain" "${m[@]}" "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
+		[ "$n" -gt 0 ]
+		;;
+	esac
+}
+
+# 原生 nftables 规则集中会拦截入站的 input 链 (policy drop 或含无条件 drop/reject): 输出 "family table chain"
+# 跳过 iptables-nft 兼容表 (链名 INPUT, 由 iptables 分支处理) 与 firewalld 自己的表
+_fw_nft_block_chains() {
+	has nft || return 0
+	nft list ruleset 2>/dev/null | awk '
+		$1 == "table" { fam = $2; tbl = $3; next }
+		$1 == "chain" { ch = $2; hook = 0; blk = 0; next }
+		/hook input/ { hook = 1; if (/policy drop/) blk = 1; next }
+		hook && /^[[:space:]]*(counter( packets [0-9]+ bytes [0-9]+)? )?(drop|reject)/ { blk = 1; next }
+		$1 == "}" && ch != "" {
+			if (hook && blk && ch != "INPUT" && tbl != "firewalld") print fam, tbl, ch
+			ch = ""; hook = 0; blk = 0
+		}'
+}
+
+# _fw_nft open|close 端口或范围(a-b) tcp|udp
+_fw_nft() {
+	local act=$1 port=$2 proto=$3 fam tbl ch h rule
+	rule="$proto dport $port accept comment \"onebox\""
+	while read -r fam tbl ch; do
+		[ -n "$ch" ] || continue
+		if [ "$act" = open ]; then
+			nft list chain "$fam" "$tbl" "$ch" 2>/dev/null | grep -qF "$rule" && continue
+			nft insert rule "$fam" "$tbl" "$ch" "$proto" dport "$port" accept comment '"onebox"' 2>/dev/null
+		else
+			for h in $(nft -a list chain "$fam" "$tbl" "$ch" 2>/dev/null | grep -F "$rule" | sed -n 's/.*# handle \([0-9]*\).*/\1/p'); do
+				nft delete rule "$fam" "$tbl" "$ch" handle "$h" 2>/dev/null
+			done
+		fi
+	done < <(_fw_nft_block_chains)
 	return 0
 }
 
 # fw_rule open|close 端口或范围(a-b) tcp|udp
 fw_rule() {
-	local act=$1 port=$2 proto=$3 ipt_port changed=0 t
-	ipt_port=${port/-/:}
+	local act=$1 port=$2 proto=$3 ipt_port=${2/-/:} t
+	# ufw / firewalld 自己管理 INPUT, 此时不再直接改 iptables (否则规则重复, 且 ufw 下 INPUT 策略恒为 DROP)
 	if _fw_ufw_active; then
 		if [ "$act" = open ]; then
 			ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1
 		else
 			ufw delete allow "${ipt_port}/${proto}" >/dev/null 2>&1
 		fi
+		return 0
 	fi
 	if _fw_firewalld_active; then
+		# 运行时 + 永久各写一次, 不做 --reload: 每次 reload 要数秒, 且 iptables 后端 (CentOS 7) 的 reload 会清掉端口跳跃的 NAT 规则
+		# 默认路由网卡若被绑定到非默认 zone, 端口要开在那个 zone 里
+		local z=() zone dev
+		dev=$(ip route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+		[ -n "$dev" ] && zone=$(firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null)
+		[ -n "$zone" ] && z=(--zone="$zone")
 		if [ "$act" = open ]; then
-			firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1
+			firewall-cmd "${z[@]}" --add-port="${port}/${proto}" >/dev/null 2>&1
+			firewall-cmd "${z[@]}" --permanent --add-port="${port}/${proto}" >/dev/null 2>&1
 		else
-			firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1
+			firewall-cmd "${z[@]}" --remove-port="${port}/${proto}" >/dev/null 2>&1
+			firewall-cmd "${z[@]}" --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1
 		fi
-		firewall-cmd --reload >/dev/null 2>&1
+		return 0
 	fi
 	for t in iptables ip6tables; do
+		has "$t" || continue
+		[ "$t" = ip6tables ] && ! host_has_ipv6 && continue
 		if [ "$act" = open ]; then
 			_fw_iptables_blocking "$t" || continue
-			"$t" -C INPUT -p "$proto" --dport "$ipt_port" -m comment --comment onebox -j ACCEPT 2>/dev/null && continue
-			"$t" -I INPUT -p "$proto" --dport "$ipt_port" -m comment --comment onebox -j ACCEPT 2>/dev/null ||
-				"$t" -I INPUT -p "$proto" --dport "$ipt_port" -j ACCEPT 2>/dev/null
-			changed=1
+			_ipt_rule "$t" check filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && continue
+			_ipt_rule "$t" add filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
 		else
-			has "$t" || continue
-			while "$t" -D INPUT -p "$proto" --dport "$ipt_port" -m comment --comment onebox -j ACCEPT 2>/dev/null; do changed=1; done
+			_ipt_rule "$t" del filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
 		fi
 	done
-	[ "$changed" = 1 ] && _fw_iptables_persist
+	_fw_nft "$act" "$port" "$proto"
 	return 0
 }
 
-# 放行 / 关闭当前全部协议端口
+# 放行 / 关闭当前全部协议端口 (幂等; 开机时由 onebox-net 服务重新执行, 不依赖系统的规则保存机制)
 fw_apply() {
 	local act=${1:-open} p port net
 	for p in $PROTOCOLS; do
@@ -1234,102 +1342,124 @@ fw_apply() {
 			;;
 		esac
 	done
-	if proto_enabled hysteria2 && [ -n "$HY2_HOP" ]; then
-		fw_rule "$act" "$HY2_HOP" udp
+	# ACME HTTP-01 (standalone) 申请与续期都需要入站 TCP 80
+	if [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then
+		fw_rule "$act" 80 tcp
 	fi
+	# 端口跳跃: NAT 在 INPUT 之前完成, INPUT 看到的已是 Hysteria2 实际端口, 无需放行整个范围 (云安全组仍需放行)
 	return 0
 }
 
 # ---------------------------------------------------------------------------
 # Hysteria2 端口跳跃 (UDP 端口范围 -> 实际监听端口)
 # ---------------------------------------------------------------------------
-HOP_SERVICE="onebox-hop"
+NET_SERVICE="onebox-net"
 
-# hop_rules add|del
-hop_rules() {
-	local act=$1 port range t
-	port=$(pget PORT hysteria2)
-	range=$HY2_HOP
-	[ -n "$port" ] && [ -n "$range" ] || return 0
-	if has iptables; then
-		for t in iptables ip6tables; do
-			has "$t" || continue
-			[ "$t" = ip6tables ] && ! host_has_ipv6 && continue
-			while "$t" -t nat -D PREROUTING -p udp --dport "${range/-/:}" -m comment --comment onebox-hop -j REDIRECT --to-ports "$port" 2>/dev/null; do :; done
-			if [ "$act" = add ]; then
-				"$t" -t nat -A PREROUTING -p udp --dport "${range/-/:}" -m comment --comment onebox-hop -j REDIRECT --to-ports "$port" 2>/dev/null ||
-					warn "${t} 添加端口跳跃规则失败"
-			fi
-		done
-	elif has nft; then
-		nft delete table inet onebox_hop >/dev/null 2>&1
-		if [ "$act" = add ]; then
-			nft -f - <<EOF || warn "nftables 添加端口跳跃规则失败"
-table inet onebox_hop {
+_hop_nft() {
+	local act=$1 port=$2 range=$3 fam
+	for fam in ip ip6; do
+		nft delete table "$fam" onebox_hop >/dev/null 2>&1
+	done
+	[ "$act" = add ] || return 0
+	for fam in ip ip6; do
+		[ "$fam" = ip6 ] && ! host_has_ipv6 && continue
+		# 用 ip/ip6 两张表 + 数字优先级: inet 族 NAT 需内核 5.2+, 优先级关键字需较新的 nft
+		nft -f - <<EOF || return 1
+table ${fam} onebox_hop {
 	chain prerouting {
-		type nat hook prerouting priority dstnat; policy accept;
+		type nat hook prerouting priority -100; policy accept;
 		udp dport ${range} redirect to :${port}
 	}
 }
 EOF
-		fi
-	else
-		warn "未找到 iptables / nftables, 无法设置端口跳跃"
-		return 1
-	fi
-	return 0
+	done
 }
 
-# 端口跳跃规则开机自动恢复
-hop_persist() {
+# hop_rules add|del
+hop_rules() {
+	local act=$1 port range t ok=1
+	port=$(pget PORT hysteria2)
+	range=$HY2_HOP
+	[ -n "$port" ] && [ -n "$range" ] || return 0
+	for t in iptables ip6tables; do
+		has "$t" || continue
+		_ipt_rule "$t" del nat PREROUTING -p udp --dport "${range/-/:}" -- -j REDIRECT --to-ports "$port"
+		# 兼容旧版本写入的 onebox-hop 注释
+		while "$t" -t nat -D PREROUTING -p udp --dport "${range/-/:}" -m comment --comment onebox-hop -j REDIRECT --to-ports "$port" 2>/dev/null; do :; done
+	done
+	has nft && _hop_nft del
+	[ "$act" = add ] || return 0
+	if has iptables && _ipt_rule iptables add nat PREROUTING -p udp --dport "${range/-/:}" -- -j REDIRECT --to-ports "$port"; then
+		ok=0
+		if host_has_ipv6 && has ip6tables; then
+			_ipt_rule ip6tables add nat PREROUTING -p udp --dport "${range/-/:}" -- -j REDIRECT --to-ports "$port" ||
+				warn "ip6tables 添加端口跳跃规则失败 (IPv6 客户端将无法使用端口跳跃)"
+		fi
+	elif has nft && _hop_nft add "$port" "$range"; then
+		ok=0
+	fi
+	[ "$ok" = 0 ] || warn "未能设置端口跳跃规则 (需要 iptables 或 nftables 以及内核 NAT 支持)"
+	return "$ok"
+}
+
+# 开机自动恢复防火墙放行与端口跳跃 (onebox net-apply = fw_apply open + hop_rules add)
+# 排在各防火墙服务之后: nftables.service 的 "flush ruleset"、firewalld/netfilter-persistent 的加载都会清掉先加的规则
+net_persist() {
 	local act=$1
 	case "$INIT" in
 	systemd)
 		if [ "$act" = add ]; then
-			cat >"/etc/systemd/system/${HOP_SERVICE}.service" <<EOF
+			cat >"/etc/systemd/system/${NET_SERVICE}.service" <<EOF
 [Unit]
-Description=Sing-Xray-Onebox Hysteria2 port hopping rules
-After=network-online.target
+Description=Sing-Xray-Onebox firewall openings and Hysteria2 port hopping
+After=network-online.target netfilter-persistent.service iptables.service ip6tables.service nftables.service firewalld.service ufw.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=${CMD_PATH} hop-apply
-ExecStop=${CMD_PATH} hop-clear
+ExecStart=${CMD_PATH} net-apply
 
 [Install]
 WantedBy=multi-user.target
 EOF
 			systemctl daemon-reload >/dev/null 2>&1
-			systemctl enable "$HOP_SERVICE" >/dev/null 2>&1
+			systemctl enable "$NET_SERVICE" >/dev/null 2>&1
 		else
-			systemctl disable "$HOP_SERVICE" >/dev/null 2>&1
-			rm -f "/etc/systemd/system/${HOP_SERVICE}.service"
+			systemctl disable "$NET_SERVICE" >/dev/null 2>&1
+			rm -f "/etc/systemd/system/${NET_SERVICE}.service"
 			systemctl daemon-reload >/dev/null 2>&1
 		fi
 		;;
 	openrc)
+		# local 服务在 default 运行级最后执行 (在 iptables / nftables 服务之后)
 		if [ "$act" = add ]; then
 			mkdir -p /etc/local.d
-			printf '#!/bin/sh\n%s hop-apply >/dev/null 2>&1\n' "$CMD_PATH" >/etc/local.d/onebox-hop.start
-			chmod 755 /etc/local.d/onebox-hop.start
+			printf '#!/bin/sh\n%s net-apply >/dev/null 2>&1\n' "$CMD_PATH" >/etc/local.d/onebox-net.start
+			chmod 755 /etc/local.d/onebox-net.start
 			rc-update add local default >/dev/null 2>&1
 		else
-			rm -f /etc/local.d/onebox-hop.start
+			rm -f /etc/local.d/onebox-net.start
 		fi
 		;;
 	esac
+	# 清理旧版本的 onebox-hop 服务
+	if [ -f /etc/systemd/system/onebox-hop.service ]; then
+		systemctl disable onebox-hop >/dev/null 2>&1
+		rm -f /etc/systemd/system/onebox-hop.service
+		systemctl daemon-reload >/dev/null 2>&1
+	fi
+	rm -f /etc/local.d/onebox-hop.start
 	return 0
 }
 
 hop_setup() {
 	if proto_enabled hysteria2 && [ -n "$HY2_HOP" ]; then
-		hop_rules add && hop_persist add
+		hop_rules add
 	else
 		hop_rules del
-		hop_persist del
 	fi
+	net_persist add
 	return 0
 }
 
@@ -1344,13 +1474,13 @@ bbr_status() {
 }
 
 enable_bbr() {
-	local kv
+	local kv conf=/etc/sysctl.d/99-onebox-bbr.conf
 	if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = bbr ]; then
 		info "BBR 已处于启用状态 ($(bbr_status))"
 		return 0
 	fi
-	if [ "$VIRT" = openvz ] || [ "$VIRT" = lxc ]; then
-		warn "当前虚拟化为 ${VIRT}, 无法修改内核拥塞控制, 请在宿主机或服务商面板开启 BBR"
+	if [ "$VIRT" = openvz ]; then
+		warn "OpenVZ 无法修改内核拥塞控制, 请在服务商面板开启 BBR"
 		return 1
 	fi
 	kv=$(uname -r | cut -d- -f1)
@@ -1358,30 +1488,42 @@ enable_bbr() {
 		warn "当前内核 ${kv} 低于 4.9, 不支持 BBR, 请先升级内核"
 		return 1
 	fi
-	has modprobe && modprobe tcp_bbr >/dev/null 2>&1
+	# LXC 等容器无法加载模块, 但宿主机已加载 tcp_bbr 时 (内核 4.15+ 每个网络命名空间独立) 仍可设置, 所以直接尝试
+	grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null ||
+		{ has modprobe && modprobe tcp_bbr >/dev/null 2>&1; }
+	if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+		warn "内核未提供 BBR 模块 (tcp_bbr)$(is_container_virt && printf ', 容器环境请在宿主机或服务商面板开启')"
+		return 1
+	fi
 	mkdir -p /etc/sysctl.d
-	cat >/etc/sysctl.d/99-onebox-bbr.conf <<EOF
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-EOF
-	sysctl -p /etc/sysctl.d/99-onebox-bbr.conf >/dev/null 2>&1
+	printf 'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\n' >"$conf"
+	sysctl -p "$conf" >/dev/null 2>&1
 	if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = bbr ]; then
 		info "BBR 已启用 ($(bbr_status))"
 	else
+		rm -f "$conf"
 		warn "BBR 启用失败, 当前: $(bbr_status)"
 		return 1
 	fi
 }
+
 
 # ---------------------------------------------------------------------------
 # TLS 证书
 # ---------------------------------------------------------------------------
 ACME_HOME="${ACME_HOME:-/root/.acme.sh}"
 ACME_SH="${ACME_HOME}/acme.sh"
+ACME_RAW="https://raw.githubusercontent.com/acmesh-official/acme.sh/master"
 
-# 自签 ECC 证书 (兼容 OpenSSL 1.0.2 ~ 3.x / LibreSSL)
+# 统一调用 acme.sh 并固定 --home (sudo 保留普通用户 HOME 时, acme.sh 默认会去 $HOME/.acme.sh 找配置)
+acme() { "$ACME_SH" --home "$ACME_HOME" "$@"; }
+
+# 自签 ECC 证书 (已验证: OpenSSL 1.0.2k / 1.1.1 / 3.0 / 3.5, LibreSSL 2.7)
 cert_self_signed() {
-	local cn=$1 cnf
+	local cn=$1 cnf san
+	# SNI 填的是 IP 时必须用 IP 类型的 SAN, 否则 sing-box 客户端用 tls.certificate 固定证书时主机名校验失败
+	san="DNS:${cn}"
+	[[ "$cn" =~ ^[0-9]+(\.[0-9]+){3}$ || "$cn" == *:* ]] && san="IP:${cn}"
 	mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
 	cnf=$(mktemp)
 	cat >"$cnf" <<EOF
@@ -1395,9 +1537,9 @@ CN = ${cn}
 
 [v3_ext]
 basicConstraints = critical,CA:FALSE
-keyUsage = critical,digitalSignature,keyEncipherment
+keyUsage = critical,digitalSignature
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:${cn}
+subjectAltName = ${san}
 EOF
 	if openssl ecparam -genkey -name prime256v1 -noout -out "$TLS_DIR/key.pem" >/dev/null 2>&1 &&
 		openssl req -new -x509 -sha256 -days 3650 -key "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" -config "$cnf" >/dev/null 2>&1; then
@@ -1413,10 +1555,18 @@ EOF
 	return 1
 }
 
+# 叶子证书 DER 的 SHA256 (小写 hex, 无冒号). 以下场景通用:
+#   mihomo `fingerprint:` / Xray `pinnedPeerCertSha256` 与分享链接 `pcs=` / Hysteria2 `pinSHA256=`
 cert_sha256() {
-	# 证书 DER 的 SHA256 指纹 (小写十六进制, 无冒号)
 	[ -f "$CERT_FILE" ] || return 0
 	openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f'
+}
+
+# 叶子证书公钥 (SPKI DER) 的 SHA256, 标准 base64 —— 仅 sing-box >= 1.13 的 certificate_public_key_sha256 使用
+cert_spki_sha256() {
+	[ -f "$CERT_FILE" ] || return 0
+	openssl x509 -in "$CERT_FILE" -noout -pubkey 2>/dev/null | sed '/-----/d' | base64 -d 2>/dev/null |
+		openssl dgst -sha256 -binary | base64 | tr -d '\n'
 }
 
 cert_expiry() {
@@ -1424,21 +1574,27 @@ cert_expiry() {
 	openssl x509 -in "$CERT_FILE" -noout -enddate 2>/dev/null | sed 's/notAfter=//'
 }
 
-# 解析域名 (A/AAAA), 通过系统解析或 DoH
+# 只保留 IPv4 / IPv6 字面量 (不能只用 [0-9a-f:.]: 形如 cafe.be. 的 CNAME 也会匹配)
+_ip_filter() { grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9a-fA-F]{0,4}(:[0-9a-fA-F]{0,4}){2,7}$'; }
+
+# 解析域名 (A/AAAA). 优先 DoH: 与 CA 看到的公网解析一致, 不受 /etc/hosts (如 127.0.1.1 主机名) 与本地缓存影响
 resolve_domain() {
-	local d=$1 out=""
-	if has getent; then
-		out=$(getent ahosts "$d" 2>/dev/null | awk '{print $1}' | sort -u)
+	local d=$1 out="" t u
+	if has curl; then
+		for u in https://cloudflare-dns.com/dns-query https://dns.google/resolve https://dns.alidns.com/resolve; do
+			out=$(
+				for t in A AAAA; do
+					curl -fsS --max-time 6 -H 'accept: application/dns-json' "${u}?name=${d}&type=${t}" 2>/dev/null |
+						grep -oE '"data": *"[^"]*"' | sed 's/^"data": *"//; s/"$//'
+				done | _ip_filter
+			)
+			[ -n "$out" ] && break
+		done
 	fi
-	if [ -z "$out" ] && has curl; then
-		out=$(
-			for t in A AAAA; do
-				curl -fsS --max-time 6 -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=${d}&type=${t}" 2>/dev/null |
-					grep -oE '"data":"[^"]+"' | sed 's/"data":"//; s/"$//'
-			done
-		)
+	if [ -z "$out" ] && has getent; then
+		out=$(getent ahosts "$d" 2>/dev/null | awk '{print $1}' | _ip_filter)
 	fi
-	printf '%s\n' "$out" | grep -E '^[0-9a-fA-F:.]+$'
+	[ -n "$out" ] && printf '%s\n' "$out" | sort -u
 }
 
 check_domain_points_here() {
@@ -1448,48 +1604,61 @@ check_domain_points_here() {
 		warn "无法解析域名 ${d}"
 		return 1
 	fi
-	if printf '%s\n' "$ips" | grep -qxF -e "${SERVER_IPV4:-_none_}" -e "${SERVER_IPV6:-_none_}"; then
+	if printf '%s\n' "$ips" | grep -qixF -e "${SERVER_IPV4:-_none_}" -e "${SERVER_IPV6:-_none_}"; then
 		return 0
 	fi
 	warn "域名 ${d} 解析到 [$(printf '%s' "$ips" | tr '\n' ' ')], 与本机 IP (${SERVER_IPV4:-无} / ${SERVER_IPV6:-无}) 不一致"
 	return 1
 }
 
+# acme_install [邮箱]  —— Let's Encrypt 自 2025-06 起不再使用/保存联系邮箱, 可留空; 不要伪造随机 gmail 地址
 acme_install() {
-	[ -x "$ACME_SH" ] && return 0
-	ensure_cmds curl || return 1
-	ensure_cmds crontab || warn "未能安装 cron, 证书将无法自动续期"
-	_enable_cron_service
-	local email=$1
-	[ -n "$email" ] || email="$(rand_str 8 | tr 'A-Z' 'a-z')@gmail.com"
-	info "安装 acme.sh ..."
-	if ! (cd /tmp && curl -fsSL https://get.acme.sh | sh -s -- email="$email" >/dev/null 2>&1); then
-		# get.acme.sh 不可用时从 GitHub 安装
-		local tmp
+	local email=${1:-} args=() tmp
+	if [ ! -x "$ACME_SH" ]; then
+		ensure_cmds curl || return 1
+		ensure_cmds crontab || true
+		_enable_cron_service
+		[ -n "$email" ] && args+=(--email "$email")
+		if ! has crontab; then
+			# 没有 crontab 时 acme.sh --install 会直接失败 ("Pre-check failed"), 必须显式 --nocron
+			args+=(--nocron)
+			warn "未找到 crontab, 证书不会自动续期; 请自行安排每日执行: ${ACME_SH} --cron --home ${ACME_HOME}"
+		fi
+		info "安装 acme.sh ..."
 		tmp=$(mktemp -d)
-		http_get "$(gh_url https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh)" "$tmp/acme.sh" &&
-			(cd "$tmp" && sh acme.sh --install -m "$email" >/dev/null 2>&1)
+		# 1) 完整在线安装 (含 dnsapi/, 需访问 github.com 下载源码包)
+		(cd "$tmp" && http_get "${ACME_RAW}/acme.sh" acme.sh &&
+			sh acme.sh --install-online --home "$ACME_HOME" --noprofile "${args[@]}") >/dev/null 2>&1
+		# 2) github.com 不可达: 单文件安装 (可走 GH_PROXY), 缺少的 dnsapi 下面单独补
+		if [ ! -x "$ACME_SH" ]; then
+			(cd "$tmp" && http_get "$(gh_url "${ACME_RAW}/acme.sh")" acme.sh &&
+				sh acme.sh --install --home "$ACME_HOME" --noprofile "${args[@]}") >/dev/null 2>&1
+		fi
 		rm -rf "$tmp"
+		[ -x "$ACME_SH" ] || {
+			err "acme.sh 安装失败"
+			return 1
+		}
 	fi
-	[ -x "$ACME_SH" ] || {
-		err "acme.sh 安装失败"
-		return 1
-	}
-	"$ACME_SH" --upgrade --auto-upgrade >/dev/null 2>&1
-	"$ACME_SH" --set-default-ca --server letsencrypt >/dev/null 2>&1
+	if [ ! -f "$ACME_HOME/dnsapi/dns_cf.sh" ]; then
+		mkdir -p "$ACME_HOME/dnsapi"
+		http_get "$(gh_url "${ACME_RAW}/dnsapi/dns_cf.sh")" "$ACME_HOME/dnsapi/dns_cf.sh" >/dev/null 2>&1 ||
+			rm -f "$ACME_HOME/dnsapi/dns_cf.sh"
+	fi
+	acme --set-default-ca --server letsencrypt >/dev/null 2>&1
+	return 0
 }
 
 _enable_cron_service() {
+	local s
 	case "$INIT" in
 	systemd)
-		local s
 		for s in cron crond cronie; do
 			systemctl enable --now "$s" >/dev/null 2>&1 && break
 		done
 		;;
 	openrc)
-		local s
-		for s in crond cronie dcron; do
+		for s in crond cronie dcron fcron; do
 			if [ -x "/etc/init.d/$s" ]; then
 				rc-update add "$s" default >/dev/null 2>&1
 				rc-service "$s" start >/dev/null 2>&1
@@ -1497,37 +1666,52 @@ _enable_cron_service() {
 			fi
 		done
 		;;
+	none) warn "未检测到 init 系统, cron 可能未运行, 证书需手动续期: ${ACME_SH} --cron --home ${ACME_HOME}" ;;
 	esac
 	return 0
 }
 
-# cert_acme 域名 standalone|cf  (cf 需预先 export CF_Token 等变量)
+# cert_acme 域名 standalone|cf  (cf: 需预先 export CF_Token [+CF_Account_ID|CF_Zone_ID] 或 CF_Key+CF_Email)
 cert_acme() {
 	local d=$1 method=$2 args=() rc
-	acme_install || return 1
+	acme_install "${ACME_EMAIL:-}" || return 1
 	case "$method" in
 	standalone)
-		ensure_cmds socat || warn "未能安装 socat, standalone 模式可能失败"
+		# acme.sh 3.1+ standalone 用 socat, 没有 socat 时回退到 python3
+		has socat || has python3 || ensure_cmds socat || warn "未能安装 socat, standalone 模式可能失败"
 		if port_in_use 80 tcp; then
 			err "80 端口被占用, standalone 模式需要临时占用 80 端口, 请先停止占用该端口的程序"
 			return 1
 		fi
+		# HTTP-01 需要入站 TCP 80 可达; 续期时同样需要, 因此常开 (fw_apply 中按 TLS_MODE/ACME_METHOD 维护)
+		fw_rule open 80 tcp
+		warn "请确认云服务商安全组 / 防火墙已放行 TCP 80 (申请与每次续期都需要)"
 		args=(--standalone)
 		[ -z "$SERVER_IPV4" ] && [ -n "$SERVER_IPV6" ] && args+=(--listen-v6)
 		;;
-	cf) args=(--dns dns_cf) ;;
+	cf)
+		if [ -z "${CF_Token:-}" ] && { [ -z "${CF_Key:-}" ] || [ -z "${CF_Email:-}" ]; }; then
+			err "Cloudflare DNS 验证需要 CF_Token (或 CF_Key + CF_Email)"
+			return 1
+		fi
+		[ -f "$ACME_HOME/dnsapi/dns_cf.sh" ] || {
+			err "缺少 acme.sh 的 dnsapi/dns_cf.sh, 无法使用 Cloudflare DNS 验证"
+			return 1
+		}
+		args=(--dns dns_cf)
+		;;
 	*) return 1 ;;
 	esac
 	info "申请证书: ${d} (Let's Encrypt, ECC)"
-	"$ACME_SH" --issue -d "$d" "${args[@]}" -k ec-256 --server letsencrypt
+	acme --issue -d "$d" "${args[@]}" -k ec-256 --server letsencrypt
 	rc=$?
-	# rc=2 表示证书未到期无需续签, 也视为成功
+	# rc=2: 证书已存在且未到续期时间 (acme.sh RENEW_SKIP), 视为成功
 	if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then
 		err "证书申请失败 (acme.sh 退出码 ${rc}), 请检查域名解析 / 80 端口 / API 令牌"
 		return 1
 	fi
 	mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
-	"$ACME_SH" --install-cert -d "$d" --ecc \
+	acme --install-cert -d "$d" --ecc \
 		--key-file "$TLS_DIR/key.pem" \
 		--fullchain-file "$TLS_DIR/cert.pem" \
 		--reloadcmd "${CMD_PATH} restart >/dev/null 2>&1 || true" >/dev/null 2>&1 || {
@@ -1549,9 +1733,45 @@ cert_custom() {
 		err "无法解析证书文件: $c"
 		return 1
 	}
+	# 证书与私钥必须配对 (比较两者的公钥), 否则内核启动时才报错
+	if [ "$(openssl x509 -in "$c" -noout -pubkey 2>/dev/null)" != "$(openssl pkey -in "$k" -pubout 2>/dev/null)" ]; then
+		err "证书与私钥不匹配"
+		return 1
+	fi
 	mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
 	cp -f "$c" "$TLS_DIR/cert.pem" && cp -f "$k" "$TLS_DIR/key.pem" && chmod 600 "$TLS_DIR/key.pem"
 	CERT_FILE="$TLS_DIR/cert.pem" KEY_FILE="$TLS_DIR/key.pem"
+}
+
+# 本机时钟与 HTTPS 服务器 Date 头的偏差 (秒, 绝对值); 获取失败返回 1
+# SS-2022 要求客户端/服务端时间差 <= 30s, VMess(AEAD) <= 120s
+clock_skew() {
+	local u d dd mo y hms m remote now
+	for u in https://www.cloudflare.com https://www.apple.com http://www.baidu.com; do
+		d=$(curl -ksSI --max-time 6 "$u" 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: *//p' | head -n1)
+		[ -n "$d" ] && break
+	done
+	# 形如: Sat, 26 Sep 2026 17:05:53 GMT
+	read -r _ dd mo y hms _ <<<"$d"
+	[ -n "$hms" ] || return 1
+	m=JanFebMarAprMayJunJulAugSepOctNovDec
+	m=${m%%"$mo"*}
+	[ ${#m} -lt 36 ] || return 1
+	remote=$(date -u -d "$(printf '%s-%02d-%02d' "$y" $((${#m} / 3 + 1)) "$((10#$dd))") $hms" +%s 2>/dev/null) || return 1
+	now=$(date -u +%s)
+	echo $((remote > now ? remote - now : now - remote))
+}
+
+check_clock() {
+	local skew
+	skew=$(clock_skew) || return 0
+	[ "$skew" -le 10 ] && return 0
+	warn "本机时间与网络时间相差约 ${skew} 秒 (Shadowsocks-2022 允许 30 秒, VMess 允许 120 秒), 请开启时间同步"
+	case "$INIT" in
+	systemd) has timedatectl && info "可执行: timedatectl set-ntp true (或安装 chrony)" ;;
+	openrc) info "可执行: apk add chrony && rc-update add chronyd && rc-service chronyd start" ;;
+	esac
+	return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -2617,11 +2837,17 @@ port_in_hop_range() {
 	[ "$port" -ge "$a" ] && [ "$port" -le "$b" ]
 }
 
-# 我们自己的服务正在使用的端口不算占用 (重新配置时)
+# 端口是否正被本脚本已部署的协议以同一传输层 (tcp/udp) 使用 —— 重新配置时不算冲突
+# port_used_by_onebox 端口 tcp|udp
 port_used_by_onebox() {
-	local port=$1 p
+	local port=$1 want=$2 var p pn
 	[ -f "$STATE_FILE" ] || return 1
-	grep -qE "^PORT_[a-z0-9_]+=${port}\$" "$STATE_FILE"
+	for var in $(sed -n "s/^PORT_\([a-z0-9_]*\)=['\"]\{0,1\}${port}['\"]\{0,1\}\$/\1/p" "$STATE_FILE"); do
+		p=${var//_/-}
+		pn=$(proto_net "$p")
+		[ "$pn" = both ] || [ "$pn" = "$want" ] && return 0
+	done
+	return 1
 }
 
 port_ok() {
@@ -2631,6 +2857,10 @@ port_ok() {
 		warn "端口需为 1-65535 之间的数字"
 		return 1
 	}
+	if [ "$port" = 80 ] && [ "$net" != udp ] && [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then
+		warn "TCP 80 端口需保留给 ACME HTTP 验证 (证书申请与续期)"
+		return 1
+	fi
 	if port_taken_by_other "$port" "$net" "$p"; then
 		warn "端口 ${port} 已分配给其他协议"
 		return 1
@@ -2639,15 +2869,13 @@ port_ok() {
 		warn "端口 ${port} 位于 Hysteria2 端口跳跃范围 ${HY2_HOP} 内"
 		return 1
 	fi
-	if ! port_used_by_onebox "$port"; then
-		if [ "$net" != udp ] && port_in_use "$port" tcp; then
-			warn "TCP 端口 ${port} 已被其他程序占用"
-			return 1
-		fi
-		if [ "$net" != tcp ] && port_in_use "$port" udp; then
-			warn "UDP 端口 ${port} 已被其他程序占用"
-			return 1
-		fi
+	if [ "$net" != udp ] && port_in_use "$port" tcp && ! port_used_by_onebox "$port" tcp; then
+		warn "TCP 端口 ${port} 已被其他程序占用"
+		return 1
+	fi
+	if [ "$net" != tcp ] && port_in_use "$port" udp && ! port_used_by_onebox "$port" udp; then
+		warn "UDP 端口 ${port} 已被其他程序占用"
+		return 1
 	fi
 	return 0
 }
@@ -2719,12 +2947,12 @@ choose_sni() {
 		if [ "$_s_ans" -ge 1 ] && [ "$_s_ans" -le "$_s_i" ]; then
 			_s_ans=$(printf '%s\n' $REALITY_SNI_LIST | sed -n "${_s_ans}p")
 		else
-			ask _s_ans "请输入自定义伪装域名" ""
+			_s_ans=""
 		fi
 	fi
 	_s_ans=${_s_ans#https://}
 	_s_ans=${_s_ans%%/*}
-	[ -n "$_s_ans" ] || _s_ans=$(printf '%s\n' $REALITY_SNI_LIST | head -n1)
+	valid_domain "$_s_ans" || ask_domain _s_ans "请输入自定义伪装域名" ""
 	if check_tls13 "$_s_ans"; then
 		info "${_s_ans} 支持 TLS 1.3"
 	else
@@ -2741,7 +2969,7 @@ choose_tls() {
 	}
 	title "TLS 证书"
 	echo "  部分协议 ($(for p in $PROTOCOLS; do proto_needs_cert "$p" && printf '%s ' "$(proto_title "$p")"; done)) 需要 TLS 证书:"
-	echo "    1) 自签证书 (无需域名, 客户端将跳过证书验证) [默认]"
+	echo "    1) 自签证书 (无需域名, 客户端通过证书指纹校验) [默认]"
 	echo "    2) ACME 申请正式证书 —— HTTP 验证 (域名需已解析到本机, 且 80 端口空闲)"
 	echo "    3) ACME 申请正式证书 —— Cloudflare DNS API 验证"
 	echo "    4) 使用已有证书文件"
@@ -2749,15 +2977,11 @@ choose_tls() {
 	case "$m" in
 	1)
 		TLS_MODE=self
-		ask TLS_SNI "自签证书使用的域名 (SNI)" "${OPT_SNI_SELF:-www.bing.com}"
+		ask_domain TLS_SNI "自签证书使用的域名 (SNI)" "${OPT_SNI_SELF:-www.bing.com}"
 		;;
 	2 | 3)
 		TLS_MODE=acme
-		while :; do
-			ask DOMAIN "请输入已解析到本机的域名" "${OPT_DOMAIN:-}"
-			[ -n "$DOMAIN" ] && break
-			is_interactive || die "未指定域名 (--domain)"
-		done
+		ask_domain DOMAIN "请输入已解析到本机的域名" "${OPT_DOMAIN:-}"
 		TLS_SNI=$DOMAIN
 		if [ "$m" = 2 ]; then
 			ACME_METHOD=standalone
@@ -2766,8 +2990,12 @@ choose_tls() {
 			fi
 		else
 			ACME_METHOD=cf
-			if [ -z "${CF_Token:-}" ] && [ -z "${CF_Key:-}" ]; then
-				ask d "Cloudflare API Token (需 Zone.DNS 编辑权限)" ""
+			if [ -z "${CF_Token:-}" ] && { [ -z "${CF_Key:-}" ] || [ -z "${CF_Email:-}" ]; }; then
+				while :; do
+					ask d "Cloudflare API Token (需 Zone.DNS 编辑权限)" ""
+					[ -n "$d" ] && break
+					is_interactive || die "未提供 Cloudflare API Token (请设置环境变量 CF_Token)"
+				done
 				export CF_Token="$d"
 				ask d "Cloudflare Account ID (可留空)" ""
 				[ -n "$d" ] && export CF_Account_ID="$d"
@@ -2776,7 +3004,7 @@ choose_tls() {
 		;;
 	4)
 		TLS_MODE=custom
-		ask DOMAIN "证书对应的域名" "${OPT_DOMAIN:-}"
+		ask_domain DOMAIN "证书对应的域名" "${OPT_DOMAIN:-}"
 		TLS_SNI=$DOMAIN
 		ask CUSTOM_CERT "证书文件路径 (fullchain)" ""
 		ask CUSTOM_KEY "私钥文件路径" ""
@@ -3002,13 +3230,6 @@ do_install() {
 		confirm "确定重新安装?" n || return 0
 	fi
 	install_base_deps
-	if [ -n "$old_protocols" ]; then
-		# 先停止旧服务, 释放端口, 以便重新检测端口占用
-		fw_apply close
-		hop_rules del
-		svc_stop singbox
-		svc_stop xray
-	fi
 	reset_state
 	choose_protocols
 	choose_extras
@@ -3017,6 +3238,17 @@ do_install() {
 	choose_address
 	print_plan
 	confirm "确认开始安装?" y || die "已取消"
+
+	if [ -n "$old_protocols" ]; then
+		# 停止旧服务并清理旧的防火墙 / 端口跳跃规则 (旧状态仍在状态文件中)
+		(
+			load_state
+			fw_apply close
+			hop_rules del
+		)
+		svc_stop singbox
+		svc_stop xray
+	fi
 
 	# sing-box 监听 "::" 为双栈; 内核禁用 IPv6 时会自动退回 IPv4 ("0.0.0.0" 则仅 IPv4)
 	LISTEN_ADDR="::"
@@ -3027,10 +3259,14 @@ do_install() {
 	ensure_cores || die "内核安装失败"
 	gen_credentials
 	obtain_cert || die "证书配置失败"
+	# shellcheck disable=SC2034 # 通过 STATE_KEYS 保存
 	INSTALLED_AT=$(date '+%Y-%m-%d %H:%M:%S')
 	install_self
 	apply_all || die "配置生成失败"
 
+	if proto_enabled shadowsocks || proto_enabled shadowtls || proto_enabled vmess-ws; then
+		check_clock || true
+	fi
 	if ! is_container_virt && [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" != bbr ]; then
 		if ask_yn "是否开启 BBR 拥塞控制 (推荐)" "${OPT_BBR:-y}"; then enable_bbr || true; fi
 	fi
@@ -3385,7 +3621,7 @@ do_cert() {
 		;;
 	2)
 		[ "$TLS_MODE" = acme ] || die "当前不是 ACME 证书"
-		"$ACME_SH" --renew -d "$DOMAIN" --ecc --force && info "续期完成"
+		acme --renew -d "$DOMAIN" --ecc --force && info "续期完成"
 		;;
 	esac
 }
@@ -3398,12 +3634,12 @@ do_uninstall() {
 	load_state 2>/dev/null || true
 	fw_apply close 2>/dev/null
 	hop_rules del 2>/dev/null
-	hop_persist del 2>/dev/null
+	net_persist del 2>/dev/null
 	svc_remove singbox
 	svc_remove xray
 	_none_autostart_del
 	if [ "$TLS_MODE" = acme ] && [ -x "$ACME_SH" ] && [ -n "$DOMAIN" ]; then
-		"$ACME_SH" --remove -d "$DOMAIN" --ecc >/dev/null 2>&1
+		acme --remove -d "$DOMAIN" --ecc >/dev/null 2>&1
 	fi
 	rm -rf "$ONEBOX_DIR" "$BIN_DIR" "$LOG_DIR" "$RUN_DIR"
 	rmdir "$(dirname "$BIN_DIR")" 2>/dev/null
@@ -3677,8 +3913,11 @@ main() {
 		require_installed
 		apply_all
 		;;
-	hop-apply)
-		load_state && hop_rules add
+	net-apply | hop-apply)
+		load_state && {
+			fw_apply open
+			hop_rules add
+		}
 		;;
 	hop-clear)
 		load_state && hop_rules del

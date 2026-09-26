@@ -183,7 +183,9 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 ## 常见问题
 
 **安装成功但连不上？**
-1. 在云服务商控制台的安全组 / 防火墙中放行对应端口（TCP 与 UDP 分别放行，Hysteria2 / TUIC 使用 UDP）。
+1. 在云服务商控制台的安全组 / 防火墙中放行对应端口（TCP 与 UDP 分别放行，Hysteria2 / TUIC 使用 UDP；
+   启用了 Hysteria2 端口跳跃时还需放行整个 UDP 端口范围；使用 ACME HTTP 验证时需放行 TCP 80，续期同样需要）。
+   本机防火墙（ufw / firewalld / iptables / nftables）由脚本自动放行，并在开机时由 `onebox-net` 服务自动恢复。
 2. `onebox status` 与 `onebox log` 检查服务状态。
 3. REALITY 连接失败时尝试更换伪装站点（`onebox reset` 或重新安装），站点需支持 TLS 1.3，且尽量与服务器地理位置接近。
 
@@ -193,7 +195,8 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 
 **纯 IPv6 VPS？** GitHub 不支持 IPv6，下载内核需要借助支持 IPv6 的 GitHub 加速前缀（`GH_PROXY`）或先配置 WARP / NAT64。
 
-**VMess / TUIC 连接失败？** 请确认服务器与客户端时间误差在 90 秒以内（VMess 对时间敏感）。
+**SS-2022 / ShadowTLS / VMess 连接失败？** 这些协议对时间敏感：SS-2022 要求服务器与客户端时间误差在 30 秒以内，VMess 为 120 秒。
+脚本安装时会检测服务器时间偏差，请开启时间同步（`timedatectl set-ntp true` 或安装 chrony）。
 
 **如何更新？** `onebox update` 更新内核，`onebox update-script` 更新脚本（会用新脚本重新生成配置，凭据不变）。
 

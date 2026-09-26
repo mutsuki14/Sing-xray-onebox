@@ -15,8 +15,11 @@ jobs:
           bash -n onebox.sh
           bash -n tests/e2e.sh
           bash -n tests/lifecycle.sh
+          bash -n tests/unit.sh
       - name: shellcheck
-        run: shellcheck -s bash -S warning onebox.sh tests/e2e.sh tests/lifecycle.sh
+        run: shellcheck -s bash -S warning onebox.sh tests/*.sh
+      - name: unit tests
+        run: bash tests/unit.sh
 
   test:
     runs-on: ubuntu-latest
