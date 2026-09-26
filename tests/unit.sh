@@ -251,6 +251,17 @@ eq "非公共 CA 证书改为固定指纹" "$CERT_PINNED" 1
 DOMAIN=other.test
 eq "域名不匹配的证书被拒绝" "$(yes_ cert_custom "$WORK/le/live/fullchain.pem" "$WORK/le/live/privkey.pem" 2>/dev/null)" no
 
+# sing-box 服务端与 Xray 使用同一私有地址列表 (含 100.64.0.0/10, 如阿里云元数据地址)
+reset_state
+PROTOCOLS="shadowsocks" SS_METHOD=2022-blake3-aes-128-gcm SS_PASSWORD=$(gen_ss_password 2022-blake3-aes-128-gcm)
+pset CORE shadowsocks singbox
+pset PORT shadowsocks 8388
+BLOCK_PRIVATE=1 SERVER_IPV4=203.0.113.9
+ip() { :; }
+eq "sing-box 屏蔽 100.64.0.0/10" "$(gen_singbox_server | grep -c '100.64.0.0/10')" 1
+eq "sing-box 屏蔽本机地址" "$(gen_singbox_server | grep -c '203.0.113.9/32')" 1
+unset -f ip
+
 # 显示宽度补齐
 eq "pad 中文" "$(pad 协议 6)|" "协议  |"
 eq "pad ASCII" "$(pad ab 4)|" "ab  |"

@@ -72,6 +72,7 @@ readonly FALLBACK_SB_VERSION="1.14.2"
 # 会拒绝 sing-box 客户端. 可用 --xray-version latest 或 onebox update xray 主动升级.
 readonly TESTED_XR_VERSION="26.3.27"
 XR_VERSION_WANT="${ONEBOX_XRAY_VERSION:-}"
+XR_VERSION_WANT="${XR_VERSION_WANT#v}"
 
 # 全部协议 (顺序即菜单顺序)
 readonly ALL_PROTOCOLS="vless-reality vless-xhttp vless-grpc vless-ws vmess-ws trojan shadowsocks hysteria2 tuic anytls shadowtls"
@@ -688,7 +689,7 @@ port_in_use() {
 # ---------------------------------------------------------------------------
 # 状态 (保存在 /etc/onebox/onebox.conf)
 # ---------------------------------------------------------------------------
-readonly STATE_KEYS="PROTOCOLS SERVER_ADDR SERVER_IPV4 SERVER_IPV6 NODE_NAME LISTEN_ADDR
+readonly STATE_KEYS="PROTOCOLS SERVER_ADDR SERVER_IPV4 SERVER_IPV6 SERVER_IPV4_WARP SERVER_IPV6_WARP NODE_NAME LISTEN_ADDR
 UUID PASSWORD SS_METHOD SS_PASSWORD
 REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SNI REALITY_DEST
 WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
@@ -1110,13 +1111,17 @@ svc_args() {
 	esac
 }
 
-# 文件描述符上限: min(硬上限, 1048576), 容器内硬上限可能更低
+# 文件描述符上限
 nofile_limit() {
-	local h
-	h=$(ulimit -Hn 2>/dev/null)
-	case "$h" in "" | unlimited) h=1048576 ;; esac
-	[ "$h" -gt 1048576 ] 2>/dev/null && h=1048576
-	printf '%s' "$h"
+	# 取可设置的最大值 (root 可提高硬上限; 容器内受限时逐级降低)
+	local n
+	for n in 1048576 524288 262144 65535; do
+		(ulimit -n "$n") 2>/dev/null && {
+			printf '%s' "$n"
+			return 0
+		}
+	done
+	ulimit -Hn
 }
 
 # 日志超过 10MB 时清空 (OpenRC / 无 init 模式下日志写入文件, 没有轮转)
@@ -1514,7 +1519,11 @@ fw_rule() {
 	# ufw / firewalld 自己管理 INPUT, 此时不再直接改 iptables (否则规则重复, 且 ufw 下 INPUT 策略恒为 DROP)
 	if _fw_ufw_active; then
 		if [ "$act" = open ]; then
-			_fw_ledger_has "ufw $key" && return 0
+			if _fw_ledger_has "ufw $key"; then
+				# 已记入台账: 重复执行 ufw allow 是幂等的 (规则被手动删除时可恢复)
+				ufw allow "${ipt_port}/${proto}" comment onebox >/dev/null 2>&1 || ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1
+				return 0
+			fi
 			# 用户已自行放行该端口: 不接管
 			# (仅无来源 / 网卡限制的入站 ALLOW 规则才算)
 			LC_ALL=C ufw status 2>/dev/null | grep -vE ' on |OUT|FWD' |
@@ -1584,6 +1593,7 @@ _fw_ledger_migrate() {
 		[ "$net" != udp ] && _fw_ledger_add "$backend ${port}/tcp"
 		[ "$net" != tcp ] && _fw_ledger_add "$backend ${port}/udp"
 	done
+	[ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ] && _fw_ledger_add "$backend 80/tcp"
 	return 0
 }
 
@@ -1648,6 +1658,21 @@ hop_range_conflicts() {
 		net=$(proto_net "$p")
 		[ "$net" = tcp ] && continue
 		[ "$port" -ge "$a" ] && [ "$port" -le "$b" ] && out+="$(proto_title "$p")/${port} "
+	done
+	[ -n "$out" ] && printf '%s' "${out% }"
+}
+
+# 端口跳跃范围内被其他程序监听的 UDP 端口 (如 WireGuard / Tailscale), 仅用于提示
+hop_range_foreign_udp() {
+	local range=$1 a b port hy out=""
+	a=${range%-*} b=${range#*-}
+	hy=$(pget PORT hysteria2)
+	has ss || return 1
+	for port in $(ss -lnu 2>/dev/null | awk 'NR>1{n=split($4, x, ":"); print x[n]}' | sort -un); do
+		[[ "$port" =~ ^[0-9]+$ ]] || continue
+		[ "$port" = "$hy" ] && continue
+		port_used_by_onebox "$port" udp && continue
+		[ "$port" -ge "$a" ] && [ "$port" -le "$b" ] && out+="${port} "
 	done
 	[ -n "$out" ] && printf '%s' "${out% }"
 }
@@ -1968,8 +1993,13 @@ cert_acme() {
 	standalone)
 		# acme.sh 3.1+ standalone 用 socat, 没有 socat 时回退到 python3
 		has socat || has python3 || ensure_cmds socat || warn "未能安装 socat, standalone 模式可能失败"
+		# 新配置中仍有协议使用 TCP 80 时无法使用 HTTP 验证 (申请与每次续期都需要 80 端口)
+		if port_taken_by_other 80 tcp ""; then
+			err "有协议占用 TCP 80 端口, 无法使用 HTTP 验证, 请先修改该协议端口或改用 Cloudflare DNS 验证"
+			return 1
+		fi
 		if port_in_use 80 tcp && port_used_by_onebox 80 tcp; then
-			# 旧配置 (重装前) 的协议占用了 80 端口: 申请期间暂停内核, 之后由应用配置时重启
+			# 旧配置 (重装前) 的协议占用了 80 端口: 申请期间暂停内核, 之后应用新配置时重启
 			svc_stop singbox
 			svc_stop xray
 			ACME_STOPPED_CORES=1
@@ -1979,6 +2009,8 @@ cert_acme() {
 			return 1
 		fi
 		# HTTP-01 需要入站 TCP 80 可达; 续期时同样需要, 因此常开 (fw_apply 中按 TLS_MODE/ACME_METHOD 维护)
+		# 记录 80 端口是否由本次申请放行, 事务回滚时关闭
+		_fw_ledger_has "ufw 80/tcp" || _fw_ledger_has "firewalld 80/tcp" || CERT_TXN_FW80=1
 		fw_rule open 80 tcp
 		warn "请确认云服务商安全组 / 防火墙已放行 TCP 80 (申请与每次续期都需要)"
 		args=(--standalone)
@@ -2002,6 +2034,8 @@ cert_acme() {
 	CF_Token=${CF_Token:-} CF_Account_ID=${CF_Account_ID:-} CF_Zone_ID=${CF_Zone_ID:-} CF_Key=${CF_Key:-} CF_Email=${CF_Email:-} \
 		acme --issue -d "$d" "${args[@]}" -k ec-256 --server letsencrypt
 	rc=$?
+	# 签发成功 (或未到期) 即记录, 使后续任何失败都能在回滚时撤销该部署
+	{ [ "$rc" = 0 ] || [ "$rc" = 2 ]; } && CERT_TXN_NEW_ACME=$d
 	# rc=2: 证书已存在且未到续期时间 (acme.sh RENEW_SKIP), 视为成功
 	if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then
 		err "证书申请失败 (acme.sh 退出码 ${rc}), 请检查域名解析 / 80 端口 / API 令牌"
@@ -2278,9 +2312,10 @@ gen_singbox_server() {
 		# 先解析域名再匹配私有地址, 否则 localhost 之类的域名会绕过拦截
 		rules+=("      { \"action\": \"resolve\", \"strategy\": \"${strategy}\" }")
 		rules+=('      { "ip_is_private": true, "action": "reject" }')
+		# ip_is_private 不含 100.64.0.0/10 (阿里云元数据 100.100.100.200 / Tailscale) 等, 与 Xray 使用同一列表
 		local own
 		own=$(own_ip_cidrs)
-		[ -n "$own" ] && rules+=("      { \"ip_cidr\": [${own}], \"action\": \"reject\" }")
+		rules+=("      { \"ip_cidr\": [${PRIVATE_CIDRS}${own:+, ${own}}], \"action\": \"reject\" }")
 	fi
 	cat <<EOF
 {
@@ -2309,7 +2344,8 @@ own_ip_list() {
 		[ -n "${SERVER_IPV4:-}" ] && [ "${SERVER_IPV4_WARP:-0}" != 1 ] && printf '%s\n' "$SERVER_IPV4"
 		[ -n "${SERVER_IPV6:-}" ] && [ "${SERVER_IPV6_WARP:-0}" != 1 ] && printf '%s\n' "$SERVER_IPV6"
 		ip -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}'
-	} | grep -E '^[0-9a-fA-F:.]+$' | grep -E '\.|:' | sort -u
+	} | grep -E '^[0-9a-fA-F:.]+$' | grep -E '\.|:' |
+		grep -vE '^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|[fF][cCdD]|[fF][eE]80)' | sort -u
 }
 
 # own_ip_cidrs  -> JSON 字符串列表 (不含方括号), 例如 "1.2.3.4/32", "2001:db8::1/128"
@@ -3581,6 +3617,10 @@ choose_tls() {
 CERT_TXN_BAK="" CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME=""
 
 cert_txn_begin() {
+	CERT_TXN_FW80=0
+	# 事务期间脚本异常退出 (die / Ctrl-C) 时自动回滚
+	trap '[ -n "$CERT_TXN_BAK" ] && cert_txn_rollback' EXIT
+	trap 'exit 130' INT TERM HUP
 	CERT_TXN_BAK="$ONEBOX_DIR/.tls-rollback"
 	rm -rf "$CERT_TXN_BAK"
 	if [ -d "$TLS_DIR" ]; then cp -a "$TLS_DIR" "$CERT_TXN_BAK"; else mkdir -p "$CERT_TXN_BAK"; fi
@@ -3600,10 +3640,12 @@ cert_txn_commit() {
 	fi
 	rm -rf "$CERT_TXN_BAK"
 	CERT_TXN_BAK=""
+	trap - EXIT INT TERM HUP
 }
 
 cert_txn_rollback() {
 	[ -n "$CERT_TXN_BAK" ] || return 0
+	trap - EXIT INT TERM HUP
 	# 新申请的 ACME 域名 (与旧的不同) 取消部署, 防止其续期覆盖恢复后的证书
 	if [ -n "$CERT_TXN_NEW_ACME" ] && [ "$CERT_TXN_NEW_ACME" != "$CERT_TXN_OLD_ACME" ] && [ -x "$ACME_SH" ]; then
 		acme --remove -d "$CERT_TXN_NEW_ACME" --ecc >/dev/null 2>&1
@@ -3616,6 +3658,10 @@ cert_txn_rollback() {
 		load_state
 		write_client_files
 		all_cores_do restart
+	fi
+	# 本次申请临时放行的 80 端口, 恢复后的配置不再需要时关闭
+	if [ "${CERT_TXN_FW80:-0}" = 1 ] && ! { [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; }; then
+		fw_rule close 80 tcp
 	fi
 	return 0
 }
@@ -3708,6 +3754,10 @@ choose_hy2_opts() {
 				warn "端口跳跃范围 ${r} 包含其他 UDP 协议的端口: ${c}"
 				is_interactive || die "端口跳跃范围与现有端口冲突: ${c}"
 				continue
+			fi
+			if c=$(hop_range_foreign_udp "$r"); then
+				warn "端口跳跃范围内有其他程序监听的 UDP 端口 (${c}), 发往这些端口的流量将被转发到 Hysteria2"
+				if is_interactive && ! ask_yn "仍然使用该范围?" n; then continue; fi
 			fi
 			HY2_HOP=$r
 			return 0
@@ -3820,18 +3870,19 @@ ensure_cores() {
 	for core in singbox xray; do
 		core_used "$core" || continue
 		case "$core" in
+		# 已安装的内核不在这里替换 (没有备份 / 回滚); 版本不一致时提示使用 onebox update
 		singbox)
-			if [ ! -x "$SB_BIN" ] || [ "${FORCE_CORE_UPDATE:-0}" = 1 ] ||
-				{ [ -n "$LOCAL_SB_BIN" ] && ! cmp -s "$LOCAL_SB_BIN" "$SB_BIN"; } ||
-				{ [ -n "${SB_VERSION_WANT:-}" ] && [ "$SB_VERSION_WANT" != latest ] && [ "$SB_VERSION_WANT" != "$(sb_installed_version)" ]; }; then
+			if [ ! -x "$SB_BIN" ] || [ "${FORCE_CORE_UPDATE:-0}" = 1 ]; then
 				install_singbox "${SB_VERSION_WANT:-}" || return 1
+			elif [ -n "${SB_VERSION_WANT:-}" ] && [ "$SB_VERSION_WANT" != "$(sb_installed_version)" ]; then
+				warn "已安装 sing-box $(sb_installed_version), 如需更换版本请执行: onebox update singbox ${SB_VERSION_WANT}"
 			fi
 			;;
 		xray)
-			if [ ! -x "$XR_BIN" ] || [ "${FORCE_CORE_UPDATE:-0}" = 1 ] ||
-				{ [ -n "$LOCAL_XR_BIN" ] && ! cmp -s "$LOCAL_XR_BIN" "$XR_BIN"; } ||
-				{ [ -n "${XR_VERSION_WANT:-}" ] && [ "$XR_VERSION_WANT" != latest ] && [ "$XR_VERSION_WANT" != "$(xr_installed_version)" ]; }; then
+			if [ ! -x "$XR_BIN" ] || [ "${FORCE_CORE_UPDATE:-0}" = 1 ]; then
 				install_xray || return 1
+			elif [ -n "${XR_VERSION_WANT:-}" ] && [ "$XR_VERSION_WANT" != "$(xr_installed_version)" ]; then
+				warn "已安装 Xray $(xr_installed_version), 如需更换版本请执行: onebox update xray ${XR_VERSION_WANT}"
 			fi
 			;;
 		esac
@@ -3883,6 +3934,8 @@ apply_all() {
 			hop_rules del
 		) >/dev/null 2>&1
 	fi
+	# 全新安装: 建立空台账, 避免把新端口当成旧版本遗留规则 (导致 ufw 未放行)
+	[ "$had_old" = 1 ] || { mkdir -p "$ONEBOX_DIR" && [ -f "$(_fw_ledger)" ] || : >"$(_fw_ledger)"; }
 	commit_server_configs
 	save_state
 	if ! apply_services; then
@@ -4187,13 +4240,11 @@ do_add_protocol() {
 		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "${REALITY_SNI:-1}"
 		SHADOWTLS_DEST="${SHADOWTLS_SNI}:443"
 	fi
+	# 先完成所有可能失败的选择与检查, 最后再申请证书 (之后只剩应用配置, 失败会整体回滚)
+	local need_cert=0
 	if proto_needs_cert "$p" && [ -z "$TLS_MODE" ]; then
 		choose_tls
-		cert_txn_begin
-		obtain_cert || {
-			cert_txn_rollback
-			die "证书配置失败"
-		}
+		need_cert=1
 	fi
 	[ "$p" = vmess-ws ] && { vmess_tls_default && VMESS_TLS=1 || VMESS_TLS=0; }
 	[ "$p" = hysteria2 ] && choose_hy2_opts
@@ -4206,6 +4257,10 @@ do_add_protocol() {
 		is_interactive || die "端口 ${port} 不可用"
 	done
 	pset PORT "$p" "$port"
+	if [ "$need_cert" = 1 ]; then
+		cert_txn_begin
+		obtain_cert || die "证书配置失败"
+	fi
 	apply_or_die
 	info "已添加 $(proto_title "$p")"
 	link_of "$p" 2>/dev/null
