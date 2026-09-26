@@ -149,7 +149,8 @@ WRAP
 chmod +x /opt/onebox/bin/sing-box.wrap
 mv -f /opt/onebox/bin/sing-box.wrap /opt/onebox/bin/sing-box
 onebox del anytls -y >/dev/null 2>&1
-check "添加协议因服务失败而报错退出" sh -c '! onebox add anytls -y'
+# (不带 ONEBOX_SINGBOX_BIN: 否则 add 会用本地内核文件替换掉模拟故障的包装脚本)
+check "添加协议因服务失败而报错退出" sh -c '! env -u ONEBOX_SINGBOX_BIN onebox add anytls -y'
 check "状态已回滚 (无 anytls)" sh -c '! grep -q "^PROTOCOLS=.*anytls" /etc/onebox/onebox.conf'
 check "服务端配置已回滚" sh -c '! grep -q anytls-in /etc/onebox/sing-box.json'
 check "回滚后 sing-box 恢复运行" proc_running sing-box.real
