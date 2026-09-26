@@ -56,10 +56,10 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 | 编号 | 组合 | 内核 | 说明 |
 |---|---|---|---|
 | 1 | VLESS-Reality-Vision + Hysteria2 + TUIC | sing-box | **推荐**。无需域名，TCP 与 UDP 协议互为备份 |
-| 2 | VLESS-Reality-Vision + VLESS-XHTTP-Reality + SS-2022 | Xray | Xray 官方推荐的 Reality 方案 |
+| 2 | VLESS-Reality-Vision + VLESS-XHTTP-Reality + SS-2022 | Xray | Xray 官方推荐的 Reality 方案，Vision 与 XHTTP 共用 443 端口 |
 | 3 | Reality-Vision、XHTTP (Xray) + Hysteria2、TUIC、AnyTLS (sing-box) | 双内核 | 各取所长 |
 | 4 | Reality / gRPC-Reality / Trojan / SS-2022 / Hysteria2 / TUIC / AnyTLS / ShadowTLS / VMess-WS | sing-box | 全家桶 |
-| 5 | VLESS-WS-TLS + VMess-WS | Xray | 可套 CDN，建议使用域名 |
+| 5 | VLESS-WS-TLS + VMess-WS | sing-box | 可套 CDN，建议使用域名 |
 | 6 | VLESS-Reality-Vision | Xray | 极简单协议 |
 | 7 | 自定义 | 任选 | 从 11 种协议中任意组合，并选择优先内核 |
 
@@ -74,13 +74,17 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 | VMess-WS | sing-box / Xray | ✅ | ✅ | ✅ | ✅ | 可选 (有正式证书时启用 TLS) |
 | Trojan-TLS | sing-box / Xray | ✅ | ✅ | ✅ | ✅ | 自签 / ACME |
 | Shadowsocks-2022 | sing-box / Xray | ✅ | ✅ | ✅ | ✅ | 无需 |
-| Hysteria2 | sing-box | ✅ | ✅ | ✅ | ❌ | 自签 / ACME |
+| Hysteria2 | sing-box / Xray (实验性) | ✅ | ✅ | ✅ | ✅ | 自签 / ACME |
 | TUIC-v5 | sing-box | ✅ | ✅ | ✅ | ❌ | 自签 / ACME |
 | AnyTLS | sing-box | ✅ | ✅ | ✅ | ❌ | 自签 / ACME |
 | ShadowTLS-v3 | sing-box | ❌ (无通用链接格式) | ✅ | ✅ | ❌ | 借用大站握手 |
 
 > Xray 26 起对 gRPC / WebSocket / VMess / Trojan / Shadowsocks 输出“已弃用”警告，这些协议默认建议由 sing-box 承载；
-> REALITY 建议使用 443 端口（Xray 会对非 443 端口给出警告）。
+> REALITY 建议使用 443 端口（Xray 会对非 443 端口给出警告）；两者都由 Xray 承载时，VLESS-XHTTP-Reality 默认与 Vision 共用 443 端口。
+> Xray 承载 REALITY 时会启用官方推荐的 SNI 过滤，防止服务器被他人当作伪装站点 CDN 的免费中转。
+>
+> **关于 Xray 版本**：脚本默认安装经过测试的 Xray 26.3.27。更新的 Xray（26.4 之后）REALITY 服务端要求客户端支持
+> X25519MLKEM768，会拒绝 sing-box 客户端，因此 `onebox update xray` 会先提示确认；也可用 `--xray-version latest` 显式指定。
 
 ## 客户端导入
 
@@ -167,6 +171,8 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `--port <协议>=<端口>` | 指定端口，可重复 |
 | `--hy2-hop <起-止>` | Hysteria2 端口跳跃范围 |
 | `--hy2-obfs` | Hysteria2 启用 salamander 混淆 |
+| `--hy2-core singbox\|xray` | Hysteria2 服务端内核（默认 sing-box，Xray 为实验性） |
+| `--xray-version <版本\|latest>` | 指定 Xray 版本（默认 26.3.27） |
 | `--no-bbr` | 不开启 BBR |
 | `-y` | 不再询问，全部使用默认值 |
 

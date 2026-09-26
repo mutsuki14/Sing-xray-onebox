@@ -64,7 +64,10 @@ XR_SERVICE="onebox-xray"
 
 # 当 GitHub 最新版本号无法获取时使用的保底版本
 readonly FALLBACK_SB_VERSION="1.14.2"
-readonly FALLBACK_XR_VERSION="26.3.27"
+# Xray 默认安装经过测试的版本: 26.4 之后的预发布版 REALITY 服务端要求客户端携带 X25519MLKEM768,
+# 会拒绝 sing-box 客户端. 可用 --xray-version latest 或 onebox update xray 主动升级.
+readonly TESTED_XR_VERSION="26.3.27"
+XR_VERSION_WANT="${ONEBOX_XRAY_VERSION:-}"
 
 # 全部协议 (顺序即菜单顺序)
 readonly ALL_PROTOCOLS="vless-reality vless-xhttp vless-grpc vless-ws vmess-ws trojan shadowsocks hysteria2 tuic anytls shadowtls"
@@ -657,7 +660,7 @@ WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
 HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP
 SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
 TLS_MODE DOMAIN TLS_SNI CERT_FILE KEY_FILE ACME_METHOD
-SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT INSTALLED_AT"
+SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT INSTALLED_AT"
 
 # 状态变量通过 STATE_KEYS 间接读写, shellcheck 无法追踪
 # shellcheck disable=SC2034
@@ -735,7 +738,7 @@ proto_desc() {
 	vmess-ws) echo "WebSocket, 可套 CDN, 兼容性最好" ;;
 	trojan) echo "TLS 伪装, 经典稳定" ;;
 	shadowsocks) echo "SS-2022, 轻量高速, TCP+UDP" ;;
-	hysteria2) echo "QUIC/UDP, 暴力加速, 弱网首选" ;;
+	hysteria2) echo "QUIC/UDP, 暴力加速, 弱网首选 (Xray 承载为实验性)" ;;
 	tuic) echo "QUIC/UDP, 低延迟" ;;
 	anytls) echo "TLS 流量填充, 抗 TLS-in-TLS 识别" ;;
 	shadowtls) echo "借用大站 TLS 握手, 包裹 SS-2022" ;;
@@ -746,7 +749,8 @@ proto_desc() {
 proto_cores() {
 	case "$1" in
 	vless-xhttp) echo "xray" ;;
-	hysteria2 | tuic | anytls | shadowtls) echo "singbox" ;;
+	hysteria2) echo "singbox xray" ;;
+	tuic | anytls | shadowtls) echo "singbox" ;;
 	*) echo "singbox xray" ;;
 	esac
 }
@@ -784,7 +788,7 @@ proto_client_ok() {
 	link) [ "$p" != shadowtls ] ;;
 	mihomo) return 0 ;;
 	singbox) [ "$p" != vless-xhttp ] ;;
-	xray) case "$p" in hysteria2 | tuic | anytls | shadowtls) return 1 ;; *) return 0 ;; esac ;;
+	xray) case "$p" in tuic | anytls | shadowtls) return 1 ;; *) return 0 ;; esac ;;
 	*) return 1 ;;
 	esac
 }
@@ -942,14 +946,16 @@ install_xray() {
 		err "缺少 unzip, 无法安装 Xray"
 		return 1
 	}
-	if [ -z "$ver" ]; then
+	[ -n "$ver" ] || ver=${XR_VERSION_WANT:-$TESTED_XR_VERSION}
+	if [ "$ver" = latest ]; then
 		info "查询 Xray 最新版本..."
 		ver=$(gh_latest_version XTLS/Xray-core)
 		[ -n "$ver" ] || {
-			warn "无法获取 Xray 最新版本, 使用内置版本 ${FALLBACK_XR_VERSION}"
-			ver=$FALLBACK_XR_VERSION
+			warn "无法获取 Xray 最新版本, 使用经过测试的版本 ${TESTED_XR_VERSION}"
+			ver=$TESTED_XR_VERSION
 		}
 	fi
+	ver=${ver#v}
 	asset="Xray-linux-${XR_ARCH}.zip"
 	url=$(gh_url "https://github.com/XTLS/Xray-core/releases/download/v${ver}/${asset}")
 	tmp=$(core_tmpdir) || {
@@ -2096,16 +2102,45 @@ sb_dns_strategy() {
 # ---------------------------------------------------------------------------
 # 服务端配置: Xray
 # ---------------------------------------------------------------------------
-readonly PRIVATE_CIDRS='"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/3", "::/127", "fc00::/7", "fe80::/10", "ff00::/8"'
+# 与 Xray 内置的私有/保留地址表 (common/geodata/consts.go, 26.4+ freedom 默认屏蔽所用) 保持一致; 不依赖 geoip.dat
+# IPv4 映射地址 (::ffff:a.b.c.d) 会被 Xray 规范化为 IPv4, 无需单列; 不要加入 64:ff9b::/96 (纯 IPv6 VPS 的 NAT64)
+readonly PRIVATE_CIDRS='"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/3", "::/127", "fc00::/7", "fe80::/10", "ff00::/8"'
+
+# Vision 与 XHTTP 共用端口时, XHTTP 入站监听的 Linux 抽象 unix socket (不占用端口, 无文件权限问题)
+XR_XHTTP_SOCK="${XR_XHTTP_SOCK:-@onebox-xhttp}"
+# REALITY 防偷跑: REALITY 的 target 指向 127.0.0.1:REALITY_GUARD_PORT 上的 dokodemo-door, 仅放行 SNI=REALITY_SNI 的回落流量
+# (dokodemo-door 不能监听 unix socket: 其 Network() 不含 unix, Xray 会静默跳过该入站)
+
+xr_listen() { json_str "${LISTEN_ADDR:-0.0.0.0}"; }
+
+# vless-reality 与 vless-xhttp 均由 Xray 承载且端口相同 -> XHTTP 作为 Vision 入站的回落
+xr_xhttp_shared() {
+	proto_enabled vless-reality && proto_enabled vless-xhttp &&
+		[ "$(pget CORE vless-reality)" = xray ] && [ "$(pget CORE vless-xhttp)" = xray ] &&
+		[ "$(pget PORT vless-reality)" = "$(pget PORT vless-xhttp)" ]
+}
+
+# 是否有 Xray 承载的 REALITY 入站
+xr_has_reality() {
+	local p
+	for p in $PROTOCOLS; do
+		proto_uses_reality "$p" && [ "$(pget CORE "$p")" = xray ] && return 0
+	done
+	return 1
+}
+
+xr_reality_guard() { [ -n "${REALITY_GUARD_PORT:-}" ] && xr_has_reality; }
 
 _xr_reality() {
+	local target=$REALITY_DEST
+	xr_reality_guard && target="127.0.0.1:${REALITY_GUARD_PORT}"
 	printf '"security": "reality",
         "realitySettings": {
           "target": %s,
           "serverNames": [%s],
           "privateKey": %s,
           "shortIds": [%s]
-        }' "$(json_str "$REALITY_DEST")" "$(json_str "$REALITY_SNI")" "$(json_str "$REALITY_PRIVATE_KEY")" "$(json_str "$REALITY_SHORT_ID")"
+        }' "$(json_str "$target")" "$(json_str "$REALITY_SNI")" "$(json_str "$REALITY_PRIVATE_KEY")" "$(json_str "$REALITY_SHORT_ID")"
 }
 
 _xr_tls() {
@@ -2121,25 +2156,49 @@ _xr_tls() {
 readonly XR_SNIFFING='"sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }'
 
 xr_inbound() {
-	local p=$1 port
+	local p=$1 port listen
 	port=$(pget PORT "$p")
+	listen=$(xr_listen)
 	case "$p" in
 	vless-reality)
+		local fb=""
+		xr_xhttp_shared && fb=",
+        \"fallbacks\": [{ \"dest\": $(json_str "$XR_XHTTP_SOCK"), \"xver\": 1 }]"
 		printf '    {
       "tag": "vless-reality-in",
+      "listen": %s,
       "port": %s,
       "protocol": "vless",
-      "settings": { "clients": [{ "id": %s, "flow": "xtls-rprx-vision", "email": "onebox" }], "decryption": "none" },
+      "settings": {
+        "clients": [{ "id": %s, "flow": "xtls-rprx-vision", "email": "onebox" }],
+        "decryption": "none"%s
+      },
       "streamSettings": {
         "network": "raw",
         %s
       },
       %s
-    }' "$port" "$(json_str "$UUID")" "$(_xr_reality)" "$XR_SNIFFING"
+    }' "$listen" "$port" "$(json_str "$UUID")" "$fb" "$(_xr_reality)" "$XR_SNIFFING"
 		;;
 	vless-xhttp)
-		printf '    {
+		if xr_xhttp_shared; then
+			# 由 vless-reality 入站解密 REALITY 后回落至此 (h2c), PROXY protocol 传递真实客户端地址
+			printf '    {
       "tag": "vless-xhttp-in",
+      "listen": %s,
+      "protocol": "vless",
+      "settings": { "clients": [{ "id": %s, "email": "onebox" }], "decryption": "none" },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": { "path": %s, "mode": "auto" },
+        "sockopt": { "acceptProxyProtocol": true }
+      },
+      %s
+    }' "$(json_str "$XR_XHTTP_SOCK")" "$(json_str "$UUID")" "$(json_str "$XHTTP_PATH")" "$XR_SNIFFING"
+		else
+			printf '    {
+      "tag": "vless-xhttp-in",
+      "listen": %s,
       "port": %s,
       "protocol": "vless",
       "settings": { "clients": [{ "id": %s, "email": "onebox" }], "decryption": "none" },
@@ -2149,11 +2208,13 @@ xr_inbound() {
         %s
       },
       %s
-    }' "$port" "$(json_str "$UUID")" "$(json_str "$XHTTP_PATH")" "$(_xr_reality)" "$XR_SNIFFING"
+    }' "$listen" "$port" "$(json_str "$UUID")" "$(json_str "$XHTTP_PATH")" "$(_xr_reality)" "$XR_SNIFFING"
+		fi
 		;;
 	vless-grpc)
 		printf '    {
       "tag": "vless-grpc-in",
+      "listen": %s,
       "port": %s,
       "protocol": "vless",
       "settings": { "clients": [{ "id": %s, "email": "onebox" }], "decryption": "none" },
@@ -2163,11 +2224,12 @@ xr_inbound() {
         %s
       },
       %s
-    }' "$port" "$(json_str "$UUID")" "$(json_str "$GRPC_SERVICE")" "$(_xr_reality)" "$XR_SNIFFING"
+    }' "$listen" "$port" "$(json_str "$UUID")" "$(json_str "$GRPC_SERVICE")" "$(_xr_reality)" "$XR_SNIFFING"
 		;;
 	vless-ws)
 		printf '    {
       "tag": "vless-ws-in",
+      "listen": %s,
       "port": %s,
       "protocol": "vless",
       "settings": { "clients": [{ "id": %s, "email": "onebox" }], "decryption": "none" },
@@ -2177,13 +2239,14 @@ xr_inbound() {
         %s
       },
       %s
-    }' "$port" "$(json_str "$UUID")" "$(json_str "$WS_PATH")" "$(_xr_tls)" "$XR_SNIFFING"
+    }' "$listen" "$port" "$(json_str "$UUID")" "$(json_str "$WS_PATH")" "$(_xr_tls)" "$XR_SNIFFING"
 		;;
 	vmess-ws)
 		local sec='"security": "none"'
 		vmess_tls_enabled && sec=$(_xr_tls)
 		printf '    {
       "tag": "vmess-ws-in",
+      "listen": %s,
       "port": %s,
       "protocol": "vmess",
       "settings": { "clients": [{ "id": %s, "email": "onebox" }] },
@@ -2193,11 +2256,12 @@ xr_inbound() {
         %s
       },
       %s
-    }' "$port" "$(json_str "$UUID")" "$(json_str "$VMESS_PATH")" "$sec" "$XR_SNIFFING"
+    }' "$listen" "$port" "$(json_str "$UUID")" "$(json_str "$VMESS_PATH")" "$sec" "$XR_SNIFFING"
 		;;
 	trojan)
 		printf '    {
       "tag": "trojan-in",
+      "listen": %s,
       "port": %s,
       "protocol": "trojan",
       "settings": { "clients": [{ "password": %s, "email": "onebox" }] },
@@ -2206,40 +2270,86 @@ xr_inbound() {
         %s
       },
       %s
-    }' "$port" "$(json_str "$PASSWORD")" "$(_xr_tls '"h2", "http/1.1"')" "$XR_SNIFFING"
+    }' "$listen" "$port" "$(json_str "$PASSWORD")" "$(_xr_tls '"h2", "http/1.1"')" "$XR_SNIFFING"
 		;;
 	shadowsocks)
 		printf '    {
       "tag": "shadowsocks-in",
+      "listen": %s,
       "port": %s,
       "protocol": "shadowsocks",
       "settings": { "method": %s, "password": %s, "network": "tcp,udp" },
       %s
-    }' "$port" "$(json_str "$SS_METHOD")" "$(json_str "$SS_PASSWORD")" "$XR_SNIFFING"
+    }' "$listen" "$port" "$(json_str "$SS_METHOD")" "$(json_str "$SS_PASSWORD")" "$XR_SNIFFING"
+		;;
+	hysteria2)
+		# Xray >= 26.3.27. 注意: 认证只认 settings.clients[].auth (文档写的 users 与 hysteriaSettings.auth 在入站下均不生效);
+		# 服务端必须显式 alpn h3, 否则所有客户端握手失败 (no application protocol)
+		local obfs=""
+		[ "$HY2_OBFS" = 1 ] && obfs=",
+        \"finalmask\": { \"udp\": [{ \"type\": \"salamander\", \"settings\": { \"password\": $(json_str "$HY2_OBFS_PASSWORD") } }] }"
+		printf '    {
+      "tag": "hysteria2-in",
+      "listen": %s,
+      "port": %s,
+      "protocol": "hysteria",
+      "settings": { "version": 2, "clients": [{ "auth": %s, "email": "onebox" }] },
+      "streamSettings": {
+        "network": "hysteria",
+        "hysteriaSettings": { "version": 2, "masquerade": { "type": "proxy", "url": "https://www.bing.com", "rewriteHost": true } },
+        %s%s
+      },
+      %s
+    }' "$listen" "$port" "$(json_str "$PASSWORD")" "$(_xr_tls '"h3"')" "$obfs" "$XR_SNIFFING"
 		;;
 	esac
 }
 
+# REALITY 防偷跑: 未通过 REALITY 认证的连接会被原样转发给 target; 若 target 是 CDN 站点,
+# 任何人都能把本机当作该 CDN 的免费中转. 先经 dokodemo-door 嗅探 SNI, 只放行 REALITY_SNI (Xray-examples 官方模板)
+xr_reality_guard_inbound() {
+	printf '    {
+      "tag": "reality-dest-in",
+      "listen": "127.0.0.1",
+      "port": %s,
+      "protocol": "dokodemo-door",
+      "settings": { "address": %s, "port": %s, "network": "tcp" },
+      "sniffing": { "enabled": true, "destOverride": ["tls"], "routeOnly": true }
+    }' "$REALITY_GUARD_PORT" "$(json_str "${REALITY_DEST%:*}")" "${REALITY_DEST##*:}"
+}
+
 gen_xray_server() {
-	local p inbounds=() rules=()
+	local p inbounds=() rules=() ds=AsIs direct_settings=""
 	for p in $PROTOCOLS; do
 		[ "$(pget CORE "$p")" = xray ] || continue
 		inbounds+=("$(xr_inbound "$p")")
 	done
+	if xr_reality_guard; then
+		inbounds+=("$(xr_reality_guard_inbound)")
+		rules+=("      { \"type\": \"field\", \"inboundTag\": [\"reality-dest-in\"], \"domain\": [$(json_str "full:${REALITY_SNI}")], \"outboundTag\": \"direct\" }")
+		rules+=('      { "type": "field", "inboundTag": ["reality-dest-in"], "outboundTag": "block" }')
+	fi
 	[ "${BLOCK_BT:-1}" = 1 ] && rules+=('      { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" }')
-	[ "${BLOCK_PRIVATE:-1}" = 1 ] && rules+=("      { \"type\": \"field\", \"ip\": [${PRIVATE_CIDRS}], \"outboundTag\": \"block\" }")
+	if [ "${BLOCK_PRIVATE:-1}" = 1 ]; then
+		rules+=("      { \"type\": \"field\", \"ip\": [${PRIVATE_CIDRS}], \"outboundTag\": \"block\" }")
+		ds=IPIfNonMatch # 仅在存在 IP 规则时才需要为域名解析 IP
+	else
+		# Xray >= 26.4 的 freedom 默认阻止 VLESS/VMess/Trojan/SS/Hysteria 入站访问私有地址, 关闭屏蔽时需显式放行
+		# (26.3.27 会忽略未知字段 finalRules)
+		direct_settings='"settings": { "finalRules": [{ "action": "allow" }] }, '
+	fi
 	cat <<EOF
 {
-  "log": { "loglevel": "warning" },
+  "log": { "loglevel": "warning", "access": "none" },
   "inbounds": [
 $(json_join "${inbounds[@]}")
   ],
   "outbounds": [
-    { "tag": "direct", "protocol": "freedom", "settings": { "domainStrategy": "$(xr_domain_strategy)" } },
+    { "tag": "direct", "protocol": "freedom", ${direct_settings}"streamSettings": { "sockopt": { "domainStrategy": "$(xr_domain_strategy)" } } },
     { "tag": "block", "protocol": "blackhole" }
   ],
   "routing": {
-    "domainStrategy": "IPIfNonMatch",
+    "domainStrategy": "${ds}",
     "rules": [
 $(json_join "${rules[@]}")
     ]
@@ -2404,7 +2514,7 @@ _mh_tls_common() {
 }
 
 _mh_reality() {
-	printf '    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: %s\n      short-id: %s\n' \
+	printf '    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: %s\n      short-id: %s\n      support-x25519mlkem768: true\n' \
 		"$(yq "$REALITY_SNI")" "$(yq "$REALITY_PUBLIC_KEY")" "$(yq "$REALITY_SHORT_ID")"
 }
 
@@ -2786,7 +2896,8 @@ EOF
 # 客户端: Xray
 # ---------------------------------------------------------------------------
 _xrc_reality() {
-	printf '"security": "reality", "realitySettings": { "serverName": %s, "fingerprint": "chrome", "password": %s, "shortId": %s, "spiderX": "/" }' \
+	# publicKey: 所有 Xray 版本通用 (password 为 25.x 新增的别名, 旧核心会报 empty publicKey)
+	printf '"security": "reality", "realitySettings": { "serverName": %s, "fingerprint": "chrome", "publicKey": %s, "shortId": %s, "spiderX": "/" }' \
 		"$(json_str "$REALITY_SNI")" "$(json_str "$REALITY_PUBLIC_KEY")" "$(json_str "$REALITY_SHORT_ID")"
 }
 
@@ -2836,6 +2947,16 @@ xrc_outbound() {
 		printf '    { "tag": "%s", "protocol": "shadowsocks", "settings": { "servers": [{ "address": %s, "port": %s, "method": %s, "password": %s }] } }' \
 			"$tag" "$addr" "$port" "$(json_str "$SS_METHOD")" "$(json_str "$SS_PASSWORD")"
 		;;
+	hysteria2)
+		# Xray 客户端 >= 26.1.13 支持 hysteria2 出站; 端口跳跃 (udpHop) / quicParams 需 >= 26.3.27
+		local fm="" hop=""
+		[ "$HY2_OBFS" = 1 ] && fm="\"udp\": [{ \"type\": \"salamander\", \"settings\": { \"password\": $(json_str "$HY2_OBFS_PASSWORD") } }]"
+		[ -n "$HY2_HOP" ] && hop="\"quicParams\": { \"udpHop\": { \"ports\": $(json_str "$HY2_HOP"), \"interval\": \"25-35\" } }"
+		[ -n "$fm" ] && [ -n "$hop" ] && fm+=", "
+		fm+=$hop
+		printf '    { "tag": "%s", "protocol": "hysteria", "settings": { "version": 2, "address": %s, "port": %s }, "streamSettings": { "network": "hysteria", "hysteriaSettings": { "version": 2, "auth": %s }, %s%s } }' \
+			"$tag" "$addr" "$port" "$(json_str "$PASSWORD")" "$(_xrc_tls '"h3"')" "${fm:+, \"finalmask\": { ${fm} \}}"
+		;;
 	esac
 }
 
@@ -2848,9 +2969,17 @@ gen_xray_client() {
 		outs+=("$(xrc_outbound "$p" "$tag")")
 	done
 	[ ${#outs[@]} -gt 0 ] || return 1
+	# 远程 DNS (DoH 1.1.1.1) 经默认出站 (即 proxy) 发出; 国内域名走 223.5.5.5 直连, 避免 DNS 泄露与污染
 	cat <<EOF
 {
   "log": { "loglevel": "warning" },
+  "dns": {
+    "servers": [
+      "https://1.1.1.1/dns-query",
+      { "address": "223.5.5.5", "domains": ["geosite:cn"], "expectIPs": ["geoip:cn"], "skipFallback": true }
+    ],
+    "queryStrategy": "UseIP"
+  },
   "inbounds": [
     { "tag": "socks-in", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": { "udp": true }, "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true } },
     { "tag": "http-in", "listen": "127.0.0.1", "port": 10809, "protocol": "http", "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true } }
@@ -2863,7 +2992,9 @@ $(json_join "${outs[@]}"),
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
+      { "type": "field", "ip": ["223.5.5.5"], "outboundTag": "direct" },
       { "type": "field", "ip": [${PRIVATE_CIDRS}], "outboundTag": "direct" },
+      { "type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block" },
       { "type": "field", "domain": ["geosite:cn"], "outboundTag": "direct" },
       { "type": "field", "ip": ["geoip:cn"], "outboundTag": "direct" }
     ]
@@ -2896,10 +3027,10 @@ write_client_files() {
 # ---------------------------------------------------------------------------
 # 预设组合: 编号|名称|协议列表|内核偏好
 readonly PRESETS="1|推荐: Reality-Vision + Hysteria2 + TUIC (sing-box 单内核, TCP+UDP 互补)|vless-reality hysteria2 tuic|singbox
-2|Xray 经典: Reality-Vision + XHTTP-Reality + SS-2022 (Xray 单内核)|vless-reality vless-xhttp shadowsocks|xray
+2|Xray 经典: Reality-Vision + XHTTP-Reality 共用 443 + SS-2022 (Xray 单内核)|vless-reality vless-xhttp shadowsocks|xray
 3|双内核全能: Xray(Reality-Vision/XHTTP) + sing-box(Hysteria2/TUIC/AnyTLS)|vless-reality vless-xhttp hysteria2 tuic anytls|xray
 4|sing-box 全家桶: Reality/gRPC/Trojan/SS/Hy2/TUIC/AnyTLS/ShadowTLS/VMess|vless-reality vless-grpc trojan shadowsocks hysteria2 tuic anytls shadowtls vmess-ws|singbox
-5|CDN 组合: VLESS-WS-TLS + VMess-WS (建议使用域名)|vless-ws vmess-ws|xray
+5|CDN 组合: VLESS-WS-TLS + VMess-WS (建议使用域名)|vless-ws vmess-ws|singbox
 6|极简: 仅 VLESS-Reality-Vision (Xray)|vless-reality|xray
 7|自定义组合 (自由选择协议与内核)||"
 
@@ -2938,28 +3069,45 @@ print_protocol_table() {
 		for c in $(proto_cores "$p"); do cores+="$(core_title "$c")/"; done
 		printf '  %-4s %-22s %-15s %s\n' "$i" "$(proto_title "$p")" "${cores%/}" "$(proto_desc "$p")"
 	done
+	echo "  注: Xray 26 已将 gRPC/WS/VMess/Trojan/SS 标记为不推荐 (仍可用, 无移除计划), 建议由 sing-box 承载"
 }
 
 # 为每个协议分配内核
+# Xray 的 Hysteria2 服务端较新 (26.3.27 起), 不参与自动分配, 仅在明确指定时 (--hy2-core xray / 添加协议时手动选择) 使用
+proto_core_experimental() { [ "$1:$2" = hysteria2:xray ]; }
+
 assign_cores() {
 	local prefer=$1 p cores
 	for p in $PROTOCOLS; do
 		cores=$(proto_cores "$p")
-		if proto_supports_core "$p" "$prefer"; then
+		if proto_supports_core "$p" "$prefer" && ! proto_core_experimental "$p" "$prefer"; then
 			pset CORE "$p" "$prefer"
 		else
 			pset CORE "$p" "${cores%% *}"
 		fi
 	done
+	if proto_enabled hysteria2 && [ "${OPT_HY2_CORE:-}" = xray ]; then pset CORE hysteria2 xray; fi
+	return 0
 }
 
 # 端口在本次配置中是否已被其他协议使用 (同为 TCP 或同为 UDP 视为冲突)
+xr_can_share_port() {
+	case "$1:$2" in
+	vless-xhttp:vless-reality | vless-reality:vless-xhttp)
+		[ "$(pget CORE vless-reality)" = xray ] && [ "$(pget CORE vless-xhttp)" = xray ] ;;
+	*) return 1 ;;
+	esac
+}
+
 port_taken_by_other() {
 	local port=$1 net=$2 self=$3 p pp pn
+	# REALITY 防偷跑用的本机 dokodemo 端口 (仅 127.0.0.1/TCP)
+	[ "$net" != udp ] && [ "$port" = "${REALITY_GUARD_PORT:-}" ] && return 0
 	for p in $PROTOCOLS; do
 		[ "$p" = "$self" ] && continue
 		pp=$(pget PORT "$p")
 		[ "$pp" = "$port" ] || continue
+		xr_can_share_port "$self" "$p" && continue
 		pn=$(proto_net "$p")
 		if [ "$net" = both ] || [ "$pn" = both ] || [ "$net" = "$pn" ]; then
 			return 0
@@ -3019,10 +3167,24 @@ port_ok() {
 	return 0
 }
 
+# REALITY 防偷跑用的本机 dokodemo-door 端口 (仅监听 127.0.0.1/TCP)
+pick_guard_port() {
+	local i port
+	for i in $(seq 1 100); do
+		port=$(rand_port)
+		port_taken_by_other "$port" tcp "" && continue
+		port_in_use "$port" tcp && continue
+		printf '%s' "$port"
+		return 0
+	done
+	return 1
+}
+
 default_port_for() {
 	local p=$1 cand port i
 	case "$p" in
 	vless-reality | hysteria2 | anytls | trojan | shadowtls) cand="443 8443 2053 2083 2087 2096" ;;
+	vless-xhttp) xr_can_share_port vless-xhttp vless-reality && cand=$(pget PORT vless-reality) ;;
 	vless-ws) cand="2053 2083 2087 2096 8443 443" ;;
 	vmess-ws) if vmess_tls_enabled; then cand="2096 2087 2083 8443"; else cand="8080 8880 2052 2082 2086 2095"; fi ;;
 	*) cand="" ;;
@@ -3062,7 +3224,8 @@ choose_ports() {
 	done
 }
 
-readonly REALITY_SNI_LIST="www.microsoft.com www.apple.com addons.mozilla.org www.amazon.com dl.google.com www.tesla.com"
+# 不含 apple / icloud: Xray 会警告此类目标可能导致 IP 被封
+readonly REALITY_SNI_LIST="www.microsoft.com addons.mozilla.org www.amazon.com dl.google.com www.tesla.com"
 
 # 检查目标站点是否支持 TLS 1.3 (REALITY / ShadowTLS 的要求)
 check_tls13() {
@@ -3293,6 +3456,7 @@ gen_credentials() {
 	HY2_OBFS_PASSWORD=$(rand_str 16)
 	SHADOWTLS_PASSWORD=$(rand_str 20)
 	SHADOWTLS_SS_PASSWORD=$(gen_ss_password 2022-blake3-aes-128-gcm)
+	REALITY_GUARD_PORT=$(pick_guard_port)
 }
 
 # 按需补齐缺失的凭据 (添加协议时使用, 不改变已有凭据)
@@ -3312,6 +3476,7 @@ fill_missing_credentials() {
 	[ -n "$HY2_OBFS_PASSWORD" ] || HY2_OBFS_PASSWORD=$(rand_str 16)
 	[ -n "$SHADOWTLS_PASSWORD" ] || SHADOWTLS_PASSWORD=$(rand_str 20)
 	[ -n "$SHADOWTLS_SS_PASSWORD" ] || SHADOWTLS_SS_PASSWORD=$(gen_ss_password 2022-blake3-aes-128-gcm)
+	[ -n "$REALITY_GUARD_PORT" ] || REALITY_GUARD_PORT=$(pick_guard_port)
 	return 0
 }
 
@@ -3583,10 +3748,14 @@ do_add_protocol() {
 	# 内核: 优先使用已在运行的内核
 	prefer=$(pget CORE "$(printf '%s' "$PROTOCOLS" | awk '{print $1}')")
 	if [ "$(proto_cores "$p")" = "singbox xray" ]; then
-		if [ -n "${OPT_CORE:-}" ]; then
+		# Hysteria2 默认 sing-box (Xray 承载为实验性)
+		proto_core_experimental "$p" xray && prefer=singbox
+		if [ "$p" = hysteria2 ] && [ -n "${OPT_HY2_CORE:-}" ]; then
+			prefer=$OPT_HY2_CORE
+		elif [ -n "${OPT_CORE:-}" ] && ! proto_core_experimental "$p" "$OPT_CORE"; then
 			prefer=$OPT_CORE
 		elif is_interactive; then
-			echo "  该协议可用内核: 1) sing-box  2) Xray"
+			echo "  该协议可用内核: 1) sing-box  2) Xray$(proto_core_experimental "$p" xray && printf ' (实验性)')"
 			ask_num i "请选择" "$([ "$prefer" = xray ] && echo 2 || echo 1)" 1 2 || i=1
 			[ "$i" = 2 ] && prefer=xray || prefer=singbox
 		fi
@@ -3703,9 +3872,15 @@ do_update_core() {
 	fi
 	if [ "$which" = all ] || [ "$which" = xray ]; then
 		if [ -x "$XR_BIN" ] || core_used xray; then
-			local old
+			local old xv=$TESTED_XR_VERSION
 			old=$(xr_installed_version)
-			install_xray && info "Xray: ${old:-无} -> $(xr_installed_version)"
+			warn "经过测试的 Xray 版本为 ${TESTED_XR_VERSION}; 更新的版本中 REALITY 服务端会拒绝不支持 X25519MLKEM768 的客户端 (如 sing-box)"
+			if [ -n "$XR_VERSION_WANT" ]; then
+				xv=$XR_VERSION_WANT
+			elif confirm "是否仍然安装 Xray 最新版?" n; then
+				xv=latest
+			fi
+			install_xray "$xv" && info "Xray: ${old:-无} -> $(xr_installed_version)"
 		fi
 	fi
 	FORCE_CORE_UPDATE=0
@@ -3900,7 +4075,7 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   reset                    重置全部 UUID / 密码 / 密钥
   start | stop | restart | status
   log [singbox|xray]       查看日志
-  update [singbox|xray]    更新内核 (默认全部)
+  update [singbox|xray] [版本]  更新内核 (默认全部; Xray 默认保持经过测试的版本)
   update-script            更新本脚本
   cert                     证书管理
   bbr                      开启 BBR
@@ -3921,6 +4096,8 @@ install 选项 (用于无人值守安装):
   --port <协议>=<端口>     指定端口, 可重复使用
   --hy2-hop <起-止>        Hysteria2 端口跳跃范围, 例如 20000-40000
   --hy2-obfs               Hysteria2 启用 salamander 混淆
+  --hy2-core <singbox|xray> Hysteria2 服务端内核 (默认 sing-box; Xray 为实验性)
+  --xray-version <版本|latest>  指定 Xray 版本 (默认安装经过测试的 ${TESTED_XR_VERSION})
   --no-bbr                 不开启 BBR
   -y, --yes                全部使用默认值, 不再询问
 
@@ -3970,6 +4147,11 @@ parse_install_opts() {
 		--port) OPT_PORTS+="$2 " && shift ;;
 		--hy2-hop) OPT_HY2_HOP=$2 && shift ;;
 		--hy2-obfs) OPT_HY2_OBFS=y ;;
+		--hy2-core)
+			case "$2" in singbox | sing-box) OPT_HY2_CORE=singbox ;; xray) OPT_HY2_CORE=xray ;; *) die "--hy2-core 仅支持 singbox 或 xray" ;; esac
+			shift
+			;;
+		--xray-version) XR_VERSION_WANT=${2#v} && shift ;;
 		--no-bbr) OPT_BBR=n ;;
 		--allow-private) OPT_BLOCK_PRIVATE=0 ;;
 		-y | --yes) AUTO_YES=1 ;;
@@ -4046,7 +4228,10 @@ main() {
 	reset) do_reset_credentials ;;
 	start | stop | restart | status) do_service "$cmd" ;;
 	log | logs) do_log "${1:-}" ;;
-	update) do_update_core "${1:-all}" ;;
+	update)
+		[ -n "${2:-}" ] && XR_VERSION_WANT=${2#v}
+		do_update_core "${1:-all}"
+		;;
 	update-script) do_update_script ;;
 	cert) do_cert ;;
 	bbr) enable_bbr ;;

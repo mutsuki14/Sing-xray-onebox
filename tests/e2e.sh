@@ -10,6 +10,7 @@
 # 用法:
 #   SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/e2e.sh [轮次...]
 #   轮次: sb (优先 sing-box 服务端)  xr (优先 Xray 服务端)  ca-sb / ca-xr (受信任证书, 不跳过验证)
+#         xr-share (Xray: Vision 与 XHTTP 共用端口)  xr-hy2 (Xray 承载 Hysteria2 + 混淆)
 #   环境变量 KEEP=1 保留工作目录, VERBOSE=1 打印失败时的日志
 #
 set -u
@@ -198,6 +199,8 @@ setup_round() {
 		free_port
 		pset PORT "$p" "$FREE_PORT"
 	done
+	# Vision 与 XHTTP 共用同一端口 (XHTTP 作为 Vision 的回落)
+	[ -n "${SHARE_XHTTP_PORT:-}" ] && pset PORT vless-xhttp "$(pget PORT vless-reality)"
 	SERVER_ADDR=127.0.0.1 SERVER_IPV4=127.0.0.1 SERVER_IPV6="" LISTEN_ADDR=127.0.0.1
 	NODE_NAME="e2e-$name" BLOCK_PRIVATE=0 BLOCK_BT=1
 	REALITY_SNI=reality.test REALITY_DEST="127.0.0.1:${TLS_TARGET_PORT}"
@@ -233,7 +236,7 @@ start_servers() {
 	fi
 	if core_used xray; then
 		gen_xray_server |
-			jq '.outbounds += [{"tag": "e2e", "protocol": "freedom", "settings": {"redirect": "127.0.0.1:0"}}]
+			jq '.outbounds += [{"tag": "e2e", "protocol": "freedom", "settings": {"redirect": "127.0.0.1:0", "finalRules": [{"action": "allow"}]}}]
 				| .routing.rules = [{"type": "field", "domain": ["full:e2e.target"], "outboundTag": "e2e"}, {"type": "field", "ip": ["192.0.2.53/32"], "outboundTag": "e2e"}] + .routing.rules' \
 				>"$RDIR/xr-server.json"
 		if ! "$XR" run -test -c "$RDIR/xr-server.json" >"$RDIR/xr-check.log" 2>&1; then
@@ -438,13 +441,15 @@ run_round() {
 setup_fixtures
 
 ROUNDS=("$@")
-[ ${#ROUNDS[@]} -gt 0 ] || ROUNDS=(sb xr ca-sb ca-xr)
+[ ${#ROUNDS[@]} -gt 0 ] || ROUNDS=(sb xr ca-sb ca-xr xr-share xr-hy2)
 for r in "${ROUNDS[@]}"; do
 	case "$r" in
 	sb) run_round sb singbox self ;;
 	xr) run_round xr xray self ;;
 	ca-sb) HY2_OBFS_TEST=1 run_round ca-sb singbox custom "vless-ws vmess-ws trojan hysteria2 tuic anytls" ;;
 	ca-xr) run_round ca-xr xray custom "vless-ws vmess-ws trojan" ;;
+	xr-share) SHARE_XHTTP_PORT=1 run_round xr-share xray self "vless-reality vless-xhttp" ;;
+	xr-hy2) OPT_HY2_CORE=xray HY2_OBFS_TEST=1 run_round xr-hy2 xray self "hysteria2" ;;
 	*) echo "未知轮次: $r" >&2 ;;
 	esac
 done
