@@ -130,6 +130,7 @@ onebox del <协议>          删除协议
 onebox port <协议> <端口>  修改端口            例: onebox port vless-reality 8443
 onebox addr                修改客户端连接地址 / 节点名称
 onebox reset               重置全部 UUID / 密码 / 密钥
+onebox sni [--sni 域名]    更换 REALITY / ShadowTLS 伪装站点 (凭据不变)
 onebox start | stop | restart | status
 onebox log [singbox|xray]  查看日志
 onebox update [singbox|xray]   更新内核
@@ -197,7 +198,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
    启用了 Hysteria2 端口跳跃时还需放行整个 UDP 端口范围；使用 ACME HTTP 验证时需放行 TCP 80，续期同样需要）。
    本机防火墙（ufw / firewalld / iptables / nftables）由脚本自动放行，并在开机时由 `onebox-net` 服务自动恢复。
 2. `onebox status` 与 `onebox log` 检查服务状态。
-3. REALITY 连接失败时尝试更换伪装站点（`onebox reset` 或重新安装），站点需支持 TLS 1.3，且尽量与服务器地理位置接近。
+3. REALITY 连接失败时尝试更换伪装站点：`onebox sni`（或菜单 15，UUID 与密钥保持不变），站点需支持 TLS 1.3，且尽量与服务器地理位置接近。
 
 **REALITY 伪装站点怎么选？** 选择支持 TLS 1.3 / H2、非 CDN 回源、在国内可正常访问的大站，例如 `www.microsoft.com`、`www.apple.com`、`addons.mozilla.org`。脚本会自动检测所选站点是否支持 TLS 1.3。
 
@@ -211,7 +212,11 @@ sing-box 使用 musl 静态构建，不依赖系统 glibc 版本。
 **SS-2022 / ShadowTLS / VMess 连接失败？** 这些协议对时间敏感：SS-2022 要求服务器与客户端时间误差在 30 秒以内，VMess 为 120 秒。
 脚本安装时会检测服务器时间偏差，请开启时间同步（`timedatectl set-ntp true` 或安装 chrony）。
 
-**如何更新？** `onebox update` 更新内核，`onebox update-script` 更新脚本（会用新脚本重新生成配置，凭据不变）。
+**如何更新？** `onebox update` 更新内核（可指定版本，如 `onebox update singbox 1.14.2`；新内核不接受当前配置时自动恢复旧版本），
+`onebox update-script` 更新脚本（会用新脚本重新生成配置，凭据不变）。
+
+**修改失败会不会把节点搞坏？** 不会。所有修改（添加 / 删除协议、改端口、换证书、重装等）都会先用内核校验新配置，
+校验通过后才替换；若新配置下服务无法启动，脚本会自动回滚到修改前的配置并以非零状态退出。
 
 ## 测试
 
