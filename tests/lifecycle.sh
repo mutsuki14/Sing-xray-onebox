@@ -29,6 +29,9 @@ MH=${MH:-$(command -v mihomo || true)}
 	exit 2
 }
 export ONEBOX_SINGBOX_BIN="$SB" ONEBOX_XRAY_BIN="$XR" NO_COLOR=1
+# sing-box check 会在工作目录生成 cache.db, 使用临时目录
+LC_TMP=$(mktemp -d)
+trap 'rm -rf "$LC_TMP"' EXIT
 
 PASS=0 FAIL=0
 ok() {
@@ -72,7 +75,7 @@ bash "$SCRIPT" install --protocols vless-reality,hysteria2,tuic --core singbox -
 check "安装命令成功" [ $? = 0 ] || true
 check "状态文件存在且权限为 600" [ "$(stat -c %a /etc/onebox/onebox.conf 2>/dev/null)" = 600 ]
 check "onebox 命令已安装" [ -x /usr/local/bin/onebox ]
-check "sing-box 服务端配置通过校验" "$SB" check -c /etc/onebox/sing-box.json
+check "sing-box 服务端配置通过校验" "$SB" check -D "$LC_TMP" -c /etc/onebox/sing-box.json
 check "sing-box 进程运行中" proc_running sing-box
 check "Xray 未被使用" [ ! -f /etc/onebox/xray.json ]
 P_REALITY=$(conf_get PORT_vless_reality)
@@ -82,8 +85,8 @@ check "REALITY 端口 ${P_REALITY}/tcp 监听" listening "$P_REALITY" tcp
 check "Hysteria2 端口 ${P_HY2}/udp 监听" listening "$P_HY2" udp
 check "TUIC 端口 ${P_TUIC}/udp 监听" listening "$P_TUIC" udp
 check "分享链接数量为 3" [ "$(link_count)" = 3 ]
-check "sing-box 客户端配置通过校验" "$SB" check -c /etc/onebox/client/sing-box.json
-check "sing-box 客户端配置 (无 TUN) 通过校验" "$SB" check -c /etc/onebox/client/sing-box-notun.json
+check "sing-box 客户端配置通过校验" "$SB" check -D "$LC_TMP" -c /etc/onebox/client/sing-box.json
+check "sing-box 客户端配置 (无 TUN) 通过校验" "$SB" check -D "$LC_TMP" -c /etc/onebox/client/sing-box-notun.json
 check "Xray 客户端配置为合法 JSON" jq -e . /etc/onebox/client/xray.json
 if [ -x "$MH" ]; then
 	mkdir -p /tmp/onebox-lc-mh && cp /etc/onebox/client/mihomo.yaml /tmp/onebox-lc-mh/config.yaml
