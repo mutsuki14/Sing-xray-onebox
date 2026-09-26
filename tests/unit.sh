@@ -262,6 +262,38 @@ eq "sing-box 屏蔽 100.64.0.0/10" "$(gen_singbox_server | grep -c '100.64.0.0/1
 eq "sing-box 屏蔽本机地址" "$(gen_singbox_server | grep -c '203.0.113.9/32')" 1
 unset -f ip
 
+# 证书事务: 中断信号处理 + 事先已存在的 acme.sh 部署在回滚时恢复原配置
+reset_state
+STATE_FILE="$WORK/txn/onebox.conf" TLS_DIR="$WORK/txn/tls" ACME_HOME="$WORK/txn/acme" ACME_SH="$WORK/txn/none"
+ONEBOX_DIR="$WORK/txn"
+mkdir -p "$TLS_DIR" "$ACME_HOME/t.test_ecc"
+echo old >"$TLS_DIR/cert.pem"
+echo "Le_Webroot='no'" >"$ACME_HOME/t.test_ecc/t.test.conf"
+cert_txn_begin
+eq "事务期间中断会回滚" "$(trap -p INT | grep -c cert_txn_rollback)" 1
+# 模拟 cert_acme: 备份已存在的部署后以新验证方式重新签发
+cp -a "$ACME_HOME/t.test_ecc" "$ONEBOX_DIR/.acme-rollback" && CERT_TXN_ACME_D=t.test
+echo "Le_Webroot='dns_cf'" >"$ACME_HOME/t.test_ecc/t.test.conf"
+echo new >"$TLS_DIR/cert.pem"
+cert_txn_rollback >/dev/null 2>&1
+eq "回滚恢复 TLS 目录" "$(cat "$TLS_DIR/cert.pem")" old
+eq "回滚恢复已存在的 acme.sh 部署" "$(cat "$ACME_HOME/t.test_ecc/t.test.conf")" "Le_Webroot='no'"
+eq "回滚后恢复默认信号处理" "$(trap -p INT)" ""
+cert_txn_begin
+cert_txn_commit
+eq "提交后恢复默认信号处理" "$(trap -p INT)" ""
+eq "提交后删除 TLS 备份" "$(yes_ test -e "$WORK/txn/.tls-rollback")" no
+# 事务进行中收到终止信号: 回滚后以 130 退出
+(
+	cert_txn_begin
+	echo new >"$TLS_DIR/cert.pem"
+	kill -TERM "$BASHPID"
+	echo "未退出"
+) >/dev/null 2>&1
+eq "中断信号退出码" "$?" 130
+eq "中断后 TLS 目录已恢复" "$(cat "$TLS_DIR/cert.pem")" old
+ONEBOX_DIR="$WORK/etc"
+
 # 显示宽度补齐
 eq "pad 中文" "$(pad 协议 6)|" "协议  |"
 eq "pad ASCII" "$(pad ab 4)|" "ab  |"

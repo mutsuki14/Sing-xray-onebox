@@ -1503,7 +1503,18 @@ _fw_ledger() { printf '%s' "$ONEBOX_DIR/firewall.list"; }
 _fw_ledger_has() { grep -qxF "$1" "$(_fw_ledger)" 2>/dev/null; }
 _fw_ledger_add() {
 	_fw_ledger_has "$1" && return 0
+	# 首次写入台账前, 先把旧版本 (无台账) 放行的端口迁移进来
+	[ -f "$(_fw_ledger)" ] || [ ! -f "$STATE_FILE" ] || (load_state && _fw_ledger_migrate) >/dev/null 2>&1
 	mkdir -p "$ONEBOX_DIR" && printf '%s\n' "$1" >>"$(_fw_ledger)"
+}
+
+# 防火墙当前状态快照 (用于判断某次放行是否真的新增了规则)
+_fw_snapshot() {
+	cat "$(_fw_ledger)" 2>/dev/null
+	has iptables && iptables -S INPUT 2>/dev/null
+	has ip6tables && ip6tables -S INPUT 2>/dev/null
+	has nft && nft list ruleset 2>/dev/null | grep -F 'comment "onebox"'
+	return 0
 }
 _fw_ledger_del() {
 	local f
@@ -1664,16 +1675,23 @@ hop_range_conflicts() {
 
 # 端口跳跃范围内被其他程序监听的 UDP 端口 (如 WireGuard / Tailscale), 仅用于提示
 hop_range_foreign_udp() {
-	local range=$1 a b port hy out=""
+	local range=$1 a b hy lo hi out="" line port
 	a=${range%-*} b=${range#*-}
 	hy=$(pget PORT hysteria2)
 	has ss || return 1
-	for port in $(ss -lnu 2>/dev/null | awk 'NR>1{n=split($4, x, ":"); print x[n]}' | sort -un); do
+	# 本机临时端口范围内的通配绑定多为客户端套接字, 不算监听服务
+	read -r lo hi </proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || lo=32768 hi=60999
+	while IFS= read -r line; do
+		port=$(printf '%s' "$line" | awk '{n=split($4, x, ":"); print x[n]}')
 		[[ "$port" =~ ^[0-9]+$ ]] || continue
 		[ "$port" = "$hy" ] && continue
+		[ "$port" -ge "$a" ] && [ "$port" -le "$b" ] || continue
+		case "$line" in *'"sing-box"'* | *'"xray"'*) continue ;; esac
+		case "$(printf '%s' "$line" | awk '{print $4}')" in 127.* | '[::1]'* | ::1:*) continue ;; esac
+		[ "$port" -ge "$lo" ] && [ "$port" -le "$hi" ] && continue
 		port_used_by_onebox "$port" udp && continue
-		[ "$port" -ge "$a" ] && [ "$port" -le "$b" ] && out+="${port} "
-	done
+		case " $out " in *" $port "*) ;; *) out+="${port} " ;; esac
+	done < <(ss -lnup 2>/dev/null | awk 'NR>1')
 	[ -n "$out" ] && printf '%s' "${out% }"
 }
 
@@ -2003,15 +2021,24 @@ cert_acme() {
 			svc_stop singbox
 			svc_stop xray
 			ACME_STOPPED_CORES=1
+			# 申请过程中被中断时恢复内核
+			trap 'trap "" INT TERM HUP; svc_exists singbox && svc_start singbox; svc_exists xray && svc_start xray; cert_txn_rollback; exit 130' INT TERM HUP
 		fi
 		if port_in_use 80 tcp; then
 			err "80 端口被占用, standalone 模式需要临时占用 80 端口, 请先停止占用该端口的程序"
+			if [ "${ACME_STOPPED_CORES:-0}" = 1 ]; then
+				txn_traps
+				svc_exists singbox && svc_start singbox
+				svc_exists xray && svc_start xray
+			fi
 			return 1
 		fi
 		# HTTP-01 需要入站 TCP 80 可达; 续期时同样需要, 因此常开 (fw_apply 中按 TLS_MODE/ACME_METHOD 维护)
-		# 记录 80 端口是否由本次申请放行, 事务回滚时关闭
-		_fw_ledger_has "ufw 80/tcp" || _fw_ledger_has "firewalld 80/tcp" || CERT_TXN_FW80=1
+		# 记录 80 端口是否由本次申请新放行 (比较放行前后的防火墙状态), 事务回滚时关闭
+		local fw_before
+		fw_before=$(_fw_snapshot)
 		fw_rule open 80 tcp
+		[ "$(_fw_snapshot)" != "$fw_before" ] && CERT_TXN_FW80=1
 		warn "请确认云服务商安全组 / 防火墙已放行 TCP 80 (申请与每次续期都需要)"
 		args=(--standalone)
 		[ -z "$SERVER_IPV4" ] && [ -n "$SERVER_IPV6" ] && args+=(--listen-v6)
@@ -2029,22 +2056,37 @@ cert_acme() {
 		;;
 	*) return 1 ;;
 	esac
+	# 该域名已有 acme.sh 部署时: 验证方式变化需强制重新签发 (否则 acme.sh 跳过, 续期仍用旧方式);
+	# 且事务回滚时不能删除这个事先已存在的部署, 而是恢复其原有配置 (验证方式 / 证书)
+	local conf="$ACME_HOME/${d}_ecc/${d}.conf" preexist=0 stored want
+	if [ -f "$conf" ]; then
+		preexist=1
+		if [ -n "$CERT_TXN_BAK" ] && [ -z "$CERT_TXN_ACME_D" ]; then
+			rm -rf "$ONEBOX_DIR/.acme-rollback"
+			cp -a "$ACME_HOME/${d}_ecc" "$ONEBOX_DIR/.acme-rollback" && CERT_TXN_ACME_D=$d
+		fi
+		stored=$(sed -n "s/^Le_Webroot='\{0,1\}\([^']*\)'\{0,1\}$/\1/p" "$conf" | head -n1)
+		case "$method" in standalone) want=no ;; cf) want=dns_cf ;; esac
+		[ -n "$stored" ] && [ "$stored" != "$want" ] && args+=(--force)
+	fi
 	info "申请证书: ${d} (Let's Encrypt, ECC)"
 	# Cloudflare 凭据只传给 acme.sh (其会保存到 account.conf 供续期使用)
 	CF_Token=${CF_Token:-} CF_Account_ID=${CF_Account_ID:-} CF_Zone_ID=${CF_Zone_ID:-} CF_Key=${CF_Key:-} CF_Email=${CF_Email:-} \
 		acme --issue -d "$d" "${args[@]}" -k ec-256 --server letsencrypt
 	rc=$?
-	# 签发成功 (或未到期) 即记录, 使后续任何失败都能在回滚时撤销该部署
-	{ [ "$rc" = 0 ] || [ "$rc" = 2 ]; } && CERT_TXN_NEW_ACME=$d
+	# 签发成功即记录新部署, 使后续失败能在回滚时撤销 (事先已存在的部署不记录)
+	[ "$preexist" = 0 ] && { [ "$rc" = 0 ] || [ "$rc" = 2 ]; } && CERT_TXN_NEW_ACME=$d
 	# rc=2: 证书已存在且未到续期时间 (acme.sh RENEW_SKIP), 视为成功
 	if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then
 		err "证书申请失败 (acme.sh 退出码 ${rc}), 请检查域名解析 / 80 端口 / API 令牌"
 		if [ "${ACME_STOPPED_CORES:-0}" = 1 ]; then
+			txn_traps
 			svc_exists singbox && svc_start singbox
 			svc_exists xray && svc_start xray
 		fi
 		return 1
 	fi
+	[ "${ACME_STOPPED_CORES:-0}" = 1 ] && txn_traps
 	mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
 	acme --install-cert -d "$d" --ecc \
 		--key-file "$TLS_DIR/key.pem" \
@@ -3614,21 +3656,32 @@ choose_tls() {
 # ---------------------------------------------------------------------------
 # 证书变更事务: 备份 TLS 目录并记录旧的 ACME 域名; 新配置成功应用后提交, 失败时恢复
 # ---------------------------------------------------------------------------
-CERT_TXN_BAK="" CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME=""
+CERT_TXN_BAK="" CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME="" CERT_TXN_ACME_D=""
+
+# 信号处理: 证书事务进行中 (新配置尚未提交) 时, Ctrl-C 等中断先回滚事务再退出;
+# 事务结束后恢复默认. apply_all 提交配置后会屏蔽中断, 直到调用方提交 / 回滚事务
+txn_traps() {
+	if [ -n "$CERT_TXN_BAK" ]; then
+		trap 'trap "" INT TERM HUP; cert_txn_rollback; exit 130' INT TERM HUP
+	else
+		trap - INT TERM HUP
+	fi
+}
 
 cert_txn_begin() {
 	CERT_TXN_FW80=0
-	# 事务期间脚本异常退出 (die / Ctrl-C) 时自动回滚
-	trap '[ -n "$CERT_TXN_BAK" ] && cert_txn_rollback' EXIT
-	trap 'exit 130' INT TERM HUP
+	# 旧版本 (无防火墙台账) 升级: 在证书申请改动防火墙之前先迁移台账
+	[ -f "$STATE_FILE" ] && [ ! -f "$(_fw_ledger)" ] && (load_state && _fw_ledger_migrate) >/dev/null 2>&1
 	CERT_TXN_BAK="$ONEBOX_DIR/.tls-rollback"
 	rm -rf "$CERT_TXN_BAK"
 	if [ -d "$TLS_DIR" ]; then cp -a "$TLS_DIR" "$CERT_TXN_BAK"; else mkdir -p "$CERT_TXN_BAK"; fi
-	CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME=""
+	CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME="" CERT_TXN_ACME_D=""
+	rm -rf "$ONEBOX_DIR/.acme-rollback"
 	[ -f "$STATE_FILE" ] && CERT_TXN_OLD_ACME=$(
 		load_state >/dev/null 2>&1
 		[ "$TLS_MODE" = acme ] && printf '%s' "$DOMAIN"
 	)
+	txn_traps
 	return 0
 }
 
@@ -3638,31 +3691,58 @@ cert_txn_commit() {
 	if [ -n "$CERT_TXN_OLD_ACME" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$CERT_TXN_OLD_ACME" ]; } && [ -x "$ACME_SH" ]; then
 		acme --remove -d "$CERT_TXN_OLD_ACME" --ecc >/dev/null 2>&1 && info "已停止旧域名 ${CERT_TXN_OLD_ACME} 的证书自动续期"
 	fi
-	rm -rf "$CERT_TXN_BAK"
-	CERT_TXN_BAK=""
-	trap - EXIT INT TERM HUP
+	rm -rf "$CERT_TXN_BAK" "$ONEBOX_DIR/.acme-rollback"
+	CERT_TXN_BAK="" CERT_TXN_ACME_D=""
+	txn_traps
 }
 
 cert_txn_rollback() {
-	[ -n "$CERT_TXN_BAK" ] || return 0
-	trap - EXIT INT TERM HUP
+	[ -n "$CERT_TXN_BAK" ] && [ -d "$CERT_TXN_BAK" ] || {
+		CERT_TXN_BAK=""
+		txn_traps
+		return 0
+	}
 	# 新申请的 ACME 域名 (与旧的不同) 取消部署, 防止其续期覆盖恢复后的证书
 	if [ -n "$CERT_TXN_NEW_ACME" ] && [ "$CERT_TXN_NEW_ACME" != "$CERT_TXN_OLD_ACME" ] && [ -x "$ACME_SH" ]; then
 		acme --remove -d "$CERT_TXN_NEW_ACME" --ecc >/dev/null 2>&1
 	fi
+	# 事先已存在的 acme.sh 部署: 恢复其原配置 (本次可能以新的验证方式强制重新签发过)
+	if [ -n "$CERT_TXN_ACME_D" ] && [ -d "$ONEBOX_DIR/.acme-rollback" ]; then
+		rm -rf "$ACME_HOME/${CERT_TXN_ACME_D}_ecc"
+		mv "$ONEBOX_DIR/.acme-rollback" "$ACME_HOME/${CERT_TXN_ACME_D}_ecc"
+	fi
+	CERT_TXN_ACME_D=""
 	rm -rf "$TLS_DIR"
 	mv "$CERT_TXN_BAK" "$TLS_DIR"
 	CERT_TXN_BAK=""
 	# 用恢复后的状态与证书重新生成客户端文件并重启内核
+	local need80=0
 	if [ -f "$STATE_FILE" ]; then
 		load_state
+		state_migrate
 		write_client_files
 		all_cores_do restart
+		{ [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; } && need80=1
+		port_taken_by_other 80 tcp "" && need80=1
 	fi
-	# 本次申请临时放行的 80 端口, 恢复后的配置不再需要时关闭
-	if [ "${CERT_TXN_FW80:-0}" = 1 ] && ! { [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; }; then
-		fw_rule close 80 tcp
+	# 本次申请临时放行的 80 端口, 恢复后的配置 (磁盘上的状态) 不再需要时关闭
+	[ "${CERT_TXN_FW80:-0}" = 1 ] && [ "$need80" = 0 ] && fw_rule close 80 tcp
+	txn_traps
+	return 0
+}
+
+# 旧版本升级时补齐新增的状态项; 有变化时立即保存 (回滚路径也会调用)
+state_migrate() {
+	local changed=0
+	if [ -z "${CLASH_SECRET:-}" ]; then
+		CLASH_SECRET=$(rand_str 24)
+		changed=1
 	fi
+	if xr_has_reality && [ -z "${REALITY_GUARD_PORT:-}" ]; then
+		REALITY_GUARD_PORT=$(pick_guard_port)
+		changed=1
+	fi
+	[ "$changed" = 1 ] && [ -f "$STATE_FILE" ] && save_state
 	return 0
 }
 
@@ -3675,7 +3755,6 @@ obtain_cert() {
 	*) return 0 ;;
 	esac
 	rc=$?
-	[ "$rc" = 0 ] && [ "$TLS_MODE" = acme ] && CERT_TXN_NEW_ACME=$DOMAIN
 	return "$rc"
 }
 
@@ -3757,7 +3836,7 @@ choose_hy2_opts() {
 			fi
 			if c=$(hop_range_foreign_udp "$r"); then
 				warn "端口跳跃范围内有其他程序监听的 UDP 端口 (${c}), 发往这些端口的流量将被转发到 Hysteria2"
-				if is_interactive && ! ask_yn "仍然使用该范围?" n; then continue; fi
+				if is_interactive && ! ask_yn "仍然使用该范围?" y; then continue; fi
 			fi
 			HY2_HOP=$r
 			return 0
@@ -3917,7 +3996,7 @@ install_self() {
 # 返回 0 成功; 1 新配置未通过内核校验 (系统未做任何改动); 2 服务启动失败 (已尽量回滚到修改前)
 apply_all() {
 	local bak="$ONEBOX_DIR/.rollback" had_old=0 f
-	# 旧版本升级: 补齐新增的状态项
+	# 旧版本升级: 补齐新增的状态项 (随后与新配置一起保存)
 	if xr_has_reality && [ -z "${REALITY_GUARD_PORT:-}" ]; then REALITY_GUARD_PORT=$(pick_guard_port); fi
 	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
 	OWN_IP_CIDRS=$(own_ip_cidrs)
@@ -3936,6 +4015,9 @@ apply_all() {
 	fi
 	# 全新安装: 建立空台账, 避免把新端口当成旧版本遗留规则 (导致 ufw 未放行)
 	[ "$had_old" = 1 ] || { mkdir -p "$ONEBOX_DIR" && [ -f "$(_fw_ledger)" ] || : >"$(_fw_ledger)"; }
+	# 从提交配置到服务切换完成期间屏蔽中断信号, 保证状态 / 配置 / 服务一致
+	# (有证书事务时一直屏蔽到调用方提交 / 回滚事务为止, 见 txn_traps)
+	trap '' INT TERM HUP
 	commit_server_configs
 	save_state
 	if ! apply_services; then
@@ -3945,18 +4027,21 @@ apply_all() {
 				if [ -f "$bak/${f##*/}" ]; then cp -p "$bak/${f##*/}" "$f"; else rm -f "$f"; fi
 			done
 			load_state
+			state_migrate
 			apply_services >/dev/null 2>&1 || warn "回滚后服务仍未能启动, 请执行 onebox log 查看"
 		fi
 		fw_apply open
 		hop_setup
 		write_client_files
 		rm -rf "$bak"
+		[ -n "$CERT_TXN_BAK" ] || trap - INT TERM HUP
 		return 2
 	fi
 	fw_apply open
 	hop_setup
 	write_client_files
 	rm -rf "$bak"
+	[ -n "$CERT_TXN_BAK" ] || trap - INT TERM HUP
 	return 0
 }
 
@@ -4023,7 +4108,8 @@ do_install() {
 		[ "$rc" = 1 ] && die "配置未通过内核校验, 安装中止 (原配置保持不变)"
 		die "服务启动失败, 已恢复为重装前的配置 (详见上方日志)"
 	else
-		rm -rf "$CERT_TXN_BAK"
+		# 全新安装: 服务启动失败时状态已保存且引用新证书 (保留); 校验失败时未保存任何内容 (撤销证书)
+		if [ "$rc" = 2 ]; then cert_txn_commit; else cert_txn_rollback; fi
 		[ "$rc" = 1 ] && die "配置未通过内核校验, 安装中止"
 		die "服务启动失败, 请根据上方日志排查 (onebox log), 修正后可执行 onebox regen"
 	fi
@@ -4259,7 +4345,10 @@ do_add_protocol() {
 	pset PORT "$p" "$port"
 	if [ "$need_cert" = 1 ]; then
 		cert_txn_begin
-		obtain_cert || die "证书配置失败"
+		obtain_cert || {
+			cert_txn_rollback
+			die "证书配置失败"
+		}
 	fi
 	apply_or_die
 	info "已添加 $(proto_title "$p")"
