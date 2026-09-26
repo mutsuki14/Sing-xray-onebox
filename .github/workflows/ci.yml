@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n
+        run: |
+          bash -n onebox.sh
+          bash -n tests/e2e.sh
+          bash -n tests/lifecycle.sh
+      - name: shellcheck
+        run: shellcheck -s bash -S warning onebox.sh tests/e2e.sh tests/lifecycle.sh
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download cores with the script's own installer functions
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/bin"
+          ONEBOX_SOURCE_ONLY=1 ONEBOX_BIN_DIR="$RUNNER_TEMP/bin" bash -c '
+            . ./onebox.sh
+            detect_os; detect_arch
+            install_singbox
+            install_xray
+          '
+          "$RUNNER_TEMP/bin/sing-box" version
+          "$RUNNER_TEMP/bin/xray" version
+
+      - name: Download mihomo
+        run: |
+          set -e
+          url=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq '.assets[] | select(.name | test("^mihomo-linux-amd64-v[0-9.]+\\.gz$")) | .browser_download_url' | head -n1)
+          echo "mihomo asset: $url"
+          curl -fsSL "$url" | gunzip > "$RUNNER_TEMP/bin/mihomo"
+          chmod +x "$RUNNER_TEMP/bin/mihomo"
+          "$RUNNER_TEMP/bin/mihomo" -v
+
+      - name: End-to-end matrix (protocol x server core x client)
+        run: |
+          SB="$RUNNER_TEMP/bin/sing-box" XR="$RUNNER_TEMP/bin/xray" MH="$RUNNER_TEMP/bin/mihomo" VERBOSE=1 bash tests/e2e.sh
+
+      - name: Installer lifecycle
+        run: |
+          sudo env ONEBOX_LIFECYCLE=1 SB="$RUNNER_TEMP/bin/sing-box" XR="$RUNNER_TEMP/bin/xray" MH="$RUNNER_TEMP/bin/mihomo" \
+            bash tests/lifecycle.sh
