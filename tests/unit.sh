@@ -206,6 +206,51 @@ _fw_ledger_del "ufw 443/tcp"
 eq "台账删除" "$(yes_ _fw_ledger_has "ufw 443/tcp")|$(yes_ _fw_ledger_has "iptables 8443/udp")" "no|yes"
 ONEBOX_DIR="$WORK/etc"
 
+# OpenRC 服务脚本: 语法正确, start_pre 在无日志 / 小日志时都返回成功
+INIT=openrc ONEBOX_INITD_DIR_T="$WORK/initd"
+mkdir -p "$ONEBOX_INITD_DIR_T"
+(
+	INITD_DIR=$ONEBOX_INITD_DIR_T LOG_DIR="$WORK/log"
+	svc_write singbox
+)
+rc_file="$ONEBOX_INITD_DIR_T/$SB_SERVICE"
+eq "OpenRC 脚本已生成" "$([ -f "$rc_file" ] && echo yes)" yes
+eq "OpenRC 脚本语法" "$(yes_ sh -n "$rc_file")" yes
+openrc_start_pre() {
+	(
+		checkpath() { mkdir -p "$4"; }
+		# shellcheck disable=SC1090
+		. "$rc_file"
+		start_pre
+	)
+}
+eq "start_pre (无日志) 返回成功" "$(yes_ openrc_start_pre)" yes
+mkdir -p "$WORK/log" && echo small >"$WORK/log/singbox.log"
+eq "start_pre (小日志) 返回成功" "$(yes_ openrc_start_pre)" yes
+INIT=none
+
+# 端口跳跃范围与现有 UDP 端口冲突检测
+reset_state
+PROTOCOLS="vless-reality shadowsocks tuic hysteria2"
+pset PORT vless-reality 25001
+pset PORT shadowsocks 31000
+pset PORT tuic 12000
+eq "跳跃范围包含 SS 端口" "$(hop_range_conflicts 20000-40000)" "Shadowsocks-2022/31000"
+eq "跳跃范围不冲突" "$(yes_ hop_range_conflicts 40001-50000)" no
+
+# 自有证书: 保留 certbot live/ 符号链接路径 (续期后生效)
+mkdir -p "$WORK/le/archive" "$WORK/le/live"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3 -subj "/CN=cert.test" \
+	-addext "subjectAltName=DNS:cert.test" -keyout "$WORK/le/archive/privkey1.pem" -out "$WORK/le/archive/fullchain1.pem" >/dev/null 2>&1
+ln -sf ../archive/fullchain1.pem "$WORK/le/live/fullchain.pem"
+ln -sf ../archive/privkey1.pem "$WORK/le/live/privkey.pem"
+DOMAIN=cert.test
+cert_custom "$WORK/le/live/fullchain.pem" "$WORK/le/live/privkey.pem" >/dev/null 2>&1
+eq "自有证书保留 live 路径" "$CERT_FILE" "$WORK/le/live/fullchain.pem"
+eq "非公共 CA 证书改为固定指纹" "$CERT_PINNED" 1
+DOMAIN=other.test
+eq "域名不匹配的证书被拒绝" "$(yes_ cert_custom "$WORK/le/live/fullchain.pem" "$WORK/le/live/privkey.pem" 2>/dev/null)" no
+
 # 显示宽度补齐
 eq "pad 中文" "$(pad 协议 6)|" "协议  |"
 eq "pad ASCII" "$(pad ab 4)|" "ab  |"

@@ -62,6 +62,7 @@ XR_CONF="${ONEBOX_DIR}/xray.json"
 SB_BIN="${BIN_DIR}/sing-box"
 XR_BIN="${BIN_DIR}/xray"
 CMD_PATH="/usr/local/bin/onebox"
+INITD_DIR="${ONEBOX_INITD_DIR:-/etc/init.d}"
 SB_SERVICE="onebox-sing-box"
 XR_SERVICE="onebox-xray"
 
@@ -694,7 +695,7 @@ WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
 HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP
 SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
 TLS_MODE DOMAIN TLS_SNI CERT_FILE KEY_FILE ACME_METHOD
-SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT VMESS_TLS CLASH_SECRET CERT_PINNED INSTALLED_AT"
+SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT VMESS_TLS CLASH_SECRET CERT_PINNED OWN_IP_CIDRS INSTALLED_AT"
 
 # 状态变量通过 STATE_KEYS 间接读写, shellcheck 无法追踪
 # shellcheck disable=SC2034
@@ -739,8 +740,6 @@ load_state() {
 	reset_state
 	# shellcheck disable=SC1090
 	. "$STATE_FILE"
-	# 旧版本状态文件没有 CLASH_SECRET: 生成随机密钥
-	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
 	# 旧版本状态文件没有 VMESS_TLS: 按当时的规则推导并固定下来
 	if proto_enabled vmess-ws && [ -z "${VMESS_TLS:-}" ]; then
 		if vmess_tls_default; then VMESS_TLS=1; else VMESS_TLS=0; fi
@@ -1151,7 +1150,7 @@ EOF
 		systemctl daemon-reload >/dev/null 2>&1
 		;;
 	openrc)
-		cat >"/etc/init.d/${name}" <<EOF
+		cat >"${INITD_DIR}/${name}" <<EOF
 #!/sbin/openrc-run
 
 name="${name}"
@@ -1174,10 +1173,13 @@ depend() {
 start_pre() {
 	checkpath -d -m 0700 "${LOG_DIR}"
 	# 日志超过 10MB 时清空
-	[ -f "${LOG_DIR}/${core}.log" ] && [ "\$(wc -c <"${LOG_DIR}/${core}.log")" -gt 10485760 ] && : >"${LOG_DIR}/${core}.log"
+	if [ -f "${LOG_DIR}/${core}.log" ] && [ "\$(wc -c <"${LOG_DIR}/${core}.log")" -gt 10485760 ]; then
+		: >"${LOG_DIR}/${core}.log"
+	fi
+	return 0
 }
 EOF
-		chmod 755 "/etc/init.d/${name}"
+		chmod 755 "${INITD_DIR}/${name}"
 		;;
 	esac
 	return 0
@@ -1341,7 +1343,7 @@ svc_exists() {
 	name=$(svc_name "$1")
 	case "$INIT" in
 	systemd) [ -f "/etc/systemd/system/${name}.service" ] ;;
-	openrc) [ -f "/etc/init.d/${name}" ] ;;
+	openrc) [ -f "${INITD_DIR}/${name}" ] ;;
 	none) _none_running "$1" || { [ -x "$(svc_bin "$1")" ] && [ -f "$(svc_conf "$1")" ]; } ;;
 	esac
 }
@@ -1357,7 +1359,7 @@ svc_remove() {
 		systemctl daemon-reload >/dev/null 2>&1
 		systemctl reset-failed "$name" >/dev/null 2>&1
 		;;
-	openrc) rm -f "/etc/init.d/${name}" ;;
+	openrc) rm -f "${INITD_DIR}/${name}" ;;
 	esac
 	return 0
 }
@@ -1437,8 +1439,11 @@ _ipt_rule() {
 			"$t" -t "$table" -C "$chain" "${m[@]}" "${j[@]}" 2>/dev/null
 		;;
 	add)
-		"$t" -t "$table" -I "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null ||
-			"$t" -t "$table" -I "$chain" "${m[@]}" "${j[@]}" 2>/dev/null
+		# IPT_PLAIN=1 表示因缺少 xt_comment 而添加了无注释规则
+		IPT_PLAIN=0
+		"$t" -t "$table" -I "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null && return 0
+		IPT_PLAIN=1
+		"$t" -t "$table" -I "$chain" "${m[@]}" "${j[@]}" 2>/dev/null
 		;;
 	del | delc | delp)
 		# del: 两种形式都删; delc: 仅删带 onebox 注释的; delp: 仅删无注释的 (仅用于本脚本在缺少 xt_comment 时添加的规则)
@@ -1511,7 +1516,9 @@ fw_rule() {
 		if [ "$act" = open ]; then
 			_fw_ledger_has "ufw $key" && return 0
 			# 用户已自行放行该端口: 不接管
-			ufw status 2>/dev/null | grep -qE "^${ipt_port}(/${proto})?[[:space:]].*ALLOW" && return 0
+			# (仅无来源 / 网卡限制的入站 ALLOW 规则才算)
+			LC_ALL=C ufw status 2>/dev/null | grep -vE ' on |OUT|FWD' |
+				grep -qE "^${ipt_port}(/${proto})?( \(v6\))?[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere" && return 0
 			ufw allow "${ipt_port}/${proto}" comment onebox >/dev/null 2>&1 || ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1
 			_fw_ledger_add "ufw $key"
 		elif _fw_ledger_has "ufw $key"; then
@@ -1547,7 +1554,8 @@ fw_rule() {
 		if [ "$act" = open ]; then
 			_fw_iptables_blocking "$t" || continue
 			_ipt_rule "$t" check filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && continue
-			_ipt_rule "$t" add filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && _fw_ledger_add "$t $key"
+			# 带注释的规则可凭注释识别; 仅无注释的回退形式需要记入台账
+			_ipt_rule "$t" add filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && [ "$IPT_PLAIN" = 1 ] && _fw_ledger_add "$t $key"
 		else
 			_ipt_rule "$t" delc filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
 			if _fw_ledger_has "$t $key"; then
@@ -1560,9 +1568,29 @@ fw_rule() {
 	return 0
 }
 
+# 旧版本安装 (无台账) 通过 ufw / firewalld 放行的端口: 首次使用时记入台账, 以便之后能正常关闭
+_fw_ledger_migrate() {
+	[ -f "$(_fw_ledger)" ] && return 0
+	[ -f "$STATE_FILE" ] || return 0
+	local backend="" p port net
+	_fw_ufw_active && backend=ufw
+	[ -z "$backend" ] && _fw_firewalld_active && backend=firewalld
+	mkdir -p "$ONEBOX_DIR" && : >"$(_fw_ledger)"
+	[ -n "$backend" ] || return 0
+	for p in $PROTOCOLS; do
+		port=$(pget PORT "$p")
+		[ -n "$port" ] || continue
+		net=$(proto_net "$p")
+		[ "$net" != udp ] && _fw_ledger_add "$backend ${port}/tcp"
+		[ "$net" != tcp ] && _fw_ledger_add "$backend ${port}/udp"
+	done
+	return 0
+}
+
 # 放行 / 关闭当前全部协议端口 (幂等; 开机时由 onebox-net 服务重新执行, 不依赖系统的规则保存机制)
 fw_apply() {
 	local act=${1:-open} p port net
+	_fw_ledger_migrate
 	for p in $PROTOCOLS; do
 		port=$(pget PORT "$p")
 		[ -n "$port" ] || continue
@@ -1598,7 +1626,7 @@ _hop_nft() {
 	for fam in ip ip6; do
 		[ "$fam" = ip6 ] && ! host_has_ipv6 && continue
 		# 用 ip/ip6 两张表 + 数字优先级: inet 族 NAT 需内核 5.2+, 优先级关键字需较新的 nft
-		nft -f - <<EOF || return 1
+		nft -f - <<EOF || { [ "$fam" = ip6 ] && warn "nftables 添加 IPv6 端口跳跃规则失败" && continue; return 1; }
 table ${fam} onebox_hop {
 	chain prerouting {
 		type nat hook prerouting priority -100; policy accept;
@@ -1607,6 +1635,21 @@ table ${fam} onebox_hop {
 }
 EOF
 	done
+}
+
+# 端口跳跃范围与其他 UDP 协议端口冲突时输出冲突项 (协议/端口), 无冲突返回 1
+hop_range_conflicts() {
+	local range=$1 a b p port net out=""
+	a=${range%-*} b=${range#*-}
+	for p in $PROTOCOLS; do
+		[ "$p" = hysteria2 ] && continue
+		port=$(pget PORT "$p")
+		[ -n "$port" ] || continue
+		net=$(proto_net "$p")
+		[ "$net" = tcp ] && continue
+		[ "$port" -ge "$a" ] && [ "$port" -le "$b" ] && out+="$(proto_title "$p")/${port} "
+	done
+	[ -n "$out" ] && printf '%s' "${out% }"
 }
 
 # hop_rules add|del
@@ -1697,6 +1740,8 @@ hop_setup() {
 		fi
 		if [ $? -ne 0 ] || ! { has iptables || has nft; }; then
 			warn "无法设置 Hysteria2 端口跳跃规则 (需要 iptables 或 nftables 以及内核 NAT 支持), 已关闭端口跳跃"
+			hop_rules del
+			has nft && _hop_nft del
 			HY2_HOP=""
 			save_state
 		fi
@@ -1923,6 +1968,12 @@ cert_acme() {
 	standalone)
 		# acme.sh 3.1+ standalone 用 socat, 没有 socat 时回退到 python3
 		has socat || has python3 || ensure_cmds socat || warn "未能安装 socat, standalone 模式可能失败"
+		if port_in_use 80 tcp && port_used_by_onebox 80 tcp; then
+			# 旧配置 (重装前) 的协议占用了 80 端口: 申请期间暂停内核, 之后由应用配置时重启
+			svc_stop singbox
+			svc_stop xray
+			ACME_STOPPED_CORES=1
+		fi
 		if port_in_use 80 tcp; then
 			err "80 端口被占用, standalone 模式需要临时占用 80 端口, 请先停止占用该端口的程序"
 			return 1
@@ -1954,6 +2005,10 @@ cert_acme() {
 	# rc=2: 证书已存在且未到续期时间 (acme.sh RENEW_SKIP), 视为成功
 	if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then
 		err "证书申请失败 (acme.sh 退出码 ${rc}), 请检查域名解析 / 80 端口 / API 令牌"
+		if [ "${ACME_STOPPED_CORES:-0}" = 1 ]; then
+			svc_exists singbox && svc_start singbox
+			svc_exists xray && svc_start xray
+		fi
 		return 1
 	fi
 	mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
@@ -1971,8 +2026,9 @@ cert_acme() {
 
 cert_custom() {
 	local c=$1 k=$2
-	c=$(readlink -f "$c" 2>/dev/null || printf '%s' "$c")
-	k=$(readlink -f "$k" 2>/dev/null || printf '%s' "$k")
+	# 只转为绝对路径, 不解析符号链接 (certbot 的 live/ 目录是指向 archive/ 的链接, 续期后链接指向新文件)
+	case "$c" in /*) ;; *) c="$PWD/$c" ;; esac
+	case "$k" in /*) ;; *) k="$PWD/$k" ;; esac
 	[ -f "$c" ] && [ -f "$k" ] || {
 		err "证书或私钥文件不存在"
 		return 1
@@ -3519,13 +3575,53 @@ choose_tls() {
 	esac
 }
 
-obtain_cert() {
-	local old="" rc
-	# 记录旧的 ACME 部署 (状态文件中的值)
-	[ -f "$STATE_FILE" ] && old=$(
+# ---------------------------------------------------------------------------
+# 证书变更事务: 备份 TLS 目录并记录旧的 ACME 域名; 新配置成功应用后提交, 失败时恢复
+# ---------------------------------------------------------------------------
+CERT_TXN_BAK="" CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME=""
+
+cert_txn_begin() {
+	CERT_TXN_BAK="$ONEBOX_DIR/.tls-rollback"
+	rm -rf "$CERT_TXN_BAK"
+	if [ -d "$TLS_DIR" ]; then cp -a "$TLS_DIR" "$CERT_TXN_BAK"; else mkdir -p "$CERT_TXN_BAK"; fi
+	CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME=""
+	[ -f "$STATE_FILE" ] && CERT_TXN_OLD_ACME=$(
 		load_state >/dev/null 2>&1
 		[ "$TLS_MODE" = acme ] && printf '%s' "$DOMAIN"
 	)
+	return 0
+}
+
+cert_txn_commit() {
+	[ -n "$CERT_TXN_BAK" ] || return 0
+	# 不再使用旧域名的 ACME 证书时, 取消其自动续期; 否则续期时 acme.sh 会覆盖新证书 (导致固定指纹的客户端全部失效)
+	if [ -n "$CERT_TXN_OLD_ACME" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$CERT_TXN_OLD_ACME" ]; } && [ -x "$ACME_SH" ]; then
+		acme --remove -d "$CERT_TXN_OLD_ACME" --ecc >/dev/null 2>&1 && info "已停止旧域名 ${CERT_TXN_OLD_ACME} 的证书自动续期"
+	fi
+	rm -rf "$CERT_TXN_BAK"
+	CERT_TXN_BAK=""
+}
+
+cert_txn_rollback() {
+	[ -n "$CERT_TXN_BAK" ] || return 0
+	# 新申请的 ACME 域名 (与旧的不同) 取消部署, 防止其续期覆盖恢复后的证书
+	if [ -n "$CERT_TXN_NEW_ACME" ] && [ "$CERT_TXN_NEW_ACME" != "$CERT_TXN_OLD_ACME" ] && [ -x "$ACME_SH" ]; then
+		acme --remove -d "$CERT_TXN_NEW_ACME" --ecc >/dev/null 2>&1
+	fi
+	rm -rf "$TLS_DIR"
+	mv "$CERT_TXN_BAK" "$TLS_DIR"
+	CERT_TXN_BAK=""
+	# 用恢复后的状态与证书重新生成客户端文件并重启内核
+	if [ -f "$STATE_FILE" ]; then
+		load_state
+		write_client_files
+		all_cores_do restart
+	fi
+	return 0
+}
+
+obtain_cert() {
+	local rc
 	case "$TLS_MODE" in
 	self) cert_self_signed "$TLS_SNI" ;;
 	acme) cert_acme "$DOMAIN" "$ACME_METHOD" ;;
@@ -3533,10 +3629,7 @@ obtain_cert() {
 	*) return 0 ;;
 	esac
 	rc=$?
-	# 不再使用旧域名的 ACME 证书时, 取消其自动续期; 否则续期时 acme.sh 会覆盖新证书 (导致固定指纹的客户端全部失效)
-	if [ "$rc" = 0 ] && [ -n "$old" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$old" ]; } && [ -x "$ACME_SH" ]; then
-		acme --remove -d "$old" --ecc >/dev/null 2>&1 && info "已停止旧域名 ${old} 的证书自动续期"
-	fi
+	[ "$rc" = 0 ] && [ "$TLS_MODE" = acme ] && CERT_TXN_NEW_ACME=$DOMAIN
 	return "$rc"
 }
 
@@ -3609,6 +3702,13 @@ choose_hy2_opts() {
 		ask r "端口跳跃范围 (起始-结束)" "${OPT_HY2_HOP:-20000-40000}"
 		if [[ "$r" =~ ^([1-9][0-9]*)-([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -ge 1024 ] && [ "${BASH_REMATCH[2]}" -le 65535 ] &&
 			[ "${BASH_REMATCH[1]}" -lt "${BASH_REMATCH[2]}" ]; then
+			local c
+			if c=$(hop_range_conflicts "$r"); then
+				# 范围内的 UDP 流量会被转发到 Hysteria2, 不能包含其他 UDP 协议的端口
+				warn "端口跳跃范围 ${r} 包含其他 UDP 协议的端口: ${c}"
+				is_interactive || die "端口跳跃范围与现有端口冲突: ${c}"
+				continue
+			fi
 			HY2_HOP=$r
 			return 0
 		fi
@@ -3720,8 +3820,20 @@ ensure_cores() {
 	for core in singbox xray; do
 		core_used "$core" || continue
 		case "$core" in
-		singbox) [ -x "$SB_BIN" ] && [ "${FORCE_CORE_UPDATE:-0}" != 1 ] || install_singbox || return 1 ;;
-		xray) [ -x "$XR_BIN" ] && [ "${FORCE_CORE_UPDATE:-0}" != 1 ] || install_xray || return 1 ;;
+		singbox)
+			if [ ! -x "$SB_BIN" ] || [ "${FORCE_CORE_UPDATE:-0}" = 1 ] ||
+				{ [ -n "$LOCAL_SB_BIN" ] && ! cmp -s "$LOCAL_SB_BIN" "$SB_BIN"; } ||
+				{ [ -n "${SB_VERSION_WANT:-}" ] && [ "$SB_VERSION_WANT" != latest ] && [ "$SB_VERSION_WANT" != "$(sb_installed_version)" ]; }; then
+				install_singbox "${SB_VERSION_WANT:-}" || return 1
+			fi
+			;;
+		xray)
+			if [ ! -x "$XR_BIN" ] || [ "${FORCE_CORE_UPDATE:-0}" = 1 ] ||
+				{ [ -n "$LOCAL_XR_BIN" ] && ! cmp -s "$LOCAL_XR_BIN" "$XR_BIN"; } ||
+				{ [ -n "${XR_VERSION_WANT:-}" ] && [ "$XR_VERSION_WANT" != latest ] && [ "$XR_VERSION_WANT" != "$(xr_installed_version)" ]; }; then
+				install_xray || return 1
+			fi
+			;;
 		esac
 	done
 	SB_VERSION=$(sb_installed_version)
@@ -3754,6 +3866,10 @@ install_self() {
 # 返回 0 成功; 1 新配置未通过内核校验 (系统未做任何改动); 2 服务启动失败 (已尽量回滚到修改前)
 apply_all() {
 	local bak="$ONEBOX_DIR/.rollback" had_old=0 f
+	# 旧版本升级: 补齐新增的状态项
+	if xr_has_reality && [ -z "${REALITY_GUARD_PORT:-}" ]; then REALITY_GUARD_PORT=$(pick_guard_port); fi
+	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
+	OWN_IP_CIDRS=$(own_ip_cidrs)
 	prepare_server_configs || return 1
 	rm -rf "$bak"
 	if [ -f "$STATE_FILE" ]; then
@@ -3791,11 +3907,17 @@ apply_all() {
 	return 0
 }
 
-# 应用配置, 失败时给出明确原因并退出
+# 应用配置 (含进行中的证书变更事务), 失败时回滚并给出明确原因
 apply_or_die() {
+	local rc
 	apply_all
-	case $? in
-	0) return 0 ;;
+	rc=$?
+	if [ "$rc" = 0 ]; then
+		cert_txn_commit
+		return 0
+	fi
+	cert_txn_rollback
+	case "$rc" in
 	1) die "新配置未通过内核校验, 未做任何修改" ;;
 	*) die "服务启动失败, 已回滚到修改前的配置 (详见上方日志, 或执行 onebox log)" ;;
 	esac
@@ -3828,30 +3950,30 @@ do_install() {
 
 	ensure_cores || die "内核安装失败"
 	gen_credentials
-	# 重装时先备份旧证书, 新服务启动失败回滚时一并恢复
-	local tls_bak="$ONEBOX_DIR/.tls-rollback"
-	rm -rf "$tls_bak"
-	[ -n "$old_protocols" ] && [ -d "$TLS_DIR" ] && cp -a "$TLS_DIR" "$tls_bak"
-	obtain_cert || die "证书配置失败"
+	# 重装时备份旧证书, 新配置失败时一并恢复
+	cert_txn_begin
+	obtain_cert || {
+		cert_txn_rollback
+		die "证书配置失败"
+	}
 	# shellcheck disable=SC2034 # 通过 STATE_KEYS 保存
 	INSTALLED_AT=$(date '+%Y-%m-%d %H:%M:%S')
 	install_self
 	# 旧服务 (重装时) 在新配置校验通过后才会被停止 / 替换
+	local rc
 	apply_all
-	case $? in
-	0) rm -rf "$tls_bak" ;;
-	1) die "配置未通过内核校验, 安装中止" ;;
-	*)
-		if [ -n "$old_protocols" ]; then
-			if [ -d "$tls_bak" ]; then
-				rm -rf "$TLS_DIR" && mv "$tls_bak" "$TLS_DIR"
-				all_cores_do restart
-			fi
-			die "服务启动失败, 已恢复为重装前的配置 (详见上方日志)"
-		fi
+	rc=$?
+	if [ "$rc" = 0 ]; then
+		cert_txn_commit
+	elif [ -n "$old_protocols" ]; then
+		cert_txn_rollback
+		[ "$rc" = 1 ] && die "配置未通过内核校验, 安装中止 (原配置保持不变)"
+		die "服务启动失败, 已恢复为重装前的配置 (详见上方日志)"
+	else
+		rm -rf "$CERT_TXN_BAK"
+		[ "$rc" = 1 ] && die "配置未通过内核校验, 安装中止"
 		die "服务启动失败, 请根据上方日志排查 (onebox log), 修正后可执行 onebox regen"
-		;;
-	esac
+	fi
 
 	if proto_enabled shadowsocks || proto_enabled shadowtls || proto_enabled vmess-ws; then
 		check_clock || true
@@ -4067,7 +4189,11 @@ do_add_protocol() {
 	fi
 	if proto_needs_cert "$p" && [ -z "$TLS_MODE" ]; then
 		choose_tls
-		obtain_cert || die "证书配置失败"
+		cert_txn_begin
+		obtain_cert || {
+			cert_txn_rollback
+			die "证书配置失败"
+		}
 	fi
 	[ "$p" = vmess-ws ] && { vmess_tls_default && VMESS_TLS=1 || VMESS_TLS=0; }
 	[ "$p" = hysteria2 ] && choose_hy2_opts
@@ -4171,7 +4297,7 @@ do_change_sni() {
 }
 
 do_update_core() {
-	local which=${1:-all} c changed=""
+	local which=${1:-all} c changed="" failed=""
 	require_installed
 	FORCE_CORE_UPDATE=1
 	# 先备份旧内核, 新内核不接受当前配置或无法启动时恢复
@@ -4180,7 +4306,12 @@ do_update_core() {
 		if [ -x "$SB_BIN" ] || core_used singbox; then
 			local old
 			old=$(sb_installed_version)
-			install_singbox "${SB_VERSION_WANT:-}" && info "sing-box: ${old:-无} -> $(sb_installed_version)" && changed+=" singbox"
+			if install_singbox "${SB_VERSION_WANT:-}"; then
+				info "sing-box: ${old:-无} -> $(sb_installed_version)"
+				changed+=" singbox"
+			else
+				failed+=" sing-box"
+			fi
 		fi
 	fi
 	if [ "$which" = all ] || [ "$which" = xray ]; then
@@ -4190,13 +4321,24 @@ do_update_core() {
 			warn "经过测试的 Xray 版本为 ${TESTED_XR_VERSION}; 更新的版本中 REALITY 服务端会拒绝不支持 X25519MLKEM768 的客户端 (如 sing-box)"
 			if [ -n "$XR_VERSION_WANT" ]; then
 				xv=$XR_VERSION_WANT
-			elif confirm "是否仍然安装 Xray 最新版?" n; then
+			elif ask_yn "是否仍然安装 Xray 最新版?" n; then
+				# 使用 ask_yn: -y / 非交互时取默认值 n, 不会自动升级到未经测试的版本
 				xv=latest
 			fi
-			install_xray "$xv" && info "Xray: ${old:-无} -> $(xr_installed_version)" && changed+=" xray"
+			if install_xray "$xv"; then
+				info "Xray: ${old:-无} -> $(xr_installed_version)"
+				changed+=" xray"
+			else
+				failed+=" xray"
+			fi
 		fi
 	fi
 	FORCE_CORE_UPDATE=0
+	if [ -z "$changed" ]; then
+		for c in "$SB_BIN" "$XR_BIN"; do rm -f "$c.bak"; done
+		[ -n "$failed" ] && err "内核更新失败:${failed}" && return 1
+		return 0
+	fi
 	apply_all
 	case $? in
 	0) ;;
@@ -4210,6 +4352,7 @@ do_update_core() {
 		;;
 	esac
 	for c in "$SB_BIN" "$XR_BIN"; do rm -f "$c.bak"; done
+	[ -n "$failed" ] && err "部分内核更新失败:${failed}" && return 1
 	return 0
 }
 
@@ -4263,7 +4406,11 @@ do_cert() {
 		choose_tls
 		PROTOCOLS=$saved
 		[ -n "$TLS_MODE" ] || TLS_MODE=$old_mode
-		obtain_cert || die "证书配置失败"
+		cert_txn_begin
+		obtain_cert || {
+			cert_txn_rollback
+			die "证书配置失败"
+		}
 		{ [ "$TLS_MODE" = acme ] || [ "$TLS_MODE" = custom ]; } && ask_yn "是否把客户端连接地址改为 ${DOMAIN}?" y && SERVER_ADDR=$DOMAIN
 		if proto_enabled vmess-ws; then
 			local want=0
@@ -4616,6 +4763,10 @@ main() {
 		;;
 	net-apply | hop-apply)
 		load_state && {
+			# 本机地址变化 (如 DHCP / 更换 IP) 时重新生成服务端配置, 保持对本机地址的屏蔽
+			if [ "${BLOCK_PRIVATE:-1}" = 1 ] && [ "$(own_ip_cidrs)" != "${OWN_IP_CIDRS:-}" ]; then
+				apply_all >/dev/null 2>&1 || true
+			fi
 			fw_apply open
 			hop_rules add
 		}
