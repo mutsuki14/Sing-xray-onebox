@@ -1675,21 +1675,25 @@ hop_range_conflicts() {
 
 # 端口跳跃范围内被其他程序监听的 UDP 端口 (如 WireGuard / Tailscale), 仅用于提示
 hop_range_foreign_udp() {
-	local range=$1 a b hy lo hi out="" line port
+	local range=$1 a b hy out="" line port pid exe own
 	a=${range%-*} b=${range#*-}
 	hy=$(pget PORT hysteria2)
 	has ss || return 1
-	# 本机临时端口范围内的通配绑定多为客户端套接字, 不算监听服务
-	read -r lo hi </proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || lo=32768 hi=60999
 	while IFS= read -r line; do
 		port=$(printf '%s' "$line" | awk '{n=split($4, x, ":"); print x[n]}')
 		[[ "$port" =~ ^[0-9]+$ ]] || continue
 		[ "$port" = "$hy" ] && continue
 		[ "$port" -ge "$a" ] && [ "$port" -le "$b" ] || continue
-		case "$line" in *'"sing-box"'* | *'"xray"'*) continue ;; esac
 		case "$(printf '%s' "$line" | awk '{print $4}')" in 127.* | '[::1]'* | ::1:*) continue ;; esac
-		[ "$port" -ge "$lo" ] && [ "$port" -le "$hi" ] && continue
 		port_used_by_onebox "$port" udp && continue
+		# onebox 自身内核的出站 UDP 套接字 (按进程可执行文件判断, 而非进程名); 无属主的内核套接字 (如内核 WireGuard) 不跳过
+		own=0
+		for pid in $(printf '%s' "$line" | grep -o 'pid=[0-9]*' | cut -d= -f2); do
+			exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+			exe=${exe% (deleted)}
+			if [ -n "$exe" ] && { [ "$exe" = "$SB_BIN" ] || [ "$exe" = "$XR_BIN" ]; }; then own=1; else own=0 && break; fi
+		done
+		[ "$own" = 1 ] && continue
 		case " $out " in *" $port "*) ;; *) out+="${port} " ;; esac
 	done < <(ss -lnup 2>/dev/null | awk 'NR>1')
 	[ -n "$out" ] && printf '%s' "${out% }"
@@ -3676,7 +3680,9 @@ cert_txn_begin() {
 	rm -rf "$CERT_TXN_BAK"
 	if [ -d "$TLS_DIR" ]; then cp -a "$TLS_DIR" "$CERT_TXN_BAK"; else mkdir -p "$CERT_TXN_BAK"; fi
 	CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME="" CERT_TXN_ACME_D=""
-	rm -rf "$ONEBOX_DIR/.acme-rollback"
+	rm -rf "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback"
+	# acme.sh 会把 Cloudflare 凭据写入 account.conf (即使签发失败), 回滚时需恢复, 否则旧域名续期用错凭据
+	[ -f "$ACME_HOME/account.conf" ] && cp -p "$ACME_HOME/account.conf" "$ONEBOX_DIR/.acme-account.rollback"
 	[ -f "$STATE_FILE" ] && CERT_TXN_OLD_ACME=$(
 		load_state >/dev/null 2>&1
 		[ "$TLS_MODE" = acme ] && printf '%s' "$DOMAIN"
@@ -3691,7 +3697,7 @@ cert_txn_commit() {
 	if [ -n "$CERT_TXN_OLD_ACME" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$CERT_TXN_OLD_ACME" ]; } && [ -x "$ACME_SH" ]; then
 		acme --remove -d "$CERT_TXN_OLD_ACME" --ecc >/dev/null 2>&1 && info "已停止旧域名 ${CERT_TXN_OLD_ACME} 的证书自动续期"
 	fi
-	rm -rf "$CERT_TXN_BAK" "$ONEBOX_DIR/.acme-rollback"
+	rm -rf "$CERT_TXN_BAK" "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback"
 	CERT_TXN_BAK="" CERT_TXN_ACME_D=""
 	txn_traps
 }
@@ -3702,6 +3708,8 @@ cert_txn_rollback() {
 		txn_traps
 		return 0
 	}
+	# 回滚期间屏蔽中断, 保证恢复完整 (结束时由 txn_traps 恢复默认)
+	trap '' INT TERM HUP
 	# 新申请的 ACME 域名 (与旧的不同) 取消部署, 防止其续期覆盖恢复后的证书
 	if [ -n "$CERT_TXN_NEW_ACME" ] && [ "$CERT_TXN_NEW_ACME" != "$CERT_TXN_OLD_ACME" ] && [ -x "$ACME_SH" ]; then
 		acme --remove -d "$CERT_TXN_NEW_ACME" --ecc >/dev/null 2>&1
@@ -3712,6 +3720,9 @@ cert_txn_rollback() {
 		mv "$ONEBOX_DIR/.acme-rollback" "$ACME_HOME/${CERT_TXN_ACME_D}_ecc"
 	fi
 	CERT_TXN_ACME_D=""
+	if [ -f "$ONEBOX_DIR/.acme-account.rollback" ] && [ -d "$ACME_HOME" ]; then
+		mv -f "$ONEBOX_DIR/.acme-account.rollback" "$ACME_HOME/account.conf"
+	fi
 	rm -rf "$TLS_DIR"
 	mv "$CERT_TXN_BAK" "$TLS_DIR"
 	CERT_TXN_BAK=""
@@ -4001,6 +4012,9 @@ apply_all() {
 	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
 	OWN_IP_CIDRS=$(own_ip_cidrs)
 	prepare_server_configs || return 1
+	# 从撤销旧防火墙规则到服务切换完成期间屏蔽中断信号, 保证防火墙 / 状态 / 配置 / 服务一致
+	# (有证书事务时一直屏蔽到调用方提交 / 回滚事务为止, 见 txn_traps)
+	trap '' INT TERM HUP
 	rm -rf "$bak"
 	if [ -f "$STATE_FILE" ]; then
 		had_old=1
@@ -4015,9 +4029,6 @@ apply_all() {
 	fi
 	# 全新安装: 建立空台账, 避免把新端口当成旧版本遗留规则 (导致 ufw 未放行)
 	[ "$had_old" = 1 ] || { mkdir -p "$ONEBOX_DIR" && [ -f "$(_fw_ledger)" ] || : >"$(_fw_ledger)"; }
-	# 从提交配置到服务切换完成期间屏蔽中断信号, 保证状态 / 配置 / 服务一致
-	# (有证书事务时一直屏蔽到调用方提交 / 回滚事务为止, 见 txn_traps)
-	trap '' INT TERM HUP
 	commit_server_configs
 	save_state
 	if ! apply_services; then

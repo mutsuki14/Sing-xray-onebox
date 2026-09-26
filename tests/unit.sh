@@ -238,6 +238,26 @@ pset PORT tuic 12000
 eq "跳跃范围包含 SS 端口" "$(hop_range_conflicts 20000-40000)" "Shadowsocks-2022/31000"
 eq "跳跃范围不冲突" "$(yes_ hop_range_conflicts 40001-50000)" no
 
+# 跳跃范围内其他程序的 UDP 监听: 内核 WireGuard (无属主) / tailscaled 需提示;
+# 回环地址与 onebox 自身内核 (按可执行文件判断) 的套接字不提示
+pset PORT hysteria2 8443
+SELF_EXE=$(readlink /proc/$$/exe)
+ss() {
+	cat <<SS
+State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+UNCONN 0      0            0.0.0.0:51820      0.0.0.0:*
+UNCONN 0      0               [::]:51820         [::]:*
+UNCONN 0      0            0.0.0.0:41641      0.0.0.0:*    users:(("tailscaled",pid=1,fd=18))
+UNCONN 0      0          127.0.0.1:45000      0.0.0.0:*    users:(("dnsmasq",pid=1,fd=4))
+UNCONN 0      0            0.0.0.0:47000      0.0.0.0:*    users:(("sing-box",pid=$$,fd=9))
+UNCONN 0      0            0.0.0.0:31000      0.0.0.0:*    users:(("sing-box",pid=$$,fd=7))
+SS
+}
+eq "跳跃范围内的外部 UDP 监听" "$(SB_BIN=$SELF_EXE hop_range_foreign_udp 30000-60000)" "51820 41641"
+eq "同名但非 onebox 内核的进程仍提示" "$(SB_BIN=/nonexistent hop_range_foreign_udp 46000-48000)" 47000
+eq "范围外无提示" "$(yes_ hop_range_foreign_udp 20000-25000)" no
+unset -f ss
+
 # 自有证书: 保留 certbot live/ 符号链接路径 (续期后生效)
 mkdir -p "$WORK/le/archive" "$WORK/le/live"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3 -subj "/CN=cert.test" \
@@ -269,13 +289,16 @@ ONEBOX_DIR="$WORK/txn"
 mkdir -p "$TLS_DIR" "$ACME_HOME/t.test_ecc"
 echo old >"$TLS_DIR/cert.pem"
 echo "Le_Webroot='no'" >"$ACME_HOME/t.test_ecc/t.test.conf"
+echo "SAVED_CF_Token='old'" >"$ACME_HOME/account.conf"
 cert_txn_begin
 eq "事务期间中断会回滚" "$(trap -p INT | grep -c cert_txn_rollback)" 1
 # 模拟 cert_acme: 备份已存在的部署后以新验证方式重新签发
 cp -a "$ACME_HOME/t.test_ecc" "$ONEBOX_DIR/.acme-rollback" && CERT_TXN_ACME_D=t.test
 echo "Le_Webroot='dns_cf'" >"$ACME_HOME/t.test_ecc/t.test.conf"
 echo new >"$TLS_DIR/cert.pem"
+echo "SAVED_CF_Token='bad'" >"$ACME_HOME/account.conf"
 cert_txn_rollback >/dev/null 2>&1
+eq "回滚恢复 acme.sh account.conf (Cloudflare 凭据)" "$(cat "$ACME_HOME/account.conf")" "SAVED_CF_Token='old'"
 eq "回滚恢复 TLS 目录" "$(cat "$TLS_DIR/cert.pem")" old
 eq "回滚恢复已存在的 acme.sh 部署" "$(cat "$ACME_HOME/t.test_ecc/t.test.conf")" "Le_Webroot='no'"
 eq "回滚后恢复默认信号处理" "$(trap -p INT)" ""
