@@ -125,6 +125,38 @@ check "链接使用新 UUID" grep -q "$(conf_get UUID)" /etc/onebox/client/links
 check "修改地址为 127.0.0.2" onebox addr --addr 127.0.0.2 --name lc2 -y
 check "链接地址已更新" grep -q "@127.0.0.2:" /etc/onebox/client/links.txt
 
+step "输入校验 / 伪装站点 / 地址保留"
+check "前导零端口被拒绝" sh -c '! onebox port hysteria2 0450 -y'
+check "拒绝后 sing-box 仍在运行" proc_running sing-box
+OLD_UUID=$(conf_get UUID)
+check "更换伪装站点" onebox sni --sni addons.mozilla.org -y
+check "REALITY SNI 已更新" [ "$(conf_get REALITY_SNI)" = addons.mozilla.org ]
+check "更换伪装站点不改变 UUID" [ "$(conf_get UUID)" = "$OLD_UUID" ]
+check "链接中 SNI 已更新" grep -q "sni=addons.mozilla.org" /etc/onebox/client/links.txt
+check "仅修改节点名称" onebox addr --name lc3 -y
+check "修改名称时保留地址" [ "$(conf_get SERVER_ADDR)" = 127.0.0.2 ]
+check "节点名称已更新" [ "$(conf_get NODE_NAME)" = lc3 ]
+
+step "服务启动失败时自动回滚"
+# 用包装脚本模拟: 新配置含 anytls 时 sing-box 启动即退出 (但 check 通过)
+# (运行中的可执行文件不能直接覆盖写入, 需写到临时文件再 mv 替换)
+cp /opt/onebox/bin/sing-box /opt/onebox/bin/sing-box.real
+cat >/opt/onebox/bin/sing-box.wrap <<'WRAP'
+#!/bin/sh
+if [ "$1" = run ] && grep -q anytls-in /etc/onebox/sing-box.json 2>/dev/null; then echo "simulated failure" >&2; exit 1; fi
+exec /opt/onebox/bin/sing-box.real "$@"
+WRAP
+chmod +x /opt/onebox/bin/sing-box.wrap
+mv -f /opt/onebox/bin/sing-box.wrap /opt/onebox/bin/sing-box
+onebox del anytls -y >/dev/null 2>&1
+check "添加协议因服务失败而报错退出" sh -c '! onebox add anytls -y'
+check "状态已回滚 (无 anytls)" sh -c '! grep -q "^PROTOCOLS=.*anytls" /etc/onebox/onebox.conf'
+check "服务端配置已回滚" sh -c '! grep -q anytls-in /etc/onebox/sing-box.json'
+check "回滚后 sing-box 恢复运行" proc_running sing-box.real
+mv -f /opt/onebox/bin/sing-box.real /opt/onebox/bin/sing-box
+check "恢复后重启正常" onebox restart
+check "sing-box 运行中" proc_running sing-box
+
 step "服务启停 / 重新生成"
 check "stop" onebox stop
 sleep 1

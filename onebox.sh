@@ -32,6 +32,9 @@ if [ -z "${BASH_VERSION:-}" ]; then
 	exit 1
 fi
 
+# 以 sh 调用 bash 时处于 POSIX 模式, bash 5.1 之前该模式下不支持进程替换等语法, 先退出 POSIX 模式
+case ":${SHELLOPTS:-}:" in *:posix:*) set +o posix ;; esac
+
 if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
 	echo "本脚本需要 bash 4.0 或更高版本 (当前: ${BASH_VERSION})" >&2
 	exit 1
@@ -123,6 +126,12 @@ ask() {
 			printf '%s: ' "$_a_prompt" >&2
 		fi
 		IFS= read -r _a_val <"$TTY_IN" || _a_val=""
+		# 去掉方向键等产生的 ANSI 转义序列及其他控制字符 (否则会写进节点名 / 地址, 破坏客户端配置)
+		if [[ "$_a_val" == *[[:cntrl:]]* ]]; then
+			local _a_esc=$'\033'
+			_a_val=$(printf '%s' "$_a_val" | sed "s/${_a_esc}\[[0-9;?]*[A-Za-z~]//g; s/${_a_esc}O[A-Za-z]//g")
+			_a_val=${_a_val//[[:cntrl:]]/}
+		fi
 		# 去掉首尾空白
 		_a_val="${_a_val#"${_a_val%%[![:space:]]*}"}"
 		_a_val="${_a_val%"${_a_val##*[![:space:]]}"}"
@@ -158,8 +167,8 @@ ask_num() {
 	local _n_var=$1 _n_prompt=$2 _n_def=$3 _n_min=$4 _n_max=$5 _n_val
 	while :; do
 		ask _n_val "$_n_prompt" "$_n_def"
-		if [[ "$_n_val" =~ ^[0-9]+$ ]] && [ "$_n_val" -ge "$_n_min" ] && [ "$_n_val" -le "$_n_max" ]; then
-			printf -v "$_n_var" '%s' "$_n_val"
+		if [[ "$_n_val" =~ ^[0-9]{1,6}$ ]] && [ "$((10#$_n_val))" -ge "$_n_min" ] && [ "$((10#$_n_val))" -le "$_n_max" ]; then
+			printf -v "$_n_var" '%s' "$((10#$_n_val))"
 			return 0
 		fi
 		warn "请输入 ${_n_min}-${_n_max} 之间的数字"
@@ -252,6 +261,7 @@ json_str() {
 	s=${s//$'\n'/\\n}
 	s=${s//$'\t'/\\t}
 	s=${s//$'\r'/\\r}
+	s=${s//[[:cntrl:]]/}
 	printf '"%s"' "$s"
 }
 
@@ -660,7 +670,7 @@ WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
 HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP
 SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
 TLS_MODE DOMAIN TLS_SNI CERT_FILE KEY_FILE ACME_METHOD
-SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT INSTALLED_AT"
+SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT VMESS_TLS INSTALLED_AT"
 
 # 状态变量通过 STATE_KEYS 间接读写, shellcheck 无法追踪
 # shellcheck disable=SC2034
@@ -705,6 +715,11 @@ load_state() {
 	reset_state
 	# shellcheck disable=SC1090
 	. "$STATE_FILE"
+	# 旧版本状态文件没有 VMESS_TLS: 按当时的规则推导并固定下来
+	if proto_enabled vmess-ws && [ -z "${VMESS_TLS:-}" ]; then
+		if vmess_tls_default; then VMESS_TLS=1; else VMESS_TLS=0; fi
+	fi
+	return 0
 }
 
 is_installed() { [ -f "$STATE_FILE" ] && [ -n "$(sed -n 's/^PROTOCOLS=//p' "$STATE_FILE" 2>/dev/null | tr -d "'\"")" ]; }
@@ -778,8 +793,16 @@ proto_needs_cert() {
 	esac
 }
 
-# vmess-ws 仅在拥有正式证书 (ACME / 自有证书) 时启用 TLS, 否则为明文 WS (便于套 CDN)
-vmess_tls_enabled() { [ "$TLS_MODE" = acme ] || [ "$TLS_MODE" = custom ]; }
+# vmess-ws 是否启用 TLS: 安装 / 添加时按证书方式决定并保存 (VMESS_TLS), 之后更换证书不会悄悄改变
+# 默认: 拥有正式证书 (ACME / 自有证书) 时启用 TLS, 否则为明文 WS (便于套 CDN)
+vmess_tls_default() { [ "$TLS_MODE" = acme ] || [ "$TLS_MODE" = custom ]; }
+vmess_tls_enabled() {
+	case "${VMESS_TLS:-}" in
+	1) return 0 ;;
+	0) return 1 ;;
+	*) vmess_tls_default ;;
+	esac
+}
 
 # 客户端支持情况: proto_client_ok 协议 link|mihomo|singbox|xray
 proto_client_ok() {
@@ -1294,11 +1317,13 @@ apply_services() {
 		if core_used "$core"; then
 			svc_write "$core"
 			svc_enable "$core"
-			svc_restart "$core"
 		elif svc_exists "$core"; then
 			svc_remove "$core"
 		fi
 	done
+	# 先全部停止再启动: 端口在两个内核之间迁移时 (如 REALITY 从 Xray 改到 sing-box) 避免冲突
+	for core in singbox xray; do core_used "$core" && svc_stop "$core"; done
+	for core in singbox xray; do core_used "$core" && svc_start "$core"; done
 	sleep 2
 	for core in singbox xray; do
 		core_used "$core" || continue
@@ -2371,39 +2396,53 @@ xr_domain_strategy() {
 # ---------------------------------------------------------------------------
 # 写入并校验服务端配置 (校验失败时保留旧配置)
 # ---------------------------------------------------------------------------
-_write_checked() {
-	# _write_checked 内核 目标文件 生成函数
-	local core=$1 dst=$2 fn=$3 tmp out
-	tmp="${dst%.json}.new.json"
-	"$fn" >"$tmp" || return 1
-	chmod 600 "$tmp"
-	case "$core" in
-	singbox) out=$("$SB_BIN" check -c "$tmp" 2>&1) ;;
-	xray) out=$("$XR_BIN" run -test -c "$tmp" 2>&1) ;;
-	esac
-	if [ $? -ne 0 ]; then
-		err "$(core_title "$core") 配置校验失败:"
+# 两阶段写入: 先生成并校验全部内核的新配置 (*.new.json), 全部通过后再替换, 任一失败则不改动现有配置
+_check_config() {
+	# _check_config 内核 文件
+	local out
+	case "$1" in
+	singbox) out=$("$SB_BIN" check -c "$2" 2>&1) ;;
+	xray) out=$("$XR_BIN" run -test -c "$2" 2>&1) ;;
+	esac || {
+		err "$(core_title "$1") 配置校验失败:"
 		printf '%s\n' "$out" | tail -n 15 >&2
-		rm -f "$tmp"
 		return 1
-	fi
-	mv -f "$tmp" "$dst"
+	}
 }
 
-write_server_configs() {
+prepare_server_configs() {
+	local core conf fn tmp
 	mkdir -p "$ONEBOX_DIR"
-	if core_used singbox; then
-		_write_checked singbox "$SB_CONF" gen_singbox_server || return 1
-	else
-		rm -f "$SB_CONF"
-	fi
-	if core_used xray; then
-		_write_checked xray "$XR_CONF" gen_xray_server || return 1
-	else
-		rm -f "$XR_CONF"
-	fi
+	for core in singbox xray; do
+		core_used "$core" || continue
+		conf=$(svc_conf "$core")
+		tmp="${conf%.json}.new.json"
+		case "$core" in singbox) fn=gen_singbox_server ;; xray) fn=gen_xray_server ;; esac
+		(umask 077 && "$fn" >"$tmp") || {
+			rm -f "$tmp"
+			return 1
+		}
+		_check_config "$core" "$tmp" || {
+			rm -f "${SB_CONF%.json}.new.json" "${XR_CONF%.json}.new.json"
+			return 1
+		}
+	done
 	return 0
 }
+
+commit_server_configs() {
+	local core conf
+	for core in singbox xray; do
+		conf=$(svc_conf "$core")
+		if core_used "$core"; then
+			mv -f "${conf%.json}.new.json" "$conf"
+		else
+			rm -f "$conf"
+		fi
+	done
+}
+
+write_server_configs() { prepare_server_configs && commit_server_configs; }
 
 # ---------------------------------------------------------------------------
 # 客户端: 分享链接
@@ -2501,7 +2540,10 @@ gen_links() {
 # ---------------------------------------------------------------------------
 # 内核版本要求 (按协议): AnyTLS >= 1.19.3, VLESS-XHTTP >= 1.19.22, Hysteria2 端口跳跃 >= 1.18.2
 # YAML 单引号字符串
-yq() { printf "'%s'" "${1//\'/\'\'}"; }
+yq() {
+	local q="'"
+	printf "'%s'" "${1//$q/$q$q}"
+}
 
 _mh_tls_common() {
 	# 证书类协议的 sni; 自签证书时跳过 CA 校验并固定证书指纹 (mihomo 在设置 fingerprint 时始终校验指纹)
@@ -2825,11 +2867,9 @@ gen_singbox_client() {
 		nodes+=("$(json_str "$(node_name "$p")")")
 		outs+=("$(sbc_outbound "$p")")
 	done
-	names=$(
-		IFS=,
-		printf '%s' "${nodes[*]}"
-	)
-	names=${names//,/, }
+	[ ${#outs[@]} -gt 0 ] || return 1
+	names=$(printf '%s, ' "${nodes[@]}")
+	names=${names%, }
 	inbounds='    { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080 }'
 	if [ "$mode" = tun ]; then
 		inbounds='    {
@@ -3011,8 +3051,16 @@ write_client_files() {
 	gen_links >"$CLIENT_DIR/links.txt"
 	b64 <"$CLIENT_DIR/links.txt" >"$CLIENT_DIR/sub.txt"
 	gen_mihomo >"$CLIENT_DIR/mihomo.yaml"
-	gen_singbox_client tun >"$CLIENT_DIR/sing-box.json"
-	gen_singbox_client notun >"$CLIENT_DIR/sing-box-notun.json"
+	local f
+	for f in tun notun; do
+		local dst="$CLIENT_DIR/sing-box.json"
+		[ "$f" = notun ] && dst="$CLIENT_DIR/sing-box-notun.json"
+		if gen_singbox_client "$f" >"$dst.tmp"; then
+			mv -f "$dst.tmp" "$dst"
+		else
+			rm -f "$dst.tmp" "$dst"
+		fi
+	done
 	if gen_xray_client >"$CLIENT_DIR/xray.json.tmp"; then
 		mv -f "$CLIENT_DIR/xray.json.tmp" "$CLIENT_DIR/xray.json"
 	else
@@ -3119,7 +3167,7 @@ port_taken_by_other() {
 # 端口是否落在 Hysteria2 端口跳跃范围内 (UDP)
 port_in_hop_range() {
 	local port=$1 a b
-	[ -n "$HY2_HOP" ] || return 1
+	proto_enabled hysteria2 && [ -n "$HY2_HOP" ] || return 1
 	a=${HY2_HOP%-*} b=${HY2_HOP#*-}
 	[ "$port" -ge "$a" ] && [ "$port" -le "$b" ]
 }
@@ -3140,7 +3188,7 @@ port_used_by_onebox() {
 port_ok() {
 	local port=$1 p=$2 net
 	net=$(proto_net "$p")
-	[[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || {
+	[[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -le 65535 ] || {
 		warn "端口需为 1-65535 之间的数字"
 		return 1
 	}
@@ -3270,7 +3318,7 @@ choose_tls() {
 		return 0
 	}
 	title "TLS 证书"
-	echo "  部分协议 ($(for p in $PROTOCOLS; do proto_needs_cert "$p" && printf '%s ' "$(proto_title "$p")"; done)) 需要 TLS 证书:"
+	echo "  以下协议需要 (或可选) TLS 证书: $(for p in $PROTOCOLS; do { proto_needs_cert "$p" || [ "$p" = vmess-ws ]; } && printf '%s ' "$(proto_title "$p")"; done)"
 	echo "    1) 自签证书 (无需域名, 客户端通过证书指纹校验) [默认]"
 	echo "    2) ACME 申请正式证书 —— HTTP 验证 (域名需已解析到本机, 且 80 端口空闲)"
 	echo "    3) ACME 申请正式证书 —— Cloudflare DNS API 验证"
@@ -3287,6 +3335,7 @@ choose_tls() {
 		TLS_SNI=$DOMAIN
 		if [ "$m" = 2 ]; then
 			ACME_METHOD=standalone
+			[ -n "$SERVER_IPV4$SERVER_IPV6" ] || detect_public_ip
 			if ! check_domain_points_here "$DOMAIN"; then
 				confirm "域名解析似乎未指向本机 (若开启了 CDN 代理请先关闭), 仍然继续?" n || die "已取消"
 			fi
@@ -3315,12 +3364,24 @@ choose_tls() {
 }
 
 obtain_cert() {
+	local old="" rc
+	# 记录旧的 ACME 部署 (状态文件中的值)
+	[ -f "$STATE_FILE" ] && old=$(
+		load_state >/dev/null 2>&1
+		[ "$TLS_MODE" = acme ] && printf '%s' "$DOMAIN"
+	)
 	case "$TLS_MODE" in
 	self) cert_self_signed "$TLS_SNI" ;;
 	acme) cert_acme "$DOMAIN" "$ACME_METHOD" ;;
 	custom) cert_custom "$CUSTOM_CERT" "$CUSTOM_KEY" ;;
 	*) return 0 ;;
 	esac
+	rc=$?
+	# 不再使用旧域名的 ACME 证书时, 取消其自动续期; 否则续期时 acme.sh 会覆盖新证书 (导致固定指纹的客户端全部失效)
+	if [ "$rc" = 0 ] && [ -n "$old" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$old" ]; } && [ -x "$ACME_SH" ]; then
+		acme --remove -d "$old" --ecc >/dev/null 2>&1 && info "已停止旧域名 ${old} 的证书自动续期"
+	fi
+	return "$rc"
 }
 
 choose_protocols() {
@@ -3372,26 +3433,32 @@ choose_extras() {
 		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "${REALITY_SNI:-${OPT_SNI:-1}}"
 		SHADOWTLS_DEST="${SHADOWTLS_SNI}:443"
 	fi
-	if proto_enabled hysteria2; then
-		title "Hysteria2 选项"
-		HY2_OBFS=0 HY2_HOP=""
-		if ask_yn "是否启用 Salamander 混淆 (可对抗 QUIC 识别, 但会失去 HTTP/3 伪装)" "${OPT_HY2_OBFS:-n}"; then
-			HY2_OBFS=1
-		fi
-		if [ "$INIT" != none ] && ask_yn "是否启用端口跳跃 (UDP 端口范围转发到 Hysteria2 端口)" "$([ -n "${OPT_HY2_HOP:-}" ] && echo y || echo n)"; then
-			local r
-			while :; do
-				ask r "端口跳跃范围 (起始-结束)" "${OPT_HY2_HOP:-20000-40000}"
-				if [[ "$r" =~ ^([0-9]+)-([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 1024 ] && [ "${BASH_REMATCH[2]}" -le 65535 ] &&
-					[ "${BASH_REMATCH[1]}" -lt "${BASH_REMATCH[2]}" ]; then
-					HY2_HOP=$r
-					break
-				fi
-				warn "格式错误, 示例: 20000-40000"
-				is_interactive || break
-			done
-		fi
+	proto_enabled hysteria2 && choose_hy2_opts
+}
+
+# Hysteria2 混淆 / 端口跳跃 (安装与添加协议时使用)
+choose_hy2_opts() {
+	local r
+	title "Hysteria2 选项"
+	HY2_OBFS=0 HY2_HOP=""
+	if ask_yn "是否启用 Salamander 混淆 (可对抗 QUIC 识别, 但会失去 HTTP/3 伪装)" "${OPT_HY2_OBFS:-n}"; then
+		HY2_OBFS=1
 	fi
+	if [ "$INIT" = none ]; then
+		[ -n "${OPT_HY2_HOP:-}" ] && warn "未检测到 systemd / OpenRC, 无法在开机时恢复端口跳跃规则, 已忽略 --hy2-hop"
+		return 0
+	fi
+	ask_yn "是否启用端口跳跃 (UDP 端口范围转发到 Hysteria2 端口)" "$([ -n "${OPT_HY2_HOP:-}" ] && echo y || echo n)" || return 0
+	while :; do
+		ask r "端口跳跃范围 (起始-结束)" "${OPT_HY2_HOP:-20000-40000}"
+		if [[ "$r" =~ ^([1-9][0-9]*)-([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -ge 1024 ] && [ "${BASH_REMATCH[2]}" -le 65535 ] &&
+			[ "${BASH_REMATCH[1]}" -lt "${BASH_REMATCH[2]}" ]; then
+			HY2_HOP=$r
+			return 0
+		fi
+		warn "格式错误, 示例: 20000-40000"
+		is_interactive || die "端口跳跃范围无效: $r"
+	done
 }
 
 choose_address() {
@@ -3406,7 +3473,8 @@ choose_address() {
 	else
 		def=${SERVER_IPV4:-$SERVER_IPV6}
 	fi
-	[ -n "${OPT_ADDR:-}" ] && def=$OPT_ADDR
+	# 修改地址时默认保留当前值
+	def=${OPT_ADDR:-${SERVER_ADDR:-$def}}
 	while :; do
 		ask SERVER_ADDR "客户端连接使用的地址 (IP 或域名)" "$def"
 		SERVER_ADDR=${SERVER_ADDR#[}
@@ -3416,8 +3484,8 @@ choose_address() {
 	done
 	local h
 	h=$(hostname 2>/dev/null | cut -d. -f1 | LC_ALL=C tr -cd 'A-Za-z0-9_-')
-	ask NODE_NAME "节点名称前缀" "${OPT_NAME:-${h:-onebox}}"
-	NODE_NAME=$(printf '%s' "$NODE_NAME" | tr -d '#&=?/\\"'"'"' ')
+	ask NODE_NAME "节点名称前缀" "${OPT_NAME:-${NODE_NAME:-${h:-onebox}}}"
+	NODE_NAME=$(printf '%s' "$NODE_NAME" | tr -d '#&=?/\\"'"'"' ,:;|')
 	[ -n "$NODE_NAME" ] || NODE_NAME=onebox
 }
 
@@ -3485,8 +3553,8 @@ ensure_cores() {
 	for core in singbox xray; do
 		core_used "$core" || continue
 		case "$core" in
-		singbox) [ -x "$SB_BIN" ] && [ -z "$LOCAL_SB_BIN" ] && [ "${FORCE_CORE_UPDATE:-0}" != 1 ] || install_singbox || return 1 ;;
-		xray) [ -x "$XR_BIN" ] && [ -z "$LOCAL_XR_BIN" ] && [ "${FORCE_CORE_UPDATE:-0}" != 1 ] || install_xray || return 1 ;;
+		singbox) [ -x "$SB_BIN" ] && [ "${FORCE_CORE_UPDATE:-0}" != 1 ] || install_singbox || return 1 ;;
+		xray) [ -x "$XR_BIN" ] && [ "${FORCE_CORE_UPDATE:-0}" != 1 ] || install_xray || return 1 ;;
 		esac
 	done
 	SB_VERSION=$(sb_installed_version)
@@ -3515,14 +3583,55 @@ install_self() {
 }
 
 # 应用当前状态: 生成配置 -> 服务 -> 防火墙 -> 客户端文件
+# 应用当前状态: 校验新配置 -> 切换 -> 重启服务 -> 防火墙 -> 客户端文件
+# 返回 0 成功; 1 新配置未通过内核校验 (系统未做任何改动); 2 服务启动失败 (已尽量回滚到修改前)
 apply_all() {
-	write_server_configs || return 1
+	local bak="$ONEBOX_DIR/.rollback" had_old=0 f
+	prepare_server_configs || return 1
+	rm -rf "$bak"
+	if [ -f "$STATE_FILE" ]; then
+		had_old=1
+		mkdir -p "$bak" && chmod 700 "$bak"
+		for f in "$STATE_FILE" "$SB_CONF" "$XR_CONF"; do [ -f "$f" ] && cp -p "$f" "$bak/"; done
+		# 关闭旧状态下的防火墙放行与端口跳跃, 新状态随后重新放行
+		(
+			load_state
+			fw_apply close
+			hop_rules del
+		) >/dev/null 2>&1
+	fi
+	commit_server_configs
 	save_state
-	apply_services || warn "部分服务未能正常启动, 请查看上方日志"
+	if ! apply_services; then
+		if [ "$had_old" = 1 ]; then
+			warn "服务启动失败, 正在回滚到修改前的配置..."
+			for f in "$STATE_FILE" "$SB_CONF" "$XR_CONF"; do
+				if [ -f "$bak/${f##*/}" ]; then cp -p "$bak/${f##*/}" "$f"; else rm -f "$f"; fi
+			done
+			load_state
+			apply_services >/dev/null 2>&1 || warn "回滚后服务仍未能启动, 请执行 onebox log 查看"
+		fi
+		fw_apply open
+		hop_setup
+		write_client_files
+		rm -rf "$bak"
+		return 2
+	fi
 	fw_apply open
 	hop_setup
 	write_client_files
+	rm -rf "$bak"
 	return 0
+}
+
+# 应用配置, 失败时给出明确原因并退出
+apply_or_die() {
+	apply_all
+	case $? in
+	0) return 0 ;;
+	1) die "新配置未通过内核校验, 未做任何修改" ;;
+	*) die "服务启动失败, 已回滚到修改前的配置 (详见上方日志, 或执行 onebox log)" ;;
+	esac
 }
 
 do_install() {
@@ -3538,21 +3647,11 @@ do_install() {
 	choose_protocols
 	choose_extras
 	choose_tls
+	if proto_enabled vmess-ws; then vmess_tls_default && VMESS_TLS=1 || VMESS_TLS=0; fi
 	choose_ports
 	choose_address
 	print_plan
 	confirm "确认开始安装?" y || die "已取消"
-
-	if [ -n "$old_protocols" ]; then
-		# 停止旧服务并清理旧的防火墙 / 端口跳跃规则 (旧状态仍在状态文件中)
-		(
-			load_state
-			fw_apply close
-			hop_rules del
-		)
-		svc_stop singbox
-		svc_stop xray
-	fi
 
 	# sing-box 监听 "::" 为双栈; 内核禁用 IPv6 时会自动退回 IPv4 ("0.0.0.0" 则仅 IPv4)
 	LISTEN_ADDR="::"
@@ -3562,11 +3661,30 @@ do_install() {
 
 	ensure_cores || die "内核安装失败"
 	gen_credentials
+	# 重装时先备份旧证书, 新服务启动失败回滚时一并恢复
+	local tls_bak="$ONEBOX_DIR/.tls-rollback"
+	rm -rf "$tls_bak"
+	[ -n "$old_protocols" ] && [ -d "$TLS_DIR" ] && cp -a "$TLS_DIR" "$tls_bak"
 	obtain_cert || die "证书配置失败"
 	# shellcheck disable=SC2034 # 通过 STATE_KEYS 保存
 	INSTALLED_AT=$(date '+%Y-%m-%d %H:%M:%S')
 	install_self
-	apply_all || die "配置生成失败"
+	# 旧服务 (重装时) 在新配置校验通过后才会被停止 / 替换
+	apply_all
+	case $? in
+	0) rm -rf "$tls_bak" ;;
+	1) die "配置未通过内核校验, 安装中止" ;;
+	*)
+		if [ -n "$old_protocols" ]; then
+			if [ -d "$tls_bak" ]; then
+				rm -rf "$TLS_DIR" && mv "$tls_bak" "$TLS_DIR"
+				all_cores_do restart
+			fi
+			die "服务启动失败, 已恢复为重装前的配置 (详见上方日志)"
+		fi
+		die "服务启动失败, 请根据上方日志排查 (onebox log), 修正后可执行 onebox regen"
+		;;
+	esac
 
 	if proto_enabled shadowsocks || proto_enabled shadowtls || proto_enabled vmess-ws; then
 		check_clock || true
@@ -3644,8 +3762,8 @@ show_info() {
 	title "客户端配置文件"
 	echo "  订阅 (Base64)     : ${CLIENT_DIR}/sub.txt"
 	echo "  mihomo / Clash    : ${CLIENT_DIR}/mihomo.yaml"
-	echo "  sing-box (TUN)    : ${CLIENT_DIR}/sing-box.json"
-	echo "  sing-box (代理端口): ${CLIENT_DIR}/sing-box-notun.json"
+	[ -f "$CLIENT_DIR/sing-box.json" ] && echo "  sing-box (TUN)    : ${CLIENT_DIR}/sing-box.json"
+	[ -f "$CLIENT_DIR/sing-box-notun.json" ] && echo "  sing-box (代理端口): ${CLIENT_DIR}/sing-box-notun.json"
 	[ -f "$CLIENT_DIR/xray.json" ] && echo "  Xray              : ${CLIENT_DIR}/xray.json"
 	echo "  mihomo / sing-box 本地控制面板 (127.0.0.1:9090) 密钥: $(mh_secret)"
 	echo "  mihomo 需要内核 >= $(mh_min_version) (请使用客户端最新版)"
@@ -3669,8 +3787,11 @@ show_client() {
 	fi
 	case "$which" in
 	mihomo | clash) cat "$CLIENT_DIR/mihomo.yaml" ;;
-	singbox | sing-box) cat "$CLIENT_DIR/sing-box.json" ;;
-	singbox-notun | sing-box-notun) cat "$CLIENT_DIR/sing-box-notun.json" ;;
+	singbox | sing-box | singbox-notun | sing-box-notun)
+		local f="$CLIENT_DIR/sing-box.json"
+		case "$which" in *notun) f="$CLIENT_DIR/sing-box-notun.json" ;; esac
+		if [ -f "$f" ]; then cat "$f"; else warn "当前协议组合中没有 sing-box 客户端支持的协议"; fi
+		;;
 	xray)
 		if [ -f "$CLIENT_DIR/xray.json" ]; then cat "$CLIENT_DIR/xray.json"; else warn "当前协议组合中没有 Xray 客户端支持的协议"; fi
 		;;
@@ -3744,9 +3865,14 @@ do_add_protocol() {
 	fi
 	case " $ALL_PROTOCOLS " in *" $p "*) ;; *) die "未知协议: $p" ;; esac
 	proto_enabled "$p" && die "$(proto_title "$p") 已存在"
+	# 内核: 优先使用已在运行的内核 (取已有协议中第一个的内核)
+	local x
+	prefer=""
+	for x in $PROTOCOLS; do
+		prefer=$(pget CORE "$x")
+		[ -n "$prefer" ] && break
+	done
 	PROTOCOLS=$(normalize_protocols $PROTOCOLS "$p")
-	# 内核: 优先使用已在运行的内核
-	prefer=$(pget CORE "$(printf '%s' "$PROTOCOLS" | awk '{print $1}')")
 	if [ "$(proto_cores "$p")" = "singbox xray" ]; then
 		# Hysteria2 默认 sing-box (Xray 承载为实验性)
 		proto_core_experimental "$p" xray && prefer=singbox
@@ -3772,11 +3898,12 @@ do_add_protocol() {
 		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "${REALITY_SNI:-1}"
 		SHADOWTLS_DEST="${SHADOWTLS_SNI}:443"
 	fi
-	if { proto_needs_cert "$p" || { [ "$p" = vmess-ws ] && vmess_tls_enabled; }; } && [ -z "$TLS_MODE" ]; then
+	if proto_needs_cert "$p" && [ -z "$TLS_MODE" ]; then
 		choose_tls
 		obtain_cert || die "证书配置失败"
 	fi
-	[ "$p" = hysteria2 ] && [ -z "$HY2_OBFS" ] && HY2_OBFS=0
+	[ "$p" = vmess-ws ] && { vmess_tls_default && VMESS_TLS=1 || VMESS_TLS=0; }
+	[ "$p" = hysteria2 ] && choose_hy2_opts
 	ensure_cores || die "内核安装失败"
 	[ -n "$REALITY_PRIVATE_KEY" ] || ! any_reality || gen_reality_keypair
 	port=$(opt_port_for "$p") || port=$(default_port_for "$p")
@@ -3786,7 +3913,7 @@ do_add_protocol() {
 		is_interactive || die "端口 ${port} 不可用"
 	done
 	pset PORT "$p" "$port"
-	apply_all || die "应用配置失败"
+	apply_or_die
 	info "已添加 $(proto_title "$p")"
 	link_of "$p" 2>/dev/null
 }
@@ -3806,13 +3933,13 @@ do_del_protocol() {
 	fi
 	proto_enabled "$p" || die "未启用协议: $p"
 	[ "$(printf '%s\n' $PROTOCOLS | wc -l)" -gt 1 ] || die "至少需要保留一个协议, 如需全部移除请使用卸载"
-	fw_apply close
-	[ "$p" = hysteria2 ] && hop_rules del
 	PROTOCOLS=$(printf '%s\n' $PROTOCOLS | grep -vx "$p" | tr '\n' ' ')
 	PROTOCOLS=${PROTOCOLS% }
 	pset PORT "$p" ""
 	pset CORE "$p" ""
-	apply_all || die "应用配置失败"
+	[ "$p" = hysteria2 ] && HY2_HOP="" HY2_OBFS=""
+	[ "$p" = vmess-ws ] && VMESS_TLS=""
+	apply_or_die
 	info "已删除 $(proto_title "$p")"
 }
 
@@ -3836,10 +3963,8 @@ do_change_port() {
 		is_interactive || die "端口 ${port} 不可用"
 		port=""
 	done
-	fw_apply close
-	hop_rules del
 	pset PORT "$p" "$port"
-	apply_all || die "应用配置失败"
+	apply_or_die
 	info "$(proto_title "$p") 端口已修改为 ${port}"
 }
 
@@ -3847,7 +3972,7 @@ do_reset_credentials() {
 	require_installed
 	confirm "将重新生成全部 UUID / 密码 / REALITY 密钥, 旧的客户端配置将失效, 继续?" n || return 0
 	gen_credentials
-	apply_all || die "应用配置失败"
+	apply_or_die
 	info "凭据已重置, 请重新导入客户端配置"
 	show_info
 }
@@ -3855,19 +3980,40 @@ do_reset_credentials() {
 do_change_addr() {
 	require_installed
 	choose_address
-	apply_all || die "应用配置失败"
+	apply_or_die
 	info "已更新客户端地址"
 }
 
+do_change_sni() {
+	require_installed
+	if ! any_reality && ! proto_enabled shadowtls; then
+		die "当前协议中没有 REALITY / ShadowTLS, 无需伪装站点"
+	fi
+	if any_reality; then
+		title "更换 REALITY 伪装站点 (当前: ${REALITY_SNI})"
+		choose_sni REALITY_SNI "REALITY 目标站点" "${OPT_SNI:-$REALITY_SNI}"
+		REALITY_DEST="${OPT_REALITY_DEST:-${REALITY_SNI}:443}"
+	fi
+	if proto_enabled shadowtls; then
+		title "更换 ShadowTLS 握手站点 (当前: ${SHADOWTLS_SNI})"
+		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "${OPT_SNI:-$SHADOWTLS_SNI}"
+		SHADOWTLS_DEST="${SHADOWTLS_SNI}:443"
+	fi
+	apply_or_die
+	info "伪装站点已更新 (UUID / 密钥不变), 请重新导入或修改客户端中的 SNI"
+}
+
 do_update_core() {
-	local which=${1:-all}
+	local which=${1:-all} c changed=""
 	require_installed
 	FORCE_CORE_UPDATE=1
+	# 先备份旧内核, 新内核不接受当前配置或无法启动时恢复
+	for c in "$SB_BIN" "$XR_BIN"; do [ -x "$c" ] && cp -p "$c" "$c.bak"; done
 	if [ "$which" = all ] || [ "$which" = singbox ] || [ "$which" = sing-box ]; then
 		if [ -x "$SB_BIN" ] || core_used singbox; then
 			local old
 			old=$(sb_installed_version)
-			install_singbox && info "sing-box: ${old:-无} -> $(sb_installed_version)"
+			install_singbox "${SB_VERSION_WANT:-}" && info "sing-box: ${old:-无} -> $(sb_installed_version)" && changed+=" singbox"
 		fi
 	fi
 	if [ "$which" = all ] || [ "$which" = xray ]; then
@@ -3880,11 +4026,24 @@ do_update_core() {
 			elif confirm "是否仍然安装 Xray 最新版?" n; then
 				xv=latest
 			fi
-			install_xray "$xv" && info "Xray: ${old:-无} -> $(xr_installed_version)"
+			install_xray "$xv" && info "Xray: ${old:-无} -> $(xr_installed_version)" && changed+=" xray"
 		fi
 	fi
 	FORCE_CORE_UPDATE=0
-	apply_all || warn "应用配置失败"
+	apply_all
+	case $? in
+	0) ;;
+	*)
+		err "新内核不接受当前配置或无法启动, 恢复旧版本内核"
+		for c in "$SB_BIN" "$XR_BIN"; do [ -f "$c.bak" ] && mv -f "$c.bak" "$c"; done
+		apply_all >/dev/null 2>&1
+		SB_VERSION=$(sb_installed_version) XR_VERSION=$(xr_installed_version)
+		save_state
+		return 1
+		;;
+	esac
+	for c in "$SB_BIN" "$XR_BIN"; do rm -f "$c.bak"; done
+	return 0
 }
 
 do_update_script() {
@@ -3897,7 +4056,14 @@ do_update_script() {
 		info "脚本已更新: $(sed -n 's/^readonly SCRIPT_VERSION="\(.*\)"/\1/p' "$CMD_PATH")"
 		if is_installed; then
 			# 用新脚本重新生成配置, 以应用新版本的改进
-			"$CMD_PATH" regen >/dev/null 2>&1 || true
+			local out
+			if out=$("$CMD_PATH" regen 2>&1); then
+				info "已按新版本重新生成配置"
+			else
+				printf '%s\n' "$out" | tail -n 20 >&2
+				err "配置重新生成失败 (已保留原配置), 请执行 onebox regen / onebox log 查看"
+				return 1
+			fi
 		fi
 	else
 		rm -f "$tmp"
@@ -3931,8 +4097,24 @@ do_cert() {
 		PROTOCOLS=$saved
 		[ -n "$TLS_MODE" ] || TLS_MODE=$old_mode
 		obtain_cert || die "证书配置失败"
-		[ "$TLS_MODE" = acme ] || [ "$TLS_MODE" = custom ] && ask_yn "是否把客户端连接地址改为 ${DOMAIN}?" y && SERVER_ADDR=$DOMAIN
-		apply_all || die "应用配置失败"
+		{ [ "$TLS_MODE" = acme ] || [ "$TLS_MODE" = custom ]; } && ask_yn "是否把客户端连接地址改为 ${DOMAIN}?" y && SERVER_ADDR=$DOMAIN
+		if proto_enabled vmess-ws; then
+			local want=0
+			vmess_tls_default && want=1
+			if [ "$want" != "${VMESS_TLS:-0}" ]; then
+				if [ "$want" = 1 ]; then
+					ask_yn "是否为 VMess-WS 启用 TLS (现有 VMess 客户端需重新导入, 端口将重新选择)?" n && VMESS_TLS=1
+				else
+					ask_yn "是否将 VMess-WS 改为明文 WS (现有 VMess 客户端需重新导入, 端口将重新选择)?" n && VMESS_TLS=0
+				fi
+				if [ "$VMESS_TLS" = "$want" ]; then
+					pset PORT vmess-ws ""
+					pset PORT vmess-ws "$(default_port_for vmess-ws)"
+					info "VMess-WS 端口改为 $(pget PORT vmess-ws)"
+				fi
+			fi
+		fi
+		apply_or_die
 		info "证书已更新"
 		;;
 	2)
@@ -4009,17 +4191,18 @@ main_menu() {
   ${GREEN}5.${PLAIN}  删除协议
   ${GREEN}6.${PLAIN}  修改端口
   ${GREEN}7.${PLAIN}  修改客户端连接地址 / 节点名称
-  ${GREEN}8.${PLAIN}  重置 UUID / 密码 / 密钥
+  ${GREEN}8.${PLAIN}  重置 UUID / 密码 / 密钥 (伪装站点见 15)
   ${GREEN}9.${PLAIN}  启动 / 停止 / 重启 / 日志
   ${GREEN}10.${PLAIN} 更新内核 (sing-box / Xray)
   ${GREEN}11.${PLAIN} 证书管理
   ${GREEN}12.${PLAIN} 开启 BBR
   ${GREEN}13.${PLAIN} 更新脚本
   ${GREEN}14.${PLAIN} 卸载
+  ${GREEN}15.${PLAIN} 更换 REALITY / ShadowTLS 伪装站点
   ${GREEN}0.${PLAIN}  退出
 EOF
 		hr
-		ask_num n "请选择" 0 0 14 || exit 0
+		ask_num n "请选择" 0 0 15 || exit 0
 		case "$n" in
 		0) exit 0 ;;
 		1) (do_install) ;;
@@ -4036,6 +4219,7 @@ EOF
 		12) (enable_bbr) ;;
 		13) (do_update_script) && exec "$CMD_PATH" ;;
 		14) (do_uninstall) && ! [ -f "$STATE_FILE" ] && exit 0 ;;
+		15) (do_change_sni) ;;
 		esac
 		pause
 	done
@@ -4073,6 +4257,7 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   port <协议> <端口>       修改端口
   addr                     修改客户端连接地址 / 节点名称
   reset                    重置全部 UUID / 密码 / 密钥
+  sni [--sni 域名]         更换 REALITY / ShadowTLS 伪装站点 (凭据不变)
   start | stop | restart | status
   log [singbox|xray]       查看日志
   update [singbox|xray] [版本]  更新内核 (默认全部; Xray 默认保持经过测试的版本)
@@ -4116,7 +4301,11 @@ OPT_PORTS=""
 parse_install_opts() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--preset) OPT_PRESET=$2 && shift ;;
+		--preset)
+			[[ "${2:-}" =~ ^[1-7]$ ]] || die "--preset 取值为 1-7"
+			OPT_PRESET=$2
+			shift
+			;;
 		--protocols)
 			OPT_PRESET=7
 			local x idx="" i p
@@ -4144,8 +4333,18 @@ parse_install_opts() {
 		--domain) OPT_DOMAIN=$2 && shift ;;
 		--addr) OPT_ADDR=$2 && shift ;;
 		--name) OPT_NAME=$2 && shift ;;
-		--port) OPT_PORTS+="$2 " && shift ;;
-		--hy2-hop) OPT_HY2_HOP=$2 && shift ;;
+		--port)
+			case " $ALL_PROTOCOLS " in *" ${2%%=*} "*) ;; *) die "--port 格式为 <协议>=<端口>, 未知协议: ${2%%=*}" ;; esac
+			[[ "${2#*=}" =~ ^[1-9][0-9]{0,4}$ ]] && [ "${2#*=}" -le 65535 ] || die "--port 端口无效: ${2#*=}"
+			OPT_PORTS+="$2 "
+			shift
+			;;
+		--hy2-hop)
+			[[ "${2:-}" =~ ^([1-9][0-9]*)-([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -ge 1024 ] && [ "${BASH_REMATCH[2]}" -le 65535 ] &&
+				[ "${BASH_REMATCH[1]}" -lt "${BASH_REMATCH[2]}" ] || die "--hy2-hop 格式为 起始-结束, 例如 20000-40000"
+			OPT_HY2_HOP=$2
+			shift
+			;;
 		--hy2-obfs) OPT_HY2_OBFS=y ;;
 		--hy2-core)
 			case "$2" in singbox | sing-box) OPT_HY2_CORE=singbox ;; xray) OPT_HY2_CORE=xray ;; *) die "--hy2-core 仅支持 singbox 或 xray" ;; esac
@@ -4229,7 +4428,12 @@ main() {
 	start | stop | restart | status) do_service "$cmd" ;;
 	log | logs) do_log "${1:-}" ;;
 	update)
-		[ -n "${2:-}" ] && XR_VERSION_WANT=${2#v}
+		if [ -n "${2:-}" ]; then
+			case "${1:-}" in
+			singbox | sing-box) SB_VERSION_WANT=${2#v} ;;
+			xray) XR_VERSION_WANT=${2#v} ;;
+			esac
+		fi
 		do_update_core "${1:-all}"
 		;;
 	update-script) do_update_script ;;
@@ -4237,7 +4441,11 @@ main() {
 	bbr) enable_bbr ;;
 	regen)
 		require_installed
-		apply_all
+		apply_or_die
+		;;
+	sni)
+		parse_install_opts "$@"
+		do_change_sni
 		;;
 	net-apply | hop-apply)
 		load_state && {

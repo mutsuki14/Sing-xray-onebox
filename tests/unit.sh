@@ -139,6 +139,49 @@ eq "uri_host IPv6" "$(uri_host)" "[2001:db8::1]"
 SERVER_ADDR="1.2.3.4"
 eq "uri_host IPv4" "$(uri_host)" "1.2.3.4"
 
+# --- 评审发现的问题回归测试 ------------------------------------------------
+reset_state
+PROTOCOLS="shadowsocks"
+pset CORE shadowsocks xray
+eq "端口前导零被拒绝" "$(yes_ port_ok 0443 shadowsocks 2>/dev/null)" no
+eq "端口 65536 被拒绝" "$(yes_ port_ok 65536 shadowsocks 2>/dev/null)" no
+
+# ask(): 去掉方向键产生的转义序列与控制字符
+printf 'HK\033[D\033[C-01\033OA\n' >"$WORK/tty"
+got=$(
+	AUTO_YES=0 TTY_IN="$WORK/tty"
+	v=""
+	ask v "名称" "x" 2>/dev/null
+	printf '%s' "$v"
+)
+eq "ask 去除转义序列" "$got" "HK-01"
+
+# 节点名含逗号时 sing-box 客户端 selector 与 tag 一致; 无 sing-box 可用协议时不输出配置
+reset_state
+PROTOCOLS="vless-reality shadowsocks" NODE_NAME="HK,01" SERVER_ADDR=1.2.3.4
+UUID=$(gen_uuid) SS_METHOD=2022-blake3-aes-128-gcm SS_PASSWORD=$(gen_ss_password 2022-blake3-aes-128-gcm)
+REALITY_SNI=www.microsoft.com REALITY_PUBLIC_KEY=abc REALITY_SHORT_ID=0123abcd
+pset PORT vless-reality 443
+pset PORT shadowsocks 8388
+if command -v jq >/dev/null 2>&1; then
+	eq "selector 引用的节点均存在" "$(gen_singbox_client notun | jq -r '([.outbounds[].tag]) as $t | [.outbounds[] | select(.type == "selector" or .type == "urltest") | .outbounds[] | select(. as $x | $t | index($x) | not)] | length')" 0
+fi
+PROTOCOLS="vless-xhttp"
+sb_gen_quiet() { gen_singbox_client notun >/dev/null; }
+eq "无 sing-box 可用协议时不生成" "$(yes_ sb_gen_quiet)" no
+
+# 端口跳跃范围仅在 Hysteria2 启用时生效
+PROTOCOLS="tuic" HY2_HOP="20000-40000"
+eq "未启用 Hysteria2 时不占用跳跃范围" "$(yes_ port_in_hop_range 25000)" no
+PROTOCOLS="hysteria2 tuic"
+eq "启用 Hysteria2 时占用跳跃范围" "$(yes_ port_in_hop_range 25000)" yes
+
+# VMess TLS 状态固定, 不随证书方式变化
+PROTOCOLS="vmess-ws" TLS_MODE=self VMESS_TLS=1
+eq "VMESS_TLS=1 覆盖自签默认" "$(yes_ vmess_tls_enabled)" yes
+TLS_MODE=acme VMESS_TLS=0
+eq "VMESS_TLS=0 覆盖 ACME 默认" "$(yes_ vmess_tls_enabled)" no
+
 # 显示宽度补齐
 eq "pad 中文" "$(pad 协议 6)|" "协议  |"
 eq "pad ASCII" "$(pad ab 4)|" "ab  |"
