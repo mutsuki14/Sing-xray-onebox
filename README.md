@@ -7,7 +7,7 @@
 分享链接、Base64 订阅与二维码。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
 ```
 
 安装完成后，随时输入 `onebox` 打开管理菜单。
@@ -27,6 +27,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
   Alpine / Arch / openSUSE 等；systemd 与 OpenRC；amd64 / arm64 / armv7 / armv6 / 386 / s390x / riscv64 / loong64 等架构。
   sing-box 优先使用 musl 静态构建，老旧 glibc 与 Alpine 均可运行。
 - **证书**：自签证书（客户端自动固定证书指纹，无需关闭校验即可安全连接）/ Let's Encrypt（HTTP 验证或 Cloudflare DNS 验证，acme.sh 自动续期）/ 自有证书。
+- **自有域名 REALITY 网站**：使用自己的域名一键生成可编辑的主页、申请 Let's Encrypt 证书并自动续期，普通浏览器与 REALITY 客户端共用公网入口。
 - **贴心细节**：自动检测端口占用、放行防火墙（ufw / firewalld / iptables，含甲骨文云默认规则）、Hysteria2 端口跳跃、BBR、
   屏蔽 BT 与回环/内网访问、配置写入前先经内核校验（失败不覆盖旧配置）、国内服务器 GitHub 加速。
 - **经过真实流量测试**：仓库自带端到端测试，覆盖 *协议 × 服务端内核 × 客户端* 的全部组合（TCP 与 UDP）。
@@ -37,16 +38,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 
 ```bash
 # curl
-bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
 
 # 或 wget
-bash <(wget -qO- https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
 
 # Alpine 默认没有 bash 与 curl: 可先 apk add --no-cache bash curl, 或者下载后用 sh 运行 (脚本会自动安装 bash):
-wget -O onebox.sh https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh && sh onebox.sh
+wget -O onebox.sh https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh && sh onebox.sh
 
 # 国内服务器 (GitHub 访问困难) 可设置加速前缀:
-GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
+GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
 ```
 
 运行后选择 **1. 安装**，依次选择协议组合、伪装站点、证书方式与端口（直接回车即使用推荐的默认值），脚本会完成其余全部工作。
@@ -85,6 +86,52 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 >
 > **关于 Xray 版本**：脚本默认安装经过测试的 Xray 26.3.27。更新的 Xray（26.4 之后）REALITY 服务端要求客户端支持
 > X25519MLKEM768，会拒绝 sing-box 客户端，因此 `onebox update xray` 会先提示确认；也可用 `--xray-version latest` 显式指定。
+
+## 使用自己的域名作为 REALITY 网站
+
+安装时、首次添加 REALITY 协议时，或执行 `onebox sni` 更换目标时，在 REALITY 目标站点菜单选择 **7. 自有域名一键建站**，输入域名和网站标题即可。
+脚本会建立一个可直接访问的主页，为该域名申请 Let's Encrypt 证书，并将 REALITY 的握手目标设为本机网站。
+已有节点切换此模式时保留 UUID 与 REALITY 密钥，客户端需要更新 SNI，或重新导入生成的配置。
+
+开始前需要：
+
+- 将域名的 A / AAAA 记录直接解析到此 VPS 的公网地址；使用 Cloudflare 等 DNS 服务时关闭该记录的 CDN 代理。配置了 AAAA 时，对应 IPv6 地址也必须可达。
+- 在云安全组中放行 **TCP 80** 和实际使用的 **REALITY TCP 端口**。TCP 80 用于网站访问和证书申请、自动续期，需持续可达。
+- 确保 TCP 80 未被其他程序占用。脚本使用独立 nginx 实例，不接管现有 nginx 网站；发现端口冲突会明确报错。
+
+```bash
+# 新安装：默认协议组合 + 自有域名网站
+bash onebox.sh install --preset 1 --reality-site www.example.com --site-title "我的手记" -y
+
+# 已安装：将 REALITY 目标切换为自己的域名
+onebox sni --reality-site www.example.com --site-title "我的手记"
+
+# 添加 REALITY 协议时启用自有域名网站
+onebox add vless-reality --reality-site www.example.com
+
+# 查看网站地址、文件位置和证书信息；必要时手动强制续期
+onebox site info
+onebox site renew
+```
+
+`onebox site` 与 `onebox site info` 等效。`--reality-site` 不能与 `--sni` 或 `--reality-dest` 同时使用。
+
+网站与代理的连接方式：
+
+| 流量 | 处理方式 |
+|---|---|
+| 浏览器访问 HTTP 80 | nginx 提供 ACME 验证文件，其余请求跳转到网站 HTTPS 地址 |
+| 浏览器访问 REALITY 公网端口 | REALITY 将普通 TLS 请求转给本机 nginx，呈现网站 |
+| 合法 REALITY 客户端 | 由相应 sing-box / Xray 核心处理代理流量 |
+| nginx 的 HTTPS 监听 | 仅监听 `127.0.0.1`；优先分配 8444，冲突时尝试 9444 等空闲端口，无需对公网开放 |
+
+网站地址优先使用监听 443 的 REALITY 入站；没有 REALITY 443 时，地址会包含实际端口，例如 `https://www.example.com:8443/`。
+脚本提供的本机 HTTPS 网站启用 TLS 1.3 和 HTTP/2；网站使用独立的 acme.sh 目录管理证书与续期任务。
+
+默认主页位于 **`/var/lib/onebox-site/index.html`**，可直接编辑 HTML 替换内容；`onebox regen` 不会覆盖用户修改后的主页。
+其他代理协议使用 HTTP 验证证书时，启用网站会将验证迁移到网站目录，避免争用 80 端口；停用网站时恢复 standalone 验证。
+切换回外部 REALITY 目标，或删除最后一个 REALITY 协议时，脚本停止托管网站和其续期任务，但保留网页内容。
+执行 `onebox uninstall` 会删除托管网站及其管理文件，保留系统安装的 nginx 软件包。
 
 ## 客户端导入
 
@@ -131,6 +178,8 @@ onebox port <协议> <端口>  修改端口            例: onebox port vless-re
 onebox addr                修改客户端连接地址 / 节点名称
 onebox reset               重置全部 UUID / 密码 / 密钥
 onebox sni [--sni 域名]    更换 REALITY / ShadowTLS 伪装站点 (凭据不变)
+onebox sni --reality-site 域名   使用自有域名一键建站并设为 REALITY 目标
+onebox site [info|renew]    查看托管网站信息 / 强制续期网站证书
 onebox start | stop | restart | status
 onebox log [singbox|xray]  查看日志
 onebox update [singbox|xray]   更新内核
@@ -165,6 +214,8 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `--protocols a,b,...` | 自定义协议列表 |
 | `--core singbox\|xray` | 两种内核都支持的协议优先使用的内核 |
 | `--sni <域名>` | REALITY / ShadowTLS 伪装站点 |
+| `--reality-site <域名>` | 自有域名 REALITY 网站，自动建站、申请证书与续期；不能与 `--sni` / `--reality-dest` 同用 |
+| `--site-title <标题>` | 自动生成主页的标题（默认“山间手记”；已有主页不会被覆盖） |
 | `--tls self\|acme\|cf` | 证书方式：自签 / ACME HTTP 验证 / ACME Cloudflare DNS 验证 |
 | `--domain <域名>` | 证书域名 |
 | `--addr <IP或域名>` | 客户端连接地址（默认自动检测公网 IP） |
@@ -187,6 +238,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `/etc/onebox/sing-box.json`、`/etc/onebox/xray.json` | 服务端配置 |
 | `/etc/onebox/tls/` | 证书 |
 | `/etc/onebox/client/` | 客户端配置、分享链接、订阅 |
+| `/var/lib/onebox-site/index.html` | 自有域名网站主页，可直接编辑；具体管理路径见 `onebox site info` |
 | `/opt/onebox/bin/` | sing-box / xray 内核 |
 | `onebox-sing-box`、`onebox-xray` | 系统服务名 (systemd / OpenRC) |
 | `/usr/local/bin/onebox` | 管理命令 |
@@ -201,6 +253,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 3. REALITY 连接失败时尝试更换伪装站点：`onebox sni`（或菜单 15，UUID 与密钥保持不变），站点需支持 TLS 1.3，且尽量与服务器地理位置接近。
 
 **REALITY 伪装站点怎么选？** 选择支持 TLS 1.3 / H2、非 CDN 回源、在国内可正常访问的大站，例如 `www.microsoft.com`、`www.apple.com`、`addons.mozilla.org`。脚本会自动检测所选站点是否支持 TLS 1.3。
+也可在目标菜单选择 7，使用自己的域名一键建站；准备要求与管理方式见上文“使用自己的域名作为 REALITY 网站”。
 
 **国内 VPS 下载失败？** 设置 `GH_PROXY=https://ghfast.top/`（或其他可用的 GitHub 加速前缀）后重新运行。
 

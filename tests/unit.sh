@@ -187,6 +187,12 @@ eq "IPv4 合法" "$(yes_ valid_ipv4 1.2.3.4)" yes
 eq "IPv4 越界" "$(yes_ valid_ipv4 1.2.3.256)" no
 eq "IPv6 合法" "$(yes_ valid_ipv6 2001:db8::1)" yes
 eq "IPv6 非法" "$(yes_ valid_ipv6 example.com)" no
+for addr in :: ::1 2001:db8:: 1:2:3:4:5:6:7:8 ::ffff:192.0.2.1 1:2:3:4:5:6:192.0.2.1; do
+	eq "IPv6 完整校验接受 $addr" "$(yes_ valid_ipv6 "$addr")" yes
+done
+for addr in :::: 1:2:3 1::2::3 1:2:3:4:5:6:7:8:9 1:2:3:4:5:6:7::8 12345::1 1:2:3:4:5:6:7: ::ffff:999.0.0.1 1:2:3:4:5:192.0.2.1; do
+	eq "IPv6 完整校验拒绝 $addr" "$(yes_ valid_ipv6 "$addr")" no
+done
 
 # 屏蔽本机地址 (排除 WARP 出口)
 ip() { :; }
@@ -241,7 +247,15 @@ eq "跳跃范围不冲突" "$(yes_ hop_range_conflicts 40001-50000)" no
 # 跳跃范围内其他程序的 UDP 监听: 内核 WireGuard (无属主) / tailscaled 需提示;
 # 回环地址与 onebox 自身内核 (按可执行文件判断) 的套接字不提示
 pset PORT hysteria2 8443
-SELF_EXE=$(readlink /proc/$$/exe)
+SELF_EXE=/test/onebox/core
+# 固定模拟 PID 与可执行路径, 不依赖测试容器能否读取真实 /proc/<pid>/exe。
+readlink() {
+	case "$1" in
+	/proc/424242/exe) printf '%s\n' "$SELF_EXE" ;;
+	/proc/1/exe) printf '%s\n' /test/foreign/tailscaled ;;
+	*) command readlink "$@" ;;
+	esac
+}
 ss() {
 	cat <<SS
 State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
@@ -249,14 +263,14 @@ UNCONN 0      0            0.0.0.0:51820      0.0.0.0:*
 UNCONN 0      0               [::]:51820         [::]:*
 UNCONN 0      0            0.0.0.0:41641      0.0.0.0:*    users:(("tailscaled",pid=1,fd=18))
 UNCONN 0      0          127.0.0.1:45000      0.0.0.0:*    users:(("dnsmasq",pid=1,fd=4))
-UNCONN 0      0            0.0.0.0:47000      0.0.0.0:*    users:(("sing-box",pid=$$,fd=9))
-UNCONN 0      0            0.0.0.0:31000      0.0.0.0:*    users:(("sing-box",pid=$$,fd=7))
+UNCONN 0      0            0.0.0.0:47000      0.0.0.0:*    users:(("sing-box",pid=424242,fd=9))
+UNCONN 0      0            0.0.0.0:31000      0.0.0.0:*    users:(("sing-box",pid=424242,fd=7))
 SS
 }
 eq "跳跃范围内的外部 UDP 监听" "$(SB_BIN=$SELF_EXE hop_range_foreign_udp 30000-60000)" "51820 41641"
 eq "同名但非 onebox 内核的进程仍提示" "$(SB_BIN=/nonexistent hop_range_foreign_udp 46000-48000)" 47000
 eq "范围外无提示" "$(yes_ hop_range_foreign_udp 20000-25000)" no
-unset -f ss
+unset -f ss readlink
 
 # 自有证书: 保留 certbot live/ 符号链接路径 (续期后生效)
 mkdir -p "$WORK/le/archive" "$WORK/le/live"

@@ -13,13 +13,18 @@ jobs:
       - name: bash -n
         run: |
           bash -n onebox.sh
-          bash -n tests/e2e.sh
-          bash -n tests/lifecycle.sh
-          bash -n tests/unit.sh
+          for test in tests/*.sh; do bash -n "$test"; done
       - name: shellcheck
         run: shellcheck -s bash -S warning onebox.sh tests/*.sh
       - name: unit tests
         run: bash tests/unit.sh
+      - name: Owned-domain REALITY site regressions
+        run: bash tests/site.sh
+      - name: Failure-path and compatibility regressions
+        run: |
+          for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh; do
+            bash "$test" || exit 1
+          done
 
   test:
     runs-on: ubuntu-latest
@@ -28,6 +33,17 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - name: Extract nginx config checker without installing a system service
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          mkdir -p "$RUNNER_TEMP/nginx-package" "$RUNNER_TEMP/nginx-root"
+          cd "$RUNNER_TEMP/nginx-package"
+          apt-get download nginx
+          dpkg-deb -x nginx_*.deb "$RUNNER_TEMP/nginx-root"
+          test -x "$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
+      - name: Validate generated nginx configs with a real nginx binary
+        run: sudo env ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site.sh
 
       - name: Download cores with the script's own installer functions
         run: |
@@ -50,6 +66,11 @@ jobs:
           curl -fsSL "$url" | gunzip > "$RUNNER_TEMP/bin/mihomo"
           chmod +x "$RUNNER_TEMP/bin/mihomo"
           "$RUNNER_TEMP/bin/mihomo" -v
+
+      - name: Owned-domain REALITY website through real nginx and both cores
+        run: |
+          sudo env SB="$RUNNER_TEMP/bin/sing-box" XR="$RUNNER_TEMP/bin/xray" \
+            ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site-e2e.sh
 
       - name: End-to-end matrix (protocol x server core x client)
         run: |
