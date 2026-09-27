@@ -242,7 +242,32 @@ ask_secret() {
 }
 
 valid_ipv4() { [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] && [ "${BASH_REMATCH[1]}" -le 255 ] && [ "${BASH_REMATCH[2]}" -le 255 ] && [ "${BASH_REMATCH[3]}" -le 255 ] && [ "${BASH_REMATCH[4]}" -le 255 ]; }
-valid_ipv6() { [[ "$1" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$1" == *:*:* ]]; }
+valid_ipv6() {
+	local addr=$1 left right part tail count=0 compressed=0
+	local groups=()
+	[[ "$addr" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$addr" == *:* ]] || return 1
+	# An IPv4 suffix occupies the final two 16-bit groups.
+	if [[ "$addr" == *.* ]]; then
+		tail=${addr##*:}
+		valid_ipv4 "$tail" || return 1
+		addr="${addr%:*}:0:0"
+	fi
+	if [[ "$addr" == *::* ]]; then
+		compressed=1
+		left=${addr%%::*} right=${addr#*::}
+		[[ "$right" != *::* && "$left" != *: && "$right" != :* ]] || return 1
+		addr="${left}${left:+:}${right}"
+		addr=${addr%:}
+	else
+		[[ "$addr" != :* && "$addr" != *: ]] || return 1
+	fi
+	IFS=: read -r -a groups <<<"$addr"
+	for part in "${groups[@]}"; do
+		[[ "$part" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+		count=$((count + 1))
+	done
+	if [ "$compressed" = 1 ]; then [ "$count" -lt 8 ]; else [ "$count" -eq 8 ]; fi
+}
 
 # 合法域名 (至少包含一个点, 仅字母数字与连字符)
 valid_domain() {
@@ -720,28 +745,32 @@ pget() {
 pset() { printf -v "$1_${2//-/_}" '%s' "$3"; }
 
 save_state() {
-	mkdir -p "$ONEBOX_DIR" && chmod 700 "$ONEBOX_DIR"
-	local tmp="${STATE_FILE}.tmp" k p v
+	mkdir -p "$ONEBOX_DIR" && chmod 700 "$ONEBOX_DIR" || return 1
+	local tmp k p v failed=0
+	tmp=$(mktemp "${STATE_FILE}.tmp.XXXXXX") || return 1
 	{
-		echo "# Sing-Xray-Onebox 状态文件 (由脚本自动生成, 请勿手动修改)"
-		for k in $STATE_KEYS; do printf '%s=%q\n' "$k" "${!k-}"; done
+		printf '%s\n' '# Sing-Xray-Onebox 状态文件 (由脚本自动生成, 请勿手动修改)' || failed=1
+		for k in $STATE_KEYS; do printf '%s=%q\n' "$k" "${!k-}" || failed=1; done
 		for p in $ALL_PROTOCOLS; do
 			for k in PORT CORE; do
 				v="${k}_${p//-/_}"
-				if [ -n "${!v-}" ]; then printf '%s=%q\n' "$v" "${!v}"; fi
+				if [ -n "${!v-}" ]; then printf '%s=%q\n' "$v" "${!v}" || failed=1; fi
 			done
 		done
-	} >"$tmp"
-	[ -s "$tmp" ] || die "无法写入 ${STATE_FILE}"
-	chmod 600 "$tmp"
-	mv -f "$tmp" "$STATE_FILE"
+	} >"$tmp" || failed=1
+	if [ "$failed" = 0 ] && [ -s "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$STATE_FILE"; then return 0; fi
+	rm -f "$tmp"
+	err "无法完整保存状态文件: ${STATE_FILE}"
+	return 1
 }
 
 load_state() {
 	[ -f "$STATE_FILE" ] || return 1
+	bash -n "$STATE_FILE" 2>/dev/null || { err "状态文件语法无效: ${STATE_FILE}"; return 1; }
 	reset_state
 	# shellcheck disable=SC1090
-	. "$STATE_FILE"
+	. "$STATE_FILE" || { err "状态文件加载失败: ${STATE_FILE}"; return 1; }
+	[ -n "$PROTOCOLS" ] || { err "状态文件缺少协议列表: ${STATE_FILE}"; return 1; }
 	# 旧版本状态文件没有 VMESS_TLS: 按当时的规则推导并固定下来
 	if proto_enabled vmess-ws && [ -z "${VMESS_TLS:-}" ]; then
 		if vmess_tls_default; then VMESS_TLS=1; else VMESS_TLS=0; fi
@@ -1137,7 +1166,7 @@ svc_write() {
 After=onebox-site.service"
 	case "$INIT" in
 	systemd)
-		cat >"/etc/systemd/system/${name}.service" <<EOF
+		cat >"/etc/systemd/system/${name}.service" <<EOF || return 1
 [Unit]
 Description=Sing-Xray-Onebox $(core_title "$core") Service
 Documentation=https://github.com/${SCRIPT_REPO}
@@ -1156,10 +1185,10 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-		systemctl daemon-reload >/dev/null 2>&1
+		systemctl daemon-reload >/dev/null 2>&1 || return 1
 		;;
 	openrc)
-		cat >"${INITD_DIR}/${name}" <<EOF
+		cat >"${INITD_DIR}/${name}" <<EOF || return 1
 #!/sbin/openrc-run
 
 name="${name}"
@@ -1188,7 +1217,7 @@ start_pre() {
 	return 0
 }
 EOF
-		chmod 755 "${INITD_DIR}/${name}"
+		chmod 755 "${INITD_DIR}/${name}" || return 1
 		;;
 	esac
 	return 0
@@ -1208,8 +1237,12 @@ svc_disable() {
 	local name
 	name=$(svc_name "$1")
 	case "$INIT" in
-	systemd) systemctl disable "$name" >/dev/null 2>&1 ;;
-	openrc) rc-update del "$name" default >/dev/null 2>&1 ;;
+	systemd) systemctl disable "$name" >/dev/null 2>&1 || return 1 ;;
+	openrc)
+		if rc-update show default 2>/dev/null | grep -qw "$name"; then
+			rc-update del "$name" default >/dev/null 2>&1 || return 1
+		fi
+		;;
 	esac
 	return 0
 }
@@ -1273,15 +1306,16 @@ _none_autostart_add() {
 	(
 		crontab -l 2>/dev/null
 		echo "@reboot ${CMD_PATH} net-apply >/dev/null 2>&1; ${CMD_PATH} start >/dev/null 2>&1"
-	) | crontab - 2>/dev/null
+	) | crontab - 2>/dev/null || return 1
 	return 0
 }
 
 _none_autostart_del() {
 	has crontab || return 0
-	crontab -l 2>/dev/null | grep -q "${CMD_PATH} start" || return 0
-	crontab -l 2>/dev/null | grep -v "${CMD_PATH} start" | crontab - 2>/dev/null
-	return 0
+	local current
+	current=$(crontab -l 2>/dev/null) || return 0
+	printf '%s\n' "$current" | grep -qF "${CMD_PATH} start" || return 0
+	printf '%s\n' "$current" | grep -vF "${CMD_PATH} start" | crontab - 2>/dev/null
 }
 
 svc_start() {
@@ -1298,9 +1332,9 @@ svc_stop() {
 	local core=$1 name
 	name=$(svc_name "$core")
 	case "$INIT" in
-	systemd) systemctl stop "$name" >/dev/null 2>&1 ;;
-	openrc) rc-service "$name" stop >/dev/null 2>&1 ;;
-	none) _none_stop "$core" ;;
+	systemd) systemctl stop "$name" >/dev/null 2>&1 || return 1 ;;
+	openrc) rc-service "$name" stop >/dev/null 2>&1 || return 1 ;;
+	none) _none_stop "$core" || return 1 ;;
 	esac
 	return 0
 }
@@ -1311,7 +1345,7 @@ svc_restart() {
 	systemd) systemctl restart "$(svc_name "$core")" >/dev/null 2>&1 ;;
 	openrc) rc-service "$(svc_name "$core")" restart >/dev/null 2>&1 ;;
 	none)
-		svc_stop "$core"
+		svc_stop "$core" || return 1
 		svc_start "$core"
 		;;
 	esac
@@ -1360,15 +1394,17 @@ svc_exists() {
 svc_remove() {
 	local core=$1 name
 	name=$(svc_name "$core")
-	svc_stop "$core"
-	svc_disable "$core"
+	# 未安装的服务无需 stop/disable (systemd 对不存在的 unit 返回失败)。
+	svc_exists "$core" || return 0
+	svc_stop "$core" || return 1
+	svc_disable "$core" || return 1
 	case "$INIT" in
 	systemd)
-		rm -f "/etc/systemd/system/${name}.service"
-		systemctl daemon-reload >/dev/null 2>&1
+		rm -f "/etc/systemd/system/${name}.service" || return 1
+		systemctl daemon-reload >/dev/null 2>&1 || return 1
 		systemctl reset-failed "$name" >/dev/null 2>&1
 		;;
-	openrc) rm -f "${INITD_DIR}/${name}" ;;
+	openrc) rm -f "${INITD_DIR}/${name}" || return 1 ;;
 	esac
 	return 0
 }
@@ -1397,15 +1433,21 @@ apply_services() {
 	site_apply_service || return 1
 	for core in singbox xray; do
 		if core_used "$core"; then
-			svc_write "$core"
-			svc_enable "$core"
+			svc_write "$core" || return 1
+			svc_enable "$core" || return 1
 		elif svc_exists "$core"; then
-			svc_remove "$core"
+			svc_remove "$core" || return 1
 		fi
 	done
 	# 先全部停止再启动: 端口在两个内核之间迁移时 (如 REALITY 从 Xray 改到 sing-box) 避免冲突
-	for core in singbox xray; do core_used "$core" && svc_stop "$core"; done
-	for core in singbox xray; do core_used "$core" && svc_start "$core"; done
+	for core in singbox xray; do
+		core_used "$core" || continue
+		svc_stop "$core" || return 1
+	done
+	for core in singbox xray; do
+		core_used "$core" || continue
+		svc_start "$core" || ok=1
+	done
 	sleep 2
 	for core in singbox xray; do
 		core_used "$core" || continue
@@ -1457,14 +1499,27 @@ _ipt_rule() {
 		;;
 	del | delc | delp)
 		# del: 两种形式都删; delc: 仅删带 onebox 注释的; delp: 仅删无注释的 (仅用于本脚本在缺少 xt_comment 时添加的规则)
-		local n=0
+		local status
 		if [ "$act" != delp ]; then
-			while "$t" -t "$table" -D "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
+			while :; do
+				"$t" -t "$table" -D "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null
+				status=$?
+				[ "$status" = 0 ] || break
+			done
+			# 无匹配规则 / 缺少 comment 模块可继续; 权限或锁错误必须保留台账并上报。
+			[ "$status" -le 2 ] || return 1
+			"$t" -t "$table" -C "$chain" "${m[@]}" -m comment --comment onebox "${j[@]}" 2>/dev/null && return 1
 		fi
 		if [ "$act" != delc ]; then
-			while "$t" -t "$table" -D "$chain" "${m[@]}" "${j[@]}" 2>/dev/null; do n=$((n + 1)); done
+			while :; do
+				"$t" -t "$table" -D "$chain" "${m[@]}" "${j[@]}" 2>/dev/null
+				status=$?
+				[ "$status" = 0 ] || break
+			done
+			[ "$status" -le 1 ] || return 1
+			"$t" -t "$table" -C "$chain" "${m[@]}" "${j[@]}" 2>/dev/null && return 1
 		fi
-		[ "$n" -gt 0 ]
+		return 0
 		;;
 	esac
 }
@@ -1473,7 +1528,9 @@ _ipt_rule() {
 # 跳过 iptables-nft 兼容表 (链名 INPUT, 由 iptables 分支处理) 与 firewalld 自己的表
 _fw_nft_block_chains() {
 	has nft || return 0
-	nft list ruleset 2>/dev/null | awk '
+	local rules
+	rules=$(nft list ruleset 2>/dev/null) || return 1
+	printf '%s\n' "$rules" | awk '
 		$1 == "table" { fam = $2; tbl = $3; next }
 		$1 == "chain" { ch = $2; hook = 0; blk = 0; next }
 		/hook input/ { hook = 1; if (/policy drop/) blk = 1; next }
@@ -1486,20 +1543,22 @@ _fw_nft_block_chains() {
 
 # _fw_nft open|close 端口或范围(a-b) tcp|udp
 _fw_nft() {
-	local act=$1 port=$2 proto=$3 fam tbl ch h rule
+	local act=$1 port=$2 proto=$3 fam tbl ch h rule rc=0 chains listing
 	rule="$proto dport $port accept comment \"onebox\""
+	chains=$(_fw_nft_block_chains) || return 1
 	while read -r fam tbl ch; do
 		[ -n "$ch" ] || continue
 		if [ "$act" = open ]; then
 			nft list chain "$fam" "$tbl" "$ch" 2>/dev/null | grep -qF "$rule" && continue
-			nft insert rule "$fam" "$tbl" "$ch" "$proto" dport "$port" accept comment '"onebox"' 2>/dev/null
+			nft insert rule "$fam" "$tbl" "$ch" "$proto" dport "$port" accept comment '"onebox"' 2>/dev/null || rc=1
 		else
-			for h in $(nft -a list chain "$fam" "$tbl" "$ch" 2>/dev/null | grep -F "$rule" | sed -n 's/.*# handle \([0-9]*\).*/\1/p'); do
-				nft delete rule "$fam" "$tbl" "$ch" handle "$h" 2>/dev/null
+			listing=$(nft -a list chain "$fam" "$tbl" "$ch" 2>/dev/null) || { rc=1; continue; }
+			for h in $(printf '%s\n' "$listing" | grep -F "$rule" | sed -n 's/.*# handle \([0-9]*\).*/\1/p'); do
+				nft delete rule "$fam" "$tbl" "$ch" handle "$h" 2>/dev/null || rc=1
 			done
 		fi
-	done < <(_fw_nft_block_chains)
-	return 0
+	done <<<"$chains"
+	return "$rc"
 }
 
 # 防火墙台账: 记录本脚本实际添加的放行规则 ("后端 端口/协议"), 关闭时只删除台账中的规则,
@@ -1531,7 +1590,7 @@ _fw_ledger_del() {
 
 # fw_rule open|close 端口或范围(a-b) tcp|udp
 fw_rule() {
-	local act=$1 port=$2 proto=$3 ipt_port=${2/-/:} t key="${2}/${3}"
+	local act=$1 port=$2 proto=$3 ipt_port=${2/-/:} t key="${2}/${3}" rc=0
 	# ufw / firewalld 自己管理 INPUT, 此时不再直接改 iptables (否则规则重复, 且 ufw 下 INPUT 策略恒为 DROP)
 	if _fw_ufw_active; then
 		if [ "$act" = open ]; then
@@ -1545,19 +1604,23 @@ fw_rule() {
 			LC_ALL=C ufw status 2>/dev/null | grep -vE ' on |OUT|FWD' |
 				grep -qE "^${ipt_port}(/${proto})?( \(v6\))?[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere" && return 0
 			ufw allow "${ipt_port}/${proto}" comment onebox >/dev/null 2>&1 || ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1 || return 1
-			_fw_ledger_add "ufw $key"
+			_fw_ledger_add "ufw $key" || return 1
 		elif _fw_ledger_has "ufw $key"; then
 			ufw delete allow "${ipt_port}/${proto}" >/dev/null 2>&1 || return 1
-			_fw_ledger_del "ufw $key"
+			_fw_ledger_del "ufw $key" || return 1
 		fi
 		return 0
 	fi
 	if _fw_firewalld_active; then
 		# 运行时 + 永久各写一次, 不做 --reload: 每次 reload 要数秒, 且 iptables 后端 (CentOS 7) 的 reload 会清掉端口跳跃的 NAT 规则
 		# 默认路由网卡若被绑定到非默认 zone, 端口要开在那个 zone 里
-		local z=() zone dev
+		local z=() zone="" dev
 		dev=$(ip route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
-		[ -n "$dev" ] && zone=$(firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null)
+		[ -n "$dev" ] || dev=$(ip -6 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+		if [ -n "$dev" ]; then
+			# 未绑定 zone 时命令会输出 "no zone" 并失败, 应使用默认 zone。
+			zone=$(firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null) || zone=""
+		fi
 		[ -n "$zone" ] && z=(--zone="$zone")
 		if [ "$act" = open ]; then
 			if ! _fw_ledger_has "firewalld $key"; then
@@ -1567,12 +1630,13 @@ fw_rule() {
 				fi
 			fi
 			firewall-cmd "${z[@]}" --add-port="${port}/${proto}" >/dev/null 2>&1 || return 1
+			# runtime 已修改便立即记录, permanent 失败时回滚仍能关闭本次新增端口。
+			_fw_ledger_add "firewalld $key" || return 1
 			firewall-cmd "${z[@]}" --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || return 1
-			_fw_ledger_add "firewalld $key"
 		elif _fw_ledger_has "firewalld $key"; then
 			firewall-cmd "${z[@]}" --remove-port="${port}/${proto}" >/dev/null 2>&1 || return 1
 			firewall-cmd "${z[@]}" --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1 || return 1
-			_fw_ledger_del "firewalld $key"
+			_fw_ledger_del "firewalld $key" || return 1
 		fi
 		return 0
 	fi
@@ -1583,17 +1647,24 @@ fw_rule() {
 			_fw_iptables_blocking "$t" || continue
 			_ipt_rule "$t" check filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && continue
 			# 带注释的规则可凭注释识别; 仅无注释的回退形式需要记入台账
-			_ipt_rule "$t" add filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT && [ "$IPT_PLAIN" = 1 ] && _fw_ledger_add "$t $key"
+			if _ipt_rule "$t" add filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT; then
+				if [ "$IPT_PLAIN" = 1 ]; then _fw_ledger_add "$t $key" || rc=1; fi
+			else
+				rc=1
+			fi
 		else
-			_ipt_rule "$t" delc filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
+			_ipt_rule "$t" delc filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT || rc=1
 			if _fw_ledger_has "$t $key"; then
-				_ipt_rule "$t" delp filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT
-				_fw_ledger_del "$t $key"
+				if _ipt_rule "$t" delp filter INPUT -p "$proto" --dport "$ipt_port" -- -j ACCEPT; then
+					_fw_ledger_del "$t $key" || rc=1
+				else
+					rc=1
+				fi
 			fi
 		fi
 	done
-	_fw_nft "$act" "$port" "$proto"
-	return 0
+	_fw_nft "$act" "$port" "$proto" || rc=1
+	return "$rc"
 }
 
 # 旧版本安装 (无台账) 通过 ufw / firewalld 放行的端口: 首次使用时记入台账, 以便之后能正常关闭
@@ -1603,43 +1674,43 @@ _fw_ledger_migrate() {
 	local backend="" p port net
 	_fw_ufw_active && backend=ufw
 	[ -z "$backend" ] && _fw_firewalld_active && backend=firewalld
-	mkdir -p "$ONEBOX_DIR" && : >"$(_fw_ledger)"
+	mkdir -p "$ONEBOX_DIR" && : >"$(_fw_ledger)" || return 1
 	[ -n "$backend" ] || return 0
 	for p in $PROTOCOLS; do
 		port=$(pget PORT "$p")
 		[ -n "$port" ] || continue
 		net=$(proto_net "$p")
-		[ "$net" != udp ] && _fw_ledger_add "$backend ${port}/tcp"
-		[ "$net" != tcp ] && _fw_ledger_add "$backend ${port}/udp"
+		if [ "$net" != udp ]; then _fw_ledger_add "$backend ${port}/tcp" || return 1; fi
+		if [ "$net" != tcp ]; then _fw_ledger_add "$backend ${port}/udp" || return 1; fi
 	done
-	[ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ] && _fw_ledger_add "$backend 80/tcp"
+	if [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then _fw_ledger_add "$backend 80/tcp" || return 1; fi
 	return 0
 }
 
 # 放行 / 关闭当前全部协议端口 (幂等; 开机时由 onebox-net 服务重新执行, 不依赖系统的规则保存机制)
 fw_apply() {
-	local act=${1:-open} p port net
-	_fw_ledger_migrate
+	local act=${1:-open} p port net rc=0
+	_fw_ledger_migrate || return 1
 	for p in $PROTOCOLS; do
 		port=$(pget PORT "$p")
 		[ -n "$port" ] || continue
 		net=$(proto_net "$p")
 		case "$net" in
-		tcp) fw_rule "$act" "$port" tcp ;;
-		udp) fw_rule "$act" "$port" udp ;;
+		tcp) fw_rule "$act" "$port" tcp || rc=1 ;;
+		udp) fw_rule "$act" "$port" udp || rc=1 ;;
 		both)
-			fw_rule "$act" "$port" tcp
-			fw_rule "$act" "$port" udp
+			fw_rule "$act" "$port" tcp || rc=1
+			fw_rule "$act" "$port" udp || rc=1
 			;;
 		esac
 	done
 	# ACME HTTP-01 (standalone) 申请与续期都需要入站 TCP 80
 	if [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then
-		fw_rule "$act" 80 tcp
+		fw_rule "$act" 80 tcp || rc=1
 	fi
-	site_enabled && fw_rule "$act" 80 tcp
+	if site_enabled; then fw_rule "$act" 80 tcp || rc=1; fi
 	# 端口跳跃: NAT 在 INPUT 之前完成, INPUT 看到的已是 Hysteria2 实际端口, 无需放行整个范围 (云安全组仍需放行)
-	return 0
+	return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -1739,12 +1810,15 @@ hop_rules() {
 
 # 开机自动恢复防火墙放行与端口跳跃 (onebox net-apply = fw_apply open + hop_rules add)
 # 排在各防火墙服务之后: nftables.service 的 "flush ruleset"、firewalld/netfilter-persistent 的加载都会清掉先加的规则
+_net_service_file() { printf '/etc/systemd/system/%s.service' "$NET_SERVICE"; }
+
 net_persist() {
-	local act=$1
+	local act=$1 unit
+	unit=$(_net_service_file)
 	case "$INIT" in
 	systemd)
 		if [ "$act" = add ]; then
-			cat >"/etc/systemd/system/${NET_SERVICE}.service" <<EOF
+			cat >"$unit" <<EOF || return 1
 [Unit]
 Description=Sing-Xray-Onebox firewall openings and Hysteria2 port hopping
 After=network-online.target netfilter-persistent.service iptables.service ip6tables.service nftables.service firewalld.service ufw.service
@@ -1758,34 +1832,35 @@ ExecStart=${CMD_PATH} net-apply
 [Install]
 WantedBy=multi-user.target
 EOF
-			systemctl daemon-reload >/dev/null 2>&1
-			systemctl enable "$NET_SERVICE" >/dev/null 2>&1
+			systemctl daemon-reload >/dev/null 2>&1 || return 1
+			systemctl enable "$NET_SERVICE" >/dev/null 2>&1 || return 1
 		else
-			systemctl disable "$NET_SERVICE" >/dev/null 2>&1
-			rm -f "/etc/systemd/system/${NET_SERVICE}.service"
-			systemctl daemon-reload >/dev/null 2>&1
+			if [ -e "$unit" ] || [ -L "$unit" ]; then
+				systemctl disable "$NET_SERVICE" >/dev/null 2>&1 || return 1
+				rm -f "$unit" || return 1
+				systemctl daemon-reload >/dev/null 2>&1 || return 1
+			fi
 		fi
 		;;
 	openrc)
 		# local 服务在 default 运行级最后执行 (在 iptables / nftables 服务之后)
 		if [ "$act" = add ]; then
-			mkdir -p /etc/local.d
-			printf '#!/bin/sh\n%s net-apply >/dev/null 2>&1\n' "$CMD_PATH" >/etc/local.d/onebox-net.start
-			chmod 755 /etc/local.d/onebox-net.start
-			rc-update add local default >/dev/null 2>&1
+			mkdir -p /etc/local.d || return 1
+			printf '#!/bin/sh\n%s net-apply >/dev/null 2>&1\n' "$CMD_PATH" >/etc/local.d/onebox-net.start || return 1
+			chmod 755 /etc/local.d/onebox-net.start || return 1
+			rc-update add local default >/dev/null 2>&1 || return 1
 		else
-			rm -f /etc/local.d/onebox-net.start
+			rm -f /etc/local.d/onebox-net.start || return 1
 		fi
 		;;
 	esac
 	# 清理旧版本的 onebox-hop 服务
 	if [ -f /etc/systemd/system/onebox-hop.service ]; then
-		systemctl disable onebox-hop >/dev/null 2>&1
-		rm -f /etc/systemd/system/onebox-hop.service
-		systemctl daemon-reload >/dev/null 2>&1
+		systemctl disable onebox-hop >/dev/null 2>&1 || return 1
+		rm -f /etc/systemd/system/onebox-hop.service || return 1
+		systemctl daemon-reload >/dev/null 2>&1 || return 1
 	fi
 	rm -f /etc/local.d/onebox-hop.start
-	return 0
 }
 
 hop_setup() {
@@ -1805,7 +1880,6 @@ hop_setup() {
 		hop_rules del
 	fi
 	net_persist add
-	return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2055,7 +2129,12 @@ cert_acme() {
 		local fw_before
 		fw_before=$(_fw_snapshot)
 		fw_rule open 80 tcp
+		rc=$?
 		[ "$(_fw_snapshot)" != "$fw_before" ] && CERT_TXN_FW80=1
+		if [ "$rc" != 0 ]; then
+			err "无法放行证书验证所需的 TCP 80 端口"
+			return 1
+		fi
 		warn "请确认云服务商安全组 / 防火墙已放行 TCP 80 (申请与每次续期都需要)"
 		args=(--standalone)
 		[ -z "$SERVER_IPV4" ] && [ -n "$SERVER_IPV6" ] && args+=(--listen-v6)
@@ -2407,7 +2486,7 @@ start_pre() { "${bin}" -t -p "${REALITY_SITE_DIR}/" -c "${REALITY_SITE_DIR}/ngin
 EOF
 		chmod 755 "$unit" || return 1
 		;;
-	none) warn "未检测到 init 系统：站点使用独立 nginx 守护进程，开机启动通过专属 crontab @reboot（需 crontab）" ;;
+	none) warn "未检测到 init 系统：站点使用独立 nginx 守护进程，随 onebox 的统一开机任务启动（需 crontab）" ;;
 	esac
 	cat >"$REALITY_SITE_DIR/reload.sh" <<EOF
 #!/usr/bin/env bash
@@ -2452,12 +2531,49 @@ site_service() {
 	! _site_running
 }
 
-_site_cron_lines() { has crontab && crontab -l 2>/dev/null | awk -v home="$SITE_ACME_HOME/" -v root="$REALITY_SITE_DIR/" 'index($0,home) || (index($0,root) && /onebox-site-autostart/)'; return 0; }
+# An independent backup job may refer to the ACME directory. Only the renewal
+# command and the legacy, explicitly marked boot command belong to this site.
+_site_cron_filter() {
+	awk -v mode="$1" -v exe="$SITE_ACME_HOME/acme.sh" -v root="$REALITY_SITE_DIR/" '
+		{ own = (index($0,exe) && /(^|[ \t])--cron([ \t]|$)/) ||
+		        (index($0,root) && /# onebox-site-autostart([ \t]|$)/)
+		  if ((mode == "owned" && own) || (mode == "keep" && !own)) print }
+	'
+}
+
+_site_read_crontab() {
+	local tmp out rc message
+	tmp=$(mktemp) || return 1
+	out=$(LC_ALL=C crontab -l 2>"$tmp")
+	rc=$?
+	message=$(cat "$tmp")
+	rm -f "$tmp"
+	if [ "$rc" = 0 ]; then
+		[ -z "$out" ] || printf '%s\n' "$out"
+		return 0
+	fi
+	# Vixie/Cronie and BusyBox distinguish an absent user crontab by these
+	# diagnostics. Other read failures must not become an empty replacement.
+	if [ -z "$out" ]; then
+		case "$message" in
+		*'no crontab for '* | *"can't open '"*': No such file or directory') return 0 ;;
+		esac
+	fi
+	err "无法读取现有 crontab，已保留原任务且取消站点任务变更"
+	return 1
+}
+
+_site_cron_lines() {
+	has crontab || return 0
+	local current
+	current=$(_site_read_crontab) || return 1
+	printf '%s\n' "$current" | _site_cron_filter owned
+}
 _site_cron_remove() {
 	has crontab || return 0
 	local current filtered
-	current=$(crontab -l 2>/dev/null) || return 0
-	filtered=$(printf '%s\n' "$current" | awk -v home="$SITE_ACME_HOME/" -v root="$REALITY_SITE_DIR/" '!index($0,home) && !(index($0,root) && /onebox-site-autostart/)')
+	current=$(_site_read_crontab) || return 1
+	filtered=$(printf '%s\n' "$current" | _site_cron_filter keep)
 	[ "$current" = "$filtered" ] || printf '%s\n' "$filtered" | crontab -
 }
 _site_scheduler_ready() {
@@ -2484,13 +2600,12 @@ _site_scheduler_ready() {
 }
 _site_cron_enable() {
 	_site_scheduler_ready || return 1
-	local current wanted bin
-	current=$(crontab -l 2>/dev/null | awk -v home="$SITE_ACME_HOME/" -v root="$REALITY_SITE_DIR/" '!index($0,home) && !(index($0,root) && /onebox-site-autostart/)')
+	local current wanted
+	current=$(_site_read_crontab) || return 1
+	current=$(printf '%s\n' "$current" | _site_cron_filter keep)
 	wanted="17 3 * * * \"${SITE_ACME_HOME}/acme.sh\" --cron --home \"${SITE_ACME_HOME}\" >/dev/null 2>&1"
-	if [ "$INIT" = none ]; then
-		bin=$(site_nginx_bin) || return 1
-		wanted+=$'\n'"@reboot \"${bin}\" -p \"${REALITY_SITE_DIR}/\" -c \"${REALITY_SITE_DIR}/nginx.conf\" # onebox-site-autostart"
-	fi
+	# The global onebox @reboot starts the site before proxy cores. A second
+	# direct nginx job races for its sockets and can abort the proxy startup.
 	{ [ -z "$current" ] || printf '%s\n' "$current"; printf '%s\n' "$wanted"; } | crontab -
 }
 
@@ -2508,7 +2623,7 @@ _site_txn_begin() {
 	case "$INIT" in systemd) systemctl is-enabled --quiet "$SITE_SERVICE" 2>/dev/null && : >"$backup/enabled" ;; openrc) rc-update show default 2>/dev/null | grep -qw "$SITE_SERVICE" && : >"$backup/enabled" ;; esac
 	if [ -d "$REALITY_SITE_DIR" ]; then cp -a "$REALITY_SITE_DIR" "$backup/site" || { rm -rf "$backup"; return 1; }; fi
 	if [ -d "$REALITY_SITE_ROOT" ]; then cp -a "$REALITY_SITE_ROOT" "$backup/root" || { rm -rf "$backup"; return 1; }; fi
-	_site_cron_lines >"$backup/cron"
+	_site_cron_lines >"$backup/cron" || { rm -rf "$backup"; return 1; }
 	# Do not expose an incomplete snapshot to rollback: copy failure must never
 	# cause the original website to be deleted while restoring a partial backup.
 	SITE_TXN_BAK=$backup
@@ -2561,7 +2676,21 @@ site_health() {
 }
 
 _site_enable_unit() { case "$INIT" in systemd) systemctl enable "$SITE_SERVICE" >/dev/null 2>&1 ;; openrc) rc-update add "$SITE_SERVICE" default >/dev/null 2>&1 ;; none) return 0 ;; esac; }
-_site_disable_unit() { case "$INIT" in systemd) systemctl disable "$SITE_SERVICE" >/dev/null 2>&1 ;; openrc) rc-update del "$SITE_SERVICE" default >/dev/null 2>&1 ;; none) return 0 ;; esac; return 0; }
+_site_disable_unit() {
+	local unit enabled
+	unit=$(_site_unit_path)
+	[ -n "$unit" ] && [ -f "$unit" ] || return 0
+	case "$INIT" in
+	systemd) systemctl disable "$SITE_SERVICE" >/dev/null 2>&1 ;;
+	openrc)
+		enabled=$(rc-update show default 2>/dev/null) || return 1
+		printf '%s\n' "$enabled" | grep -qw "$SITE_SERVICE" || return 0
+		rc-update del "$SITE_SERVICE" default >/dev/null 2>&1
+		;;
+	none) return 0 ;;
+	*) return 1 ;;
+	esac
+}
 
 _site_prepare_inner() {
 	local signature needs_cert=0 old_port="" was_running=0 before hash fw_rc
@@ -2641,50 +2770,75 @@ site_commit() {
 	[ -n "$SITE_TXN_BAK" ] || return 0
 	if ! site_enabled && [ -f "$REALITY_SITE_DIR/.onebox-site-owned" ]; then
 		site_service stop || return 1
-		_site_disable_unit
+		_site_disable_unit || { err "无法取消站点开机启动，保留事务以便回滚"; return 1; }
 		_site_cron_remove || return 1
-		: >"$REALITY_SITE_DIR/.disabled"
+		: >"$REALITY_SITE_DIR/.disabled" || return 1
 		info "自有站点已停用，页面与证书保留在 ${REALITY_SITE_ROOT}"
 	fi
 	rm -rf "$SITE_TXN_BAK"
 	SITE_TXN_BAK=""
-	declare -F txn_traps >/dev/null && txn_traps
+	# apply_all still has to restore firewall rules and write client files.
+	# Its outer certificate transaction releases signal suppression at the end.
+	return 0
+}
+
+# Copy into the destination filesystem before replacing the live directory.
+# Keep the original snapshot until the ENTIRE rollback succeeds, so a second
+# rollback after any later failure can safely restore both paths again.
+_site_restore_directory() {
+	local source=$1 target=$2 staging
+	if [ ! -d "$source" ]; then rm -rf "$target"; return $?; fi
+	staging=$(mktemp -d "${target%/*}/.onebox-restore.XXXXXX") || return 1
+	if ! cp -a "$source" "$staging/content"; then rm -rf "$staging"; return 1; fi
+	if ! rm -rf "$target" || ! mv "$staging/content" "$target"; then rm -rf "$staging"; return 1; fi
+	rm -rf "$staging"
+}
+
+_site_rollback_inner() {
+	local backup=$SITE_TXN_BAK unit had_running=0 current
+	unit=$(cat "$backup/unit-path")
+	[ ! -f "$backup/running" ] || had_running=1
+	site_service stop >/dev/null 2>&1 || { err "无法停止站点进程，回滚备份保留在 $backup"; return 1; }
+	_site_disable_unit || return 1
+	_site_cron_remove || return 1
+	# The directory paths were captured before changes, independent of loaded state.
+	REALITY_SITE_DIR=$(cat "$backup/site-path")
+	REALITY_SITE_ROOT=$(cat "$backup/root-path")
+	SITE_ACME_HOME="$REALITY_SITE_DIR/acme"
+	_site_restore_directory "$backup/site" "$REALITY_SITE_DIR" || { err "站点配置恢复失败，备份保留在 $backup"; return 1; }
+	_site_restore_directory "$backup/root" "$REALITY_SITE_ROOT" || { err "站点内容恢复失败，备份保留在 $backup"; return 1; }
+	if [ -n "$unit" ]; then
+		if [ -f "$backup/unit" ]; then cp -p "$backup/unit" "$unit" || return 1; else rm -f "$unit" || return 1; fi
+	fi
+	[ "$INIT" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || return 1
+	[ ! -f "$backup/enabled" ] || _site_enable_unit || return 1
+	if [ -s "$backup/cron" ]; then
+		has crontab || return 1
+		current=$(_site_read_crontab) || return 1
+		{ [ -z "$current" ] || printf '%s\n' "$current"; cat "$backup/cron"; } | crontab - || return 1
+	fi
+	if [ "$had_running" = 1 ]; then site_service start || { err "站点回滚后未能恢复运行，备份保留在 $backup"; return 1; }; fi
+	[ ! -f "$backup/fw80" ] || fw_rule close 80 tcp || return 1
+	rm -rf "$backup"
+	SITE_TXN_BAK=""
 	return 0
 }
 
 site_rollback() {
 	[ -n "$SITE_TXN_BAK" ] && [ -d "$SITE_TXN_BAK" ] || return 0
-	local backup=$SITE_TXN_BAK unit had_running=0
-	unit=$(cat "$backup/unit-path")
-	[ ! -f "$backup/running" ] || had_running=1
-	site_service stop >/dev/null 2>&1 || { err "无法停止站点进程，回滚备份保留在 $backup"; return 1; }
-	_site_disable_unit
-	_site_cron_remove
-	# The directory paths were captured before changes, independent of loaded state.
-	REALITY_SITE_DIR=$(cat "$backup/site-path")
-	REALITY_SITE_ROOT=$(cat "$backup/root-path")
-	SITE_ACME_HOME="$REALITY_SITE_DIR/acme"
-	rm -rf "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT"
-	[ ! -d "$backup/site" ] || mv "$backup/site" "$REALITY_SITE_DIR" || { err "站点配置恢复失败，备份保留在 $backup"; return 1; }
-	[ ! -d "$backup/root" ] || mv "$backup/root" "$REALITY_SITE_ROOT" || { err "站点内容恢复失败，备份保留在 $backup"; return 1; }
-	if [ -n "$unit" ]; then
-		if [ -f "$backup/unit" ]; then cp -p "$backup/unit" "$unit"; else rm -f "$unit"; fi
-	fi
-	[ "$INIT" != systemd ] || systemctl daemon-reload >/dev/null 2>&1
-	[ ! -f "$backup/enabled" ] || _site_enable_unit
-	if [ -s "$backup/cron" ] && has crontab; then { crontab -l 2>/dev/null; cat "$backup/cron"; } | crontab -; fi
-	if [ "$had_running" = 1 ]; then site_service start || warn "站点回滚后未能恢复运行，请检查 nginx 日志"; fi
-	[ ! -f "$backup/fw80" ] || fw_rule close 80 tcp
-	rm -rf "$backup"
-	SITE_TXN_BAK=""
-	declare -F txn_traps >/dev/null && txn_traps
-	return 0
+	local ignored=0 rc
+	[ "$(trap -p INT)" != "trap -- '' SIGINT" ] || ignored=1
+	trap '' INT TERM HUP
+	_site_rollback_inner
+	rc=$?
+	if [ "$ignored" = 0 ]; then declare -F txn_traps >/dev/null && txn_traps; fi
+	return "$rc"
 }
 
 site_remove() {
 	[ -f "$REALITY_SITE_DIR/.onebox-site-owned" ] || return 0
 	site_service stop || return 1
-	_site_disable_unit
+	_site_disable_unit || return 1
 	_site_cron_remove || return 1
 	local unit
 	unit=$(_site_unit_path)
@@ -3264,11 +3418,12 @@ commit_server_configs() {
 	for core in singbox xray; do
 		conf=$(svc_conf "$core")
 		if core_used "$core"; then
-			mv -f "${conf%.json}.new.json" "$conf"
+			mv -f "${conf%.json}.new.json" "$conf" || return 1
 		else
-			rm -f "$conf"
+			rm -f "$conf" || return 1
 		fi
 	done
+	return 0
 }
 
 write_server_configs() { prepare_server_configs && commit_server_configs; }
@@ -3311,13 +3466,17 @@ link_of() {
 	vmess-ws)
 		# v2rayN 格式 (与 v2rayN 导出的键集合一致): v/port/aid 为字符串, 标准 base64 (带填充)
 		# TLS 时 alpn=http/1.1 (不要输出空 alpn: mihomo 会解析成 alpn:[""]); 明文 WS 时 host 用 DOMAIN (如有)
-		local json vtls="" vsni="" valpn="" vfp="" vhost=${DOMAIN:-}
+		local json vtls="" vsni="" valpn="" vfp="" vhost=${DOMAIN:-} vtrust=""
 		if vmess_tls_enabled; then
 			vtls=tls vsni=$(tls_server_name) valpn=http/1.1 vfp=chrome vhost=$(tls_server_name)
+			# v2rayN VmessQRCode 支持 insecure / pcs; TLS 自签时必须随链接传递证书固定信息。
+			if tls_insecure; then
+				vtrust=",\"insecure\":\"1\",\"pcs\":$(json_str "$(cert_sha256)")"
+			fi
 		fi
-		json=$(printf '{"v":"2","ps":%s,"add":%s,"port":"%s","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":%s,"path":%s,"tls":"%s","sni":%s,"alpn":"%s","fp":"%s"}' \
+		json=$(printf '{"v":"2","ps":%s,"add":%s,"port":"%s","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":%s,"path":%s,"tls":"%s","sni":%s,"alpn":"%s","fp":"%s"%s}' \
 			"$(json_str "$(node_name "$p")")" "$(json_str "$SERVER_ADDR")" "$port" "$UUID" \
-			"$(json_str "$vhost")" "$(json_str "$VMESS_PATH")" "$vtls" "$(json_str "$vsni")" "$valpn" "$vfp")
+			"$(json_str "$vhost")" "$(json_str "$VMESS_PATH")" "$vtls" "$(json_str "$vsni")" "$valpn" "$vfp" "$vtrust")
 		echo "vmess://$(printf '%s' "$json" | b64)"
 		;;
 	trojan)
@@ -3877,27 +4036,33 @@ EOF
 # 写出全部客户端文件
 # ---------------------------------------------------------------------------
 write_client_files() {
-	mkdir -p "$CLIENT_DIR" && chmod 700 "$CLIENT_DIR"
-	gen_links >"$CLIENT_DIR/links.txt"
-	b64 <"$CLIENT_DIR/links.txt" >"$CLIENT_DIR/sub.txt"
-	gen_mihomo >"$CLIENT_DIR/mihomo.yaml"
-	local f
-	for f in tun notun; do
-		local dst="$CLIENT_DIR/sing-box.json"
-		[ "$f" = notun ] && dst="$CLIENT_DIR/sing-box-notun.json"
-		if gen_singbox_client "$f" >"$dst.tmp"; then
-			mv -f "$dst.tmp" "$dst"
-		else
-			rm -f "$dst.tmp" "$dst"
-		fi
+	mkdir -p "$CLIENT_DIR" && chmod 700 "$CLIENT_DIR" || return 1
+	local tmp p f failed=0 has_sb=0 has_xr=0
+	tmp=$(mktemp -d "$CLIENT_DIR/.new.XXXXXX") || return 1
+	for p in $PROTOCOLS; do
+		proto_client_ok "$p" singbox && has_sb=1
+		proto_client_ok "$p" xray && has_xr=1
 	done
-	if gen_xray_client >"$CLIENT_DIR/xray.json.tmp"; then
-		mv -f "$CLIENT_DIR/xray.json.tmp" "$CLIENT_DIR/xray.json"
-	else
-		rm -f "$CLIENT_DIR/xray.json.tmp" "$CLIENT_DIR/xray.json"
+	gen_links >"$tmp/links.txt" || failed=1
+	b64 <"$tmp/links.txt" >"$tmp/sub.txt" || failed=1
+	gen_mihomo >"$tmp/mihomo.yaml" || failed=1
+	if [ "$has_sb" = 1 ]; then
+		gen_singbox_client tun >"$tmp/sing-box.json" || failed=1
+		gen_singbox_client notun >"$tmp/sing-box-notun.json" || failed=1
 	fi
-	chmod 600 "$CLIENT_DIR"/* 2>/dev/null
-	return 0
+	if [ "$has_xr" = 1 ]; then gen_xray_client >"$tmp/xray.json" || failed=1; fi
+	if [ "$failed" = 0 ]; then chmod 600 "$tmp"/* || failed=1; fi
+	if [ "$failed" = 0 ]; then
+		for f in links.txt sub.txt mihomo.yaml sing-box.json sing-box-notun.json xray.json; do
+			if [ -f "$tmp/$f" ]; then
+				mv -f "$tmp/$f" "$CLIENT_DIR/$f" || { failed=1; break; }
+			else
+				rm -f "$CLIENT_DIR/$f" || { failed=1; break; }
+			fi
+		done
+	fi
+	rm -rf "$tmp"
+	[ "$failed" = 0 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -4034,7 +4199,7 @@ port_ok() {
 		warn "端口 ${port} 已分配给其他协议"
 		return 1
 	fi
-	if [ "$net" != tcp ] && port_in_hop_range "$port"; then
+	if [ "$p" != hysteria2 ] && [ "$net" != tcp ] && port_in_hop_range "$port"; then
 		warn "端口 ${port} 位于 Hysteria2 端口跳跃范围 ${HY2_HOP} 内"
 		return 1
 	fi
@@ -4196,6 +4361,20 @@ choose_reality_target() {
 	fi
 }
 
+# ShadowTLS 独立使用外部握手站点, 不能默认继承直连本机的自有域名。
+choose_shadowtls_target() {
+	local def=${SHADOWTLS_SNI:-${REALITY_SNI:-${OPT_SNI:-1}}}
+	if site_enabled && [ -z "${SHADOWTLS_SNI:-}" ]; then def=1; fi
+	while :; do
+		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "$def"
+		if [ -z "${REALITY_SITE_DOMAIN:-}" ] || [ "${SHADOWTLS_SNI,,}" != "${REALITY_SITE_DOMAIN,,}" ]; then break; fi
+		warn "该域名指向本机自有网站, 不能用作 ShadowTLS 外部握手站点, 请选择其他域名"
+		is_interactive || die "ShadowTLS 握手站点不能使用本机自有域名"
+		def=1
+	done
+	SHADOWTLS_DEST="${SHADOWTLS_SNI}:443"
+}
+
 choose_tls() {
 	local m d
 	any_needs_cert || proto_enabled vmess-ws || {
@@ -4278,15 +4457,28 @@ cert_txn_begin() {
 	# acme.sh may persist API credentials even on issuance failure.
 	if [ -f "$ACME_HOME/account.conf" ]; then
 		cp -p "$ACME_HOME/account.conf" "$staging/account.conf" || { rm -rf "$staging"; err "无法备份 ACME 账户配置，已取消变更"; return 1; }
+	else
+		: >"$staging/account.absent" || { rm -rf "$staging"; return 1; }
 	fi
 	[ ! -f "$STATE_FILE" ] || old_acme=$(
 		load_state >/dev/null 2>&1
 		[ "$TLS_MODE" = acme ] && printf '%s' "$DOMAIN"
 	)
-	if ! rm -rf "$backup" "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback" ||
+	# Commit may remove this previous domain's renewal before switching to a
+	# new domain/self-signed certificate. Keep its deployment reversible too.
+	if [ -n "$old_acme" ] && [ -d "$ACME_HOME/${old_acme}_ecc" ]; then
+		cp -a "$ACME_HOME/${old_acme}_ecc" "$staging/old-deployment" || { rm -rf "$staging"; err "无法备份旧域名的续期部署，已取消变更"; return 1; }
+	fi
+	if ! rm -rf "$backup" "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback" "$ONEBOX_DIR/.acme-account.absent.rollback" "$ONEBOX_DIR/.acme-old.rollback" ||
 		! mv "$staging/tls" "$backup"; then
 		rm -rf "$staging"
 		err "无法保存 TLS 证书备份，已取消变更"
+		return 1
+	fi
+	if { [ -f "$staging/account.absent" ] && ! mv "$staging/account.absent" "$ONEBOX_DIR/.acme-account.absent.rollback"; } ||
+		{ [ -d "$staging/old-deployment" ] && ! mv "$staging/old-deployment" "$ONEBOX_DIR/.acme-old.rollback"; }; then
+		rm -rf "$staging" "$backup" "$ONEBOX_DIR/.acme-account.rollback" "$ONEBOX_DIR/.acme-account.absent.rollback" "$ONEBOX_DIR/.acme-old.rollback"
+		err "无法保存完整的 ACME 备份，已取消变更"
 		return 1
 	fi
 	if [ -f "$staging/account.conf" ] && ! mv "$staging/account.conf" "$ONEBOX_DIR/.acme-account.rollback"; then
@@ -4306,55 +4498,83 @@ cert_txn_begin() {
 }
 
 cert_txn_commit() {
-	site_commit || return 1
-	[ -n "$CERT_TXN_BAK" ] || return 0
 	# 不再使用旧域名的 ACME 证书时, 取消其自动续期; 否则续期时 acme.sh 会覆盖新证书 (导致固定指纹的客户端全部失效)
-	if [ -n "$CERT_TXN_OLD_ACME" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$CERT_TXN_OLD_ACME" ]; } && [ -x "$ACME_SH" ]; then
-		acme --remove -d "$CERT_TXN_OLD_ACME" --ecc >/dev/null 2>&1 && info "已停止旧域名 ${CERT_TXN_OLD_ACME} 的证书自动续期"
+	# Do this BEFORE site_commit discards its rollback snapshot. A removed
+	# deployment is safe to skip on retry and is restored from .acme-old.rollback.
+	if [ -n "$CERT_TXN_BAK" ] && [ -n "$CERT_TXN_OLD_ACME" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$CERT_TXN_OLD_ACME" ]; } &&
+		[ -f "$ACME_HOME/${CERT_TXN_OLD_ACME}_ecc/${CERT_TXN_OLD_ACME}.conf" ]; then
+		if [ ! -x "$ACME_SH" ] || ! acme --remove -d "$CERT_TXN_OLD_ACME" --ecc >/dev/null 2>&1; then
+			err "无法停止旧域名证书续期，已保留备份并取消提交"
+			return 1
+		fi
+		info "已停止旧域名 ${CERT_TXN_OLD_ACME} 的证书自动续期"
 	fi
-	rm -rf "$CERT_TXN_BAK" "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback"
-	CERT_TXN_BAK="" CERT_TXN_ACME_D=""
+	site_commit || return 1
+	[ -n "$CERT_TXN_BAK" ] || { txn_traps; return 0; }
+	rm -rf "$CERT_TXN_BAK" "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback" "$ONEBOX_DIR/.acme-account.absent.rollback" "$ONEBOX_DIR/.acme-old.rollback"
+	CERT_TXN_BAK="" CERT_TXN_ACME_D="" CERT_TXN_NEW_ACME="" CERT_TXN_OLD_ACME=""
 	txn_traps
+	return 0
 }
 
-cert_txn_rollback() {
-	site_rollback
-	[ -n "$CERT_TXN_BAK" ] && [ -d "$CERT_TXN_BAK" ] || {
-		CERT_TXN_BAK=""
-		txn_traps
-		return 0
-	}
-	# 回滚期间屏蔽中断, 保证恢复完整 (结束时由 txn_traps 恢复默认)
-	trap '' INT TERM HUP
+_cert_txn_rollback_inner() {
+	local mode=${1:-} need80=0 tmp
 	# 新申请的 ACME 域名 (与旧的不同) 取消部署, 防止其续期覆盖恢复后的证书
-	if [ -n "$CERT_TXN_NEW_ACME" ] && [ "$CERT_TXN_NEW_ACME" != "$CERT_TXN_OLD_ACME" ] && [ -x "$ACME_SH" ]; then
-		acme --remove -d "$CERT_TXN_NEW_ACME" --ecc >/dev/null 2>&1
+	if [ -n "$CERT_TXN_NEW_ACME" ] && [ "$CERT_TXN_NEW_ACME" != "$CERT_TXN_OLD_ACME" ] &&
+		[ -f "$ACME_HOME/${CERT_TXN_NEW_ACME}_ecc/${CERT_TXN_NEW_ACME}.conf" ]; then
+		[ -x "$ACME_SH" ] && acme --remove -d "$CERT_TXN_NEW_ACME" --ecc >/dev/null 2>&1 || return 1
 	fi
 	# 事先已存在的 acme.sh 部署: 恢复其原配置 (本次可能以新的验证方式强制重新签发过)
 	if [ -n "$CERT_TXN_ACME_D" ] && [ -d "$ONEBOX_DIR/.acme-rollback" ]; then
-		rm -rf "$ACME_HOME/${CERT_TXN_ACME_D}_ecc"
-		mv "$ONEBOX_DIR/.acme-rollback" "$ACME_HOME/${CERT_TXN_ACME_D}_ecc"
+		mkdir -p "$ACME_HOME" || return 1
+		_site_restore_directory "$ONEBOX_DIR/.acme-rollback" "$ACME_HOME/${CERT_TXN_ACME_D}_ecc" || return 1
 	fi
-	CERT_TXN_ACME_D=""
-	if [ -f "$ONEBOX_DIR/.acme-account.rollback" ] && [ -d "$ACME_HOME" ]; then
-		mv -f "$ONEBOX_DIR/.acme-account.rollback" "$ACME_HOME/account.conf"
+	if [ -n "$CERT_TXN_OLD_ACME" ] && [ -d "$ONEBOX_DIR/.acme-old.rollback" ]; then
+		mkdir -p "$ACME_HOME" || return 1
+		_site_restore_directory "$ONEBOX_DIR/.acme-old.rollback" "$ACME_HOME/${CERT_TXN_OLD_ACME}_ecc" || return 1
 	fi
-	rm -rf "$TLS_DIR"
-	mv "$CERT_TXN_BAK" "$TLS_DIR" || { err "证书恢复失败，已保留备份: $CERT_TXN_BAK"; return 1; }
-	CERT_TXN_BAK=""
+	if [ -f "$ONEBOX_DIR/.acme-account.rollback" ]; then
+		mkdir -p "$ACME_HOME" || return 1
+		tmp=$(mktemp "$ACME_HOME/.onebox-account.XXXXXX") || return 1
+		if ! cp -p "$ONEBOX_DIR/.acme-account.rollback" "$tmp" || ! mv -f "$tmp" "$ACME_HOME/account.conf"; then rm -f "$tmp"; return 1; fi
+	elif [ -f "$ONEBOX_DIR/.acme-account.absent.rollback" ]; then
+		rm -f "$ACME_HOME/account.conf" || return 1
+	fi
+	_site_restore_directory "$CERT_TXN_BAK" "$TLS_DIR" || return 1
 	# 用恢复后的状态与证书重新生成客户端文件并重启内核
-	local need80=0
 	if [ -f "$STATE_FILE" ]; then
-		load_state
-		state_migrate
-		write_client_files
-		all_cores_do restart
+		load_state || return 1
+		# apply_all restores the exact client-file snapshot and restarts services
+		# itself. Other callers must surface failures and retain retryable backups.
+		if [ "$mode" != --files-only ]; then
+			write_client_files || return 1
+			all_cores_do restart || return 1
+		fi
 		{ [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; } && need80=1
 		port_taken_by_other 80 tcp "" && need80=1
 	fi
 	# 本次申请临时放行的 80 端口, 恢复后的配置 (磁盘上的状态) 不再需要时关闭
 	site_enabled && need80=1
-	[ "${CERT_TXN_FW80:-0}" = 1 ] && [ "$need80" = 0 ] && fw_rule close 80 tcp
+	if [ "${CERT_TXN_FW80:-0}" = 1 ] && [ "$need80" = 0 ]; then fw_rule close 80 tcp || return 1; fi
+	return 0
+}
+
+cert_txn_rollback() {
+	# Do not continue or report success after an incomplete website rollback.
+	trap '' INT TERM HUP
+	site_rollback || { txn_traps; return 1; }
+	[ -n "$CERT_TXN_BAK" ] && [ -d "$CERT_TXN_BAK" ] || {
+		CERT_TXN_BAK=""
+		txn_traps
+		return 0
+	}
+	if ! _cert_txn_rollback_inner "${1:-}"; then
+		err "证书、续期配置或服务尚未完全恢复，备份保留在 $CERT_TXN_BAK"
+		txn_traps
+		return 1
+	fi
+	rm -rf "$CERT_TXN_BAK" "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback" "$ONEBOX_DIR/.acme-account.absent.rollback" "$ONEBOX_DIR/.acme-old.rollback"
+	CERT_TXN_BAK="" CERT_TXN_ACME_D="" CERT_TXN_NEW_ACME="" CERT_TXN_OLD_ACME=""
 	txn_traps
 	return 0
 }
@@ -4451,8 +4671,7 @@ choose_extras() {
 	fi
 	if proto_enabled shadowtls; then
 		title "ShadowTLS 握手站点"
-		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "${REALITY_SNI:-${OPT_SNI:-1}}"
-		SHADOWTLS_DEST="${SHADOWTLS_SNI}:443"
+		choose_shadowtls_target
 	fi
 	proto_enabled hysteria2 && choose_hy2_opts
 }
@@ -4641,67 +4860,103 @@ install_self() {
 	return 0
 }
 
-# 应用当前状态: 生成配置 -> 服务 -> 防火墙 -> 客户端文件
-# 应用当前状态: 校验新配置 -> 切换 -> 重启服务 -> 防火墙 -> 客户端文件
-# 返回 0 成功; 1 新配置未通过内核校验 (系统未做任何改动); 2 服务启动失败 (已尽量回滚到修改前)
+# 恢复已完整建立的快照。恢复失败保留快照, 不将缺失/不完整备份视为原文件不存在。
+_apply_restore_files() {
+	local bak=$1 f restore failed=0
+	[ -f "$bak/complete" ] || return 1
+	for f in "$STATE_FILE" "$SB_CONF" "$XR_CONF"; do
+		if [ -f "$bak/${f##*/}" ]; then
+			restore=$(mktemp "${f}.restore.XXXXXX") || { failed=1; continue; }
+			if ! cp -p "$bak/${f##*/}" "$restore" || ! mv -f "$restore" "$f"; then failed=1; rm -f "$restore"; fi
+		else
+			rm -f "$f" || failed=1
+		fi
+	done
+	if [ -d "$bak/client" ]; then
+		restore=$(mktemp -d "$ONEBOX_DIR/.client-restore.XXXXXX") || return 1
+		if cp -a "$bak/client/." "$restore/" && rm -rf "$CLIENT_DIR" && mv "$restore" "$CLIENT_DIR"; then :; else failed=1; rm -rf "$restore"; fi
+	else
+		rm -rf "$CLIENT_DIR" || failed=1
+	fi
+	[ "$failed" = 0 ]
+}
+
+_apply_rollback() {
+	local bak=$1 had_old=$2 failed=0
+	# 尽量撤销新规则, 然后根据旧状态重新放行; 每一步都保留失败信息。
+	fw_apply close || failed=1
+	hop_rules del || failed=1
+	_apply_restore_files "$bak" || failed=1
+	if [ "$had_old" = 1 ]; then
+		if load_state; then
+			cert_txn_rollback --files-only || failed=1
+			apply_services || failed=1
+			fw_apply open || failed=1
+			hop_setup || failed=1
+		else
+			failed=1
+			cert_txn_rollback --files-only || failed=1
+		fi
+	else
+		svc_remove singbox || failed=1
+		svc_remove xray || failed=1
+		net_persist del || failed=1
+		if [ "$INIT" = none ]; then _none_autostart_del || failed=1; fi
+		cert_txn_rollback --files-only || failed=1
+	fi
+	if [ "$failed" = 0 ]; then
+		rm -rf "$bak"
+	else
+		warn "自动恢复尚未全部完成, 已保留原始文件备份: $bak"
+	fi
+	txn_traps
+	[ "$failed" = 0 ]
+}
+
+# 返回 0 成功; 1 准备失败; 2 提交失败 (已尝试恢复, 恢复不全时保留备份并明确提示)。
 apply_all() {
-	local bak="$ONEBOX_DIR/.rollback" had_old=0 f
+	local bak had_old=0 f snapshot_ok=1 failed=0
 	# 旧版本升级: 补齐新增的状态项 (随后与新配置一起保存)
 	if xr_has_reality && [ -z "${REALITY_GUARD_PORT:-}" ]; then REALITY_GUARD_PORT=$(pick_guard_port); fi
 	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
 	OWN_IP_CIDRS=$(own_ip_cidrs)
-	prepare_site_and_renewal || { cert_txn_rollback; return 1; }
-	prepare_server_configs || { cert_txn_rollback; return 1; }
-	# 从撤销旧防火墙规则到服务切换完成期间屏蔽中断信号, 保证防火墙 / 状态 / 配置 / 服务一致
-	# (有证书事务时一直屏蔽到调用方提交 / 回滚事务为止, 见 txn_traps)
-	trap '' INT TERM HUP
-	rm -rf "$bak"
-	if [ -f "$STATE_FILE" ]; then
-		had_old=1
-		mkdir -p "$bak" && chmod 700 "$bak"
-		for f in "$STATE_FILE" "$SB_CONF" "$XR_CONF"; do [ -f "$f" ] && cp -p "$f" "$bak/"; done
-		# 关闭旧状态下的防火墙放行与端口跳跃, 新状态随后重新放行
-		(
-			load_state
-			fw_apply close
-			hop_rules del
-		) >/dev/null 2>&1
-	fi
-	# 全新安装: 建立空台账, 避免把新端口当成旧版本遗留规则 (导致 ufw 未放行)
-	[ "$had_old" = 1 ] || { mkdir -p "$ONEBOX_DIR" && [ -f "$(_fw_ledger)" ] || : >"$(_fw_ledger)"; }
-	commit_server_configs
-	save_state
-	if ! apply_services || ! site_commit; then
-		if [ "$had_old" = 1 ]; then
-			warn "服务启动失败, 正在回滚到修改前的配置..."
-			for f in "$STATE_FILE" "$SB_CONF" "$XR_CONF"; do
-				if [ -f "$bak/${f##*/}" ]; then cp -p "$bak/${f##*/}" "$f"; else rm -f "$f"; fi
-			done
-			load_state
-			cert_txn_rollback
-			state_migrate
-			apply_services >/dev/null 2>&1 || warn "回滚后服务仍未能启动, 请执行 onebox log 查看"
-		elif [ -n "${SITE_TXN_BAK:-}" ]; then
-			# 首次建站失败时不留下指向已回滚网站的服务和状态。
-			svc_remove singbox
-			svc_remove xray
-			rm -f "$STATE_FILE" "$SB_CONF" "$XR_CONF"
-			cert_txn_rollback
-			rm -rf "$bak"
-			return 2
-		fi
-		fw_apply open
-		hop_setup
-		write_client_files
+	mkdir -p "$ONEBOX_DIR" || { cert_txn_rollback; return 1; }
+	bak=$(mktemp -d "$ONEBOX_DIR/.rollback.XXXXXX") || { cert_txn_rollback; return 1; }
+	[ ! -f "$STATE_FILE" ] || had_old=1
+	for f in "$STATE_FILE" "$SB_CONF" "$XR_CONF"; do
+		if [ -f "$f" ]; then cp -p "$f" "$bak/" || snapshot_ok=0; fi
+	done
+	if [ -d "$CLIENT_DIR" ]; then cp -a "$CLIENT_DIR" "$bak/client" || snapshot_ok=0; fi
+	if [ "$snapshot_ok" != 1 ] || ! : >"$bak/complete"; then
 		rm -rf "$bak"
-		txn_traps
+		cert_txn_rollback
+		err "无法完整备份原配置, 已中止应用"
+		return 1
+	fi
+	if ! prepare_site_and_renewal || ! prepare_server_configs; then
+		if cert_txn_rollback; then rm -rf "$bak"; else warn "证书或网站恢复失败, 原配置备份保留在: $bak"; fi
+		return 1
+	fi
+	trap '' INT TERM HUP
+	if [ "$had_old" = 1 ]; then
+		(load_state && fw_apply close && hop_rules del) || failed=1
+	elif [ ! -f "$(_fw_ledger)" ]; then
+		: >"$(_fw_ledger)" || failed=1
+	fi
+	if [ "$failed" = 0 ]; then commit_server_configs || failed=1; fi
+	if [ "$failed" = 0 ]; then save_state || failed=1; fi
+	if [ "$failed" = 0 ]; then apply_services || failed=1; fi
+	if [ "$failed" = 0 ]; then fw_apply open || failed=1; fi
+	if [ "$failed" = 0 ]; then hop_setup || failed=1; fi
+	if [ "$failed" = 0 ]; then write_client_files || failed=1; fi
+	# 网站/证书快照必须保留到网络和所有客户端文件都已成功发布。
+	if [ "$failed" = 0 ]; then cert_txn_commit || failed=1; fi
+	if [ "$failed" != 0 ]; then
+		warn "应用配置失败, 正在恢复修改前的状态..."
+		_apply_rollback "$bak" "$had_old" || true
 		return 2
 	fi
-	fw_apply open
-	hop_setup
-	write_client_files
 	rm -rf "$bak"
-	cert_txn_commit
 	txn_traps
 	return 0
 }
@@ -4712,13 +4967,12 @@ apply_or_die() {
 	apply_all
 	rc=$?
 	if [ "$rc" = 0 ]; then
-		cert_txn_commit
 		return 0
 	fi
 	cert_txn_rollback
 	case "$rc" in
 	1) die "站点准备或配置校验失败, 已撤销配置变更 (详见上方日志)" ;;
-	*) die "服务启动失败, 已回滚到修改前的配置 (详见上方日志, 或执行 onebox log)" ;;
+	*) die "应用配置失败, 已尝试恢复原配置 (请检查上方恢复结果, 或执行 onebox log)" ;;
 	esac
 }
 
@@ -4763,16 +5017,16 @@ do_install() {
 	apply_all
 	rc=$?
 	if [ "$rc" = 0 ]; then
-		cert_txn_commit
+		:
 	elif [ -n "$old_protocols" ]; then
 		cert_txn_rollback
 		[ "$rc" = 1 ] && die "配置未通过内核校验, 安装中止 (原配置保持不变)"
 		die "服务启动失败, 已恢复为重装前的配置 (详见上方日志)"
 	else
-		# 全新安装: 服务启动失败时状态已保存且引用新证书 (保留); 校验失败时未保存任何内容 (撤销证书)
-		if [ "$rc" = 2 ]; then cert_txn_commit; else cert_txn_rollback; fi
+		# 全新安装失败也回滚证书, 不提交可能仍待恢复的事务。
+		cert_txn_rollback
 		[ "$rc" = 1 ] && die "配置未通过内核校验, 安装中止"
-		die "服务启动失败, 请根据上方日志排查 (onebox log), 修正后可执行 onebox regen"
+		die "安装应用失败, 请根据上方恢复结果排查后重新安装"
 	fi
 
 	if proto_enabled shadowsocks || proto_enabled shadowtls || proto_enabled vmess-ws; then
@@ -4793,7 +5047,7 @@ do_install() {
 # ---------------------------------------------------------------------------
 require_installed() {
 	is_installed || die "尚未安装, 请先执行安装 (onebox install)"
-	load_state
+	load_state || die "已安装的状态文件无法加载, 请先恢复配置备份"
 }
 
 show_qr() {
@@ -4896,25 +5150,28 @@ show_client() {
 # 管理操作
 # ---------------------------------------------------------------------------
 all_cores_do() {
-	local act=$1 core
+	local act=$1 core failed=0
 	for core in singbox xray; do
 		core_used "$core" || continue
 		case "$act" in
-		start) svc_start "$core" ;;
-		stop) svc_stop "$core" ;;
-		restart) svc_restart "$core" ;;
+		start) svc_start "$core" || failed=1 ;;
+		stop) svc_stop "$core" || failed=1 ;;
+		restart) svc_restart "$core" || failed=1 ;;
 		esac
 	done
+	[ "$failed" = 0 ]
 }
 
 do_service() {
-	local act=$1 core
+	local act=$1 core failed=0
 	require_installed
 	case "$act" in
 	start | stop | restart)
-		if site_enabled; then site_service "$act" || return 1; fi
-		all_cores_do "$act"
-		[ "$act" = start ] && [ -n "$HY2_HOP" ] && proto_enabled hysteria2 && hop_rules add
+		if site_enabled; then
+			if ! site_service "$act"; then [ "$act" = stop ] || return 1; failed=1; fi
+		fi
+		all_cores_do "$act" || failed=1
+		if [ "$act" = start ] && [ -n "$HY2_HOP" ] && proto_enabled hysteria2; then hop_rules add || failed=1; fi
 		sleep 1
 		for core in singbox xray; do
 			core_used "$core" && echo "  $(core_title "$core"): $(svc_status_text "$core")"
@@ -4928,7 +5185,7 @@ do_service() {
 		done
 		;;
 	esac
-	return 0
+	[ "$failed" = 0 ]
 }
 
 do_log() {
@@ -4987,8 +5244,7 @@ do_add_protocol() {
 		choose_reality_target
 	fi
 	if [ "$p" = shadowtls ] && [ -z "$SHADOWTLS_SNI" ]; then
-		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "${REALITY_SNI:-1}"
-		SHADOWTLS_DEST="${SHADOWTLS_SNI}:443"
+		choose_shadowtls_target
 	fi
 	# 先完成所有可能失败的选择与检查, 最后再申请证书 (之后只剩应用配置, 失败会整体回滚)
 	local need_cert=0
@@ -5108,21 +5364,57 @@ do_change_sni() {
 	info "伪装站点已更新 (UUID / 密钥不变), 请重新导入或修改客户端中的 SNI"
 }
 
-do_update_core() {
-	local which=${1:-all} c changed="" failed=""
+_restore_core_update() {
+	local backup=$1 targets=$2 applied=$3 core bin failed=0
+	for core in $targets; do
+		bin=$(svc_bin "$core")
+		if [ -f "$backup/$core" ]; then
+			cp -p "$backup/$core" "$bin.restore" && mv -f "$bin.restore" "$bin" || failed=1
+		else
+			rm -f "$bin" || failed=1
+		fi
+	done
+	if [ "$failed" != 0 ]; then err "内核恢复失败，已保留备份: $backup"; return 1; fi
+	if [ "$applied" = 1 ]; then
+		SB_VERSION=$(sb_installed_version) XR_VERSION=$(xr_installed_version)
+		apply_all || { err "旧内核已恢复，但服务恢复失败，备份保留于: $backup"; return 1; }
+	fi
+	return 0
+}
+
+do_update_core() (
+	local which=${1:-all} core bin targets="" backup committed=0 applied=0 update_rc
 	require_installed
-	FORCE_CORE_UPDATE=1
-	# 先备份旧内核, 新内核不接受当前配置或无法启动时恢复
-	for c in "$SB_BIN" "$XR_BIN"; do [ -x "$c" ] && cp -p "$c" "$c.bak"; done
+	case "$which" in all | singbox | sing-box | xray) ;; *) err "未知内核: $which"; return 1 ;; esac
+	for core in singbox xray; do
+		case "$which:$core" in all:* | singbox:singbox | sing-box:singbox | xray:xray) ;; *) continue ;; esac
+		bin=$(svc_bin "$core")
+		{ [ -x "$bin" ] || core_used "$core"; } && targets+=" $core"
+	done
+	[ -n "$targets" ] || { err "所选内核尚未安装"; return 1; }
+	backup=$(core_tmpdir) || return 1
+	chmod 700 "$backup" || { rm -rf "$backup"; return 1; }
+	# 所有备份完整落盘后才能替换任何内核，不覆盖以前失败时保留的备份。
+	for core in $targets; do
+		bin=$(svc_bin "$core")
+		if [ -e "$bin" ] && ! cp -p "$bin" "$backup/$core"; then
+			rm -rf "$backup"
+			err "无法备份 $(core_title "$core")，已取消内核更新"
+			return 1
+		fi
+	done
+	trap 'update_rc=$?; trap "" INT TERM HUP; if [ "$committed" != 1 ]; then if _restore_core_update "$backup" "$targets" "$applied"; then rm -rf "$backup"; else update_rc=1; fi; else rm -rf "$backup"; fi; exit "$update_rc"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
 	if [ "$which" = all ] || [ "$which" = singbox ] || [ "$which" = sing-box ]; then
 		if [ -x "$SB_BIN" ] || core_used singbox; then
 			local old
 			old=$(sb_installed_version)
 			if install_singbox "${SB_VERSION_WANT:-}"; then
 				info "sing-box: ${old:-无} -> $(sb_installed_version)"
-				changed+=" singbox"
 			else
-				failed+=" sing-box"
+				err "sing-box 更新失败，恢复本次更新前的内核"
+				return 1
 			fi
 		fi
 	fi
@@ -5139,60 +5431,56 @@ do_update_core() {
 			fi
 			if install_xray "$xv"; then
 				info "Xray: ${old:-无} -> $(xr_installed_version)"
-				changed+=" xray"
 			else
-				failed+=" xray"
+				err "Xray 更新失败，恢复本次更新前的内核"
+				return 1
 			fi
 		fi
 	fi
-	FORCE_CORE_UPDATE=0
-	if [ -z "$changed" ]; then
-		for c in "$SB_BIN" "$XR_BIN"; do rm -f "$c.bak"; done
-		[ -n "$failed" ] && err "内核更新失败:${failed}" && return 1
-		return 0
-	fi
-	apply_all
-	case $? in
-	0) ;;
-	*)
-		err "新内核不接受当前配置或无法启动, 恢复旧版本内核"
-		for c in "$SB_BIN" "$XR_BIN"; do [ -f "$c.bak" ] && mv -f "$c.bak" "$c"; done
-		apply_all >/dev/null 2>&1
-		SB_VERSION=$(sb_installed_version) XR_VERSION=$(xr_installed_version)
-		save_state
+	applied=1
+	if ! apply_all; then
+		err "新内核配置应用失败，恢复旧版本内核"
 		return 1
-		;;
-	esac
-	for c in "$SB_BIN" "$XR_BIN"; do rm -f "$c.bak"; done
-	[ -n "$failed" ] && err "部分内核更新失败:${failed}" && return 1
+	fi
+	committed=1
 	return 0
-}
+)
 
-do_update_script() {
-	local tmp
-	tmp=$(mktemp)
+do_update_script() (
+	local staging tmp out installed=0 committed=0 replaced=0 update_rc
+	staging=$(mktemp -d "${CMD_PATH%/*}/.onebox-update.XXXXXX") || return 1
+	chmod 700 "$staging" || { rm -rf "$staging"; return 1; }
+	tmp="$staging/new"
+	if [ -f "$CMD_PATH" ]; then
+		cp -p "$CMD_PATH" "$staging/old" || { rm -rf "$staging"; err "无法备份原脚本，更新已取消"; return 1; }
+	fi
+	is_installed && installed=1
+	trap 'update_rc=$?; trap "" INT TERM HUP; if [ "$committed" != 1 ] && [ "$replaced" = 1 ]; then if [ -f "$staging/old" ]; then if cp -p "$staging/old" "$staging/restore" && mv -f "$staging/restore" "$CMD_PATH"; then [ "$installed" != 1 ] || "$CMD_PATH" regen >/dev/null 2>&1 || warn "旧脚本已恢复，但配置恢复失败，请执行 onebox log 检查"; else err "脚本恢复失败，备份保留于: $staging"; exit 1; fi; else rm -f "$CMD_PATH"; fi; fi; rm -rf "$staging"; exit "$update_rc"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
 	info "下载最新脚本..."
 	if http_get "$(gh_url "$SCRIPT_RAW_URL")" "$tmp" && head -n 5 "$tmp" | grep -q 'Sing-Xray-Onebox' && bash -n "$tmp" 2>/dev/null; then
-		chmod 755 "$tmp"
-		mv -f "$tmp" "$CMD_PATH"
-		info "脚本已更新: $(sed -n 's/^readonly SCRIPT_VERSION="\(.*\)"/\1/p' "$CMD_PATH")"
-		if is_installed; then
+		chmod 755 "$tmp" || return 1
+		# 在原子替换前启用恢复，覆盖 mv 已成功但尚未来得及赋值时的中断。
+		replaced=1
+		mv -f "$tmp" "$CMD_PATH" || { err "无法替换管理脚本，原脚本已保留"; return 1; }
+		if [ "$installed" = 1 ]; then
 			# 用新脚本重新生成配置, 以应用新版本的改进
-			local out
 			if out=$("$CMD_PATH" regen 2>&1); then
 				info "已按新版本重新生成配置"
 			else
 				printf '%s\n' "$out" | tail -n 20 >&2
-				err "配置重新生成失败 (已保留原配置), 请执行 onebox regen / onebox log 查看"
+				err "新脚本配置应用失败，恢复原管理脚本"
 				return 1
 			fi
 		fi
 	else
-		rm -f "$tmp"
 		err "脚本更新失败"
 		return 1
 	fi
-}
+	committed=1
+	info "脚本已更新: $(sed -n 's/^readonly SCRIPT_VERSION="\(.*\)"/\1/p' "$CMD_PATH")"
+)
 
 do_cert() {
 	require_installed
@@ -5456,6 +5744,11 @@ OPT_PORTS=""
 parse_install_opts() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
+		--preset | --protocols | --core | --sni | --reality-site | --site-title | --reality-dest | --tls | --domain | --addr | --name | --port | --hy2-hop | --hy2-core | --xray-version)
+			[ $# -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || die "$1 需要一个非空参数值"
+			;;
+		esac
+		case "$1" in
 		--preset)
 			[[ "${2:-}" =~ ^[1-7]$ ]] || die "--preset 取值为 1-7"
 			OPT_PRESET=$2
@@ -5473,6 +5766,7 @@ parse_install_opts() {
 				case " $ALL_PROTOCOLS " in *" $x "*) ;; *) die "未知协议: $x" ;; esac
 			done
 			OPT_CUSTOM=${idx% }
+			[ -n "$OPT_CUSTOM" ] || die "--protocols 至少需要一个协议"
 			shift
 			;;
 		--core)

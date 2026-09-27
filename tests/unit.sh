@@ -187,6 +187,12 @@ eq "IPv4 合法" "$(yes_ valid_ipv4 1.2.3.4)" yes
 eq "IPv4 越界" "$(yes_ valid_ipv4 1.2.3.256)" no
 eq "IPv6 合法" "$(yes_ valid_ipv6 2001:db8::1)" yes
 eq "IPv6 非法" "$(yes_ valid_ipv6 example.com)" no
+for addr in :: ::1 2001:db8:: 1:2:3:4:5:6:7:8 ::ffff:192.0.2.1 1:2:3:4:5:6:192.0.2.1; do
+	eq "IPv6 完整校验接受 $addr" "$(yes_ valid_ipv6 "$addr")" yes
+done
+for addr in :::: 1:2:3 1::2::3 1:2:3:4:5:6:7:8:9 1:2:3:4:5:6:7::8 12345::1 1:2:3:4:5:6:7: ::ffff:999.0.0.1 1:2:3:4:5:192.0.2.1; do
+	eq "IPv6 完整校验拒绝 $addr" "$(yes_ valid_ipv6 "$addr")" no
+done
 
 # 屏蔽本机地址 (排除 WARP 出口)
 ip() { :; }

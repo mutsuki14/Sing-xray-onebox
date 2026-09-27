@@ -13,17 +13,18 @@ jobs:
       - name: bash -n
         run: |
           bash -n onebox.sh
-          bash -n tests/e2e.sh
-          bash -n tests/lifecycle.sh
-          bash -n tests/unit.sh
-          bash -n tests/site.sh
-          bash -n tests/site-e2e.sh
+          for test in tests/*.sh; do bash -n "$test"; done
       - name: shellcheck
         run: shellcheck -s bash -S warning onebox.sh tests/*.sh
       - name: unit tests
         run: bash tests/unit.sh
       - name: Owned-domain REALITY site regressions
         run: bash tests/site.sh
+      - name: Failure-path and compatibility regressions
+        run: |
+          for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh; do
+            bash "$test" || exit 1
+          done
 
   test:
     runs-on: ubuntu-latest
