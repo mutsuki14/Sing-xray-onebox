@@ -46,9 +46,9 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
-readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/main/onebox.sh}"
+readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/claude/linux-vps-proxy-script-1m1ksn/onebox.sh}"
 
 ONEBOX_DIR="${ONEBOX_DIR:-/etc/onebox}"
 BIN_DIR="${ONEBOX_BIN_DIR:-/opt/onebox/bin}"
@@ -692,6 +692,7 @@ port_in_use() {
 readonly STATE_KEYS="PROTOCOLS SERVER_ADDR SERVER_IPV4 SERVER_IPV6 SERVER_IPV4_WARP SERVER_IPV6_WARP NODE_NAME LISTEN_ADDR
 UUID PASSWORD SS_METHOD SS_PASSWORD
 REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SNI REALITY_DEST
+REALITY_SITE_ENABLED REALITY_SITE_DOMAIN REALITY_SITE_PORT REALITY_SITE_TITLE
 WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
 HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP
 SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
@@ -1128,10 +1129,12 @@ nofile_limit() {
 trim_log() { [ -f "$1" ] && [ "$(wc -c <"$1" 2>/dev/null || echo 0)" -gt 10485760 ] && : >"$1"; return 0; }
 
 svc_write() {
-	local core=$1 name bin args extra=""
+	local core=$1 name bin args extra="" site_order=""
 	name=$(svc_name "$core") bin=$(svc_bin "$core") args=$(svc_args "$core")
 	# Xray 配置错误时退出码为 23, 不必无限重启 (与官方 Xray-install 一致)
 	[ "$core" = xray ] && extra="RestartPreventExitStatus=23"
+	site_enabled && site_order="Wants=onebox-site.service
+After=onebox-site.service"
 	case "$INIT" in
 	systemd)
 		cat >"/etc/systemd/system/${name}.service" <<EOF
@@ -1140,6 +1143,7 @@ Description=Sing-Xray-Onebox $(core_title "$core") Service
 Documentation=https://github.com/${SCRIPT_REPO}
 After=network-online.target nss-lookup.target
 Wants=network-online.target
+${site_order}
 
 [Service]
 Type=simple
@@ -1390,6 +1394,7 @@ svc_status_text() {
 # 按当前协议分配, 启停相应内核; 启动后检查是否正常运行
 apply_services() {
 	local core ok=0
+	site_apply_service || return 1
 	for core in singbox xray; do
 		if core_used "$core"; then
 			svc_write "$core"
@@ -1533,16 +1538,16 @@ fw_rule() {
 			if _fw_ledger_has "ufw $key"; then
 				# 已记入台账: 重复执行 ufw allow 是幂等的 (规则被手动删除时可恢复)
 				ufw allow "${ipt_port}/${proto}" comment onebox >/dev/null 2>&1 || ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1
-				return 0
+				return $?
 			fi
 			# 用户已自行放行该端口: 不接管
 			# (仅无来源 / 网卡限制的入站 ALLOW 规则才算)
 			LC_ALL=C ufw status 2>/dev/null | grep -vE ' on |OUT|FWD' |
 				grep -qE "^${ipt_port}(/${proto})?( \(v6\))?[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere" && return 0
-			ufw allow "${ipt_port}/${proto}" comment onebox >/dev/null 2>&1 || ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1
+			ufw allow "${ipt_port}/${proto}" comment onebox >/dev/null 2>&1 || ufw allow "${ipt_port}/${proto}" >/dev/null 2>&1 || return 1
 			_fw_ledger_add "ufw $key"
 		elif _fw_ledger_has "ufw $key"; then
-			ufw delete allow "${ipt_port}/${proto}" >/dev/null 2>&1
+			ufw delete allow "${ipt_port}/${proto}" >/dev/null 2>&1 || return 1
 			_fw_ledger_del "ufw $key"
 		fi
 		return 0
@@ -1556,14 +1561,17 @@ fw_rule() {
 		[ -n "$zone" ] && z=(--zone="$zone")
 		if [ "$act" = open ]; then
 			if ! _fw_ledger_has "firewalld $key"; then
-				firewall-cmd "${z[@]}" --permanent --query-port="${port}/${proto}" >/dev/null 2>&1 && return 0
-				_fw_ledger_add "firewalld $key"
+				if firewall-cmd "${z[@]}" --permanent --query-port="${port}/${proto}" >/dev/null 2>&1; then
+					firewall-cmd "${z[@]}" --add-port="${port}/${proto}" >/dev/null 2>&1
+					return $?
+				fi
 			fi
-			firewall-cmd "${z[@]}" --add-port="${port}/${proto}" >/dev/null 2>&1
-			firewall-cmd "${z[@]}" --permanent --add-port="${port}/${proto}" >/dev/null 2>&1
+			firewall-cmd "${z[@]}" --add-port="${port}/${proto}" >/dev/null 2>&1 || return 1
+			firewall-cmd "${z[@]}" --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || return 1
+			_fw_ledger_add "firewalld $key"
 		elif _fw_ledger_has "firewalld $key"; then
-			firewall-cmd "${z[@]}" --remove-port="${port}/${proto}" >/dev/null 2>&1
-			firewall-cmd "${z[@]}" --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1
+			firewall-cmd "${z[@]}" --remove-port="${port}/${proto}" >/dev/null 2>&1 || return 1
+			firewall-cmd "${z[@]}" --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1 || return 1
 			_fw_ledger_del "firewalld $key"
 		fi
 		return 0
@@ -1629,6 +1637,7 @@ fw_apply() {
 	if [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then
 		fw_rule "$act" 80 tcp
 	fi
+	site_enabled && fw_rule "$act" 80 tcp
 	# 端口跳跃: NAT 在 INPUT 之前完成, INPUT 看到的已是 Hysteria2 实际端口, 无需放行整个范围 (云安全组仍需放行)
 	return 0
 }
@@ -2013,6 +2022,10 @@ cert_acme() {
 	acme_install "${ACME_EMAIL:-}" || return 1
 	case "$method" in
 	standalone)
+		if site_enabled; then
+			# 托管网站持续监听 80: 使用同一挑战目录, 签发与续期都不必暂停网站。
+			args=(--webroot "$REALITY_SITE_ROOT")
+		else
 		# acme.sh 3.1+ standalone 用 socat, 没有 socat 时回退到 python3
 		has socat || has python3 || ensure_cmds socat || warn "未能安装 socat, standalone 模式可能失败"
 		# 新配置中仍有协议使用 TCP 80 时无法使用 HTTP 验证 (申请与每次续期都需要 80 端口)
@@ -2046,6 +2059,7 @@ cert_acme() {
 		warn "请确认云服务商安全组 / 防火墙已放行 TCP 80 (申请与每次续期都需要)"
 		args=(--standalone)
 		[ -z "$SERVER_IPV4" ] && [ -n "$SERVER_IPV6" ] && args+=(--listen-v6)
+		fi
 		;;
 	cf)
 		if [ -z "${CF_Token:-}" ] && { [ -z "${CF_Key:-}" ] || [ -z "${CF_Email:-}" ]; }; then
@@ -2066,11 +2080,23 @@ cert_acme() {
 	if [ -f "$conf" ]; then
 		preexist=1
 		if [ -n "$CERT_TXN_BAK" ] && [ -z "$CERT_TXN_ACME_D" ]; then
-			rm -rf "$ONEBOX_DIR/.acme-rollback"
-			cp -a "$ACME_HOME/${d}_ecc" "$ONEBOX_DIR/.acme-rollback" && CERT_TXN_ACME_D=$d
+			local acme_backup
+			acme_backup=$(mktemp -d "$ONEBOX_DIR/.acme-snapshot.XXXXXX") || { err "无法创建 ACME 部署备份"; return 1; }
+			if ! cp -a "$ACME_HOME/${d}_ecc" "$acme_backup/deployment"; then
+				rm -rf "$acme_backup"
+				err "无法完整备份现有 ACME 部署，已取消证书变更"
+				return 1
+			fi
+			if ! rm -rf "$ONEBOX_DIR/.acme-rollback" || ! mv "$acme_backup/deployment" "$ONEBOX_DIR/.acme-rollback"; then
+				rm -rf "$acme_backup"
+				err "无法保存 ACME 部署备份，已取消证书变更"
+				return 1
+			fi
+			rm -rf "$acme_backup"
+			CERT_TXN_ACME_D=$d
 		fi
 		stored=$(sed -n "s/^Le_Webroot='\{0,1\}\([^']*\)'\{0,1\}$/\1/p" "$conf" | head -n1)
-		case "$method" in standalone) want=no ;; cf) want=dns_cf ;; esac
+		case "$method" in standalone) if site_enabled; then want=$REALITY_SITE_ROOT; else want=no; fi ;; cf) want=dns_cf ;; esac
 		[ -n "$stored" ] && [ "$stored" != "$want" ] && args+=(--force)
 	fi
 	info "申请证书: ${d} (Let's Encrypt, ECC)"
@@ -2168,6 +2194,512 @@ check_clock() {
 	openrc) info "可执行: apk add chrony && rc-update add chronyd && rc-service chronyd start" ;;
 	esac
 	return 1
+}
+
+# ---------------------------------------------------------------------------
+# 自有域名 REALITY 网站 (独立 nginx / ACME / 事务管理)
+# ---------------------------------------------------------------------------
+# Optional owned-domain REALITY website. Inlined into onebox.sh for distribution.
+# nginx has its own config/service/PID; distro nginx configuration is never edited.
+REALITY_SITE_DIR="${ONEBOX_DIR}/site"
+REALITY_SITE_ROOT="${ONEBOX_SITE_ROOT:-/var/lib/onebox-site}"
+SITE_SERVICE="onebox-site"
+SITE_ACME_HOME="${REALITY_SITE_DIR}/acme"
+SITE_TXN_BAK=""
+
+site_enabled() { [ "${REALITY_SITE_ENABLED:-}" = 1 ] && any_reality; }
+site_nginx_bin() { if [ -n "${ONEBOX_NGINX_BIN:-}" ]; then [ -x "$ONEBOX_NGINX_BIN" ] && printf '%s' "$ONEBOX_NGINX_BIN"; else command -v nginx; fi; }
+site_public_port() {
+	local p first="" port
+	for p in $PROTOCOLS; do
+		proto_uses_reality "$p" || continue
+		port=$(pget PORT "$p")
+		[ -n "$port" ] || continue
+		[ "$port" = 443 ] && { printf '443'; return 0; }
+		[ -n "$first" ] || first=$port
+	done
+	[ -n "$first" ] || return 1
+	printf '%s' "$first"
+}
+
+site_html_escape() {
+	local s=$1
+	# Bash replacement strings can interpret & on newer Bash; use sed explicitly.
+	printf '%s' "$s" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&#39;/g"
+}
+
+site_render_index() {
+	local title domain
+	title=$(site_html_escape "${REALITY_SITE_TITLE:-山间手记}")
+	domain=$(site_html_escape "$REALITY_SITE_DOMAIN")
+	cat <<EOF
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="一个安放文字、想法与日常观察的地方。"><meta name="color-scheme" content="light"><title>${title}</title>
+<style>
+:root{--paper:#f7f6ee;--ink:#233e32;--muted:#617167;--line:#d8dfd4;--leaf:#dce9d7}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.8 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}a{color:inherit;text-decoration:none}a:focus-visible{outline:2px solid var(--ink);outline-offset:6px}.wrap{width:min(1080px,calc(100% - 48px));margin:auto}header{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:28px 0;border-bottom:1px solid var(--line)}.brand{font-weight:700;letter-spacing:.04em;overflow-wrap:anywhere}nav{display:flex;gap:26px;flex-shrink:0;font-size:14px;color:var(--muted)}nav a:hover{text-decoration:underline;text-underline-offset:5px}.hero{display:grid;grid-template-columns:1.5fr 1fr;align-items:center;gap:64px;padding:96px 0}.eyebrow{margin:0 0 20px;font-size:12px;letter-spacing:.18em;color:var(--muted)}h1{margin:0;font-family:Georgia,"Songti SC",serif;font-size:clamp(36px,5.3vw,62px);font-weight:500;line-height:1.3;letter-spacing:-.035em}.intro{max-width:470px;margin:26px 0 30px;color:var(--muted)}.button{display:inline-block;padding:10px 22px;border:1px solid var(--ink);border-radius:28px;font-size:14px}.button:hover{background:var(--ink);color:var(--paper)}.art{position:relative;aspect-ratio:1;border-radius:48% 48% 10px 10px;background:var(--leaf);overflow:hidden}.art:before{content:"";position:absolute;width:62%;height:62%;left:19%;top:17%;border:1px solid #7d9a78;border-radius:50%}.art:after{content:"";position:absolute;width:1px;height:78%;background:#7d9a78;left:50%;bottom:0;transform:rotate(24deg);transform-origin:bottom}.art span{position:absolute;left:24px;bottom:20px;color:#54714f;font:italic 14px Georgia,serif;letter-spacing:.06em}section{scroll-margin-top:30px}.about{display:grid;grid-template-columns:1fr 2fr;gap:48px;padding:46px 0;border-top:1px solid var(--line)}h2{margin:0;font-size:22px;font-weight:600}.about p{margin:0;color:var(--muted);max-width:650px}.notes{padding:42px 0 72px}.section-top{display:flex;align-items:baseline;justify-content:space-between;gap:20px;margin-bottom:24px}.section-top span{font-size:13px;color:var(--muted)}.cards{display:grid;grid-template-columns:1fr 1fr;gap:22px}article{padding:28px;border:1px solid var(--line);border-radius:12px;background:#fffdf6}.tag{font-size:12px;color:var(--muted)}h3{margin:12px 0;font-size:20px;font-weight:600}article p{margin:0;color:var(--muted);font-size:15px}footer{display:flex;justify-content:space-between;gap:20px;padding:26px 0 34px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);overflow-wrap:anywhere}@media(max-width:680px){.wrap{width:calc(100% - 36px)}header{align-items:flex-start;flex-direction:column;gap:12px}nav{gap:24px}.hero{grid-template-columns:1fr;gap:36px;padding:54px 0}.art{max-width:280px;width:100%;justify-self:center}.about{grid-template-columns:1fr;gap:18px;padding:32px 0}.cards{grid-template-columns:1fr}.section-top{align-items:flex-start;flex-direction:column;gap:4px}footer{flex-direction:column;gap:4px}}@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style></head><body><div class="wrap">
+<header><a class="brand" href="#home">${title}</a><nav aria-label="主导航"><a href="#home">首页</a><a href="#about">关于</a><a href="#notes">记录</a></nav></header>
+<main><section class="hero" id="home" aria-labelledby="hero-title"><div><p class="eyebrow">文字 · 想法 · 日常</p><h1 id="hero-title">给思考一点空间，<br>给日常一些留白。</h1><p class="intro">这里是一个安放文字的小地方。记录值得停留的瞬间，也整理那些尚未成形的想法。</p><a class="button" href="#notes">读一读随手记录 ↗</a></div><div class="art" aria-hidden="true"><span>A little room to think.</span></div></section>
+<section class="about" id="about" aria-labelledby="about-title"><h2 id="about-title">关于这里</h2><p>写作让模糊的想法渐渐清晰，也让平常的生活留下痕迹。这个小站从简单的记录开始，不急着得出答案，只希望保持观察、好奇与表达。</p></section>
+<section class="notes" id="notes" aria-labelledby="notes-title"><div class="section-top"><h2 id="notes-title">随手记录</h2><span>一些可以慢慢读的片段</span></div><div class="cards"><article><span class="tag">关于记录</span><h3>从一个小念头开始</h3><p>不必等到想法完整才动笔。记下一句话、一个问题，或一个忽然注意到的细节，就已经为之后的思考留下了入口。</p></article><article><span class="tag">关于日常</span><h3>留意身边的细节</h3><p>光线移动的方向，街角树叶的颜色，一段让人停顿的文字。许多值得记住的事，就藏在这些不起眼的片刻里。</p></article></div></section></main>
+<footer><span>${title} · ${domain}</span><span>保持好奇，慢慢记录。</span></footer></div></body></html>
+EOF
+}
+
+site_validate_ports() {
+	site_enabled || return 0
+	valid_domain "${REALITY_SITE_DOMAIN:-}" || { err "自有站点需要合法域名"; return 1; }
+	local port=${REALITY_SITE_PORT:-} p pp net
+	[[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || { err "站点内部 TLS 端口必须为 1024–65535"; return 1; }
+	[ "$port" != "${REALITY_GUARD_PORT:-}" ] && [ "${REALITY_GUARD_PORT:-}" != 80 ] || { err "站点端口与 REALITY 防偷跑端口冲突"; return 1; }
+	for p in $PROTOCOLS; do
+		net=$(proto_net "$p")
+		[ "$net" = udp ] && continue
+		pp=$(pget PORT "$p")
+		if [ "$pp" = 80 ] || [ "$pp" = "$port" ]; then err "${p} 的 TCP 端口 ${pp} 与自有站点冲突"; return 1; fi
+	done
+	site_public_port >/dev/null || { err "自有站点至少需要一个 REALITY TCP 入站"; return 1; }
+}
+
+_site_paths_safe() {
+	local p
+	for p in "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT" "$SITE_ACME_HOME"; do
+		[[ "$p" =~ ^/[A-Za-z0-9_./-]+$ ]] && [[ "$p" != *'/../'* && "$p" != */.. && "$p" != *'/./'* ]] || { err "站点路径需要不含空格与特殊字符的绝对路径: $p"; return 1; }
+		case "$p" in /|/etc|/var|/var/lib|/root|/home|/usr|/opt|/tmp|/run) err "拒绝使用系统目录作为站点专属目录: $p"; return 1 ;; esac
+		[ ! -L "$p" ] || { err "站点目录不能是符号链接: $p"; return 1; }
+	done
+	case "$REALITY_SITE_ROOT/" in "$ONEBOX_DIR/"*) err "站点内容需放在公开可遍历的独立目录，不能放入私密配置目录"; return 1 ;; esac
+	for p in "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT"; do
+		if [ -d "$p" ] && [ ! -f "$p/.onebox-site-owned" ]; then
+			[ -z "$(ls -A "$p" 2>/dev/null)" ] || { err "目录已存在且不归 onebox 站点管理: $p"; return 1; }
+		fi
+	done
+}
+
+_site_hash() { openssl dgst -sha256 2>/dev/null | sed 's/^.*= *//'; }
+_site_signature() { printf '%s\n' "$REALITY_SITE_DOMAIN" "$REALITY_SITE_PORT" "$(site_public_port)" "${REALITY_SITE_TITLE:-山间手记}" "$REALITY_SITE_ROOT" | _site_hash; }
+_site_unit_path() { case "$INIT" in systemd) printf '/etc/systemd/system/%s.service' "$SITE_SERVICE" ;; openrc) printf '%s/%s' "$INITD_DIR" "$SITE_SERVICE" ;; none) return 0 ;; esac; }
+_site_running() {
+	local pid
+	[ -f "$REALITY_SITE_DIR/nginx.pid" ] || return 1
+	pid=$(cat "$REALITY_SITE_DIR/nginx.pid")
+	[[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+	[ -r "/proc/$pid/cmdline" ] || return 1
+	tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF "$REALITY_SITE_DIR/nginx.conf"
+}
+
+site_nginx_check() { "$(site_nginx_bin)" -t -p "$REALITY_SITE_DIR/" -c "$REALITY_SITE_DIR/nginx.conf" >/dev/null 2>&1; }
+site_write_nginx() {
+	local public user="" group="" u ipv6="" suffix=""
+	public=$(site_public_port) || return 1
+	[ "$public" = 443 ] || suffix=":${public}"
+	for u in nginx www-data nobody; do
+		id "$u" >/dev/null 2>&1 || continue
+		user=$u group=$(id -gn "$u")
+		break
+	done
+	[ -n "$user" ] || { err "nginx 需要非 root 工作进程账号"; return 1; }
+	host_has_ipv6 && ipv6='listen [::]:80;'
+	mkdir -p "$REALITY_SITE_DIR/tmp" || return 1
+	cat >"$REALITY_SITE_DIR/nginx.conf" <<EOF
+# Managed exclusively by onebox; no /etc/nginx includes.
+user ${user} ${group};
+worker_processes 1;
+pid "${REALITY_SITE_DIR}/nginx.pid";
+error_log "${REALITY_SITE_DIR}/error.log" warn;
+events { worker_connections 512; }
+http {
+    access_log off;
+    server_tokens off;
+    charset utf-8;
+    default_type application/octet-stream;
+    types { text/html html htm; text/css css; application/javascript js; image/png png; image/jpeg jpg jpeg; image/svg+xml svg; image/x-icon ico; text/plain txt; }
+    client_body_temp_path "${REALITY_SITE_DIR}/tmp";
+    proxy_temp_path "${REALITY_SITE_DIR}/tmp/proxy";
+    fastcgi_temp_path "${REALITY_SITE_DIR}/tmp/fastcgi";
+    uwsgi_temp_path "${REALITY_SITE_DIR}/tmp/uwsgi";
+    scgi_temp_path "${REALITY_SITE_DIR}/tmp/scgi";
+    sendfile on;
+    keepalive_timeout 30;
+    server {
+        listen 80;
+        ${ipv6}
+        server_name ${REALITY_SITE_DOMAIN};
+        location ^~ /.well-known/acme-challenge/ { root "${REALITY_SITE_ROOT}"; default_type text/plain; try_files \$uri =404; }
+        location / { return 301 https://${REALITY_SITE_DOMAIN}${suffix}\$request_uri; }
+    }
+    server {
+        listen 127.0.0.1:${REALITY_SITE_PORT} ssl http2;
+        server_name ${REALITY_SITE_DOMAIN};
+        ssl_certificate "${REALITY_SITE_DIR}/cert.pem";
+        ssl_certificate_key "${REALITY_SITE_DIR}/key.pem";
+        ssl_protocols TLSv1.3;
+        ssl_ecdh_curve X25519:prime256v1;
+        ssl_session_cache shared:onebox_site:1m;
+        ssl_session_timeout 10m;
+        root "${REALITY_SITE_ROOT}";
+        index index.html;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
+        location ~ /\\. { deny all; }
+        location / { try_files \$uri \$uri/ =404; }
+    }
+}
+EOF
+	site_nginx_check || { err "站点 nginx 配置校验失败（需 nginx 支持 TLS 1.3 和 HTTP/2）"; return 1; }
+}
+
+site_install_nginx() {
+	site_nginx_bin >/dev/null 2>&1 && return 0
+	# Package post-install may start distro nginx. Only stop it when nginx/config/service
+	# were all absent beforehand, so an existing website is never taken over.
+	if [ -d /etc/nginx ] || [ -e /etc/systemd/system/nginx.service ] || [ -e /lib/systemd/system/nginx.service ] || [ -e /usr/lib/systemd/system/nginx.service ] || [ -e "$INITD_DIR/nginx" ]; then
+		err "检测到现有 nginx 文件但找不到 nginx 命令，请先修复原 nginx 安装；不会接管已有站点"
+		return 1
+	fi
+	ensure_cmds nginx || return 1
+	case "$INIT" in
+	systemd) systemctl stop nginx >/dev/null 2>&1; systemctl disable nginx >/dev/null 2>&1 ;;
+	openrc) rc-service nginx stop >/dev/null 2>&1; rc-update del nginx default >/dev/null 2>&1 ;;
+	none) [ ! -f /run/nginx.pid ] || "$(site_nginx_bin)" -s quit >/dev/null 2>&1 ;;
+	esac
+	site_nginx_bin >/dev/null 2>&1
+}
+
+_site_write_service() {
+	local bin unit
+	bin=$(site_nginx_bin) || return 1
+	[[ "$bin" =~ ^/[A-Za-z0-9_./-]+$ ]] || { err "nginx 可执行路径包含不支持的字符"; return 1; }
+	unit=$(_site_unit_path)
+	case "$INIT" in
+	systemd)
+		cat >"$unit" <<EOF
+[Unit]
+Description=Onebox owned-domain website
+After=network.target
+[Service]
+Type=forking
+PIDFile=${REALITY_SITE_DIR}/nginx.pid
+ExecStartPre=${bin} -t -p ${REALITY_SITE_DIR}/ -c ${REALITY_SITE_DIR}/nginx.conf
+ExecStart=${bin} -p ${REALITY_SITE_DIR}/ -c ${REALITY_SITE_DIR}/nginx.conf
+ExecReload=${bin} -p ${REALITY_SITE_DIR}/ -c ${REALITY_SITE_DIR}/nginx.conf -s reload
+KillSignal=SIGQUIT
+TimeoutStopSec=15
+Restart=on-failure
+PrivateTmp=true
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
+EOF
+		systemctl daemon-reload >/dev/null 2>&1 || return 1
+		;;
+	openrc)
+		cat >"$unit" <<EOF
+#!/sbin/openrc-run
+name="${SITE_SERVICE}"
+description="Onebox owned-domain website"
+command="${bin}"
+command_args="-p ${REALITY_SITE_DIR}/ -c ${REALITY_SITE_DIR}/nginx.conf"
+pidfile="${REALITY_SITE_DIR}/nginx.pid"
+depend() { need net; }
+start_pre() { "${bin}" -t -p "${REALITY_SITE_DIR}/" -c "${REALITY_SITE_DIR}/nginx.conf"; }
+EOF
+		chmod 755 "$unit" || return 1
+		;;
+	none) warn "未检测到 init 系统：站点使用独立 nginx 守护进程，开机启动通过专属 crontab @reboot（需 crontab）" ;;
+	esac
+	cat >"$REALITY_SITE_DIR/reload.sh" <<EOF
+#!/usr/bin/env bash
+set -e
+"${bin}" -t -p "${REALITY_SITE_DIR}/" -c "${REALITY_SITE_DIR}/nginx.conf"
+if [ -f "${REALITY_SITE_DIR}/.disabled" ]; then exit 0; fi
+"${bin}" -p "${REALITY_SITE_DIR}/" -c "${REALITY_SITE_DIR}/nginx.conf" -s reload
+EOF
+	chmod 700 "$REALITY_SITE_DIR/reload.sh"
+}
+
+site_service() {
+	local action=${1:-status} bin pid i
+	[ -f "$REALITY_SITE_DIR/.onebox-site-owned" ] || { [ "$action" = stop ] && return 0; return 1; }
+	case "$action" in
+	status) if _site_running; then info "自有站点运行中"; return 0; else info "自有站点未运行"; return 1; fi ;;
+	start | restart) site_nginx_check || return 1 ;;
+	stop) ;; *) return 1 ;;
+	esac
+	if [ "$action" = restart ]; then site_service stop || return 1; action=start; fi
+	if [ "$action" = start ]; then
+		_site_running && return 0
+		case "$INIT" in
+		systemd) systemctl start "$SITE_SERVICE" >/dev/null 2>&1 ;;
+		openrc) rc-service "$SITE_SERVICE" start >/dev/null 2>&1 ;;
+		none) bin=$(site_nginx_bin) && "$bin" -p "$REALITY_SITE_DIR/" -c "$REALITY_SITE_DIR/nginx.conf" ;;
+		esac
+		return $?
+	fi
+	case "$INIT" in
+	systemd) systemctl stop "$SITE_SERVICE" >/dev/null 2>&1 ;;
+	openrc) rc-service "$SITE_SERVICE" stop >/dev/null 2>&1 ;;
+	none)
+		if _site_running; then
+			pid=$(cat "$REALITY_SITE_DIR/nginx.pid")
+			kill -QUIT "$pid" 2>/dev/null || return 1
+			for i in 1 2 3 4 5; do _site_running || break; sleep 1; done
+			_site_running && return 1
+		fi
+		;;
+	esac
+	! _site_running
+}
+
+_site_cron_lines() { has crontab && crontab -l 2>/dev/null | awk -v home="$SITE_ACME_HOME/" -v root="$REALITY_SITE_DIR/" 'index($0,home) || (index($0,root) && /onebox-site-autostart/)'; return 0; }
+_site_cron_remove() {
+	has crontab || return 0
+	local current filtered
+	current=$(crontab -l 2>/dev/null) || return 0
+	filtered=$(printf '%s\n' "$current" | awk -v home="$SITE_ACME_HOME/" -v root="$REALITY_SITE_DIR/" '!index($0,home) && !(index($0,root) && /onebox-site-autostart/)')
+	[ "$current" = "$filtered" ] || printf '%s\n' "$filtered" | crontab -
+}
+_site_scheduler_ready() {
+	ensure_cmds crontab || { err "自有站点需要 crontab 自动续期，安装失败"; return 1; }
+	local s file name
+	case "$INIT" in
+	systemd)
+		_enable_cron_service
+		for s in cron crond cronie; do systemctl is-active --quiet "$s" 2>/dev/null && return 0; done
+		;;
+	openrc)
+		_enable_cron_service
+		for s in crond cronie dcron fcron; do rc-service "$s" status >/dev/null 2>&1 && return 0; done
+		;;
+	none)
+		for file in /proc/[0-9]*/comm; do
+			IFS= read -r name <"$file" 2>/dev/null || continue
+			case "$name" in cron | crond | cronie | dcron | fcron) return 0 ;; esac
+		done
+		;;
+	esac
+	err "cron 未运行，无法保证站点证书自动续期；请先启动 cron 服务后重试"
+	return 1
+}
+_site_cron_enable() {
+	_site_scheduler_ready || return 1
+	local current wanted bin
+	current=$(crontab -l 2>/dev/null | awk -v home="$SITE_ACME_HOME/" -v root="$REALITY_SITE_DIR/" '!index($0,home) && !(index($0,root) && /onebox-site-autostart/)')
+	wanted="17 3 * * * \"${SITE_ACME_HOME}/acme.sh\" --cron --home \"${SITE_ACME_HOME}\" >/dev/null 2>&1"
+	if [ "$INIT" = none ]; then
+		bin=$(site_nginx_bin) || return 1
+		wanted+=$'\n'"@reboot \"${bin}\" -p \"${REALITY_SITE_DIR}/\" -c \"${REALITY_SITE_DIR}/nginx.conf\" # onebox-site-autostart"
+	fi
+	{ [ -z "$current" ] || printf '%s\n' "$current"; printf '%s\n' "$wanted"; } | crontab -
+}
+
+_site_txn_begin() {
+	[ -n "$SITE_TXN_BAK" ] && return 0
+	mkdir -p "$ONEBOX_DIR" || return 1
+	local unit backup
+	backup=$(mktemp -d "$ONEBOX_DIR/.site-rollback.XXXXXX") || return 1
+	printf '%s\n' "$REALITY_SITE_DIR" >"$backup/site-path"
+	printf '%s\n' "$REALITY_SITE_ROOT" >"$backup/root-path"
+	_site_running && : >"$backup/running"
+	unit=$(_site_unit_path)
+	printf '%s\n' "$unit" >"$backup/unit-path"
+	if [ -n "$unit" ] && [ -e "$unit" ]; then cp -p "$unit" "$backup/unit" || { rm -rf "$backup"; return 1; }; fi
+	case "$INIT" in systemd) systemctl is-enabled --quiet "$SITE_SERVICE" 2>/dev/null && : >"$backup/enabled" ;; openrc) rc-update show default 2>/dev/null | grep -qw "$SITE_SERVICE" && : >"$backup/enabled" ;; esac
+	if [ -d "$REALITY_SITE_DIR" ]; then cp -a "$REALITY_SITE_DIR" "$backup/site" || { rm -rf "$backup"; return 1; }; fi
+	if [ -d "$REALITY_SITE_ROOT" ]; then cp -a "$REALITY_SITE_ROOT" "$backup/root" || { rm -rf "$backup"; return 1; }; fi
+	_site_cron_lines >"$backup/cron"
+	# Do not expose an incomplete snapshot to rollback: copy failure must never
+	# cause the original website to be deleted while restoring a partial backup.
+	SITE_TXN_BAK=$backup
+	declare -F txn_traps >/dev/null && txn_traps
+	return 0
+}
+
+site_check_dns() {
+	local resolved own ip
+	resolved=$(resolve_domain "$REALITY_SITE_DOMAIN")
+	[ -n "$resolved" ] || { err "无法解析站点域名 ${REALITY_SITE_DOMAIN}"; return 1; }
+	own=$(own_ip_list)
+	[ -n "$own" ] || { err "无法确认本机公网地址，不能申请站点证书"; return 1; }
+	while IFS= read -r ip; do
+		printf '%s\n' "$own" | grep -qixF "$ip" || { err "域名 ${REALITY_SITE_DOMAIN} 的地址 ${ip} 不属于本机，请将全部 A/AAAA 直连本机并关闭 CDN 代理"; return 1; }
+	done <<<"$resolved"
+}
+
+_site_cert_usable() {
+	[ -s "$REALITY_SITE_DIR/cert.pem" ] && [ -s "$REALITY_SITE_DIR/key.pem" ] || return 1
+	[ "$(cat "$REALITY_SITE_DIR/cert-domain" 2>/dev/null)" = "$REALITY_SITE_DOMAIN" ] || return 1
+	openssl x509 -in "$REALITY_SITE_DIR/cert.pem" -checkend 3600 -noout >/dev/null 2>&1 &&
+		openssl verify -untrusted "$REALITY_SITE_DIR/cert.pem" "$REALITY_SITE_DIR/cert.pem" >/dev/null 2>&1
+}
+
+site_issue_cert() (
+	# Separate ACME account/home/renewal target; proxy TLS_* variables are untouched.
+	ACME_HOME=$SITE_ACME_HOME ACME_SH="$SITE_ACME_HOME/acme.sh"
+	acme_install "${ACME_EMAIL:-}" || exit 1
+	local rc old
+	old=$(cat "$REALITY_SITE_DIR/cert-domain" 2>/dev/null)
+	if [ -n "$old" ] && [ "$old" != "$REALITY_SITE_DOMAIN" ]; then
+		acme --remove -d "$old" --ecc >/dev/null 2>&1 || exit 1
+	fi
+	acme --issue -d "$REALITY_SITE_DOMAIN" --webroot "$REALITY_SITE_ROOT" -k ec-256 --server letsencrypt
+	rc=$?
+	[ "$rc" = 0 ] || [ "$rc" = 2 ] || exit "$rc"
+	acme --install-cert -d "$REALITY_SITE_DOMAIN" --ecc --key-file "$REALITY_SITE_DIR/key.pem" --fullchain-file "$REALITY_SITE_DIR/cert.pem" --reloadcmd "$REALITY_SITE_DIR/reload.sh" || exit 1
+	chmod 600 "$REALITY_SITE_DIR/key.pem" || exit 1
+	printf '%s\n' "$REALITY_SITE_DOMAIN" >"$REALITY_SITE_DIR/cert-domain"
+)
+
+site_health() {
+	local out
+	_site_running || return 1
+	# TLS1.3 and h2 must actually negotiate; config parsing alone is insufficient.
+	out=$(printf '' | timeout 8 openssl s_client -connect "127.0.0.1:${REALITY_SITE_PORT}" -servername "$REALITY_SITE_DOMAIN" -tls1_3 -alpn h2 2>/dev/null) || return 1
+	printf '%s\n' "$out" | grep -q 'ALPN protocol: h2' || { err "站点未成功协商 HTTP/2"; return 1; }
+	curl --noproxy '*' -fsS --connect-timeout 3 --max-time 8 --resolve "${REALITY_SITE_DOMAIN}:${REALITY_SITE_PORT}:127.0.0.1" "https://${REALITY_SITE_DOMAIN}:${REALITY_SITE_PORT}/" -o /dev/null
+}
+
+_site_enable_unit() { case "$INIT" in systemd) systemctl enable "$SITE_SERVICE" >/dev/null 2>&1 ;; openrc) rc-update add "$SITE_SERVICE" default >/dev/null 2>&1 ;; none) return 0 ;; esac; }
+_site_disable_unit() { case "$INIT" in systemd) systemctl disable "$SITE_SERVICE" >/dev/null 2>&1 ;; openrc) rc-update del "$SITE_SERVICE" default >/dev/null 2>&1 ;; none) return 0 ;; esac; return 0; }
+
+_site_prepare_inner() {
+	local signature needs_cert=0 old_port="" was_running=0 before hash fw_rc
+	site_validate_ports && _site_paths_safe || return 1
+	signature=$(_site_signature)
+	_site_cert_usable || needs_cert=1
+	# Re-generating unchanged proxy configs never depends on DNS/CA reachability.
+	if [ "$needs_cert" = 0 ] && [ "$(cat "$REALITY_SITE_DIR/settings.sha256" 2>/dev/null)" = "$signature" ] && [ -f "$REALITY_SITE_DIR/nginx.conf" ] && [ -f "$REALITY_SITE_ROOT/index.html" ]; then
+		if [ ! -f "$REALITY_SITE_DIR/.disabled" ] && _site_running && _site_cron_lines | grep -qF -- '--cron'; then
+			site_nginx_check
+			return $?
+		fi
+		_site_txn_begin || return 1
+		rm -f "$REALITY_SITE_DIR/.disabled"
+		site_service start && _site_enable_unit && _site_cron_enable
+		return $?
+	fi
+	[ "$needs_cert" = 0 ] || site_check_dns || return 1
+	_site_running && was_running=1
+	old_port=$(cat "$REALITY_SITE_DIR/local-port" 2>/dev/null)
+	if port_in_use 80 tcp && [ "$was_running" != 1 ]; then err "TCP 80 已被其他服务使用，不能启用自有站点"; return 1; fi
+	if port_in_use "$REALITY_SITE_PORT" tcp && { [ "$was_running" != 1 ] || [ "$old_port" != "$REALITY_SITE_PORT" ]; }; then err "站点内部 TLS 端口 ${REALITY_SITE_PORT} 已被占用"; return 1; fi
+	_site_txn_begin || return 1
+	site_install_nginx && ensure_cmds timeout || return 1
+	mkdir -p "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT/.well-known/acme-challenge" || return 1
+	chmod 700 "$REALITY_SITE_DIR" || return 1
+	chmod 755 "$REALITY_SITE_ROOT" "$REALITY_SITE_ROOT/.well-known" "$REALITY_SITE_ROOT/.well-known/acme-challenge" || return 1
+	: >"$REALITY_SITE_DIR/.onebox-site-owned"
+	: >"$REALITY_SITE_ROOT/.onebox-site-owned"
+	rm -f "$REALITY_SITE_DIR/.disabled"
+	hash=""
+	[ ! -f "$REALITY_SITE_ROOT/index.html" ] || hash=$(_site_hash <"$REALITY_SITE_ROOT/index.html")
+	if [ ! -f "$REALITY_SITE_ROOT/index.html" ] || { [ -n "$hash" ] && [ "$hash" = "$(cat "$REALITY_SITE_DIR/index.sha256" 2>/dev/null)" ]; }; then
+		site_render_index >"$REALITY_SITE_ROOT/index.html" || return 1
+		chmod 644 "$REALITY_SITE_ROOT/index.html"
+		_site_hash <"$REALITY_SITE_ROOT/index.html" >"$REALITY_SITE_DIR/index.sha256"
+	fi
+	if [ "$needs_cert" = 1 ]; then
+		# Temporary local-only certificate makes nginx able to serve HTTP-01 webroot.
+		(umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj "/CN=${REALITY_SITE_DOMAIN}" -keyout "$REALITY_SITE_DIR/key.pem" -out "$REALITY_SITE_DIR/cert.pem") >/dev/null 2>&1 || return 1
+	fi
+	site_write_nginx && _site_write_service || return 1
+	before=$(_fw_snapshot)
+	fw_rule open 80 tcp
+	fw_rc=$?
+	[ "$(_fw_snapshot)" = "$before" ] || : >"$SITE_TXN_BAK/fw80"
+	[ "$fw_rc" = 0 ] || { err "站点 TCP 80 防火墙放行失败"; return 1; }
+	site_service restart || return 1
+	if [ "$needs_cert" = 1 ]; then site_issue_cert || return 1; fi
+	# nginx reload is asynchronous; allow old workers a short drain interval.
+	local attempt healthy=0
+	for attempt in 1 2 3; do
+		if site_health; then healthy=1; break; fi
+		[ "$attempt" = 3 ] || sleep 1
+	done
+	[ "$healthy" = 1 ] || { err "站点 HTTPS/TLS1.3/HTTP2 健康检查失败"; return 1; }
+	printf '%s\n' "$signature" >"$REALITY_SITE_DIR/settings.sha256"
+	printf '%s\n' "$REALITY_SITE_PORT" >"$REALITY_SITE_DIR/local-port"
+	_site_enable_unit && _site_cron_enable
+}
+
+site_prepare() {
+	if ! site_enabled; then
+		[ ! -f "$REALITY_SITE_DIR/.onebox-site-owned" ] || _site_txn_begin
+		return $?
+	fi
+	if _site_prepare_inner; then return 0; fi
+	site_rollback
+	return 1
+}
+
+site_apply_service() {
+	if site_enabled; then site_nginx_check && site_service start; else site_service stop; fi
+}
+
+site_commit() {
+	[ -n "$SITE_TXN_BAK" ] || return 0
+	if ! site_enabled && [ -f "$REALITY_SITE_DIR/.onebox-site-owned" ]; then
+		site_service stop || return 1
+		_site_disable_unit
+		_site_cron_remove || return 1
+		: >"$REALITY_SITE_DIR/.disabled"
+		info "自有站点已停用，页面与证书保留在 ${REALITY_SITE_ROOT}"
+	fi
+	rm -rf "$SITE_TXN_BAK"
+	SITE_TXN_BAK=""
+	declare -F txn_traps >/dev/null && txn_traps
+	return 0
+}
+
+site_rollback() {
+	[ -n "$SITE_TXN_BAK" ] && [ -d "$SITE_TXN_BAK" ] || return 0
+	local backup=$SITE_TXN_BAK unit had_running=0
+	unit=$(cat "$backup/unit-path")
+	[ ! -f "$backup/running" ] || had_running=1
+	site_service stop >/dev/null 2>&1 || { err "无法停止站点进程，回滚备份保留在 $backup"; return 1; }
+	_site_disable_unit
+	_site_cron_remove
+	# The directory paths were captured before changes, independent of loaded state.
+	REALITY_SITE_DIR=$(cat "$backup/site-path")
+	REALITY_SITE_ROOT=$(cat "$backup/root-path")
+	SITE_ACME_HOME="$REALITY_SITE_DIR/acme"
+	rm -rf "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT"
+	[ ! -d "$backup/site" ] || mv "$backup/site" "$REALITY_SITE_DIR" || { err "站点配置恢复失败，备份保留在 $backup"; return 1; }
+	[ ! -d "$backup/root" ] || mv "$backup/root" "$REALITY_SITE_ROOT" || { err "站点内容恢复失败，备份保留在 $backup"; return 1; }
+	if [ -n "$unit" ]; then
+		if [ -f "$backup/unit" ]; then cp -p "$backup/unit" "$unit"; else rm -f "$unit"; fi
+	fi
+	[ "$INIT" != systemd ] || systemctl daemon-reload >/dev/null 2>&1
+	[ ! -f "$backup/enabled" ] || _site_enable_unit
+	if [ -s "$backup/cron" ] && has crontab; then { crontab -l 2>/dev/null; cat "$backup/cron"; } | crontab -; fi
+	if [ "$had_running" = 1 ]; then site_service start || warn "站点回滚后未能恢复运行，请检查 nginx 日志"; fi
+	[ ! -f "$backup/fw80" ] || fw_rule close 80 tcp
+	rm -rf "$backup"
+	SITE_TXN_BAK=""
+	declare -F txn_traps >/dev/null && txn_traps
+	return 0
+}
+
+site_remove() {
+	[ -f "$REALITY_SITE_DIR/.onebox-site-owned" ] || return 0
+	site_service stop || return 1
+	_site_disable_unit
+	_site_cron_remove
+	local unit
+	unit=$(_site_unit_path)
+	[ -z "$unit" ] || rm -f "$unit"
+	[ "$INIT" != systemd ] || systemctl daemon-reload >/dev/null 2>&1
+	[ ! -f "$REALITY_SITE_ROOT/.onebox-site-owned" ] || rm -rf "$REALITY_SITE_ROOT"
+	rm -rf "$REALITY_SITE_DIR"
+}
+
+site_info() {
+	site_enabled || return 0
+	local port suffix=""
+	port=$(site_public_port)
+	[ "$port" = 443 ] || suffix=":${port}"
+	printf '  自有站点   : https://%s%s/\n  页面文件   : %s/index.html\n  内部目标   : 127.0.0.1:%s (TLS1.3 + HTTP/2)\n' "$REALITY_SITE_DOMAIN" "$suffix" "$REALITY_SITE_ROOT" "$REALITY_SITE_PORT"
 }
 
 # ---------------------------------------------------------------------------
@@ -2634,14 +3166,18 @@ xr_reality_guard_inbound() {
 }
 
 gen_xray_server() {
-	local p inbounds=() rules=() ds=AsIs direct_settings=""
+	local p inbounds=() rules=() ds=AsIs direct_settings="" site_outbound="" guard_outbound=direct
 	for p in $PROTOCOLS; do
 		[ "$(pget CORE "$p")" = xray ] || continue
 		inbounds+=("$(xr_inbound "$p")")
 	done
 	if xr_reality_guard; then
 		inbounds+=("$(xr_reality_guard_inbound)")
-		rules+=("      { \"type\": \"field\", \"inboundTag\": [\"reality-dest-in\"], \"domain\": [$(json_str "full:${REALITY_SNI}")], \"outboundTag\": \"direct\" }")
+		if site_enabled; then
+			guard_outbound=reality-site
+			site_outbound="    { \"tag\": \"reality-site\", \"protocol\": \"freedom\", \"settings\": { \"redirect\": $(json_str "127.0.0.1:${REALITY_SITE_PORT}"), \"finalRules\": [{ \"action\": \"allow\", \"network\": \"tcp\", \"ip\": [\"127.0.0.1/32\"], \"port\": $(json_str "$REALITY_SITE_PORT") }, { \"action\": \"block\" }] } },"
+		fi
+		rules+=("      { \"type\": \"field\", \"inboundTag\": [\"reality-dest-in\"], \"domain\": [$(json_str "full:${REALITY_SNI}")], \"outboundTag\": $(json_str "$guard_outbound") }")
 		rules+=('      { "type": "field", "inboundTag": ["reality-dest-in"], "outboundTag": "block" }')
 	fi
 	[ "${BLOCK_BT:-1}" = 1 ] && rules+=('      { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" }')
@@ -2663,6 +3199,7 @@ $(json_join "${inbounds[@]}")
   ],
   "outbounds": [
     { "tag": "direct", "protocol": "freedom", ${direct_settings}"streamSettings": { "sockopt": { "domainStrategy": "$(xr_domain_strategy)" } } },
+${site_outbound}
     { "tag": "block", "protocol": "blackhole" }
   ],
   "routing": {
@@ -3485,6 +4022,10 @@ port_ok() {
 		warn "端口需为 1-65535 之间的数字"
 		return 1
 	}
+	if site_enabled && [ "$net" != udp ] && { [ "$port" = 80 ] || [ "$port" = "$REALITY_SITE_PORT" ]; }; then
+		warn "TCP ${port} 已保留给自有域名网站 (HTTP 80 / 本机 HTTPS ${REALITY_SITE_PORT})"
+		return 1
+	fi
 	if [ "$port" = 80 ] && [ "$net" != udp ] && [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then
 		warn "TCP 80 端口需保留给 ACME HTTP 验证 (证书申请与续期)"
 		return 1
@@ -3513,6 +4054,7 @@ pick_guard_port() {
 	local i port
 	for i in $(seq 1 100); do
 		port=$(rand_port)
+		site_enabled && [ "$port" = "$REALITY_SITE_PORT" ] && continue
 		port_taken_by_other "$port" tcp "" && continue
 		port_in_use "$port" tcp && continue
 		printf '%s' "$port"
@@ -3585,8 +4127,13 @@ choose_sni() {
 		printf '    %d) %s\n' "$_s_i" "$_s_x"
 	done
 	printf '    %d) 自定义\n' $((_s_i + 1))
+	[ "$_s_var" = REALITY_SNI ] && printf '    %d) 使用自己的域名 + 一键建站 (网页 / 正式证书 / 自动续期)\n' $((_s_i + 2))
 	ask _s_ans "$_s_prompt (输入编号或域名)" "$_s_def"
 	if [[ "$_s_ans" =~ ^[0-9]+$ ]]; then
+		if [ "$_s_var" = REALITY_SNI ] && [ "$_s_ans" -eq $((_s_i + 2)) ]; then
+			choose_owned_reality
+			return $?
+		fi
 		if [ "$_s_ans" -ge 1 ] && [ "$_s_ans" -le "$_s_i" ]; then
 			_s_ans=$(printf '%s\n' $REALITY_SNI_LIST | sed -n "${_s_ans}p")
 		else
@@ -3602,6 +4149,51 @@ choose_sni() {
 		warn "无法确认 ${_s_ans} 支持 TLS 1.3 (可能是本机网络问题), 若连接失败请更换伪装站点"
 	fi
 	printf -v "$_s_var" '%s' "$_s_ans"
+	[ "$_s_var" = REALITY_SNI ] && REALITY_SITE_ENABLED=0
+	return 0
+}
+
+# 自有域名与 REALITY 共用公网入口, TLS 网站仅监听 loopback, 不把目标指回自身的 443。
+choose_owned_reality() {
+	local port i
+	ask_domain REALITY_SITE_DOMAIN "请输入自己的域名 (A/AAAA 直连解析到本 VPS, 关闭 CDN 代理)" "${OPT_REALITY_SITE:-${REALITY_SITE_DOMAIN:-}}"
+	REALITY_SITE_DOMAIN=${REALITY_SITE_DOMAIN,,}
+	[ "${#REALITY_SITE_DOMAIN}" -le 253 ] || die "域名过长"
+	ask REALITY_SITE_TITLE "网站标题 (会自动生成可编辑的个人主页)" "${OPT_SITE_TITLE:-${REALITY_SITE_TITLE:-山间手记}}"
+	[ -n "$REALITY_SITE_TITLE" ] && [ "${#REALITY_SITE_TITLE}" -le 80 ] && [[ "$REALITY_SITE_TITLE" != *[[:cntrl:]]* ]] || die "网站标题需为 1-80 个字符且不含控制字符"
+	if [ -z "${REALITY_SITE_PORT:-}" ]; then
+		for i in $(seq 1 30); do
+			case "$i" in 1) port=8444 ;; 2) port=9444 ;; *) port=$(rand_port) ;; esac
+			[ "$port" = "${REALITY_GUARD_PORT:-}" ] && continue
+			port_taken_by_other "$port" tcp "" && continue
+			port_in_use "$port" tcp && continue
+			REALITY_SITE_PORT=$port
+			break
+		done
+	fi
+	[ -n "$REALITY_SITE_PORT" ] || die "无法为网站分配本机 HTTPS 端口"
+	REALITY_SITE_ENABLED=1
+	REALITY_SNI=$REALITY_SITE_DOMAIN
+	REALITY_DEST="127.0.0.1:${REALITY_SITE_PORT}"
+	info "将生成网站并申请 Let's Encrypt 证书; 请放行 TCP 80 与 REALITY 对外端口"
+}
+
+choose_reality_target() {
+	if [ -n "${OPT_REALITY_SITE:-}" ]; then
+		choose_owned_reality
+	else
+		local def=${OPT_SNI:-${REALITY_SNI:-1}}
+		if site_enabled && [ -z "${OPT_SNI:-}" ]; then def=$(($(printf '%s\n' $REALITY_SNI_LIST | wc -l) + 2)); fi
+		choose_sni REALITY_SNI "REALITY 目标站点" "$def"
+	fi
+	if site_enabled; then
+		REALITY_DEST="127.0.0.1:${REALITY_SITE_PORT}"
+	else
+		if [ -n "${REALITY_SITE_DOMAIN:-}" ] && [ "$REALITY_SNI" = "$REALITY_SITE_DOMAIN" ] && [ -z "${OPT_REALITY_DEST:-}" ]; then
+			die "该域名是本机托管网站, 请选择使用自己的域名 + 一键建站, 避免 REALITY 目标指向自身公网端口"
+		fi
+		REALITY_DEST="${OPT_REALITY_DEST:-${REALITY_SNI}:443}"
+	fi
 }
 
 choose_tls() {
@@ -3665,7 +4257,7 @@ CERT_TXN_BAK="" CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME="" CERT_TXN_ACME_D=""
 # 信号处理: 证书事务进行中 (新配置尚未提交) 时, Ctrl-C 等中断先回滚事务再退出;
 # 事务结束后恢复默认. apply_all 提交配置后会屏蔽中断, 直到调用方提交 / 回滚事务
 txn_traps() {
-	if [ -n "$CERT_TXN_BAK" ]; then
+	if [ -n "$CERT_TXN_BAK${SITE_TXN_BAK:-}" ]; then
 		trap 'trap "" INT TERM HUP; cert_txn_rollback; exit 130' INT TERM HUP
 	else
 		trap - INT TERM HUP
@@ -3673,25 +4265,48 @@ txn_traps() {
 }
 
 cert_txn_begin() {
-	CERT_TXN_FW80=0
-	# 旧版本 (无防火墙台账) 升级: 在证书申请改动防火墙之前先迁移台账
-	[ -f "$STATE_FILE" ] && [ ! -f "$(_fw_ledger)" ] && (load_state && _fw_ledger_migrate) >/dev/null 2>&1
-	CERT_TXN_BAK="$ONEBOX_DIR/.tls-rollback"
-	rm -rf "$CERT_TXN_BAK"
-	if [ -d "$TLS_DIR" ]; then cp -a "$TLS_DIR" "$CERT_TXN_BAK"; else mkdir -p "$CERT_TXN_BAK"; fi
-	CERT_TXN_OLD_ACME="" CERT_TXN_NEW_ACME="" CERT_TXN_ACME_D=""
-	rm -rf "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback"
-	# acme.sh 会把 Cloudflare 凭据写入 account.conf (即使签发失败), 回滚时需恢复, 否则旧域名续期用错凭据
-	[ -f "$ACME_HOME/account.conf" ] && cp -p "$ACME_HOME/account.conf" "$ONEBOX_DIR/.acme-account.rollback"
-	[ -f "$STATE_FILE" ] && CERT_TXN_OLD_ACME=$(
+	# Nested preparation must retain the earliest complete snapshot.
+	[ -n "$CERT_TXN_BAK" ] && return 0
+	local staging old_acme="" backup="$ONEBOX_DIR/.tls-rollback"
+	mkdir -p "$ONEBOX_DIR" || return 1
+	staging=$(mktemp -d "$ONEBOX_DIR/.cert-snapshot.XXXXXX") || return 1
+	if [ -d "$TLS_DIR" ]; then
+		cp -a "$TLS_DIR" "$staging/tls" || { rm -rf "$staging"; err "无法完整备份 TLS 证书，已取消变更"; return 1; }
+	else
+		mkdir -p "$staging/tls" || { rm -rf "$staging"; return 1; }
+	fi
+	# acme.sh may persist API credentials even on issuance failure.
+	if [ -f "$ACME_HOME/account.conf" ]; then
+		cp -p "$ACME_HOME/account.conf" "$staging/account.conf" || { rm -rf "$staging"; err "无法备份 ACME 账户配置，已取消变更"; return 1; }
+	fi
+	[ ! -f "$STATE_FILE" ] || old_acme=$(
 		load_state >/dev/null 2>&1
 		[ "$TLS_MODE" = acme ] && printf '%s' "$DOMAIN"
 	)
+	if ! rm -rf "$backup" "$ONEBOX_DIR/.acme-rollback" "$ONEBOX_DIR/.acme-account.rollback" ||
+		! mv "$staging/tls" "$backup"; then
+		rm -rf "$staging"
+		err "无法保存 TLS 证书备份，已取消变更"
+		return 1
+	fi
+	if [ -f "$staging/account.conf" ] && ! mv "$staging/account.conf" "$ONEBOX_DIR/.acme-account.rollback"; then
+		rm -rf "$staging" "$backup"
+		err "无法保存 ACME 账户备份，已取消变更"
+		return 1
+	fi
+	rm -rf "$staging"
+	# Only a fully prepared snapshot may activate destructive rollback.
+	CERT_TXN_BAK=$backup
+	CERT_TXN_FW80=0
+	CERT_TXN_OLD_ACME=$old_acme CERT_TXN_NEW_ACME="" CERT_TXN_ACME_D=""
+	# 旧版本 (无防火墙台账) 升级: 在证书申请改动防火墙之前先迁移台账
+	[ -f "$STATE_FILE" ] && [ ! -f "$(_fw_ledger)" ] && (load_state && _fw_ledger_migrate) >/dev/null 2>&1
 	txn_traps
 	return 0
 }
 
 cert_txn_commit() {
+	site_commit || return 1
 	[ -n "$CERT_TXN_BAK" ] || return 0
 	# 不再使用旧域名的 ACME 证书时, 取消其自动续期; 否则续期时 acme.sh 会覆盖新证书 (导致固定指纹的客户端全部失效)
 	if [ -n "$CERT_TXN_OLD_ACME" ] && { [ "$TLS_MODE" != acme ] || [ "$DOMAIN" != "$CERT_TXN_OLD_ACME" ]; } && [ -x "$ACME_SH" ]; then
@@ -3703,6 +4318,7 @@ cert_txn_commit() {
 }
 
 cert_txn_rollback() {
+	site_rollback
 	[ -n "$CERT_TXN_BAK" ] && [ -d "$CERT_TXN_BAK" ] || {
 		CERT_TXN_BAK=""
 		txn_traps
@@ -3737,6 +4353,7 @@ cert_txn_rollback() {
 		port_taken_by_other 80 tcp "" && need80=1
 	fi
 	# 本次申请临时放行的 80 端口, 恢复后的配置 (磁盘上的状态) 不再需要时关闭
+	site_enabled && need80=1
 	[ "${CERT_TXN_FW80:-0}" = 1 ] && [ "$need80" = 0 ] && fw_rule close 80 tcp
 	txn_traps
 	return 0
@@ -3759,6 +4376,7 @@ state_migrate() {
 
 obtain_cert() {
 	local rc
+	site_prepare || return 1
 	case "$TLS_MODE" in
 	self) cert_self_signed "$TLS_SNI" ;;
 	acme) cert_acme "$DOMAIN" "$ACME_METHOD" ;;
@@ -3767,6 +4385,24 @@ obtain_cert() {
 	esac
 	rc=$?
 	return "$rc"
+}
+
+# 网站启停时迁移主代理证书的 HTTP 验证方式, 防止旧 standalone 续期争抢 80。
+prepare_site_and_renewal() {
+	site_prepare || return 1
+	[ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ] || return 0
+	local conf="$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf" stored want=no
+	[ -f "$conf" ] || return 0
+	stored=$(sed -n "s/^Le_Webroot='\\{0,1\\}\\([^']*\\)'\\{0,1\\}$/\\1/p" "$conf" | head -n1)
+	site_enabled && want=$REALITY_SITE_ROOT
+	[ "$stored" = "$want" ] && return 0
+	# 只迁移本功能涉及的 standalone / 自有网站 webroot, 不接管其他工具的部署。
+	if site_enabled || [ "$stored" = "$REALITY_SITE_ROOT" ]; then
+		[ -n "$CERT_TXN_BAK" ] || cert_txn_begin || return 1
+		if ! site_enabled; then site_service stop || return 1; fi
+		cert_acme "$DOMAIN" standalone || return 1
+	fi
+	return 0
 }
 
 choose_protocols() {
@@ -3808,10 +4444,10 @@ choose_protocols() {
 }
 
 choose_extras() {
+	[ -z "${OPT_REALITY_SITE:-}" ] || any_reality || die "--reality-site 需要至少启用一个 REALITY 协议"
 	if any_reality; then
 		title "REALITY 伪装站点"
-		choose_sni REALITY_SNI "REALITY 目标站点" "${OPT_SNI:-1}"
-		REALITY_DEST="${OPT_REALITY_DEST:-${REALITY_SNI}:443}"
+		choose_reality_target
 	fi
 	if proto_enabled shadowtls; then
 		title "ShadowTLS 握手站点"
@@ -3866,6 +4502,8 @@ choose_address() {
 	echo "  IPv6: ${SERVER_IPV6:-无}"
 	if [ "$TLS_MODE" = acme ] || [ "$TLS_MODE" = custom ]; then
 		def=$DOMAIN
+	elif site_enabled; then
+		def=$REALITY_SITE_DOMAIN
 	elif [ -n "$SERVER_IPV4" ] && [ "${SERVER_IPV4_WARP:-0}" != 1 ]; then
 		def=$SERVER_IPV4
 	elif [ -n "$SERVER_IPV6" ] && [ "${SERVER_IPV6_WARP:-0}" != 1 ]; then
@@ -3903,6 +4541,7 @@ print_plan() {
 	done
 	echo "  服务器地址: ${SERVER_ADDR}"
 	[ -n "$REALITY_SNI" ] && echo "  REALITY 目标: ${REALITY_SNI}"
+	site_enabled && echo "  自有网站: ${REALITY_SITE_DOMAIN} → ${REALITY_DEST} (网页 + Let's Encrypt + 自动续期)"
 	case "$TLS_MODE" in
 	self) echo "  TLS 证书: 自签 (${TLS_SNI})" ;;
 	acme) echo "  TLS 证书: Let's Encrypt (${DOMAIN}, $([ "$ACME_METHOD" = cf ] && echo Cloudflare DNS || echo HTTP) 验证)" ;;
@@ -4011,7 +4650,8 @@ apply_all() {
 	if xr_has_reality && [ -z "${REALITY_GUARD_PORT:-}" ]; then REALITY_GUARD_PORT=$(pick_guard_port); fi
 	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
 	OWN_IP_CIDRS=$(own_ip_cidrs)
-	prepare_server_configs || return 1
+	prepare_site_and_renewal || { cert_txn_rollback; return 1; }
+	prepare_server_configs || { cert_txn_rollback; return 1; }
 	# 从撤销旧防火墙规则到服务切换完成期间屏蔽中断信号, 保证防火墙 / 状态 / 配置 / 服务一致
 	# (有证书事务时一直屏蔽到调用方提交 / 回滚事务为止, 见 txn_traps)
 	trap '' INT TERM HUP
@@ -4031,28 +4671,38 @@ apply_all() {
 	[ "$had_old" = 1 ] || { mkdir -p "$ONEBOX_DIR" && [ -f "$(_fw_ledger)" ] || : >"$(_fw_ledger)"; }
 	commit_server_configs
 	save_state
-	if ! apply_services; then
+	if ! apply_services || ! site_commit; then
 		if [ "$had_old" = 1 ]; then
 			warn "服务启动失败, 正在回滚到修改前的配置..."
 			for f in "$STATE_FILE" "$SB_CONF" "$XR_CONF"; do
 				if [ -f "$bak/${f##*/}" ]; then cp -p "$bak/${f##*/}" "$f"; else rm -f "$f"; fi
 			done
 			load_state
+			cert_txn_rollback
 			state_migrate
 			apply_services >/dev/null 2>&1 || warn "回滚后服务仍未能启动, 请执行 onebox log 查看"
+		elif [ -n "${SITE_TXN_BAK:-}" ]; then
+			# 首次建站失败时不留下指向已回滚网站的服务和状态。
+			svc_remove singbox
+			svc_remove xray
+			rm -f "$STATE_FILE" "$SB_CONF" "$XR_CONF"
+			cert_txn_rollback
+			rm -rf "$bak"
+			return 2
 		fi
 		fw_apply open
 		hop_setup
 		write_client_files
 		rm -rf "$bak"
-		[ -n "$CERT_TXN_BAK" ] || trap - INT TERM HUP
+		txn_traps
 		return 2
 	fi
 	fw_apply open
 	hop_setup
 	write_client_files
 	rm -rf "$bak"
-	[ -n "$CERT_TXN_BAK" ] || trap - INT TERM HUP
+	cert_txn_commit
+	txn_traps
 	return 0
 }
 
@@ -4067,7 +4717,7 @@ apply_or_die() {
 	fi
 	cert_txn_rollback
 	case "$rc" in
-	1) die "新配置未通过内核校验, 未做任何修改" ;;
+	1) die "站点准备或配置校验失败, 已撤销配置变更 (详见上方日志)" ;;
 	*) die "服务启动失败, 已回滚到修改前的配置 (详见上方日志, 或执行 onebox log)" ;;
 	esac
 }
@@ -4100,7 +4750,7 @@ do_install() {
 	ensure_cores || die "内核安装失败"
 	gen_credentials
 	# 重装时备份旧证书, 新配置失败时一并恢复
-	cert_txn_begin
+	cert_txn_begin || die "无法备份原证书，安装已中止"
 	obtain_cert || {
 		cert_txn_rollback
 		die "证书配置失败"
@@ -4181,6 +4831,7 @@ show_info() {
 	if any_reality; then
 		echo "  REALITY    : SNI=${REALITY_SNI}  公钥=${REALITY_PUBLIC_KEY}  ShortID=${REALITY_SHORT_ID}"
 	fi
+	site_enabled && site_info
 	proto_enabled shadowsocks && echo "  SS-2022    : ${SS_METHOD} / ${SS_PASSWORD}"
 	if [ -n "$TLS_MODE" ]; then
 		case "$TLS_MODE" in
@@ -4261,6 +4912,7 @@ do_service() {
 	require_installed
 	case "$act" in
 	start | stop | restart)
+		if site_enabled; then site_service "$act" || return 1; fi
 		all_cores_do "$act"
 		[ "$act" = start ] && [ -n "$HY2_HOP" ] && proto_enabled hysteria2 && hop_rules add
 		sleep 1
@@ -4269,6 +4921,7 @@ do_service() {
 		done
 		;;
 	status)
+		site_enabled && site_service status
 		for core in singbox xray; do
 			core_used "$core" || continue
 			echo "  $(core_title "$core") $( [ "$core" = singbox ] && sb_installed_version || xr_installed_version): $(svc_status_text "$core")"
@@ -4303,6 +4956,7 @@ do_add_protocol() {
 		p=$(protocol_by_index "$ans") || die "无效编号"
 	fi
 	case " $ALL_PROTOCOLS " in *" $p "*) ;; *) die "未知协议: $p" ;; esac
+	[ -z "${OPT_REALITY_SITE:-}" ] || proto_uses_reality "$p" || die "添加协议时 --reality-site 仅适用于 REALITY 协议"
 	proto_enabled "$p" && die "$(proto_title "$p") 已存在"
 	# 内核: 优先使用已在运行的内核 (取已有协议中第一个的内核)
 	local x
@@ -4329,9 +4983,8 @@ do_add_protocol() {
 		pset CORE "$p" "$(proto_cores "$p")"
 	fi
 	fill_missing_credentials
-	if proto_uses_reality "$p" && [ -z "$REALITY_SNI" ]; then
-		choose_sni REALITY_SNI "REALITY 目标站点" "${OPT_SNI:-1}"
-		REALITY_DEST="${REALITY_SNI}:443"
+	if proto_uses_reality "$p" && { [ -z "$REALITY_SNI" ] || [ -n "${OPT_REALITY_SITE:-}${OPT_SNI:-}" ]; }; then
+		choose_reality_target
 	fi
 	if [ "$p" = shadowtls ] && [ -z "$SHADOWTLS_SNI" ]; then
 		choose_sni SHADOWTLS_SNI "ShadowTLS 握手站点" "${REALITY_SNI:-1}"
@@ -4355,7 +5008,7 @@ do_add_protocol() {
 	done
 	pset PORT "$p" "$port"
 	if [ "$need_cert" = 1 ]; then
-		cert_txn_begin
+		cert_txn_begin || die "无法备份原证书，协议添加已中止"
 		obtain_cert || {
 			cert_txn_rollback
 			die "证书配置失败"
@@ -4387,6 +5040,10 @@ do_del_protocol() {
 	pset CORE "$p" ""
 	[ "$p" = hysteria2 ] && HY2_HOP="" HY2_OBFS=""
 	[ "$p" = vmess-ws ] && VMESS_TLS=""
+	if ! any_reality && [ "${REALITY_SITE_ENABLED:-}" = 1 ]; then
+		REALITY_SITE_ENABLED=0
+		info "已删除最后一个 REALITY 协议, 将停止网站和续期, 保留网页内容供以后恢复"
+	fi
 	apply_or_die
 	info "已删除 $(proto_title "$p")"
 }
@@ -4434,13 +5091,13 @@ do_change_addr() {
 
 do_change_sni() {
 	require_installed
+	[ -z "${OPT_REALITY_SITE:-}" ] || any_reality || die "--reality-site 需要至少启用一个 REALITY 协议"
 	if ! any_reality && ! proto_enabled shadowtls; then
 		die "当前协议中没有 REALITY / ShadowTLS, 无需伪装站点"
 	fi
 	if any_reality; then
 		title "更换 REALITY 伪装站点 (当前: ${REALITY_SNI})"
-		choose_sni REALITY_SNI "REALITY 目标站点" "${OPT_SNI:-$REALITY_SNI}"
-		REALITY_DEST="${OPT_REALITY_DEST:-${REALITY_SNI}:443}"
+		choose_reality_target
 	fi
 	if proto_enabled shadowtls; then
 		title "更换 ShadowTLS 握手站点 (当前: ${SHADOWTLS_SNI})"
@@ -4561,7 +5218,7 @@ do_cert() {
 		choose_tls
 		PROTOCOLS=$saved
 		[ -n "$TLS_MODE" ] || TLS_MODE=$old_mode
-		cert_txn_begin
+		cert_txn_begin || die "无法备份原证书，证书变更已中止"
 		obtain_cert || {
 			cert_txn_rollback
 			die "证书配置失败"
@@ -4597,13 +5254,14 @@ do_uninstall() {
 	local purge=0
 	if [ "${1:-}" = "--purge" ]; then purge=1; fi
 	title "卸载"
-	confirm "确定卸载 Sing-Xray-Onebox (将删除全部服务、配置与内核)?" n || return 0
+	confirm "确定卸载 Sing-Xray-Onebox (将删除全部服务、配置、内核及托管网站)?" n || return 0
 	load_state 2>/dev/null || true
 	fw_apply close 2>/dev/null
 	hop_rules del 2>/dev/null
 	net_persist del 2>/dev/null
 	svc_remove singbox
 	svc_remove xray
+	site_remove || die "托管网站停止或清理失败, 已保留配置供排查, 请检查 onebox-site 服务后重试卸载"
 	_none_autostart_del
 	if [ "$TLS_MODE" = acme ] && [ -x "$ACME_SH" ] && [ -n "$DOMAIN" ]; then
 		acme --remove -d "$DOMAIN" --ecc >/dev/null 2>&1
@@ -4668,10 +5326,11 @@ main_menu() {
   ${GREEN}13.${PLAIN} 更新脚本
   ${GREEN}14.${PLAIN} 卸载
   ${GREEN}15.${PLAIN} 更换 REALITY / ShadowTLS 伪装站点
+  ${GREEN}16.${PLAIN} 自有域名网站信息 / 证书续期
   ${GREEN}0.${PLAIN}  退出
 EOF
 		hr
-		ask_num n "请选择" 0 0 15 || exit 0
+		ask_num n "请选择" 0 0 16 || exit 0
 		case "$n" in
 		0) exit 0 ;;
 		1) (do_install) ;;
@@ -4689,9 +5348,32 @@ EOF
 		13) (do_update_script) && exec "$CMD_PATH" ;;
 		14) (do_uninstall) && ! [ -f "$STATE_FILE" ] && exit 0 ;;
 		15) (do_change_sni) ;;
+		16) (require_installed && site_menu) ;;
 		esac
 		pause
 	done
+}
+
+site_menu() {
+	site_enabled || { warn "尚未启用自有域名网站, 请在菜单 15 中选择一键建站"; return 0; }
+	site_info
+	local n
+	echo "  1) 强制续期网站证书  0) 返回"
+	ask_num n "请选择" 0 0 1 || return 0
+	[ "$n" = 1 ] && do_site renew
+	return 0
+}
+
+do_site() {
+	require_installed
+	site_enabled || die "未启用自有域名网站, 请执行 onebox sni --reality-site 你的域名"
+	case "${1:-info}" in
+	info) site_info ;;
+	renew)
+		"$SITE_ACME_HOME/acme.sh" --home "$SITE_ACME_HOME" --renew -d "$REALITY_SITE_DOMAIN" --ecc --force
+		;;
+	*) die "用法: onebox site [info|renew]" ;;
+	esac
 }
 
 service_menu() {
@@ -4743,6 +5425,8 @@ install 选项 (用于无人值守安装):
                            ${ALL_PROTOCOLS// /, }
   --core <singbox|xray>    两种内核都支持的协议优先使用的内核
   --sni <域名>             REALITY / ShadowTLS 伪装站点
+  --reality-site <域名>    使用自己的域名, 自动建立网站并申请 / 续期正式证书 (TCP 80 需可达)
+  --site-title <标题>      网站标题 (默认 山间手记, 可修改生成的网页)
   --tls <self|acme|cf>     证书方式: 自签 / ACME HTTP 验证 / ACME Cloudflare DNS 验证 (cf 需设置 CF_Token 环境变量)
   --domain <域名>          ACME 证书域名
   --addr <IP 或域名>       客户端连接地址 (默认自动检测公网 IP)
@@ -4794,6 +5478,16 @@ parse_install_opts() {
 			shift
 			;;
 		--sni) OPT_SNI=$2 && shift ;;
+		--reality-site)
+			[ -n "${2:-}" ] && valid_domain "$2" && [ "${#2}" -le 253 ] || die "--reality-site 需要有效域名, 例如 www.example.com"
+			OPT_REALITY_SITE=${2,,}
+			shift
+			;;
+		--site-title)
+			[ -n "${2:-}" ] && [ "${#2}" -le 80 ] && [[ "$2" != *[[:cntrl:]]* ]] || die "--site-title 需要 1-80 个字符且不含控制字符"
+			OPT_SITE_TITLE=$2
+			shift
+			;;
 		--reality-dest) OPT_REALITY_DEST=$2 && shift ;;
 		--tls)
 			case "$2" in self) OPT_TLS_CHOICE=1 ;; acme | http) OPT_TLS_CHOICE=2 ;; cf | cloudflare) OPT_TLS_CHOICE=3 ;; *) die "--tls 仅支持 self / acme / cf" ;; esac
@@ -4827,6 +5521,9 @@ parse_install_opts() {
 		esac
 		shift
 	done
+	if [ -n "${OPT_REALITY_SITE:-}" ] && [ -n "${OPT_SNI:-}${OPT_REALITY_DEST:-}" ]; then
+		die "--reality-site 与 --sni / --reality-dest 不能同时使用"
+	fi
 }
 
 # --port 协议=端口 的预设值
@@ -4907,6 +5604,7 @@ main() {
 		;;
 	update-script) do_update_script ;;
 	cert) do_cert ;;
+	site) do_site "${1:-info}" ;;
 	bbr) enable_bbr ;;
 	regen)
 		require_installed

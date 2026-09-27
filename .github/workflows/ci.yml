@@ -16,10 +16,14 @@ jobs:
           bash -n tests/e2e.sh
           bash -n tests/lifecycle.sh
           bash -n tests/unit.sh
+          bash -n tests/site.sh
+          bash -n tests/site-e2e.sh
       - name: shellcheck
         run: shellcheck -s bash -S warning onebox.sh tests/*.sh
       - name: unit tests
         run: bash tests/unit.sh
+      - name: Owned-domain REALITY site regressions
+        run: bash tests/site.sh
 
   test:
     runs-on: ubuntu-latest
@@ -28,6 +32,17 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - name: Extract nginx config checker without installing a system service
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          mkdir -p "$RUNNER_TEMP/nginx-package" "$RUNNER_TEMP/nginx-root"
+          cd "$RUNNER_TEMP/nginx-package"
+          apt-get download nginx
+          dpkg-deb -x nginx_*.deb "$RUNNER_TEMP/nginx-root"
+          test -x "$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
+      - name: Validate generated nginx configs with a real nginx binary
+        run: ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site.sh
 
       - name: Download cores with the script's own installer functions
         run: |
@@ -50,6 +65,11 @@ jobs:
           curl -fsSL "$url" | gunzip > "$RUNNER_TEMP/bin/mihomo"
           chmod +x "$RUNNER_TEMP/bin/mihomo"
           "$RUNNER_TEMP/bin/mihomo" -v
+
+      - name: Owned-domain REALITY website through real nginx and both cores
+        run: |
+          SB="$RUNNER_TEMP/bin/sing-box" XR="$RUNNER_TEMP/bin/xray" \
+            ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site-e2e.sh
 
       - name: End-to-end matrix (protocol x server core x client)
         run: |
