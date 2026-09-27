@@ -142,7 +142,7 @@ if [ -n "${ONEBOX_TEST_NGINX:-}" ]; then
 	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
 		-subj /CN=site.example.com -addext subjectAltName=DNS:site.example.com \
 		-keyout "$REALITY_SITE_DIR/key.pem" -out "$REALITY_SITE_DIR/cert.pem" >/dev/null 2>&1
-	eq "真实 nginx 校验生成配置" "$(yes_ "$ONEBOX_TEST_NGINX" -t -p "$REALITY_SITE_DIR/" -c "$REALITY_SITE_DIR/nginx.conf" 2>/dev/null)" yes
+	eq "真实 nginx 校验生成配置" "$(yes_ "$ONEBOX_TEST_NGINX" -t -p "$REALITY_SITE_DIR/" -c "$REALITY_SITE_DIR/nginx.conf")" yes
 fi
 
 # mock 外部副作用, 保留真实站点事务和配置生成逻辑。
@@ -248,6 +248,82 @@ eq "健康检查失败恢复网页、配置、证书与原服务" "$(yes_ transa
 eq "首次建立站点失败清理新文件" "$(yes_ transaction_failure_cleans_new_site)" yes
 eq "备份失败不能删除原有自定义网站" "$(yes_ snapshot_failure_preserves_custom_site)" yes
 eq "网站已准备但代理启动失败时整体回滚" "$(yes_ core_apply_failure_restores_site)" yes
+
+# 主代理证书也必须先完成快照再允许回滚, 不能因备份失败损坏原证书。
+cert_fixture() {
+	reset_state
+	ONEBOX_DIR="$WORK/cert-$1"
+	STATE_FILE="$ONEBOX_DIR/onebox.conf" TLS_DIR="$ONEBOX_DIR/tls"
+	ACME_HOME="$ONEBOX_DIR/acme" ACME_SH="$ONEBOX_DIR/no-acme-executable"
+	CERT_TXN_BAK='' SITE_TXN_BAK='' CERT_TXN_ACME_D='' CERT_TXN_NEW_ACME=''
+	mkdir -p "$TLS_DIR" "$ACME_HOME"
+	printf '%s' 'original certificate' >"$TLS_DIR/cert.pem"
+	printf '%s' 'original account' >"$ACME_HOME/account.conf"
+}
+cert_snapshot_failure_preserves_files() (
+	local kind=$1
+	cert_fixture "$kind"
+	cp() {
+		if { [ "$kind" = tls ] && [ "$2" = "$TLS_DIR" ]; } ||
+			{ [ "$kind" = account ] && [ "$2" = "$ACME_HOME/account.conf" ]; }; then return 1; fi
+		command cp "$@"
+	}
+	if cert_txn_begin >/dev/null 2>&1; then return 1; fi
+	[ -z "$CERT_TXN_BAK" ] || return 1
+	cert_txn_rollback >/dev/null 2>&1
+	[ "$(cat "$TLS_DIR/cert.pem")" = 'original certificate' ] &&
+		[ "$(cat "$ACME_HOME/account.conf")" = 'original account' ] && [ -z "$CERT_TXN_BAK" ]
+)
+nested_cert_snapshot_keeps_original() (
+	cert_fixture nested
+	cert_txn_begin || return 1
+	printf '%s' 'new certificate' >"$TLS_DIR/cert.pem"
+	printf '%s' 'new account' >"$ACME_HOME/account.conf"
+	cert_txn_begin || return 1
+	cert_txn_rollback >/dev/null 2>&1
+	[ "$(cat "$TLS_DIR/cert.pem")" = 'original certificate' ] &&
+		[ "$(cat "$ACME_HOME/account.conf")" = 'original account' ]
+)
+acme_snapshot_failure_prevents_issuance() (
+	cert_fixture deployment
+	PROTOCOLS=vless-reality REALITY_SITE_ENABLED=1 REALITY_SITE_DOMAIN=site.example.com
+	DOMAIN=proxy.example.com
+	mkdir -p "$ACME_HOME/${DOMAIN}_ecc"
+	printf '%s\n' "Le_Webroot='no'" >"$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf"
+	cert_txn_begin || return 1
+	acme_install() { return 0; }
+	acme() { printf '%s\n' "$*" >>"$ONEBOX_DIR/acme-calls"; }
+	cp() { [ "$2" != "$ACME_HOME/${DOMAIN}_ecc" ] || return 1; command cp "$@"; }
+	if cert_acme "$DOMAIN" standalone >/dev/null 2>&1; then return 1; fi
+	[ ! -e "$ONEBOX_DIR/acme-calls" ] && [ -z "$CERT_TXN_ACME_D" ] &&
+		[ "$(cat "$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf")" = "Le_Webroot='no'" ] || return 1
+	cert_txn_rollback >/dev/null 2>&1
+	[ "$(cat "$TLS_DIR/cert.pem")" = 'original certificate' ]
+)
+eq "TLS 快照失败保留原证书和账户" "$(yes_ cert_snapshot_failure_preserves_files tls)" yes
+eq "账户快照失败保留原证书和账户" "$(yes_ cert_snapshot_failure_preserves_files account)" yes
+eq "重复开启证书事务保留首次快照" "$(yes_ nested_cert_snapshot_keeps_original)" yes
+eq "已有 ACME 部署备份失败时禁止签发" "$(yes_ acme_snapshot_failure_prevents_issuance)" yes
+
+# 网站与主代理证书共用 HTTP 80 时, 迁移续期方式并避免无意义重复签发。
+renewal_migration() (
+	local mode=$1 stored=$2
+	site_fixture
+	REALITY_SITE_ENABLED=$mode
+	TLS_MODE=acme ACME_METHOD=standalone DOMAIN=proxy.example.com
+	ACME_HOME="$WORK/renewal-${mode}-${3}"
+	CERT_TXN_BAK=''
+	mkdir -p "$ACME_HOME/${DOMAIN}_ecc"
+	printf "Le_Webroot='%s'\n" "$stored" >"$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf"
+	site_prepare() { printf 'prepare\n'; }
+	cert_txn_begin() { CERT_TXN_BAK=mock; printf 'backup\n'; }
+	site_service() { printf 'site:%s\n' "$1"; }
+	cert_acme() { printf 'issue:%s:%s\n' "$1" "$2"; }
+	prepare_site_and_renewal
+)
+eq "启用网站将 standalone 续期迁移至网站验证" "$(renewal_migration 1 no enable)" $'prepare\nbackup\nissue:proxy.example.com:standalone'
+eq "停用网站先停止其 80 监听再恢复 standalone" "$(renewal_migration 0 "$REALITY_SITE_ROOT" disable)" $'prepare\nbackup\nsite:stop\nissue:proxy.example.com:standalone'
+eq "已有网站验证方式不重复申请证书" "$(renewal_migration 1 "$REALITY_SITE_ROOT" unchanged)" prepare
 
 # 两个内核的握手目标必须始终是本机 TLS 站点, 避免解析到自身公开端口后循环。
 site_fixture

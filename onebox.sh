@@ -2685,7 +2685,7 @@ site_remove() {
 	[ -f "$REALITY_SITE_DIR/.onebox-site-owned" ] || return 0
 	site_service stop || return 1
 	_site_disable_unit
-	_site_cron_remove
+	_site_cron_remove || return 1
 	local unit
 	unit=$(_site_unit_path)
 	[ -z "$unit" ] || rm -f "$unit"
@@ -4340,7 +4340,7 @@ cert_txn_rollback() {
 		mv -f "$ONEBOX_DIR/.acme-account.rollback" "$ACME_HOME/account.conf"
 	fi
 	rm -rf "$TLS_DIR"
-	mv "$CERT_TXN_BAK" "$TLS_DIR"
+	mv "$CERT_TXN_BAK" "$TLS_DIR" || { err "证书恢复失败，已保留备份: $CERT_TXN_BAK"; return 1; }
 	CERT_TXN_BAK=""
 	# 用恢复后的状态与证书重新生成客户端文件并重启内核
 	local need80=0
@@ -5409,6 +5409,8 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   addr                     修改客户端连接地址 / 节点名称
   reset                    重置全部 UUID / 密码 / 密钥
   sni [--sni 域名]         更换 REALITY / ShadowTLS 伪装站点 (凭据不变)
+  sni --reality-site 域名  使用自有域名一键建站并设为 REALITY 目标
+  site [info|renew]        查看网站信息 / 强制续期网站证书
   start | stop | restart | status
   log [singbox|xray]       查看日志
   update [singbox|xray] [版本]  更新内核 (默认全部; Xray 默认保持经过测试的版本)

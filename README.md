@@ -128,7 +128,8 @@ onebox site renew
 网站地址优先使用监听 443 的 REALITY 入站；没有 REALITY 443 时，地址会包含实际端口，例如 `https://www.example.com:8443/`。
 脚本提供的本机 HTTPS 网站启用 TLS 1.3 和 HTTP/2；网站使用独立的 acme.sh 目录管理证书与续期任务。
 
-默认主页位于 **`/var/lib/onebox-site/index.html`**，可直接编辑 HTML 替换内容；`onebox regen` 不会覆盖已存在的主页。
+默认主页位于 **`/var/lib/onebox-site/index.html`**，可直接编辑 HTML 替换内容；`onebox regen` 不会覆盖用户修改后的主页。
+其他代理协议使用 HTTP 验证证书时，启用网站会将验证迁移到网站目录，避免争用 80 端口；停用网站时恢复 standalone 验证。
 切换回外部 REALITY 目标，或删除最后一个 REALITY 协议时，脚本停止托管网站和其续期任务，但保留网页内容。
 执行 `onebox uninstall` 会删除托管网站及其管理文件，保留系统安装的 nginx 软件包。
 

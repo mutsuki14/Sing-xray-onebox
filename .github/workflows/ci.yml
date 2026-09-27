@@ -42,7 +42,7 @@ jobs:
           dpkg-deb -x nginx_*.deb "$RUNNER_TEMP/nginx-root"
           test -x "$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
       - name: Validate generated nginx configs with a real nginx binary
-        run: ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site.sh
+        run: sudo env ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site.sh
 
       - name: Download cores with the script's own installer functions
         run: |
@@ -68,7 +68,7 @@ jobs:
 
       - name: Owned-domain REALITY website through real nginx and both cores
         run: |
-          SB="$RUNNER_TEMP/bin/sing-box" XR="$RUNNER_TEMP/bin/xray" \
+          sudo env SB="$RUNNER_TEMP/bin/sing-box" XR="$RUNNER_TEMP/bin/xray" \
             ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site-e2e.sh
 
       - name: End-to-end matrix (protocol x server core x client)
