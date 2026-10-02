@@ -72,14 +72,25 @@ core_success() (
 		[ "$(sb_installed_version)|$(xr_installed_version)" = 'new-sb|old-xr' ] &&
 		[ "$(cat "$SB_BIN.bak")" = 'unrelated backup' ] && [ "$(cat "$ONEBOX_DIR/applied")" = 'new-sb|old-xr' ]
 )
+write_script_fixture() {
+	local path=$1 version=$2 rc=${3:-0}
+	cat >"$path" <<EOF
+#!/usr/bin/env bash
+# Sing-Xray-Onebox
+readonly SCRIPT_VERSION="${version}"
+if [ "\${1:-}" = regen ]; then printf '%s\\n' called >>"$SCRIPT_REGEN_LOG"; fi
+exit $rc
+EOF
+}
 script_fixture() {
 	CMD_PATH="$WORK/script-$1/onebox"
+	SCRIPT_REGEN_LOG="${CMD_PATH}.regen-calls"
 	mkdir -p "${CMD_PATH%/*}"
-	printf '#!/usr/bin/env bash\n# Sing-Xray-Onebox\nreadonly SCRIPT_VERSION="old"\nexit 0\n' >"$CMD_PATH"
+	write_script_fixture "$CMD_PATH" 1.1.0
 	cp "$CMD_PATH" "${CMD_PATH}.original"
 	chmod +x "$CMD_PATH"
 	is_installed() { return 0; }
-	http_get() { printf '#!/usr/bin/env bash\n# Sing-Xray-Onebox\nreadonly SCRIPT_VERSION="new"\nexit %s\n' "${NEW_SCRIPT_RC:-0}" >"$2"; }
+	http_get() { write_script_fixture "$2" "${NEW_SCRIPT_VERSION:-1.2.1}" "${NEW_SCRIPT_RC:-0}"; }
 }
 script_apply_failure() (
 	script_fixture apply
@@ -108,7 +119,78 @@ script_invalid_download() (
 )
 script_success() (
 	script_fixture success
-	do_update_script >/dev/null 2>&1 && grep -q 'SCRIPT_VERSION="new"' "$CMD_PATH"
+	do_update_script >/dev/null 2>&1 && grep -q 'SCRIPT_VERSION="1.2.1"' "$CMD_PATH" &&
+		[ "$(cat "$SCRIPT_REGEN_LOG")" = called ]
+)
+script_downgrade_rejected() (
+	script_fixture downgrade
+	NEW_SCRIPT_VERSION=1.0.0
+	! do_update_script >/dev/null 2>&1 && cmp -s "$CMD_PATH" "${CMD_PATH}.original" && [ ! -e "$SCRIPT_REGEN_LOG" ]
+)
+script_missing_version_rejected() (
+	script_fixture missing-version
+	http_get() { printf '#!/usr/bin/env bash\n# Sing-Xray-Onebox\nexit 0\n' >"$2"; }
+	! do_update_script >/dev/null 2>&1 && cmp -s "$CMD_PATH" "${CMD_PATH}.original"
+)
+script_invalid_version_rejected() (
+	script_fixture invalid-version
+	NEW_SCRIPT_VERSION=nightly
+	! do_update_script >/dev/null 2>&1 && cmp -s "$CMD_PATH" "${CMD_PATH}.original"
+)
+script_identical_skips_regen() (
+	script_fixture identical
+	http_get() { command cp "$CMD_PATH" "$2"; }
+	local out
+	out=$(do_update_script 2>&1) && [ ! -e "$SCRIPT_REGEN_LOG" ] &&
+		cmp -s "$CMD_PATH" "${CMD_PATH}.original" && printf '%s' "$out" | grep -q '最新'
+)
+script_same_version_changed_content() (
+	script_fixture same-version
+	http_get() { write_script_fixture "$2" 1.1.0; printf '# same-version improvement\n' >>"$2"; }
+	do_update_script >/dev/null 2>&1 && grep -q 'same-version improvement' "$CMD_PATH" &&
+		[ "$(cat "$SCRIPT_REGEN_LOG")" = called ]
+)
+script_compares_installed_version() (
+	script_fixture installed-newer
+	write_script_fixture "$CMD_PATH" 2.0.0
+	command cp "$CMD_PATH" "${CMD_PATH}.original"
+	NEW_SCRIPT_VERSION=1.9.0
+	! do_update_script >/dev/null 2>&1 && cmp -s "$CMD_PATH" "${CMD_PATH}.original" && [ ! -e "$SCRIPT_REGEN_LOG" ]
+)
+script_running_copy_version_not_used() (
+	script_fixture installed-older
+	write_script_fixture "$CMD_PATH" 0.9.0
+	NEW_SCRIPT_VERSION=1.0.0
+	do_update_script >/dev/null 2>&1 && grep -q 'SCRIPT_VERSION="1.0.0"' "$CMD_PATH"
+)
+script_download_failure_not_success() (
+	script_fixture download-error
+	http_get() { printf 'incomplete response\n' >"$2"; return 1; }
+	local out rc
+	out=$(do_update_script 2>&1)
+	rc=$?
+	[ "$rc" != 0 ] && cmp -s "$CMD_PATH" "${CMD_PATH}.original" && [ ! -e "$SCRIPT_REGEN_LOG" ] &&
+		! printf '%s' "$out" | grep -q '脚本已更新'
+)
+script_real_main_regen_failure() (
+	script_fixture real-main
+	# 使用与生产相同的入口保护, 并确保子进程真正执行 main / regen。
+	unset ONEBOX_SOURCE_ONLY
+	http_get() {
+		cat >"$2" <<EOF
+#!/usr/bin/env bash
+# Sing-Xray-Onebox
+readonly SCRIPT_VERSION="1.2.1"
+main() {
+    [ "\${1:-}" = regen ] || return 2
+    printf '%s\\n' new-regen >>"$SCRIPT_REGEN_LOG"
+    return 42
+}
+[ -n "\${ONEBOX_SOURCE_ONLY:-}" ] || main "\$@"
+EOF
+	}
+	! do_update_script >/dev/null 2>&1 && cmp -s "$CMD_PATH" "${CMD_PATH}.original" &&
+		[ "$(cat "$SCRIPT_REGEN_LOG")" = $'new-regen\ncalled' ]
 )
 check core_backup_failure
 check core_second_download_failure
@@ -123,5 +205,14 @@ check script_replace_interrupted
 check script_backup_failure
 check script_invalid_download
 check script_success
+check script_downgrade_rejected
+check script_missing_version_rejected
+check script_invalid_version_rejected
+check script_identical_skips_regen
+check script_same_version_changed_content
+check script_compares_installed_version
+check script_running_copy_version_not_used
+check script_download_failure_not_success
+check script_real_main_regen_failure
 printf '更新测试：通过 %s 项，失败 %s 项\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

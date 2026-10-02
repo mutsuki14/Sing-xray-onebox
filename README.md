@@ -277,8 +277,22 @@ sing-box 使用 musl 静态构建，不依赖系统 glibc 版本。
 **SS-2022 / ShadowTLS / VMess 连接失败？** 这些协议对时间敏感：SS-2022 要求服务器与客户端时间误差在 30 秒以内，VMess 为 120 秒。
 脚本安装时会检测服务器时间偏差，请开启时间同步（`timedatectl set-ntp true` 或安装 chrony）。
 
-**如何更新？** `onebox update` 更新内核（可指定版本，如 `onebox update singbox 1.14.2`；新内核不接受当前配置时自动恢复旧版本），
-`onebox update-script` 更新脚本（会用新脚本重新生成配置，凭据不变）。
+**如何更新？** `onebox update` 只更新 sing-box / Xray 内核（可指定版本，如 `onebox update singbox 1.14.2`；新内核不接受当前配置时自动恢复旧版本）。
+更新管理脚本和菜单功能请执行 `onebox update-script`（菜单 13），成功后用 `onebox version` 核验版本，再执行 `onebox` 打开新菜单；更新会重新生成配置，凭据不变。
+新版更新器会拒绝降级；下载内容与已安装脚本完全一致时跳过替换和配置应用，同版本号但内容有变化时仍可更新。
+
+**旧版 1.0.0 更新脚本失败，或更新后菜单没有变化？** 旧版默认从 `main/onebox.sh` 下载，但本仓库的默认分支是 `claude/linux-vps-proxy-script-1m1ksn`，旧地址会返回 404。
+在 VPS 的 root 终端执行下面的一次性迁移命令，无需重装节点：
+
+```bash
+ONEBOX_SCRIPT_URL=https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh onebox update-script
+onebox version
+onebox
+```
+
+非 root 用户可在上述更新命令前加 `sudo env`，并把 `onebox` 换成完整路径 `/usr/local/bin/onebox`。这只临时覆盖本次下载地址，升级后使用新脚本的正确默认地址。
+旧版若已替换文件但提示“配置重新生成失败”，当前菜单可能仍显示旧版本；退出菜单后用 `onebox version` 核验，并保留失败信息。
+如果仍无法更新，请提供 `onebox version` 和 `onebox update-script` 的完整输出，以便区分下载失败与配置应用失败。
 
 **使用已有证书（certbot 等）？** 选择“使用已有证书文件”时脚本直接引用原文件，续期后 sing-box 自动加载新证书；
 Xray 需要重启，可在 certbot 的续期钩子中加入 `onebox restart`（例如 `--deploy-hook "onebox restart"`）。
