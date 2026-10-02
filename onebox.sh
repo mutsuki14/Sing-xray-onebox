@@ -46,7 +46,7 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
 readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/claude/linux-vps-proxy-script-1m1ksn/onebox.sh}"
 
@@ -717,7 +717,7 @@ port_in_use() {
 readonly STATE_KEYS="PROTOCOLS SERVER_ADDR SERVER_IPV4 SERVER_IPV6 SERVER_IPV4_WARP SERVER_IPV6_WARP NODE_NAME LISTEN_ADDR
 UUID PASSWORD SS_METHOD SS_PASSWORD
 REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SNI REALITY_DEST
-REALITY_SITE_ENABLED REALITY_SITE_DOMAIN REALITY_SITE_PORT REALITY_SITE_TITLE
+REALITY_SITE_ENABLED REALITY_SITE_DOMAIN REALITY_SITE_PORT REALITY_SITE_TITLE REALITY_SITE_HTTPS
 WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
 HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP
 SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
@@ -1430,7 +1430,6 @@ svc_status_text() {
 # 按当前协议分配, 启停相应内核; 启动后检查是否正常运行
 apply_services() {
 	local core ok=0
-	site_apply_service || return 1
 	for core in singbox xray; do
 		if core_used "$core"; then
 			svc_write "$core" || return 1
@@ -1444,6 +1443,9 @@ apply_services() {
 		core_used "$core" || continue
 		svc_stop "$core" || return 1
 	done
+	# Release the old core's 443 before nginx takes it; nginx releases its own
+	# 443 before starting a REALITY core that will own the public entrance.
+	site_apply_service || return 1
 	for core in singbox xray; do
 		core_used "$core" || continue
 		svc_start "$core" || ok=1
@@ -1709,6 +1711,7 @@ fw_apply() {
 		fw_rule "$act" 80 tcp || rc=1
 	fi
 	if site_enabled; then fw_rule "$act" 80 tcp || rc=1; fi
+	if site_https_enabled; then fw_rule "$act" 443 tcp || rc=1; fi
 	# 端口跳跃: NAT 在 INPUT 之前完成, INPUT 看到的已是 Hysteria2 实际端口, 无需放行整个范围 (云安全组仍需放行)
 	return "$rc"
 }
@@ -2287,8 +2290,11 @@ SITE_ACME_HOME="${REALITY_SITE_DIR}/acme"
 SITE_TXN_BAK=""
 
 site_enabled() { [ "${REALITY_SITE_ENABLED:-}" = 1 ] && any_reality; }
+site_https_enabled() { site_enabled && [ "${REALITY_SITE_HTTPS:-0}" = 1 ]; }
+site_uses_https_proxy() { site_https_enabled && [ "$(site_reality_port)" != 443 ]; }
+_site_owns_https_listener() { [ "$(cat "$REALITY_SITE_DIR/frontend-port" 2>/dev/null)" = 443 ] && _site_running; }
 site_nginx_bin() { if [ -n "${ONEBOX_NGINX_BIN:-}" ]; then [ -x "$ONEBOX_NGINX_BIN" ] && printf '%s' "$ONEBOX_NGINX_BIN"; else command -v nginx; fi; }
-site_public_port() {
+site_reality_port() {
 	local p first="" port
 	for p in $PROTOCOLS; do
 		proto_uses_reality "$p" || continue
@@ -2299,6 +2305,9 @@ site_public_port() {
 	done
 	[ -n "$first" ] || return 1
 	printf '%s' "$first"
+}
+site_public_port() {
+	if site_https_enabled; then printf '443'; else site_reality_port; fi
 }
 
 site_html_escape() {
@@ -2332,13 +2341,18 @@ site_validate_ports() {
 	local port=${REALITY_SITE_PORT:-} p pp net
 	[[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || { err "站点内部 TLS 端口必须为 1024–65535"; return 1; }
 	[ "$port" != "${REALITY_GUARD_PORT:-}" ] && [ "${REALITY_GUARD_PORT:-}" != 80 ] || { err "站点端口与 REALITY 防偷跑端口冲突"; return 1; }
+	if site_https_enabled && [ "${REALITY_GUARD_PORT:-}" = 443 ]; then err "TCP 443 与 REALITY 防偷跑端口冲突，请先更换该端口"; return 1; fi
 	for p in $PROTOCOLS; do
 		net=$(proto_net "$p")
 		[ "$net" = udp ] && continue
 		pp=$(pget PORT "$p")
 		if [ "$pp" = 80 ] || [ "$pp" = "$port" ]; then err "${p} 的 TCP 端口 ${pp} 与自有站点冲突"; return 1; fi
+		if site_https_enabled && [ "$pp" = 443 ] && ! proto_uses_reality "$p"; then
+			err "${p} 已使用 TCP 443，请先更换该协议端口或关闭网站 443 入口"
+			return 1
+		fi
 	done
-	site_public_port >/dev/null || { err "自有站点至少需要一个 REALITY TCP 入站"; return 1; }
+	site_reality_port >/dev/null || { err "自有站点至少需要一个 REALITY TCP 入站"; return 1; }
 }
 
 _site_paths_safe() {
@@ -2357,7 +2371,7 @@ _site_paths_safe() {
 }
 
 _site_hash() { openssl dgst -sha256 2>/dev/null | sed 's/^.*= *//'; }
-_site_signature() { printf '%s\n' "$REALITY_SITE_DOMAIN" "$REALITY_SITE_PORT" "$(site_public_port)" "${REALITY_SITE_TITLE:-山间手记}" "$REALITY_SITE_ROOT" | _site_hash; }
+_site_signature() { printf '%s\n' "$REALITY_SITE_DOMAIN" "$REALITY_SITE_PORT" "$(site_public_port)" "${REALITY_SITE_TITLE:-山间手记}" "$REALITY_SITE_ROOT" "${REALITY_SITE_HTTPS:-0}" "$(site_uses_https_proxy && echo nginx || echo reality)" | _site_hash; }
 _site_unit_path() { case "$INIT" in systemd) printf '/etc/systemd/system/%s.service' "$SITE_SERVICE" ;; openrc) printf '%s/%s' "$INITD_DIR" "$SITE_SERVICE" ;; none) return 0 ;; esac; }
 _site_running() {
 	local pid
@@ -2369,8 +2383,18 @@ _site_running() {
 }
 
 site_nginx_check() { "$(site_nginx_bin)" -t -p "$REALITY_SITE_DIR/" -c "$REALITY_SITE_DIR/nginx.conf" >/dev/null 2>&1; }
+
+_site_ca_bundle() {
+	local path
+	for path in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem; do
+		if [ -r "$path" ] && [ -s "$path" ]; then printf '%s' "$path"; return 0; fi
+	done
+	err "找不到系统 CA 证书包，请先安装 ca-certificates"
+	return 1
+}
+
 site_write_nginx() {
-	local public user="" group="" u ipv6="" suffix=""
+	local public user="" group="" u ipv6="" suffix="" https="" https_ipv6="" ca
 	public=$(site_public_port) || return 1
 	[ "$public" = 443 ] || suffix=":${public}"
 	for u in nginx www-data nobody; do
@@ -2379,9 +2403,49 @@ site_write_nginx() {
 		break
 	done
 	[ -n "$user" ] || { err "nginx 需要非 root 工作进程账号"; return 1; }
-	host_has_ipv6 && ipv6='listen [::]:80;'
+	if host_has_ipv6; then ipv6='listen [::]:80;'; https_ipv6='listen [::]:443 ssl http2;'; fi
+	# defer 先只启动 HTTP-01 与本机目标，公网 443 由服务切换阶段接管。
+	if [ "${1:-}" != defer ] && site_uses_https_proxy; then
+		ca=$(_site_ca_bundle) || return 1
+		https=$(cat <<EOF
+    server {
+        listen 443 ssl http2;
+        ${https_ipv6}
+        server_name ${REALITY_SITE_DOMAIN};
+        ssl_certificate "${REALITY_SITE_DIR}/cert.pem";
+        ssl_certificate_key "${REALITY_SITE_DIR}/key.pem";
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ecdh_curve X25519:prime256v1;
+        ssl_session_cache shared:onebox_site:1m;
+        ssl_session_timeout 10m;
+        location / {
+            proxy_pass https://127.0.0.1:${REALITY_SITE_PORT};
+            proxy_ssl_server_name on;
+            proxy_ssl_name ${REALITY_SITE_DOMAIN};
+            proxy_ssl_protocols TLSv1.3;
+            proxy_ssl_verify on;
+            proxy_ssl_verify_depth 3;
+            proxy_ssl_trusted_certificate "${ca}";
+            proxy_http_version 1.1;
+            proxy_set_header Host ${REALITY_SITE_DOMAIN};
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$remote_addr;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host ${REALITY_SITE_DOMAIN};
+            proxy_set_header X-Forwarded-Port 443;
+            proxy_set_header Forwarded "";
+            proxy_set_header Connection "";
+            proxy_redirect off;
+            # 私密配置目录不供 worker 遍历，代理请求/响应不写临时文件。
+            proxy_buffering off;
+            proxy_request_buffering off;
+        }
+    }
+EOF
+)
+	fi
 	mkdir -p "$REALITY_SITE_DIR/tmp" || return 1
-	cat >"$REALITY_SITE_DIR/nginx.conf" <<EOF
+	cat >"$REALITY_SITE_DIR/nginx.conf" <<EOF || return 1
 # Managed exclusively by onebox; no /etc/nginx includes.
 user ${user} ${group};
 worker_processes 1;
@@ -2417,6 +2481,8 @@ http {
         ssl_ecdh_curve X25519:prime256v1;
         ssl_session_cache shared:onebox_site:1m;
         ssl_session_timeout 10m;
+        # REALITY 与反代入口可能使用不同公网端口，目录跳转保持相对路径。
+        absolute_redirect off;
         root "${REALITY_SITE_ROOT}";
         index index.html;
         add_header X-Content-Type-Options nosniff always;
@@ -2424,6 +2490,7 @@ http {
         location ~ /\\. { deny all; }
         location / { try_files \$uri \$uri/ =404; }
     }
+${https}
 }
 EOF
 	site_nginx_check || { err "站点 nginx 配置校验失败（需 nginx 支持 TLS 1.3 和 HTTP/2）"; return 1; }
@@ -2713,6 +2780,10 @@ _site_prepare_inner() {
 	old_port=$(cat "$REALITY_SITE_DIR/local-port" 2>/dev/null)
 	if port_in_use 80 tcp && [ "$was_running" != 1 ]; then err "TCP 80 已被其他服务使用，不能启用自有站点"; return 1; fi
 	if port_in_use "$REALITY_SITE_PORT" tcp && { [ "$was_running" != 1 ] || [ "$old_port" != "$REALITY_SITE_PORT" ]; }; then err "站点内部 TLS 端口 ${REALITY_SITE_PORT} 已被占用"; return 1; fi
+	if site_uses_https_proxy && port_in_use 443 tcp && ! _site_owns_https_listener && ! port_used_by_onebox 443 tcp; then
+		err "TCP 443 已被其他程序占用，请先释放该端口或关闭网站 443 入口"
+		return 1
+	fi
 	_site_txn_begin || return 1
 	site_install_nginx && ensure_cmds timeout || return 1
 	mkdir -p "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT/.well-known/acme-challenge" || return 1
@@ -2732,13 +2803,16 @@ _site_prepare_inner() {
 		# Temporary local-only certificate makes nginx able to serve HTTP-01 webroot.
 		(umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj "/CN=${REALITY_SITE_DOMAIN}" -keyout "$REALITY_SITE_DIR/key.pem" -out "$REALITY_SITE_DIR/cert.pem") >/dev/null 2>&1 || return 1
 	fi
-	site_write_nginx && _site_write_service || return 1
+	# Prepare only HTTP-01 and loopback TLS while the old proxy core is running.
+	# The public 443 listener is activated after apply_services stops old cores.
+	site_write_nginx defer && _site_write_service || return 1
 	before=$(_fw_snapshot)
 	fw_rule open 80 tcp
 	fw_rc=$?
 	[ "$(_fw_snapshot)" = "$before" ] || : >"$SITE_TXN_BAK/fw80"
 	[ "$fw_rc" = 0 ] || { err "站点 TCP 80 防火墙放行失败"; return 1; }
 	site_service restart || return 1
+	printf '0\n' >"$REALITY_SITE_DIR/frontend-port" || return 1
 	if [ "$needs_cert" = 1 ]; then site_issue_cert || return 1; fi
 	# nginx reload is asynchronous; allow old workers a short drain interval.
 	local attempt healthy=0
@@ -2763,7 +2837,20 @@ site_prepare() {
 }
 
 site_apply_service() {
-	if site_enabled; then site_nginx_check && site_service start; else site_service stop; fi
+	if ! site_enabled; then site_service stop; return $?; fi
+	if site_uses_https_proxy && [ "$(cat "$REALITY_SITE_DIR/frontend-port" 2>/dev/null)" != 443 ]; then
+		# This also covers an interrupted preparation resumed by regen.
+		_site_txn_begin || return 1
+		site_write_nginx && site_service restart || return 1
+		site_https_health || { err "网站 TCP 443 反代健康检查失败"; return 1; }
+		printf '443\n' >"$REALITY_SITE_DIR/frontend-port" || return 1
+	else
+		site_nginx_check && site_service start
+	fi
+}
+
+site_https_health() {
+	curl --noproxy '*' -fsS --connect-timeout 3 --max-time 8 --resolve "${REALITY_SITE_DOMAIN}:443:127.0.0.1" "https://${REALITY_SITE_DOMAIN}/" -o /dev/null
 }
 
 site_commit() {
@@ -2854,6 +2941,9 @@ site_info() {
 	port=$(site_public_port)
 	[ "$port" = 443 ] || suffix=":${port}"
 	printf '  自有站点   : https://%s%s/\n  页面文件   : %s/index.html\n  内部目标   : 127.0.0.1:%s (TLS1.3 + HTTP/2)\n' "$REALITY_SITE_DOMAIN" "$suffix" "$REALITY_SITE_ROOT" "$REALITY_SITE_PORT"
+	if site_https_enabled; then
+		if site_uses_https_proxy; then echo "  443 入口   : nginx HTTPS 反代 → 本机网站端口"; else echo "  443 入口   : 复用 REALITY 443 的网站回落"; fi
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -4181,7 +4271,7 @@ port_used_by_onebox() {
 }
 
 port_ok() {
-	local port=$1 p=$2 net
+	local port=$1 p=$2 net takeover=0
 	net=$(proto_net "$p")
 	[[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -le 65535 ] || {
 		warn "端口需为 1-65535 之间的数字"
@@ -4191,6 +4281,12 @@ port_ok() {
 		warn "TCP ${port} 已保留给自有域名网站 (HTTP 80 / 本机 HTTPS ${REALITY_SITE_PORT})"
 		return 1
 	fi
+	if site_https_enabled && [ "$port" = 443 ] && [ "$net" != udp ]; then
+		proto_uses_reality "$p" || { warn "TCP 443 已保留给网站入口，可与 REALITY 共用"; return 1; }
+	fi
+	# A previously managed nginx listener is also released when HTTPS/the site
+	# is being disabled; do not mistake it for an unrelated process then.
+	if [ "$port" = 443 ] && [ "$net" != udp ] && _site_owns_https_listener; then takeover=1; fi
 	if [ "$port" = 80 ] && [ "$net" != udp ] && [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then
 		warn "TCP 80 端口需保留给 ACME HTTP 验证 (证书申请与续期)"
 		return 1
@@ -4203,7 +4299,7 @@ port_ok() {
 		warn "端口 ${port} 位于 Hysteria2 端口跳跃范围 ${HY2_HOP} 内"
 		return 1
 	fi
-	if [ "$net" != udp ] && port_in_use "$port" tcp && ! port_used_by_onebox "$port" tcp; then
+	if [ "$net" != udp ] && [ "$takeover" != 1 ] && port_in_use "$port" tcp && ! port_used_by_onebox "$port" tcp; then
 		warn "TCP 端口 ${port} 已被其他程序占用"
 		return 1
 	fi
@@ -4219,6 +4315,7 @@ pick_guard_port() {
 	local i port
 	for i in $(seq 1 100); do
 		port=$(rand_port)
+		site_https_enabled && [ "$port" = 443 ] && continue
 		site_enabled && [ "$port" = "$REALITY_SITE_PORT" ] && continue
 		port_taken_by_other "$port" tcp "" && continue
 		port_in_use "$port" tcp && continue
@@ -4340,7 +4437,20 @@ choose_owned_reality() {
 	REALITY_SITE_ENABLED=1
 	REALITY_SNI=$REALITY_SITE_DOMAIN
 	REALITY_DEST="127.0.0.1:${REALITY_SITE_PORT}"
+	choose_site_https
 	info "将生成网站并申请 Let's Encrypt 证书; 请放行 TCP 80 与 REALITY 对外端口"
+}
+
+choose_site_https() {
+	local def=y
+	[ "${REALITY_SITE_HTTPS:-}" != 0 ] || def=n
+	case "${OPT_SITE_HTTPS:-}" in on) def=y ;; off) def=n ;; esac
+	if ask_yn "是否启用网站域名的 HTTPS 443 入口 (反代到网站端口；已有 REALITY 443 时自动复用)" "$def"; then
+		REALITY_SITE_HTTPS=1
+		info "网站地址将为 https://${REALITY_SITE_DOMAIN}/，请放行 TCP 443"
+	else
+		REALITY_SITE_HTTPS=0
+	fi
 }
 
 choose_reality_target() {
@@ -4359,6 +4469,7 @@ choose_reality_target() {
 		fi
 		REALITY_DEST="${OPT_REALITY_DEST:-${REALITY_SNI}:443}"
 	fi
+	[ -z "${OPT_SITE_HTTPS:-}" ] || site_enabled || die "--site-https 需要先启用自有域名网站"
 }
 
 # ShadowTLS 独立使用外部握手站点, 不能默认继承直连本机的自有域名。
@@ -4669,6 +4780,7 @@ choose_extras() {
 		title "REALITY 伪装站点"
 		choose_reality_target
 	fi
+	[ -z "${OPT_SITE_HTTPS:-}" ] || site_enabled || die "--site-https 需要先启用自有域名网站"
 	if proto_enabled shadowtls; then
 		title "ShadowTLS 握手站点"
 		choose_shadowtls_target
@@ -4761,6 +4873,7 @@ print_plan() {
 	echo "  服务器地址: ${SERVER_ADDR}"
 	[ -n "$REALITY_SNI" ] && echo "  REALITY 目标: ${REALITY_SNI}"
 	site_enabled && echo "  自有网站: ${REALITY_SITE_DOMAIN} → ${REALITY_DEST} (网页 + Let's Encrypt + 自动续期)"
+	site_https_enabled && echo "  网站入口: https://${REALITY_SITE_DOMAIN}/ (TCP 443，自动选择反代或 REALITY 回落)"
 	case "$TLS_MODE" in
 	self) echo "  TLS 证书: 自签 (${TLS_SNI})" ;;
 	acme) echo "  TLS 证书: Let's Encrypt (${DOMAIN}, $([ "$ACME_METHOD" = cf ] && echo Cloudflare DNS || echo HTTP) 验证)" ;;
@@ -4882,7 +4995,11 @@ _apply_restore_files() {
 }
 
 _apply_rollback() {
-	local bak=$1 had_old=$2 failed=0
+	local bak=$1 had_old=$2 failed=0 core
+	# The old website may need 443 currently held by a newly started core.
+	for core in singbox xray; do
+		if svc_exists "$core"; then svc_stop "$core" || failed=1; fi
+	done
 	# 尽量撤销新规则, 然后根据旧状态重新放行; 每一步都保留失败信息。
 	fw_apply close || failed=1
 	hop_rules del || failed=1
@@ -5214,6 +5331,7 @@ do_add_protocol() {
 	fi
 	case " $ALL_PROTOCOLS " in *" $p "*) ;; *) die "未知协议: $p" ;; esac
 	[ -z "${OPT_REALITY_SITE:-}" ] || proto_uses_reality "$p" || die "添加协议时 --reality-site 仅适用于 REALITY 协议"
+	[ -z "${OPT_SITE_HTTPS:-}" ] || proto_uses_reality "$p" || die "添加协议时 --site-https 仅适用于 REALITY 协议"
 	proto_enabled "$p" && die "$(proto_title "$p") 已存在"
 	# 内核: 优先使用已在运行的内核 (取已有协议中第一个的内核)
 	local x
@@ -5240,9 +5358,10 @@ do_add_protocol() {
 		pset CORE "$p" "$(proto_cores "$p")"
 	fi
 	fill_missing_credentials
-	if proto_uses_reality "$p" && { [ -z "$REALITY_SNI" ] || [ -n "${OPT_REALITY_SITE:-}${OPT_SNI:-}" ]; }; then
+	if proto_uses_reality "$p" && { [ -z "$REALITY_SNI" ] || [ -n "${OPT_REALITY_SITE:-}${OPT_SNI:-}${OPT_SITE_HTTPS:-}" ]; }; then
 		choose_reality_target
 	fi
+	[ -z "${OPT_SITE_HTTPS:-}" ] || site_enabled || die "--site-https 需要先启用自有域名网站"
 	if [ "$p" = shadowtls ] && [ -z "$SHADOWTLS_SNI" ]; then
 		choose_shadowtls_target
 	fi
@@ -5646,9 +5765,9 @@ site_menu() {
 	site_enabled || { warn "尚未启用自有域名网站, 请在菜单 15 中选择一键建站"; return 0; }
 	site_info
 	local n
-	echo "  1) 强制续期网站证书  0) 返回"
-	ask_num n "请选择" 0 0 1 || return 0
-	[ "$n" = 1 ] && do_site renew
+	echo "  1) 强制续期网站证书  2) 配置 HTTPS 443 入口  0) 返回"
+	ask_num n "请选择" 0 0 2 || return 0
+	case "$n" in 1) do_site renew ;; 2) do_site https ;; esac
 	return 0
 }
 
@@ -5657,10 +5776,20 @@ do_site() {
 	site_enabled || die "未启用自有域名网站, 请执行 onebox sni --reality-site 你的域名"
 	case "${1:-info}" in
 	info) site_info ;;
+	https)
+		case "${2:-}" in
+		on) REALITY_SITE_HTTPS=1 ;;
+		off) REALITY_SITE_HTTPS=0 ;;
+		"") choose_site_https ;;
+		*) die "用法: onebox site https [on|off]" ;;
+		esac
+		apply_or_die
+		site_info
+		;;
 	renew)
 		"$SITE_ACME_HOME/acme.sh" --home "$SITE_ACME_HOME" --renew -d "$REALITY_SITE_DOMAIN" --ecc --force
 		;;
-	*) die "用法: onebox site [info|renew]" ;;
+	*) die "用法: onebox site [info|renew|https [on|off]]" ;;
 	esac
 }
 
@@ -5699,6 +5828,7 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   sni [--sni 域名]         更换 REALITY / ShadowTLS 伪装站点 (凭据不变)
   sni --reality-site 域名  使用自有域名一键建站并设为 REALITY 目标
   site [info|renew]        查看网站信息 / 强制续期网站证书
+  site https [on|off]      开启或关闭网站的 HTTPS 443 入口
   start | stop | restart | status
   log [singbox|xray]       查看日志
   update [singbox|xray] [版本]  更新内核 (默认全部; Xray 默认保持经过测试的版本)
@@ -5717,6 +5847,7 @@ install 选项 (用于无人值守安装):
   --sni <域名>             REALITY / ShadowTLS 伪装站点
   --reality-site <域名>    使用自己的域名, 自动建立网站并申请 / 续期正式证书 (TCP 80 需可达)
   --site-title <标题>      网站标题 (默认 山间手记, 可修改生成的网页)
+  --site-https on|off      自建网站启用域名 443 入口 (新建时默认 on)
   --tls <self|acme|cf>     证书方式: 自签 / ACME HTTP 验证 / ACME Cloudflare DNS 验证 (cf 需设置 CF_Token 环境变量)
   --domain <域名>          ACME 证书域名
   --addr <IP 或域名>       客户端连接地址 (默认自动检测公网 IP)
@@ -5744,7 +5875,7 @@ OPT_PORTS=""
 parse_install_opts() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--preset | --protocols | --core | --sni | --reality-site | --site-title | --reality-dest | --tls | --domain | --addr | --name | --port | --hy2-hop | --hy2-core | --xray-version)
+		--preset | --protocols | --core | --sni | --reality-site | --site-title | --site-https | --reality-dest | --tls | --domain | --addr | --name | --port | --hy2-hop | --hy2-core | --xray-version)
 			[ $# -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || die "$1 需要一个非空参数值"
 			;;
 		esac
@@ -5782,6 +5913,10 @@ parse_install_opts() {
 		--site-title)
 			[ -n "${2:-}" ] && [ "${#2}" -le 80 ] && [[ "$2" != *[[:cntrl:]]* ]] || die "--site-title 需要 1-80 个字符且不含控制字符"
 			OPT_SITE_TITLE=$2
+			shift
+			;;
+		--site-https)
+			case "$2" in on | off) OPT_SITE_HTTPS=$2 ;; *) die "--site-https 仅支持 on / off" ;; esac
 			shift
 			;;
 		--reality-dest) OPT_REALITY_DEST=$2 && shift ;;
@@ -5900,7 +6035,7 @@ main() {
 		;;
 	update-script) do_update_script ;;
 	cert) do_cert ;;
-	site) do_site "${1:-info}" ;;
+	site) do_site "${1:-info}" "${2:-}" ;;
 	bbr) enable_bbr ;;
 	regen)
 		require_installed
