@@ -89,8 +89,9 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 
 ## 使用自己的域名作为 REALITY 网站
 
-安装时、首次添加 REALITY 协议时，或执行 `onebox sni` 更换目标时，在 REALITY 目标站点菜单选择 **7. 自有域名一键建站**，输入域名和网站标题即可。
+安装时、首次添加 REALITY 协议时，或执行 `onebox sni` 更换目标时，在 REALITY 目标站点菜单选择 **7. 自有域名一键建站**，输入域名和网站标题，再选择是否启用 **HTTPS 443 入口**（新建时默认开启）。
 脚本会建立一个可直接访问的主页，为该域名申请 Let's Encrypt 证书，并将 REALITY 的握手目标设为本机网站。
+开启 443 入口后，直接访问 `https://你的域名/`：如果 REALITY 已监听 TCP 443，则复用其网站回落；否则由独立 nginx 监听 443，并反代到本机网站的内部 HTTPS 端口。已有网站升级时保持原设置，可手动开启。
 已有节点切换此模式时保留 UUID 与 REALITY 密钥，客户端需要更新 SNI，或重新导入生成的配置。
 
 开始前需要：
@@ -98,6 +99,7 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 - 将域名的 A / AAAA 记录直接解析到此 VPS 的公网地址；使用 Cloudflare 等 DNS 服务时关闭该记录的 CDN 代理。配置了 AAAA 时，对应 IPv6 地址也必须可达。
 - 在云安全组中放行 **TCP 80** 和实际使用的 **REALITY TCP 端口**。TCP 80 用于网站访问和证书申请、自动续期，需持续可达。
 - 确保 TCP 80 未被其他程序占用。脚本使用独立 nginx 实例，不接管现有 nginx 网站；发现端口冲突会明确报错。
+- 开启 443 入口还需在云安全组放行 **TCP 443**。其他程序或非 REALITY 协议占用该端口时，请先释放端口或关闭此选项；UDP 443 可以继续使用。
 
 ```bash
 # 新安装：默认协议组合 + 自有域名网站
@@ -112,6 +114,13 @@ onebox add vless-reality --reality-site www.example.com
 # 查看网站地址、文件位置和证书信息；必要时手动强制续期
 onebox site info
 onebox site renew
+
+# 已建站：开启/关闭标准 HTTPS 入口，也可在网站管理菜单中设置
+onebox site https on
+onebox site https off
+
+# 无交互安装时显式指定（off 保持通过 REALITY 实际端口访问）
+bash onebox.sh install --preset 1 --reality-site www.example.com --site-https on -y
 ```
 
 `onebox site` 与 `onebox site info` 等效。`--reality-site` 不能与 `--sni` 或 `--reality-dest` 同时使用。
@@ -121,6 +130,7 @@ onebox site renew
 | 流量 | 处理方式 |
 |---|---|
 | 浏览器访问 HTTP 80 | nginx 提供 ACME 验证文件，其余请求跳转到网站 HTTPS 地址 |
+| 开启网站 443 入口 | 已有 REALITY 443 时复用；否则 nginx 通过 HTTPS 反代内部网站，访问地址不带端口号 |
 | 浏览器访问 REALITY 公网端口 | REALITY 将普通 TLS 请求转给本机 nginx，呈现网站 |
 | 合法 REALITY 客户端 | 由相应 sing-box / Xray 核心处理代理流量 |
 | nginx 的 HTTPS 监听 | 仅监听 `127.0.0.1`；优先分配 8444，冲突时尝试 9444 等空闲端口，无需对公网开放 |
@@ -216,6 +226,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `--sni <域名>` | REALITY / ShadowTLS 伪装站点 |
 | `--reality-site <域名>` | 自有域名 REALITY 网站，自动建站、申请证书与续期；不能与 `--sni` / `--reality-dest` 同用 |
 | `--site-title <标题>` | 自动生成主页的标题（默认“山间手记”；已有主页不会被覆盖） |
+| `--site-https on\|off` | 自建网站的域名 443 入口，新建默认开启；已有网站可用 `onebox site https on` 开启 |
 | `--tls self\|acme\|cf` | 证书方式：自签 / ACME HTTP 验证 / ACME Cloudflare DNS 验证 |
 | `--domain <域名>` | 证书域名 |
 | `--addr <IP或域名>` | 客户端连接地址（默认自动检测公网 IP） |

@@ -22,7 +22,7 @@ jobs:
         run: bash tests/site.sh
       - name: Failure-path and compatibility regressions
         run: |
-          for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh; do
+          for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh tests/site-https.sh; do
             bash "$test" || exit 1
           done
 
@@ -44,6 +44,9 @@ jobs:
           test -x "$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
       - name: Validate generated nginx configs with a real nginx binary
         run: sudo env ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site.sh
+
+      - name: HTTPS 443 reverse proxy through real nginx
+        run: sudo env ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site-https-e2e.sh
 
       - name: Download cores with the script's own installer functions
         run: |
