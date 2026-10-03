@@ -2,12 +2,14 @@
 
 **sing-box / Xray 多协议组合 · 交互式一键安装与管理脚本**
 
+当前版本：**v1.3.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+
 适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
 服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），并自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
 分享链接、Base64 订阅与二维码。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 ```
 
 安装完成后，随时输入 `onebox` 打开管理菜单。
@@ -39,16 +41,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/c
 
 ```bash
 # curl
-bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 
 # 或 wget
-bash <(wget -qO- https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 
 # Alpine 默认没有 bash 与 curl: 可先 apk add --no-cache bash curl, 或者下载后用 sh 运行 (脚本会自动安装 bash):
-wget -O onebox.sh https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh && sh onebox.sh
+wget -O onebox.sh https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh && sh onebox.sh
 
 # 国内服务器 (GitHub 访问困难) 可设置加速前缀:
-GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh)
+GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 ```
 
 运行后选择 **1. 安装**，依次选择协议组合、伪装站点、证书方式与端口（直接回车即使用推荐的默认值），脚本会完成其余全部工作。
@@ -324,15 +326,15 @@ onebox site restore latest
 更新管理脚本和菜单功能请执行 `onebox update-script`（菜单 13），成功后用 `onebox version` 核验版本，再执行 `onebox` 打开新菜单；更新会重新生成配置，凭据不变。
 新版更新器会拒绝降级；下载内容与已安装脚本完全一致时跳过替换和配置应用，同版本号但内容有变化时仍可更新。
 
-默认渠道为 `stable`，优先使用最新正式 GitHub Release 的版本标签；仓库还没有 Release 时会明确提示并回退默认分支。`testing` 跟随默认开发分支。API 限流、网络或服务器错误不会静默切换渠道。`onebox update-channel testing` 保存偏好，`onebox update-script testing` 只覆盖当次操作；`ONEBOX_SCRIPT_URL` 显式地址仍优先。菜单首页显示运行版本和渠道，`onebox update-check` 展示已安装/远端版本及发布摘要，且不替换文件。
+默认渠道为 `stable`，优先使用最新正式 GitHub Release 的版本标签；仓库还没有 Release 时会明确提示并回退默认分支。`testing` 跟随默认分支 `main`。API 限流、网络或服务器错误不会静默切换渠道。`onebox update-channel testing` 保存偏好，`onebox update-script testing` 只覆盖当次操作；`ONEBOX_SCRIPT_URL` 显式地址仍优先。菜单首页显示运行版本和渠道，`onebox update-check` 展示已安装/远端版本及发布摘要，且不替换文件。
 
 维护者推送与 `SCRIPT_VERSION` 一致的 `vX.Y.Z` 标签后，Release 工作流检查该提交属于默认分支，运行更新相关测试，再发布 `onebox.sh` 和 `SHA256SUMS`。客户端按标签获取同一份源码；下载 Release 资产时可用校验文件检查完整性。
 
-**旧版 1.0.0 更新脚本失败，或更新后菜单没有变化？** 旧版默认从 `main/onebox.sh` 下载，但本仓库的默认分支是 `claude/linux-vps-proxy-script-1m1ksn`，旧地址会返回 404。
-在 VPS 的 root 终端执行下面的一次性迁移命令，无需重装节点：
+**旧版 1.0.0 更新脚本失败，或更新后菜单没有变化？** 早期仓库没有 `main` 分支，旧版下载地址曾因此返回 404。现在 `main` 已建立并设为默认分支，包含最新代码。
+若旧版仍更新失败，可在 VPS 的 root 终端执行下面的命令，显式从 `main` 更新，无需重装节点：
 
 ```bash
-ONEBOX_SCRIPT_URL=https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/claude/linux-vps-proxy-script-1m1ksn/onebox.sh onebox update-script
+ONEBOX_SCRIPT_URL=https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh onebox update-script
 onebox version
 onebox
 ```
