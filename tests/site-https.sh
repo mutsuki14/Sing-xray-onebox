@@ -295,7 +295,7 @@ resume_deferred_frontend() (
 	site_write_nginx defer || return 1
 	printf '0\n' >"$REALITY_SITE_DIR/frontend-port"
 	MOCK_SITE_PORT=0
-	_site_cron_lines() { printf '%s\n' 'mock --cron'; }
+	_site_cron_lines() { printf '%s\n' 'onebox cert-renew site --cron'; }
 	site_https_health() {
 		[ "$(cat "$REALITY_SITE_DIR/frontend-port")" = 0 ] && [ "$MOCK_SITE_PORT" = 443 ]
 	}
@@ -309,12 +309,23 @@ unchanged_frontend_no_restart() (
 	fixture unchanged
 	REALITY_SITE_HTTPS=1
 	mock_runtime || return 1
-	_site_cron_lines() { printf '%s\n' 'mock --cron'; }
+	_site_cron_lines() { printf '%s\n' 'onebox cert-renew site --cron'; }
 	site_prepare && site_apply_service || return 1
 	[ "$(cat "$REALITY_SITE_DIR/frontend-port")" = 443 ] && [ "$MOCK_SITE_PORT" = 443 ] &&
 		[ -z "$SITE_TXN_BAK" ] && [ "$(cat "$EVENTS")" = site:start ]
 )
 check '健康且未变更的站点不重签证书、不重启 nginx' unchanged_frontend_no_restart
+
+legacy_renewal_migration() (
+	fixture legacy-renewal
+	REALITY_SITE_HTTPS=1
+	mock_runtime || return 1
+	_site_cron_lines() { printf '%s\n' 'legacy-acme.sh --cron'; }
+	_site_cron_enable() { printf 'migrated\n' >"$WORK/renewal-migrated"; }
+	site_prepare || return 1
+	[ -s "$WORK/renewal-migrated" ] && [ -n "$SITE_TXN_BAK" ] && [ ! -f "$EVENTS" ] && site_commit
+)
+check '旧续期任务在快速路径中迁移且不重启网站' legacy_renewal_migration
 
 activation_failure_preserves_marker() (
 	fixture "activation-$1"

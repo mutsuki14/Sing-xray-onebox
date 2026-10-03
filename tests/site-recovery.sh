@@ -48,7 +48,7 @@ restore_retry() (
 	printf 'changed configuration\n' >"$REALITY_SITE_DIR/nginx.conf"
 	printf 'changed page\n' >"$REALITY_SITE_ROOT/index.html"
 	mv() {
-		if [ "$failed" = 0 ] && [ "${2:-}" = "$REALITY_SITE_ROOT" ]; then failed=1; return 1; fi
+		if [ "$failed" = 0 ] && [ "${*: -1}" = "$REALITY_SITE_ROOT" ]; then failed=1; return 1; fi
 		command mv "$@"
 	}
 	site_rollback >/dev/null 2>&1; rc=$?

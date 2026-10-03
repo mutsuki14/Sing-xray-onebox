@@ -83,6 +83,7 @@ exit $rc
 EOF
 }
 script_fixture() {
+	ONEBOX_SCRIPT_URL=https://example.test/onebox.sh
 	CMD_PATH="$WORK/script-$1/onebox"
 	SCRIPT_REGEN_LOG="${CMD_PATH}.regen-calls"
 	mkdir -p "${CMD_PATH%/*}"

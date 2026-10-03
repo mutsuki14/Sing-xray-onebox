@@ -96,6 +96,28 @@ check "订阅内容可 Base64 解码" sh -c 'base64 -d /etc/onebox/client/sub.tx
 check "onebox info 正常" onebox info
 check "onebox client mihomo 正常" sh -c 'onebox client mihomo | grep -q "^proxies:"'
 
+step "管理命令: 只读预演 / 体检 / 证书 / 备份恢复 / 诊断包"
+BEFORE_STATE=$(cksum /etc/onebox/onebox.conf)
+check "plan 命令正常" onebox plan --preset 6 --sni www.microsoft.com
+check "install --dry-run 正常" onebox install --dry-run --preset 6
+check "预演保持状态文件不变" test "$(cksum /etc/onebox/onebox.conf)" = "$BEFORE_STATE"
+check "真实核心与监听端口体检正常" onebox doctor
+check "自签证书状态正常" onebox cert status
+check "自动快照已建立" test -d /etc/onebox/backups
+check "手动创建快照" onebox backup lifecycle
+BACKUP_ID=$(onebox backups | awk 'NR==2 {print $1}')
+cp /etc/onebox/client/links.txt "$LC_TMP/original-links"
+printf '\nLIFECYCLE-RESTORE-CANARY\n' >>/etc/onebox/client/links.txt
+check "恢复快照通过真实核心校验并重启服务" onebox restore "$BACKUP_ID"
+check "恢复了原客户端文件" cmp -s "$LC_TMP/original-links" /etc/onebox/client/links.txt
+check "恢复后 sing-box 仍运行" proc_running sing-box
+check "保存测试更新渠道" onebox update-channel testing
+check "更新渠道已保存" test "$(cat /etc/onebox/update-channel)" = testing
+check "恢复稳定更新渠道" onebox update-channel stable
+check "生成本地诊断包" onebox support
+SUPPORT_ARCHIVE=$(find /etc/onebox/support -name '*.tar.gz' | head -n1)
+check "诊断包可读取" tar -tzf "$SUPPORT_ARCHIVE"
+
 step "添加协议: vless-xhttp (Xray) 与 anytls"
 check "添加 vless-xhttp" onebox add vless-xhttp -y
 check "添加 anytls" onebox add anytls -y
