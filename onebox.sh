@@ -46,7 +46,7 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
 readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/claude/linux-vps-proxy-script-1m1ksn/onebox.sh}"
 
@@ -5565,8 +5565,16 @@ do_update_core() (
 	return 0
 )
 
+# 只读取版本声明，不执行尚未验证的下载内容。
+script_file_version() {
+	local version
+	version=$(sed -n 's/^readonly SCRIPT_VERSION="\([^"]*\)"$/\1/p' "$1" | head -n 1)
+	[[ "$version" =~ ^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || return 1
+	printf '%s' "$version"
+}
+
 do_update_script() (
-	local staging tmp out installed=0 committed=0 replaced=0 update_rc
+	local staging tmp out old_version new_version installed=0 committed=0 replaced=0 update_rc
 	staging=$(mktemp -d "${CMD_PATH%/*}/.onebox-update.XXXXXX") || return 1
 	chmod 700 "$staging" || { rm -rf "$staging"; return 1; }
 	tmp="$staging/new"
@@ -5577,8 +5585,21 @@ do_update_script() (
 	trap 'update_rc=$?; trap "" INT TERM HUP; if [ "$committed" != 1 ] && [ "$replaced" = 1 ]; then if [ -f "$staging/old" ]; then if cp -p "$staging/old" "$staging/restore" && mv -f "$staging/restore" "$CMD_PATH"; then [ "$installed" != 1 ] || "$CMD_PATH" regen >/dev/null 2>&1 || warn "旧脚本已恢复，但配置恢复失败，请执行 onebox log 检查"; else err "脚本恢复失败，备份保留于: $staging"; exit 1; fi; else rm -f "$CMD_PATH"; fi; fi; rm -rf "$staging"; exit "$update_rc"' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM HUP
+	old_version=$(script_file_version "$CMD_PATH" 2>/dev/null) || old_version=$SCRIPT_VERSION
+	info "当前管理脚本版本: ${old_version} (${CMD_PATH})"
 	info "下载最新脚本..."
 	if http_get "$(gh_url "$SCRIPT_RAW_URL")" "$tmp" && head -n 5 "$tmp" | grep -q 'Sing-Xray-Onebox' && bash -n "$tmp" 2>/dev/null; then
+		new_version=$(script_file_version "$tmp") || { err "下载内容缺少有效脚本版本，原脚本已保留"; return 1; }
+		if ! ver_ge "$new_version" "$old_version"; then
+			err "下载版本 ${new_version} 低于已安装版本 ${old_version}，已拒绝降级；请检查更新地址或 GitHub 加速缓存"
+			return 1
+		fi
+		if [ -f "$CMD_PATH" ] && cmp -s "$tmp" "$CMD_PATH"; then
+			committed=1
+			info "当前已是下载源提供的最新脚本 (${old_version})，无需重新应用配置"
+			return 0
+		fi
+		info "准备更新管理脚本: ${old_version} -> ${new_version}"
 		chmod 755 "$tmp" || return 1
 		# 在原子替换前启用恢复，覆盖 mv 已成功但尚未来得及赋值时的中断。
 		replaced=1
@@ -5594,11 +5615,11 @@ do_update_script() (
 			fi
 		fi
 	else
-		err "脚本更新失败"
+		err "脚本下载或校验失败，原脚本已保留；请检查网络、更新地址和 GitHub 加速设置"
 		return 1
 	fi
 	committed=1
-	info "脚本已更新: $(sed -n 's/^readonly SCRIPT_VERSION="\(.*\)"/\1/p' "$CMD_PATH")"
+	info "脚本已更新: ${old_version} -> ${new_version} (${CMD_PATH})"
 )
 
 do_cert() {
