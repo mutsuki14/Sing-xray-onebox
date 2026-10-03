@@ -28,6 +28,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/c
   sing-box 优先使用 musl 静态构建，老旧 glibc 与 Alpine 均可运行。
 - **证书**：自签证书（客户端自动固定证书指纹，无需关闭校验即可安全连接）/ Let's Encrypt（HTTP 验证或 Cloudflare DNS 验证，acme.sh 自动续期）/ 自有证书。
 - **自有域名 REALITY 网站**：使用自己的域名一键生成可编辑的主页、申请 Let's Encrypt 证书并自动续期，普通浏览器与 REALITY 客户端共用公网入口。
+- **管理与恢复**：只读安装预演、一键体检、证书状态、稳定/测试更新渠道、本机快照与手动恢复、静态网站模板和内容导入、本地脱敏诊断包。
 - **贴心细节**：自动检测端口占用、放行防火墙（ufw / firewalld / iptables，含甲骨文云默认规则）、Hysteria2 端口跳跃、BBR、
   屏蔽 BT 与回环/内网访问、配置写入前先经内核校验（失败不覆盖旧配置）、国内服务器 GitHub 加速。
 - **经过真实流量测试**：仓库自带端到端测试，覆盖 *协议 × 服务端内核 × 客户端* 的全部组合（TCP 与 UDP）。
@@ -203,6 +204,8 @@ onebox uninstall           卸载
 
 ## 无人值守安装
 
+正式安装前可先执行 `onebox plan` 或 `bash onebox.sh install --dry-run`，附带下面相同的安装选项。预演只读取当前环境，列出协议、建议端口、冲突及会涉及的服务/文件；不联网、不预留端口、不安装依赖，也不申请证书。自动端口、DNS、CA 和公网可达性仍需在实际安装时校验。
+
 ```bash
 # 预设 1, 全部默认值
 bash onebox.sh install --preset 1 -y
@@ -277,9 +280,53 @@ sing-box 使用 musl 静态构建，不依赖系统 glibc 版本。
 **SS-2022 / ShadowTLS / VMess 连接失败？** 这些协议对时间敏感：SS-2022 要求服务器与客户端时间误差在 30 秒以内，VMess 为 120 秒。
 脚本安装时会检测服务器时间偏差，请开启时间同步（`timedatectl set-ntp true` 或安装 chrony）。
 
-**如何更新？** `onebox update` 只更新 sing-box / Xray 内核（可指定版本，如 `onebox update singbox 1.14.2`；新内核不接受当前配置时自动恢复旧版本）。
+## 日常管理与故障恢复（1.3.0）
+
+| 需求 | 命令或菜单 |
+|---|---|
+| 只读体检 | `onebox doctor`，菜单 17 |
+| 证书有效期、续期任务和最近结果 | `onebox cert status`，菜单 18 |
+| 本机备份与恢复 | `onebox backup 标签`、`onebox backups`、`onebox restore ID`，菜单 19 |
+| 本地脱敏诊断包 | `onebox support`，菜单 20 |
+| 检查更新、选择渠道 | `onebox update-check`、`onebox update-channel stable`，菜单 21 |
+| 安装前预演 | `onebox plan --preset 6`，菜单 22 |
+| 网站模板、标题、导入及恢复 | 菜单 16 → 网站内容管理 |
+
+体检分别检查核心服务/配置、监听端口、DNS、证书、网站内部 HTTPS 和对外入口。本机探测成功不代表公网可达；云安全组和外部网络需要从另一台设备验证。返回码 `0` 表示通过，`1` 表示发现错误，`2` 表示只有提示或部分检查无法完成。命令不安装依赖、不改配置或服务，核心检查的临时文件单独隔离并清理。
+
+证书面板会明确区分过期、临期、名称不匹配及续期结果未知。通过 `onebox cert-renew proxy` / `onebox site renew` 发起的续期会记录结果。新的网站定时任务使用 `onebox cert-renew site --cron`，只检查该域名、未到期不强制签发；旧任务在下次应用站点配置时迁移。外部工具或尚未接入记录的历史任务，其最近结果显示未知，发现 crontab 也不等同于任务已经成功执行。
+
+### 网站内容
+
+```bash
+onebox site preview profile --title '我的主页' --theme ocean
+onebox site template profile --title '我的主页' --description '作品与日常记录' --theme ocean
+onebox site title '新的标题'
+onebox site import /root/my-static-site
+onebox site restore latest
+```
+
+模板可选 `minimal`、`profile`、`docs`，配色可选 `forest`、`ocean`、`slate`。预览仅生成私有目录内的 HTML 文件，下载该文件即可查看，线上内容不会变化。导入目录需有 `index.html`，不执行其中的文件；拒绝符号链接、特殊文件、系统目录及递归导入。每次发布前备份完整原网站，失败恢复旧内容；当前 ACME 验证目录会保留。导入或手工改过的页面不会被“修改标题”自动覆盖，请编辑源网页后重新导入。内容备份位于 `/etc/onebox/site/content-backups/`，发布结果会显示备份 ID。
+
+### 节点快照
+
+常规配置变更前和成功应用后自动保存快照，默认路径 `/etc/onebox/backups/`，保留最近 5 份。快照包含节点凭据、受管证书/私钥、客户端文件和当前网站内容，因此目录权限为 `700`、文件为 `600`；它与可以用于求助的诊断包用途不同。自动备份失败会明确警告，已有快照保留，配置操作仍可继续；手动恢复前的当前备份必须成功。
+
+恢复只支持同一脚本主版本及相同受管路径，会校验快照完整性、重新生成并校验核心配置，再恢复服务；失败尝试回滚。默认每份快照最多 64 MiB / 4096 个文件，可用 `ONEBOX_BACKUP_MAX_BYTES` 调整字节上限。不会备份内核程序或恢复系统软件；外部自定义证书保持引用，ACME 重新绑定可能需要联网和现有 DNS 凭据。它用于本机配置恢复，不是跨 VPS 迁移工具。
+
+### 诊断包
+
+`onebox support` 在 `/etc/onebox/support/` 生成权限为 `600` 的压缩包，仅收集白名单系统/服务状态和体检结果，并进一步屏蔽已知凭据。不打包原始日志、配置、私钥、订阅或环境变量，也不自动上传。报告仍可能含域名、IP 和本机路径，分享前请自行查看。
+
+### 更新与发布
+
+`onebox update` 只更新 sing-box / Xray 内核（可指定版本，如 `onebox update singbox 1.14.2`；新内核不接受当前配置时自动恢复旧版本）。
 更新管理脚本和菜单功能请执行 `onebox update-script`（菜单 13），成功后用 `onebox version` 核验版本，再执行 `onebox` 打开新菜单；更新会重新生成配置，凭据不变。
 新版更新器会拒绝降级；下载内容与已安装脚本完全一致时跳过替换和配置应用，同版本号但内容有变化时仍可更新。
+
+默认渠道为 `stable`，优先使用最新正式 GitHub Release 的版本标签；仓库还没有 Release 时会明确提示并回退默认分支。`testing` 跟随默认开发分支。API 限流、网络或服务器错误不会静默切换渠道。`onebox update-channel testing` 保存偏好，`onebox update-script testing` 只覆盖当次操作；`ONEBOX_SCRIPT_URL` 显式地址仍优先。菜单首页显示运行版本和渠道，`onebox update-check` 展示已安装/远端版本及发布摘要，且不替换文件。
+
+维护者推送与 `SCRIPT_VERSION` 一致的 `vX.Y.Z` 标签后，Release 工作流检查该提交属于默认分支，运行更新相关测试，再发布 `onebox.sh` 和 `SHA256SUMS`。客户端按标签获取同一份源码；下载 Release 资产时可用校验文件检查完整性。
 
 **旧版 1.0.0 更新脚本失败，或更新后菜单没有变化？** 旧版默认从 `main/onebox.sh` 下载，但本仓库的默认分支是 `claude/linux-vps-proxy-script-1m1ksn`，旧地址会返回 404。
 在 VPS 的 root 终端执行下面的一次性迁移命令，无需重装节点：

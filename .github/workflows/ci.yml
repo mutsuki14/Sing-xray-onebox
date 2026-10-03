@@ -22,7 +22,7 @@ jobs:
         run: bash tests/site.sh
       - name: Failure-path and compatibility regressions
         run: |
-          for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh tests/site-https.sh; do
+          for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh tests/site-https.sh tests/preflight.sh tests/releases.sh tests/diagnostics.sh tests/support.sh tests/snapshots.sh tests/site-management.sh; do
             bash "$test" || exit 1
           done
 
@@ -45,6 +45,9 @@ jobs:
       - name: Validate generated nginx configs with a real nginx binary
         run: sudo env ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site.sh
 
+      - name: Website content permissions across owners
+        run: sudo bash tests/site-management.sh
+
       - name: HTTPS 443 reverse proxy through real nginx
         run: sudo env ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site-https-e2e.sh
 
@@ -60,6 +63,9 @@ jobs:
           '
           "$RUNNER_TEMP/bin/sing-box" version
           "$RUNNER_TEMP/bin/xray" version
+
+      - name: Snapshot restore with real core validation
+        run: ONEBOX_TEST_SINGBOX="$RUNNER_TEMP/bin/sing-box" bash tests/snapshots.sh
 
       - name: Download mihomo
         run: |

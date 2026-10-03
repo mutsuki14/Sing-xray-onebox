@@ -46,7 +46,7 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.3.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
 readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/claude/linux-vps-proxy-script-1m1ksn/onebox.sh}"
 
@@ -2601,8 +2601,9 @@ site_service() {
 # An independent backup job may refer to the ACME directory. Only the renewal
 # command and the legacy, explicitly marked boot command belong to this site.
 _site_cron_filter() {
-	awk -v mode="$1" -v exe="$SITE_ACME_HOME/acme.sh" -v root="$REALITY_SITE_DIR/" '
+	awk -v mode="$1" -v exe="$SITE_ACME_HOME/acme.sh" -v root="$REALITY_SITE_DIR/" -v manager="$CMD_PATH" '
 		{ own = (index($0,exe) && /(^|[ \t])--cron([ \t]|$)/) ||
+		        (index($0,manager) && /cert-renew[ \t]+site[ \t]+--cron([ \t]|$)/) ||
 		        (index($0,root) && /# onebox-site-autostart([ \t]|$)/)
 		  if ((mode == "owned" && own) || (mode == "keep" && !own)) print }
 	'
@@ -2670,7 +2671,7 @@ _site_cron_enable() {
 	local current wanted
 	current=$(_site_read_crontab) || return 1
 	current=$(printf '%s\n' "$current" | _site_cron_filter keep)
-	wanted="17 3 * * * \"${SITE_ACME_HOME}/acme.sh\" --cron --home \"${SITE_ACME_HOME}\" >/dev/null 2>&1"
+	wanted="17 3 * * * \"${CMD_PATH}\" cert-renew site --cron >/dev/null 2>&1"
 	# The global onebox @reboot starts the site before proxy cores. A second
 	# direct nginx job races for its sockets and can abort the proxy startup.
 	{ [ -z "$current" ] || printf '%s\n' "$current"; printf '%s\n' "$wanted"; } | crontab -
@@ -2767,6 +2768,10 @@ _site_prepare_inner() {
 	# Re-generating unchanged proxy configs never depends on DNS/CA reachability.
 	if [ "$needs_cert" = 0 ] && [ "$(cat "$REALITY_SITE_DIR/settings.sha256" 2>/dev/null)" = "$signature" ] && [ -f "$REALITY_SITE_DIR/nginx.conf" ] && [ -f "$REALITY_SITE_ROOT/index.html" ]; then
 		if [ ! -f "$REALITY_SITE_DIR/.disabled" ] && _site_running && _site_cron_lines | grep -qF -- '--cron'; then
+			# Upgrade legacy direct ACME jobs without restarting a healthy site.
+			if ! _site_cron_lines | grep -qF -- 'cert-renew site --cron'; then
+				_site_txn_begin && _site_cron_enable || return 1
+			fi
 			site_nginx_check
 			return $?
 		fi
@@ -2877,7 +2882,7 @@ _site_restore_directory() {
 	if [ ! -d "$source" ]; then rm -rf "$target"; return $?; fi
 	staging=$(mktemp -d "${target%/*}/.onebox-restore.XXXXXX") || return 1
 	if ! cp -a "$source" "$staging/content"; then rm -rf "$staging"; return 1; fi
-	if ! rm -rf "$target" || ! mv "$staging/content" "$target"; then rm -rf "$staging"; return 1; fi
+	if ! rm -rf "$target" || ! mv -T "$staging/content" "$target"; then rm -rf "$staging"; return 1; fi
 	rm -rf "$staging"
 }
 
@@ -4405,7 +4410,9 @@ choose_sni() {
 	_s_ans=${_s_ans#https://}
 	_s_ans=${_s_ans%%/*}
 	valid_domain "$_s_ans" || ask_domain _s_ans "请输入自定义伪装域名" ""
-	if check_tls13 "$_s_ans"; then
+	if [ "${ONEBOX_PLAN_ONLY:-0}" = 1 ]; then
+		info "${_s_ans} 的 TLS 1.3 支持将在实际安装时检查"
+	elif check_tls13 "$_s_ans"; then
 		info "${_s_ans} 支持 TLS 1.3"
 	else
 		warn "无法确认 ${_s_ans} 支持 TLS 1.3 (可能是本机网络问题), 若连接失败请更换伪装站点"
@@ -4510,13 +4517,15 @@ choose_tls() {
 		TLS_SNI=$DOMAIN
 		if [ "$m" = 2 ]; then
 			ACME_METHOD=standalone
-			[ -n "$SERVER_IPV4$SERVER_IPV6" ] || detect_public_ip
-			if ! check_domain_points_here "$DOMAIN"; then
-				confirm "域名解析似乎未指向本机 (若开启了 CDN 代理请先关闭), 仍然继续?" n || die "已取消"
+			if [ "${ONEBOX_PLAN_ONLY:-0}" != 1 ]; then
+				[ -n "$SERVER_IPV4$SERVER_IPV6" ] || detect_public_ip
+				if ! check_domain_points_here "$DOMAIN"; then
+					confirm "域名解析似乎未指向本机 (若开启了 CDN 代理请先关闭), 仍然继续?" n || die "已取消"
+				fi
 			fi
 		else
 			ACME_METHOD=cf
-			if [ -z "${CF_Token:-}" ] && { [ -z "${CF_Key:-}" ] || [ -z "${CF_Email:-}" ]; }; then
+			if [ "${ONEBOX_PLAN_ONLY:-0}" != 1 ] && [ -z "${CF_Token:-}" ] && { [ -z "${CF_Key:-}" ] || [ -z "${CF_Email:-}" ]; }; then
 				while :; do
 					ask_secret d "Cloudflare API Token (需 Zone.DNS 编辑权限, 输入不回显)"
 					[ -n "$d" ] && break
@@ -5066,6 +5075,7 @@ apply_all() {
 	if [ "$failed" = 0 ]; then fw_apply open || failed=1; fi
 	if [ "$failed" = 0 ]; then hop_setup || failed=1; fi
 	if [ "$failed" = 0 ]; then write_client_files || failed=1; fi
+	if [ "$failed" = 0 ]; then snapshot_restore_clients || failed=1; fi
 	# 网站/证书快照必须保留到网络和所有客户端文件都已成功发布。
 	if [ "$failed" = 0 ]; then cert_txn_commit || failed=1; fi
 	if [ "$failed" != 0 ]; then
@@ -5075,6 +5085,7 @@ apply_all() {
 	fi
 	rm -rf "$bak"
 	txn_traps
+	snapshot_checkpoint applied
 	return 0
 }
 
@@ -5575,6 +5586,7 @@ script_file_version() {
 
 do_update_script() (
 	local staging tmp out old_version new_version installed=0 committed=0 replaced=0 update_rc
+	[ $# -le 1 ] || { err "用法: onebox update-script [stable|testing]"; return 1; }
 	staging=$(mktemp -d "${CMD_PATH%/*}/.onebox-update.XXXXXX") || return 1
 	chmod 700 "$staging" || { rm -rf "$staging"; return 1; }
 	tmp="$staging/new"
@@ -5588,7 +5600,7 @@ do_update_script() (
 	old_version=$(script_file_version "$CMD_PATH" 2>/dev/null) || old_version=$SCRIPT_VERSION
 	info "当前管理脚本版本: ${old_version} (${CMD_PATH})"
 	info "下载最新脚本..."
-	if http_get "$(gh_url "$SCRIPT_RAW_URL")" "$tmp" && head -n 5 "$tmp" | grep -q 'Sing-Xray-Onebox' && bash -n "$tmp" 2>/dev/null; then
+	if script_update_download "$tmp" "${1:-}"; then
 		new_version=$(script_file_version "$tmp") || { err "下载内容缺少有效脚本版本，原脚本已保留"; return 1; }
 		if ! ver_ge "$new_version" "$old_version"; then
 			err "下载版本 ${new_version} 低于已安装版本 ${old_version}，已拒绝降级；请检查更新地址或 GitHub 加速缓存"
@@ -5600,6 +5612,7 @@ do_update_script() (
 			return 0
 		fi
 		info "准备更新管理脚本: ${old_version} -> ${new_version}"
+		script_update_summary
 		chmod 755 "$tmp" || return 1
 		# 在原子替换前启用恢复，覆盖 mv 已成功但尚未来得及赋值时的中断。
 		replaced=1
@@ -5673,7 +5686,7 @@ do_cert() {
 		;;
 	2)
 		[ "$TLS_MODE" = acme ] || die "当前不是 ACME 证书"
-		acme --renew -d "$DOMAIN" --ecc --force && info "续期完成"
+		do_cert_renew proxy
 		;;
 	esac
 }
@@ -5721,6 +5734,7 @@ menu_header() {
 EOF
 	printf '%s' "$PLAIN"
 	printf '  sing-box / Xray 多协议组合一键脚本  v%s\n' "$SCRIPT_VERSION"
+	printf '  更新渠道: %s (菜单 21 检查更新)\n' "$(update_channel_get 2>/dev/null || printf '设置无效')"
 	hr
 	printf '  系统: %s (%s)  虚拟化: %s  BBR: %s\n' "$OS_NAME" "$ARCH_RAW" "$VIRT" "$(bbr_status)"
 	if is_installed; then
@@ -5755,28 +5769,40 @@ main_menu() {
   ${GREEN}14.${PLAIN} 卸载
   ${GREEN}15.${PLAIN} 更换 REALITY / ShadowTLS 伪装站点
   ${GREEN}16.${PLAIN} 自有域名网站信息 / 证书续期
+  ${GREEN}17.${PLAIN} 一键体检
+  ${GREEN}18.${PLAIN} 证书状态
+  ${GREEN}19.${PLAIN} 备份 / 恢复最近状态
+  ${GREEN}20.${PLAIN} 生成脱敏诊断包
+  ${GREEN}21.${PLAIN} 检查更新 / 切换渠道
+  ${GREEN}22.${PLAIN} 安装前预演
   ${GREEN}0.${PLAIN}  退出
 EOF
 		hr
-		ask_num n "请选择" 0 0 16 || exit 0
+		ask_num n "请选择" 0 0 22 || exit 0
 		case "$n" in
 		0) exit 0 ;;
-		1) (do_install) ;;
+		1) (managed_change do_install) ;;
 		2) (require_installed && show_info) ;;
 		3) (require_installed && show_client) ;;
-		4) (do_add_protocol) ;;
-		5) (do_del_protocol) ;;
-		6) (do_change_port) ;;
-		7) (do_change_addr) ;;
-		8) (do_reset_credentials) ;;
+		4) (managed_change do_add_protocol) ;;
+		5) (managed_change do_del_protocol) ;;
+		6) (managed_change do_change_port) ;;
+		7) (managed_change do_change_addr) ;;
+		8) (managed_change do_reset_credentials) ;;
 		9) service_menu ;;
-		10) (do_update_core all) ;;
-		11) (do_cert) ;;
+		10) (managed_change do_update_core all) ;;
+		11) (managed_change do_cert) ;;
 		12) (enable_bbr) ;;
-		13) (do_update_script) && exec "$CMD_PATH" ;;
+		13) (managed_change do_update_script) && exec "$CMD_PATH" ;;
 		14) (do_uninstall) && ! [ -f "$STATE_FILE" ] && exit 0 ;;
-		15) (do_change_sni) ;;
+		15) (managed_change do_change_sni) ;;
 		16) (require_installed && site_menu) ;;
+		17) (do_doctor) ;;
+		18) (do_cert_status) ;;
+		19) (recovery_menu) ;;
+		20) (do_support_bundle) ;;
+		21) update_menu ;;
+		22) (plan_menu) ;;
 		esac
 		pause
 	done
@@ -5786,9 +5812,9 @@ site_menu() {
 	site_enabled || { warn "尚未启用自有域名网站, 请在菜单 15 中选择一键建站"; return 0; }
 	site_info
 	local n
-	echo "  1) 强制续期网站证书  2) 配置 HTTPS 443 入口  0) 返回"
-	ask_num n "请选择" 0 0 2 || return 0
-	case "$n" in 1) do_site renew ;; 2) do_site https ;; esac
+	echo "  1) 强制续期网站证书  2) 配置 HTTPS 443 入口  3) 网站内容管理  4) 证书状态  0) 返回"
+	ask_num n "请选择" 0 0 4 || return 0
+	case "$n" in 1) do_site renew ;; 2) managed_change do_site https ;; 3) site_manage_menu ;; 4) do_cert_status ;; esac
 	return 0
 }
 
@@ -5808,7 +5834,7 @@ do_site() {
 		site_info
 		;;
 	renew)
-		"$SITE_ACME_HOME/acme.sh" --home "$SITE_ACME_HOME" --renew -d "$REALITY_SITE_DOMAIN" --ecc --force
+		do_cert_renew site
 		;;
 	*) die "用法: onebox site [info|renew|https [on|off]]" ;;
 	esac
@@ -5839,6 +5865,7 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
 命令:
   (无)                     打开交互式管理菜单
   install                  安装 / 重装
+  plan [安装选项]          只读预演协议、端口、服务与文件变更
   info                     查看节点信息与分享链接
   client <类型>            输出客户端配置: mihomo | singbox | singbox-notun | xray | links | sub | qr
   add <协议>               添加协议
@@ -5850,10 +5877,24 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   sni --reality-site 域名  使用自有域名一键建站并设为 REALITY 目标
   site [info|renew]        查看网站信息 / 强制续期网站证书
   site https [on|off]      开启或关闭网站的 HTTPS 443 入口
+  site template <minimal|profile|docs> [--title 标题] [--description 简介] [--theme forest|ocean|slate]
+  site title <标题>       修改内置模板标题
+  site import <目录>      备份后导入静态网站（需 index.html）
+  site restore [ID|latest] 恢复网站内容备份
+  site preview <模板>     生成未发布的本地 HTML 预览
   start | stop | restart | status
   log [singbox|xray]       查看日志
   update [singbox|xray] [版本]  更新内核 (默认全部; Xray 默认保持经过测试的版本)
-  update-script            更新本脚本
+  update-script [stable|testing] 更新本脚本
+  update-check [stable|testing] 只读检查可用更新
+  update-channel [stable|testing] 查看或保存更新渠道
+  doctor                   一键体检（只读；公网可达性需外部验证）
+  cert status              查看证书有效期、续期任务与最近结果
+  cert-renew [proxy|site] [--cron] 续期并记录结果（--cron 不强制签发）
+  backup [标签]            创建本机快照（保留最近 5 份）
+  backups                  列出本机快照
+  restore <ID>             恢复快照（先备份当前状态）
+  support                  生成本地脱敏诊断包
   cert                     证书管理
   bbr                      开启 BBR
   regen                    按当前设置重新生成全部配置
@@ -5861,6 +5902,7 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   help | version
 
 install 选项 (用于无人值守安装):
+  --dry-run               仅预演，不安装、不改配置、不申请证书
   --preset <1-7>           协议组合 (1=Reality+Hy2+TUIC, 2=Xray 经典, 3=双内核, 4=sing-box 全家桶, 5=CDN, 6=仅 Reality, 7=自定义)
   --protocols <a,b,...>    自定义协议列表 (隐含 --preset 7), 可选:
                            ${ALL_PROTOCOLS// /, }
@@ -6020,13 +6062,33 @@ main() {
 		echo "$SCRIPT_VERSION"
 		return 0
 		;;
+	plan)
+		parse_install_opts "$@"
+		do_install_plan
+		return $?
+		;;
+	update-check)
+		do_update_check "$@"
+		return $?
+		;;
 	esac
+	if [ "$cmd" = install ]; then
+		local dry_run=0 install_args=()
+		for a in "$@"; do
+			case "$a" in --dry-run) dry_run=1 ;; *) install_args+=("$a") ;; esac
+		done
+		if [ "$dry_run" = 1 ]; then
+			parse_install_opts "${install_args[@]}"
+			do_install_plan
+			return $?
+		fi
+	fi
 	init_env
 	case "$cmd" in
 	menu) main_menu ;;
 	install)
 		parse_install_opts "$@"
-		do_install
+		managed_change do_install
 		;;
 	info) require_installed && show_info ;;
 	client | config) require_installed && show_client "${1:-}" ;;
@@ -6034,15 +6096,15 @@ main() {
 	links) require_installed && cat "$CLIENT_DIR/links.txt" ;;
 	add)
 		parse_install_opts "${@:2}"
-		do_add_protocol "${1:-}"
+		managed_change do_add_protocol "${1:-}"
 		;;
-	del | remove) do_del_protocol "${1:-}" ;;
-	port) do_change_port "${1:-}" "${2:-}" ;;
+	del | remove) managed_change do_del_protocol "${1:-}" ;;
+	port) managed_change do_change_port "${1:-}" "${2:-}" ;;
 	addr)
 		parse_install_opts "$@"
-		do_change_addr
+		managed_change do_change_addr
 		;;
-	reset) do_reset_credentials ;;
+	reset) managed_change do_reset_credentials ;;
 	start | stop | restart | status) do_service "$cmd" ;;
 	log | logs) do_log "${1:-}" ;;
 	update)
@@ -6052,19 +6114,33 @@ main() {
 			xray) XR_VERSION_WANT=${2#v} ;;
 			esac
 		fi
-		do_update_core "${1:-all}"
+		managed_change do_update_core "${1:-all}"
 		;;
-	update-script) do_update_script ;;
-	cert) do_cert ;;
-	site) do_site "${1:-info}" "${2:-}" ;;
+	update-script) managed_change do_update_script "$@" ;;
+	update-channel) do_update_channel "$@" ;;
+	cert) if [ "${1:-}" = status ]; then do_cert_status; else managed_change do_cert; fi ;;
+	cert-renew) do_cert_renew "$@" ;;
+	support) do_support_bundle ;;
+	doctor) do_doctor ;;
+	backup) do_backup "$@" ;;
+	backups) do_backups ;;
+	restore) do_restore "$@" ;;
+	site)
+		case "${1:-info}" in
+		title | template | import | restore) managed_change do_site_manage "$@" ;;
+		preview) do_site_manage "$@" ;;
+		https) managed_change do_site "$@" ;;
+		*) do_site "${1:-info}" "${2:-}" ;;
+		esac
+		;;
 	bbr) enable_bbr ;;
 	regen)
 		require_installed
-		apply_or_die
+		managed_change apply_or_die
 		;;
 	sni)
 		parse_install_opts "$@"
-		do_change_sni
+		managed_change do_change_sni
 		;;
 	net-apply | hop-apply)
 		load_state && {
@@ -6086,6 +6162,1544 @@ main() {
 		;;
 	esac
 }
+
+
+# BEGIN preflight
+# ---------------------------------------------------------------------------
+# 安装前预演: 复用安装选项与选择函数, 在子 shell 中计算, 不改变已安装状态。
+# choose_sni/choose_tls 在 ONEBOX_PLAN_ONLY=1 时只跳过网络探测/凭据询问。
+# ---------------------------------------------------------------------------
+_plan_port_observation() {
+	local port=$1 net=$2 item busy=""
+	if [ "${PLAN_PORTS_KNOWN:-0}" != 1 ]; then printf '占用状态未检查'; return 0; fi
+	for item in tcp udp; do
+		[ "$net" = both ] || [ "$net" = "$item" ] || continue
+		if port_in_use "$port" "$item"; then
+			if port_used_by_onebox "$port" "$item" 2>/dev/null; then busy+="${item}:已有 onebox "; else busy+="${item}:已占用 "; fi
+		fi
+	done
+	printf '%s' "${busy:-当前未监听}"
+}
+
+_plan_required_tcp() {
+	local port=$1 label=$2 owner=${3:-none} allowed=0
+	printf '  TCP %-5s %-26s %s\n' "$port" "$label" "$(_plan_port_observation "$port" tcp)"
+	port_in_use "$port" tcp || return 0
+	case "$owner" in
+	site) _site_running && allowed=1 ;;
+	https) { _site_owns_https_listener || port_used_by_onebox "$port" tcp; } && allowed=1 ;;
+	core) port_used_by_onebox "$port" tcp && allowed=1 ;;
+	esac
+	[ "$allowed" = 1 ] && return 0
+	err "冲突: ${label} 需要 TCP ${port}, 当前由其他服务监听"
+	return 1
+}
+
+_plan_services_and_files() {
+	local core name
+	printf '\n将涉及的服务和文件 (实际安装时):\n'
+	for core in singbox xray; do
+		core_used "$core" || continue
+		name=$(svc_name "$core")
+		printf '  服务: %s\n  内核: %s\n  配置: %s\n' "$name" "$(svc_bin "$core")" "$(svc_conf "$core")"
+		case "$INIT" in
+		systemd) printf '  服务文件: /etc/systemd/system/%s.service\n' "$name" ;;
+		openrc) printf '  服务文件: %s/%s\n' "$INITD_DIR" "$name" ;;
+		none) printf '  启动方式: 后台进程 + root crontab @reboot (需 cron 可用)\n' ;;
+		esac
+	done
+	printf '  状态: %s\n  客户端配置: %s/\n  管理命令: %s\n  日志: %s/\n  运行目录: %s/\n' "$STATE_FILE" "$CLIENT_DIR" "$CMD_PATH" "$LOG_DIR" "$RUN_DIR"
+	case "$INIT" in
+	systemd) printf '  网络恢复: /etc/systemd/system/%s.service\n' "$NET_SERVICE" ;;
+	openrc) printf '  网络恢复: /etc/local.d/onebox-net.start\n' ;;
+	esac
+	printf '  防火墙: 按上述协议/站点端口放行; 台账 %s/firewall.list\n' "$ONEBOX_DIR"
+	if [ -n "$TLS_MODE" ]; then printf '  协议证书: %s/\n' "$TLS_DIR"; fi
+	if [ "$TLS_MODE" = acme ]; then printf '  协议证书签发/续期: %s/ + root crontab\n' "$ACME_HOME"; fi
+	if site_enabled; then
+		printf '  网站服务: %s (nginx)\n  网站内容: %s/index.html\n  网站配置/证书: %s/\n  网站签发/续期: %s/ + root crontab\n' "$SITE_SERVICE" "$REALITY_SITE_ROOT" "$REALITY_SITE_DIR" "$SITE_ACME_HOME"
+	fi
+	printf '  依赖: 实际安装时按需安装系统工具与上述内核'
+	if site_enabled; then printf '、nginx、cron'; fi
+	printf '\n'
+}
+
+do_install_plan() (
+	# 子 shell 同时隔离 AUTO_YES、选项选择结果、临时随机端口和状态变量。
+	AUTO_YES=1 ONEBOX_PLAN_ONLY=1
+	local p port net detail source status=0 observed had_install=0 unreadable=0
+	local PLAN_PORTS_KNOWN=0
+	detect_os
+	detect_init
+	if { has ss && ss -lnt >/dev/null 2>&1 && ss -lnu >/dev/null 2>&1; } ||
+		{ has netstat && netstat -lnt >/dev/null 2>&1 && netstat -lnu >/dev/null 2>&1; } ||
+		{ [ -r /proc/net/tcp ] && [ -r /proc/net/udp ]; }; then PLAN_PORTS_KNOWN=1; fi
+	if { [ -d "$ONEBOX_DIR" ] && { [ ! -r "$ONEBOX_DIR" ] || [ ! -x "$ONEBOX_DIR" ]; }; } ||
+		{ [ -e "$STATE_FILE" ] && [ ! -r "$STATE_FILE" ]; }; then
+		unreadable=1
+	else
+		is_installed && had_install=1
+	fi
+	reset_state
+	# 与真正安装共用协议/内核/站点/证书选择; 这些函数只设置内存变量。
+	choose_protocols >/dev/null
+	choose_extras >/dev/null
+	choose_tls >/dev/null
+	if proto_enabled vmess-ws; then vmess_tls_default && VMESS_TLS=1 || VMESS_TLS=0; fi
+	printf '安装前预演 (只读, 未预留端口)\n'
+	printf '系统: %s; 服务管理: %s\n' "${OS_NAME:-未知}" "$INIT"
+	if [ "$unreadable" = 1 ]; then printf '当前权限无法读取已有安装, 无法完整判断已占用端口是否属于 onebox; 请使用 sudo 再次预演。\n'; fi
+	if [ "$had_install" = 1 ]; then
+		printf '已有安装: 真正执行 install 将重建配置与凭据, 并停止/移除未选中的旧内核服务; 本次不读取或显示原凭据。\n'
+	fi
+	printf '\n协议 | 内核 | 监听端口 | 来源 | 当前状态\n'
+	for p in $PROTOCOLS; do pset PORT "$p" ''; done
+	for p in $PROTOCOLS; do
+		if port=$(opt_port_for "$p"); then source=指定; else port=$(default_port_for "$p"); source=建议; fi
+		net=$(proto_net "$p")
+		observed=$(_plan_port_observation "$port" "$net")
+		printf '%s | %s | %s/%s | %s | %s\n' "$p" "$(pget CORE "$p")" "$port" "$net" "$source" "$observed"
+		if ! detail=$(port_ok "$port" "$p" 2>&1); then
+			printf '  冲突: %s\n' "$detail" >&2
+			status=1
+		fi
+		# 保留冲突端口, 后续协议仍可发现与它的重叠, 一次报告完整列表。
+		pset PORT "$p" "$port"
+	done
+	if xr_has_reality; then
+		REALITY_GUARD_PORT=$(pick_guard_port) || { err '无法为 REALITY 防偷跑分配本机端口'; status=1; }
+		printf '  REALITY 防偷跑: 127.0.0.1:%s/TCP (建议)\n' "${REALITY_GUARD_PORT:-未能分配}"
+	fi
+	if site_enabled; then
+		site_validate_ports || status=1
+		port=$(site_public_port)
+		printf '\nHTTPS 网站入口: https://%s%s/\n' "$REALITY_SITE_DOMAIN" "$([ "$port" = 443 ] || printf ':%s' "$port")"
+		printf '  本机网站 TLS: 127.0.0.1:%s/TCP\n' "$REALITY_SITE_PORT"
+		_plan_required_tcp 80 '网站 HTTP/证书验证' site || status=1
+		if site_uses_https_proxy; then _plan_required_tcp 443 '网站 HTTPS 反向代理' https || status=1; fi
+	elif [ "$TLS_MODE" = acme ] && [ "$ACME_METHOD" = standalone ]; then
+		_plan_required_tcp 80 '协议证书 HTTP 验证' core || status=1
+	fi
+	if [ -n "$HY2_HOP" ]; then printf '  Hysteria2 UDP 跳跃范围: %s (云防火墙需另行放行)\n' "$HY2_HOP"; fi
+	if [ -n "$REALITY_SNI" ]; then printf '  REALITY 目标: %s → %s (待现场验证)\n' "$REALITY_SNI" "$REALITY_DEST"; fi
+	if [ -n "$SHADOWTLS_SNI" ]; then printf '  ShadowTLS 握手目标: %s (待现场验证)\n' "$SHADOWTLS_SNI"; fi
+	if [ -n "${OPT_ADDR:-}" ]; then
+		SERVER_ADDR=${OPT_ADDR#*://}; SERVER_ADDR=${SERVER_ADDR%%/*}; SERVER_ADDR=${SERVER_ADDR#[}; SERVER_ADDR=${SERVER_ADDR%]}
+		if ! { valid_ipv4 "$SERVER_ADDR" || valid_ipv6 "$SERVER_ADDR" || valid_domain "$SERVER_ADDR"; }; then
+			err "无效的客户端连接地址: ${OPT_ADDR}"; status=1
+		fi
+	elif [ -n "$DOMAIN" ]; then SERVER_ADDR=$DOMAIN
+	elif site_enabled; then SERVER_ADDR=$REALITY_SITE_DOMAIN
+	else SERVER_ADDR='实际安装时检测公网 IP'; fi
+	printf '\n客户端连接地址: %s\n' "$SERVER_ADDR"
+	case "$TLS_MODE" in
+	self) printf '协议证书: 自签, SNI=%s; 实际安装时生成新证书\n' "$TLS_SNI" ;;
+	acme) printf '协议证书: ACME, 域名=%s, 验证方式=%s\n' "$DOMAIN" "$ACME_METHOD" ;;
+	'') printf '协议证书: 当前协议无需单独证书\n' ;;
+	esac
+	_plan_services_and_files
+	printf '\n待实际安装现场校验: DNS A/AAAA、域名归属、云防火墙、TLS 目标兼容性、证书签发和自动续期。\n'
+	if [ "$ACME_METHOD" = cf ]; then printf 'Cloudflare API 凭据须在实际签发时提供; 预演不校验或显示令牌。\n'; fi
+	[ "$PLAN_PORTS_KNOWN" = 1 ] || printf '当前环境无法检查监听端口, 请在目标 VPS 上再次预演。\n'
+	printf '建议端口可能随占用情况或随机分配变化; 需要固定时使用 --port 协议=端口。\n'
+	if [ "$status" = 0 ]; then printf '本机检查未发现冲突; 未执行安装, 不代表公网连通性或证书签发已验证。\n'
+	else printf '发现冲突, 请调整上述选项后重新预演。\n' >&2; fi
+	return "$status"
+)
+
+# END preflight
+
+
+# BEGIN support
+# ---------------------------------------------------------------------------
+# 本地诊断包：仅收集白名单状态，不打包配置、原始日志、私钥或环境变量。
+# ---------------------------------------------------------------------------
+_support_path_safe() {
+	local path=$1 part current=""
+	local -a parts
+	[[ "$path" = /* && "$path" != *[[:cntrl:]]* ]] || return 1
+	IFS=/ read -r -a parts <<<"$path"
+	for part in "${parts[@]}"; do
+		[ -n "$part" ] || continue
+		case "$part" in . | ..) return 1 ;; esac
+		current+="/$part"
+		[ ! -L "$current" ] || return 1
+	done
+}
+
+_support_redact() {
+	local line key secret
+	while IFS= read -r line || [ -n "$line" ]; do
+		for key in UUID PASSWORD SS_PASSWORD REALITY_PRIVATE_KEY REALITY_SHORT_ID CLASH_SECRET HY2_OBFS_PASSWORD SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD CF_Token CF_Key CF_Email CF_Account_ID; do
+			secret=${!key-}
+			[ -z "$secret" ] || line=${line//"$secret"/[REDACTED]}
+		done
+		printf '%s\n' "$line"
+	done | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
+}
+
+do_support_bundle() (
+	local base="$ONEBOX_DIR/support" staging archive output rc=0 core version
+	umask 077
+	_support_path_safe "$base" || { err "诊断包目录包含不安全路径或符号链接"; return 1; }
+	mkdir -p "$base" && chmod 700 "$base" || return 1
+	staging=$(mktemp -d "$base/.build.XXXXXX") || return 1
+	archive=$(mktemp "$base/.archive.XXXXXX") || { rm -rf "$staging"; return 1; }
+	trap 'rm -rf "$staging"; rm -f "$archive"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+	# Load only the existing local state, never migrate or regenerate it.
+	if is_installed; then load_state >/dev/null 2>&1 || rc=1; else reset_state; fi
+	{
+		printf 'Onebox support report\nGenerated (UTC): %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+		printf 'Script: %s\nSystem: %s %s\nArchitecture: %s\nInit: %s\n' "$SCRIPT_VERSION" "${OS_ID:-unknown}" "${OS_VER:-unknown}" "${ARCH_RAW:-unknown}" "${INIT:-unknown}"
+		if is_installed; then printf 'Installation: present\n'; else printf 'Installation: absent\n'; fi
+		printf 'State readable: %s\n' "$([ "$rc" = 0 ] && echo yes || echo no)"
+		for core in singbox xray; do
+			if [ "$core" = singbox ]; then version=$(sb_installed_version); else version=$(xr_installed_version); fi
+			[[ "$version" =~ ^[v0-9A-Za-z._+-]{1,64}$ ]] || version=unknown
+			printf '%s version: %s\n' "$core" "$version"
+			if core_used "$core"; then
+				if svc_active "$core"; then printf '%s service: running\n' "$core"; else printf '%s service: stopped\n' "$core"; fi
+			else printf '%s service: not configured\n' "$core"; fi
+		done
+	} | _support_redact >"$staging/summary.txt" || return 1
+	# doctor intentionally suppresses raw core/config-check errors.
+	(do_doctor 2>&1 || true) | _support_redact >"$staging/doctor.txt" || return 1
+	cat >"$staging/README.txt" <<'EOF' || return 1
+This locally generated report contains allowlisted system/service status and
+diagnostic results. It does not include raw logs, configuration files, private
+keys, subscriptions or an environment dump. Known credential values are also
+redacted. Domain names, addresses and local paths may remain in diagnostic
+results; review the report before sharing. No report has been uploaded.
+EOF
+	chmod 600 "$staging"/* || return 1
+	tar -czf "$archive" -C "$staging" summary.txt doctor.txt README.txt || return 1
+	output="$base/onebox-support-$(date -u '+%Y%m%dT%H%M%SZ')-${staging##*.}.tar.gz"
+	chmod 600 "$archive" && mv -fT "$archive" "$output" || return 1
+	info "诊断包已生成: $output"
+	info "包含域名、地址及本机路径；分享前请检查内容。文件未上传。"
+)
+
+# END support
+
+
+# BEGIN renewal
+# ---------------------------------------------------------------------------
+# 为手动及计划证书续期记录可查询结果，不保存 ACME 输出或凭据。
+# ---------------------------------------------------------------------------
+renewal_record() {
+	local kind=$1 result=$2 method=$3 tmp target
+	case "$kind:$result:$method" in
+	proxy:running:cron | proxy:running:manual | proxy:success:cron | proxy:success:manual | proxy:failed:cron | proxy:failed:manual | site:running:cron | site:running:manual | site:success:cron | site:success:manual | site:failed:cron | site:failed:manual) ;;
+	*) return 1 ;;
+	esac
+	_support_path_safe "$ONEBOX_DIR" || return 1
+	target="$ONEBOX_DIR/renewal-${kind}.status"
+	[ ! -L "$target" ] && [ ! -d "$target" ] || return 1
+	mkdir -p "$ONEBOX_DIR" || return 1
+	tmp=$(mktemp "$ONEBOX_DIR/.renewal-status.XXXXXX") || return 1
+	if printf '%s\n%s\n%s\n' "$(date +%s)" "$result" "$method" >"$tmp" && chmod 600 "$tmp" && mv -fT "$tmp" "$target"; then return 0; fi
+	rm -f "$tmp"
+	return 1
+}
+
+do_cert_renew() (
+	local kind=${1:-proxy} option=${2:-} method=manual rc=1 target renewal_home exe content_lock=''
+	[ $# -le 2 ] || { err "用法: onebox cert-renew [proxy|site] [--cron]"; return 1; }
+	case "$kind" in proxy | site) ;; *) err "用法: onebox cert-renew [proxy|site] [--cron]"; return 1 ;; esac
+	case "$option" in "") ;; --cron) method=cron ;; *) err "仅支持 --cron 续期选项"; return 1 ;; esac
+	require_installed
+	if [ "$kind" = site ]; then
+		site_enabled || { err "自有域名网站未启用"; return 1; }
+		target=$REALITY_SITE_DOMAIN renewal_home=$SITE_ACME_HOME exe="$SITE_ACME_HOME/acme.sh"
+	else
+		[ "$TLS_MODE" = acme ] || { err "当前代理证书不是 ACME 证书"; return 1; }
+		target=$DOMAIN renewal_home=$ACME_HOME exe=$ACME_SH
+	fi
+	[ -x "$exe" ] || { err "未找到证书续期程序"; return 1; }
+	if ! valid_domain "$target" || [ ! -f "$renewal_home/${target}_ecc/${target}.conf" ]; then
+		renewal_record "$kind" failed "$method" || true
+		err "缺少当前域名的 ACME 续期部署，请重新配置该域名证书"
+		return 1
+	fi
+	# Both site and proxy HTTP-01 renewal can use the managed website root.
+	# Do not replace that tree while ACME is writing or serving challenges.
+	if site_enabled; then
+		_support_path_safe "$REALITY_SITE_DIR" || return 1
+		content_lock="$REALITY_SITE_DIR/.content-lock"
+		mkdir "$content_lock" 2>/dev/null || { err "网站内容或证书操作正在进行，请稍后重试"; return 1; }
+		trap 'rmdir "$content_lock" 2>/dev/null || true' EXIT
+	fi
+	renewal_record "$kind" running "$method" || { err "无法记录证书续期状态，已取消"; return 1; }
+	trap 'renewal_record "$kind" failed "$method"; exit 130' INT
+	trap 'renewal_record "$kind" failed "$method"; exit 143' TERM HUP
+	if [ "$method" = cron ]; then
+		"$exe" --home "$renewal_home" --renew -d "$target" --ecc
+	else
+		"$exe" --home "$renewal_home" --renew -d "$target" --ecc --force
+	fi
+	rc=$?
+	if [ "$rc" = 0 ] || [ "$rc" = 2 ]; then
+		renewal_record "$kind" success "$method" || { err "续期检查完成，但结果记录失败"; return 1; }
+		info "证书续期检查完成 ($kind)"
+		return 0
+	fi
+	renewal_record "$kind" failed "$method" || true
+	err "证书续期失败 ($kind)，请查看上方错误"
+	return "$rc"
+)
+
+# END renewal
+
+# BEGIN releases
+# Stable/testing update channels. Keep the preference outside onebox.conf so
+# reset_state, reinstalls and older state schemas do not silently change it.
+update_channel_file() { printf '%s/update-channel' "$ONEBOX_DIR"; }
+
+update_channel_get() {
+	local channel=${1:-} file
+	file=$(update_channel_file)
+	if [ -z "$channel" ]; then
+		_support_path_safe "$file" && [ ! -d "$file" ] || { err "更新渠道文件路径不安全"; return 1; }
+		if [ -f "$file" ]; then channel=$(cat "$file") || return 1; else channel=stable; fi
+	fi
+	case "$channel" in stable | testing) printf '%s' "$channel" ;; *) err "无效更新渠道: ${channel} (仅支持 stable / testing)"; return 1 ;; esac
+}
+
+do_update_channel() {
+	local channel file tmp
+	[ $# -le 1 ] || { err "用法: onebox update-channel [stable|testing]"; return 1; }
+	channel=$(update_channel_get "${1:-}") || return 1
+	if [ $# = 0 ]; then info "当前更新渠道: ${channel}"; return 0; fi
+	file=$(update_channel_file)
+	_support_path_safe "$ONEBOX_DIR" && [ ! -L "$file" ] && [ ! -d "$file" ] || { err "更新渠道文件路径不安全"; return 1; }
+	mkdir -p "$ONEBOX_DIR" || return 1
+	tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
+	if ! printf '%s\n' "$channel" >"$tmp" || ! chmod 600 "$tmp" || ! mv -fT "$tmp" "$file"; then
+		rm -f "$tmp"
+		err "无法保存更新渠道，原设置已保留"
+		return 1
+	fi
+	info "更新渠道已设为 ${channel}；执行 onebox update-check 查看可用版本"
+}
+
+# Parse a single TOP-LEVEL string/boolean from JSON without jq or eval.
+# Validate the whole document; ignore nested names and reject duplicate keys.
+# Unicode escapes remain printable literal escapes (GitHub emits UTF-8 text).
+_update_json_field() {
+	local file=$1 key=$2 kind=${3:-string}
+	[ "$(wc -c <"$file")" -le 1048576 ] || return 1
+	awk -v wanted="$key" -v kind="$kind" '
+	function ws() { while (substr(doc,p,1) ~ /^[ \t\r\n]$/) p++ }
+	function bad() { failed=1; exit 1 }
+	function str(    out,c,e,h) {
+		if (substr(doc,p++,1)!="\"") bad()
+		out=""
+		while (p<=length(doc)) {
+			c=substr(doc,p++,1)
+			if (c=="\"") { value=out; type="string"; return }
+			if (c ~ /[[:cntrl:]]/) bad()
+			if (c!="\\") { out=out c; continue }
+			e=substr(doc,p++,1)
+			if (e=="\"" || e=="\\" || e=="/") out=out e
+			else if (e=="n") out=out "\n"
+			else if (e=="r") out=out "\r"
+			else if (e=="t") out=out "\t"
+			else if (e=="b" || e=="f") out=out " "
+			else if (e=="u") {
+				h=substr(doc,p,4)
+				if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) bad()
+				out=out "\\u" h; p+=4
+			} else bad()
+		}
+		bad()
+	}
+	function val(depth,    c,k,rest,n) {
+		if (depth>64) bad()
+		ws(); c=substr(doc,p,1)
+		if (c=="\"") { str(); return }
+		if (c=="{" || c=="[") {
+			p++; ws()
+			if (substr(doc,p,1)==(c=="{" ? "}" : "]")) { p++; type="container"; value=""; return }
+			while (1) {
+				if (c=="{") { ws(); str(); k=value; ws(); if (substr(doc,p++,1)!=":") bad() }
+				val(depth+1)
+				if (depth==0 && c=="{" && k==wanted) {
+					if (found++) bad()
+					answer=value; answer_type=type
+				}
+				ws(); n=substr(doc,p++,1)
+				if (n==(c=="{" ? "}" : "]")) break
+				if (n!=",") bad()
+			}
+			type="container"; value=""; return
+		}
+		rest=substr(doc,p)
+		if (substr(rest,1,4)=="true") { p+=4; type="boolean"; value="true"; return }
+		if (substr(rest,1,5)=="false") { p+=5; type="boolean"; value="false"; return }
+		if (substr(rest,1,4)=="null") { p+=4; type="null"; value=""; return }
+		if (match(rest,/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) { p+=RLENGTH; type="number"; value=""; return }
+		bad()
+	}
+	{ doc=doc $0 "\n" }
+	END {
+		if (failed) exit 1
+		p=1; ws(); if (substr(doc,p,1)!="{") exit 1
+		val(0); ws()
+		if (p<=length(doc) || !found || answer_type!=kind) exit 1
+		printf "%s",answer
+	}' "$file"
+}
+
+# Return 2 ONLY for an observed HTTP 404. Network/rate-limit/server failures
+# must never look like an empty release list and silently switch to testing.
+_update_api_request() {
+	local url=$1 output=$2 status rc headers
+	if has curl; then
+		status=$(curl -sSL --retry 2 --connect-timeout 10 --max-time 30 \
+			-H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+			-o "$output" -w '%{http_code}' "$url")
+		rc=$?
+	else
+		headers=$(mktemp) || return 1
+		wget -q -S -T 20 -t 2 -O "$output" "$url" 2>"$headers"
+		rc=$?
+		status=$(awk '$1 ~ /^HTTP\// && $2 ~ /^[0-9][0-9][0-9]$/ {code=$2} END {print code}' "$headers")
+		rm -f "$headers"
+	fi
+	UPDATE_API_STATUS=$status
+	[ "$status" != 404 ] || return 2
+	[ "$rc" = 0 ] && [ "$status" = 200 ] && return 0
+	return 1
+}
+
+_update_api_fetch() {
+	local url=$1 output=$2 rc
+	_update_api_request "$url" "$output"
+	rc=$?
+	if [ "$rc" = 1 ] && [ -n "${GH_PROXY:-}" ]; then
+		_update_api_request "$(gh_url "$url")" "$output"
+		rc=$?
+	fi
+	if [ "$rc" = 1 ]; then err "GitHub 更新信息获取失败 (HTTP ${UPDATE_API_STATUS:-未知})，未更改更新源；请稍后重试"; fi
+	return "$rc"
+}
+
+_update_valid_ref() {
+	local ref=$1
+	[ "${#ref}" -le 200 ] && [[ "$ref" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] || return 1
+	case "$ref" in *..* | *//* | */.* | *. | */ | *.lock | */*.lock/*) return 1 ;; esac
+	return 0
+}
+
+_update_default_ref() {
+	local json=$1 branch
+	_update_api_fetch "https://api.github.com/repos/${SCRIPT_REPO}" "$json" || { err "无法确认仓库默认分支"; return 1; }
+	branch=$(_update_json_field "$json" default_branch) && _update_valid_ref "$branch" || { err "仓库默认分支信息无效"; return 1; }
+	UPDATE_REF=$branch
+	UPDATE_URL="https://raw.githubusercontent.com/${SCRIPT_REPO}/refs/heads/${branch}/onebox.sh"
+}
+
+_script_update_resolve_inner() {
+	local requested=${1:-} json=$2 rc tag draft prerelease
+	UPDATE_CHANNEL=$(update_channel_get "$requested") || return 1
+	UPDATE_URL="" UPDATE_REF="" UPDATE_RELEASE_VERSION="" UPDATE_SUMMARY="" UPDATE_REMOTE_VERSION="" UPDATE_SOURCE=""
+	if [ -n "${ONEBOX_SCRIPT_URL:-}" ]; then
+		[[ "$ONEBOX_SCRIPT_URL" =~ ^https?://[^[:space:]]+$ ]] || { err "ONEBOX_SCRIPT_URL 必须是有效的 HTTP(S) 地址"; return 1; }
+		UPDATE_URL=$ONEBOX_SCRIPT_URL UPDATE_SOURCE=custom
+		UPDATE_SUMMARY="本次使用显式指定的 ONEBOX_SCRIPT_URL，未查询发布渠道。"
+		return 0
+	fi
+	if [ "$UPDATE_CHANNEL" = testing ]; then
+		_update_default_ref "$json" || return 1
+		UPDATE_SOURCE=branch
+		UPDATE_SUMMARY="测试渠道跟随默认开发分支；尚未作为正式 Release 发布的更改也会包含在内。"
+		return 0
+	fi
+	_update_api_fetch "https://api.github.com/repos/${SCRIPT_REPO}/releases/latest" "$json"
+	rc=$?
+	case "$rc" in
+	0)
+		tag=$(_update_json_field "$json" tag_name) &&
+			draft=$(_update_json_field "$json" draft boolean) &&
+			prerelease=$(_update_json_field "$json" prerelease boolean) || { err "正式 Release 信息无效"; return 1; }
+		[[ "$tag" =~ ^v?[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] && [ "$draft" = false ] && [ "$prerelease" = false ] || { err "正式 Release 的标签或发布状态无效"; return 1; }
+		UPDATE_SOURCE=release UPDATE_REF=$tag UPDATE_RELEASE_VERSION=${tag#v}
+		UPDATE_URL="https://raw.githubusercontent.com/${SCRIPT_REPO}/refs/tags/${tag}/onebox.sh"
+		UPDATE_SUMMARY=$(_update_json_field "$json" body) || UPDATE_SUMMARY="此 Release 未提供更新摘要。"
+		;;
+	2)
+		# Also verify the repository exists: private/missing repositories return 404 too.
+		_update_default_ref "$json" || return 1
+		UPDATE_SOURCE='branch-fallback'
+		UPDATE_SUMMARY="仓库尚无正式 Release，本次回退到默认分支；保存的渠道仍为 stable。"
+		warn "$UPDATE_SUMMARY"
+		;;
+	*) return 1 ;;
+	esac
+}
+
+script_update_resolve() {
+	local json rc
+	[ $# -le 1 ] || { err "仅支持一个更新渠道参数: stable / testing"; return 1; }
+	json=$(mktemp) || return 1
+	_script_update_resolve_inner "${1:-}" "$json"
+	rc=$?
+	rm -f "$json"
+	return "$rc"
+}
+
+script_update_download() {
+	local output=$1 requested=${2:-}
+	script_update_resolve "$requested" || return 1
+	info "更新渠道: ${UPDATE_CHANNEL}；来源: ${UPDATE_SOURCE}${UPDATE_REF:+ (${UPDATE_REF})}"
+	http_get "$(gh_url "$UPDATE_URL")" "$output" && head -n 5 "$output" | grep -q 'Sing-Xray-Onebox' && bash -n "$output" 2>/dev/null || { err "更新脚本下载或语法校验失败"; return 1; }
+	UPDATE_REMOTE_VERSION=$(script_file_version "$output") || { err "下载内容缺少有效脚本版本"; return 1; }
+	if [ -n "$UPDATE_RELEASE_VERSION" ] && [ "$UPDATE_REMOTE_VERSION" != "$UPDATE_RELEASE_VERSION" ]; then
+		err "Release 标签版本 ${UPDATE_RELEASE_VERSION} 与脚本版本 ${UPDATE_REMOTE_VERSION} 不一致，已拒绝更新"
+		return 1
+	fi
+}
+
+script_update_summary() {
+	[ -n "${UPDATE_SUMMARY:-}" ] || return 0
+	printf '更新摘要:\n'
+	# Never evaluate release text, or send terminal control characters through.
+	printf '%s\n' "$UPDATE_SUMMARY" | awk 'NR<=12 {gsub(/[[:cntrl:]]/, " "); print "  " substr($0,1,200)} NR==13 {print "  …（更多内容请查看仓库 Release）"; exit}'
+}
+
+do_update_check() (
+	local work old_version="" new_version
+	[ $# -le 1 ] || { err "用法: onebox update-check [stable|testing]"; return 1; }
+	work=$(mktemp -d) || return 1
+	trap 'rm -rf "$work"' EXIT
+	if [ -f "$CMD_PATH" ]; then old_version=$(script_file_version "$CMD_PATH") || true; fi
+	info "已安装管理脚本: ${old_version:-未安装}；当前运行脚本: ${SCRIPT_VERSION}"
+	script_update_download "$work/onebox.sh" "${1:-}" || return 1
+	new_version=$UPDATE_REMOTE_VERSION
+	info "远端脚本版本: ${new_version}"
+	if [ -n "$old_version" ]; then
+		if ! ver_ge "$new_version" "$old_version"; then
+			warn "已安装版本高于当前渠道版本，将保留已安装版本，拒绝降级"
+		elif cmp -s "$work/onebox.sh" "$CMD_PATH"; then
+			info "已是该渠道提供的最新内容"
+		elif [ "$new_version" = "$old_version" ]; then
+			info "版本号相同，但脚本内容有更新"
+		else
+			info "发现可用更新: ${old_version} -> ${new_version}"
+		fi
+	fi
+	script_update_summary
+	info "本次只检查更新，未替换脚本或修改节点配置"
+)
+
+# END releases
+
+# BEGIN diagnostics
+# 只读诊断与证书状态。入口在子 shell 内加载状态，不改变调用者变量或部署文件。
+# 退出码: 0=通过, 1=发现错误, 2=仅警告或检查不完整。
+_diag_report() {
+	local level=$1 label=$2 message=$3 hint=${4:-}
+	case "$level" in
+	ok) DIAG_OK=$((DIAG_OK + 1)); printf '[通过] %s: %s\n' "$label" "$message" ;;
+	fail) DIAG_FAIL=$((DIAG_FAIL + 1)); printf '[失败] %s: %s\n' "$label" "$message" ;;
+	warn) DIAG_WARN=$((DIAG_WARN + 1)); printf '[提示] %s: %s\n' "$label" "$message" ;;
+	*) printf '[信息] %s: %s\n' "$label" "$message" ;;
+	esac
+	[ -z "$hint" ] || printf '  建议: %s\n' "$hint"
+	return 0
+}
+
+_diag_finish() {
+	printf '\n通过 %s 项，失败 %s 项，提示 %s 项。未修改服务、配置或证书。\n' "$DIAG_OK" "$DIAG_FAIL" "$DIAG_WARN"
+	[ "$DIAG_FAIL" = 0 ] || return 1
+	[ "$DIAG_WARN" = 0 ] || return 2
+}
+
+_diag_load_state() {
+	local protocol core port invalid=0
+	if [ ! -f "$STATE_FILE" ]; then
+		_diag_report fail 安装状态 未找到安装状态 '先执行 onebox install。'
+		return 1
+	fi
+	if ! load_state >/dev/null 2>&1; then
+		_diag_report fail 安装状态 '状态文件不可读、语法错误或缺少协议列表' '检查状态文件权限及最近备份；不要直接重装覆盖原配置。'
+		return 1
+	fi
+	for protocol in $PROTOCOLS; do
+		case " $ALL_PROTOCOLS " in *" $protocol "*) ;; *) _diag_report fail 安装状态 '协议列表含未知项目' '检查状态文件或恢复最近备份。'; invalid=1; continue ;; esac
+		core=$(pget CORE "$protocol") port=$(pget PORT "$protocol")
+		if ! proto_supports_core "$protocol" "$core"; then _diag_report fail "$(proto_title "$protocol")" '缺少内核分配或内核不支持此协议' '检查状态文件中的内核分配，恢复最近备份。'; invalid=1; fi
+		if ! [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$port" -gt 65535 ]; then _diag_report fail "$(proto_title "$protocol")" '未配置有效监听端口' '使用 onebox port 设置有效端口。'; invalid=1; fi
+	done
+	[ "$invalid" = 0 ] || return 1
+	_diag_report ok 安装状态 已加载
+}
+
+_diag_now() { date +%s; }
+_diag_epoch_text() {
+	[[ "$1" =~ ^[0-9]{1,12}$ ]] || return 1
+	date -u -d "@$1" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || printf 'Unix 时间 %s' "$1"
+}
+
+_diag_cert_epoch() {
+	# OpenSSL 的 GMT 文本转换成 GNU date / BusyBox date 都能读取的格式。
+	local month day clock year zone number
+	read -r month day clock year zone <<<"$1"
+	case "$month" in Jan) number=01 ;; Feb) number=02 ;; Mar) number=03 ;; Apr) number=04 ;; May) number=05 ;; Jun) number=06 ;; Jul) number=07 ;; Aug) number=08 ;; Sep) number=09 ;; Oct) number=10 ;; Nov) number=11 ;; Dec) number=12 ;; *) return 1 ;; esac
+	[[ "$day" =~ ^[0-9]{1,2}$ && "$year" =~ ^[0-9]{4}$ && "$clock" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ && "$zone" = GMT ]] || return 1
+	LC_ALL=C date -u -d "$year-$number-$(printf '%02d' "$((10#$day))") $clock" +%s 2>/dev/null
+}
+
+_diag_cert_name() {
+	local file=$1 name=$2 option=-checkhost output
+	[[ "$name" == *:* ]] || valid_ipv4 "$name" && option=-checkip
+	if ! openssl x509 -help 2>&1 | grep -q -- "$option"; then return 2; fi
+	output=$(LC_ALL=C openssl x509 -in "$file" -noout "$option" "$name" 2>/dev/null) || return 1
+	# 部分 OpenSSL 版本在名称不匹配时仍返回 0，因此同时检查判定文本。
+	[[ "$output" == *' does match certificate'* ]]
+}
+
+_diag_cert_notice() {
+	local active=$1
+	shift
+	if [ "$active" = 1 ]; then _diag_report "$@"; else shift; _diag_report info "$@"; fi
+}
+
+_diag_certificate() {
+	local label=$1 file=$2 key=$3 name=$4 pinned=$5 active=$6 dates expiry begin end_epoch='' begin_epoch='' now='' days rc public private
+	printf '\n%s\n' "$label"
+	if [ "$active" != 1 ]; then _diag_report info 状态 '已停用，以下仅展示保留证书'; fi
+	if ! has openssl; then _diag_cert_notice "$active" warn "$label" '缺少 openssl，未检查证书' '安装 openssl 后重新执行；本命令不会安装依赖。'; return 0; fi
+	if [ -z "$file" ] || [ ! -r "$file" ]; then _diag_cert_notice "$active" fail "$label" '证书文件缺失或不可读' '通过 onebox cert 或 onebox site info 检查证书配置。'; return 0; fi
+	dates=$(LC_ALL=C openssl x509 -in "$file" -noout -startdate -enddate 2>/dev/null) || {
+		_diag_cert_notice "$active" fail "$label" '无法解析 PEM 证书' '检查证书文件格式，恢复可用证书后重试。'; return 0;
+	}
+	expiry=$(printf '%s\n' "$dates" | sed -n 's/^notAfter=//p')
+	begin=$(printf '%s\n' "$dates" | sed -n 's/^notBefore=//p')
+	printf '  到期: %s\n' "$expiry"
+	end_epoch=$(_diag_cert_epoch "$expiry") && begin_epoch=$(_diag_cert_epoch "$begin") && now=$(_diag_now) || now=''
+	if [[ "$now" =~ ^[0-9]+$ && "$end_epoch" =~ ^[0-9]+$ && "$begin_epoch" =~ ^[0-9]+$ ]]; then
+		if [ "$now" -lt "$begin_epoch" ]; then
+			_diag_cert_notice "$active" fail 有效期 '证书尚未生效' '检查系统时钟与证书 notBefore 时间。'
+		elif [ "$now" -ge "$end_epoch" ]; then
+			_diag_cert_notice "$active" fail 有效期 "已过期 $(((now - end_epoch) / 86400)) 天" '立即检查续期任务；代理证书用 onebox cert，网站证书用 onebox site renew。'
+		else
+			days=$(((end_epoch - now + 86399) / 86400))
+			if [ "$days" -le 30 ]; then _diag_cert_notice "$active" warn 有效期 "剩余 ${days} 天" '检查续期任务和最近续期记录。'; else _diag_report ok 有效期 "剩余 ${days} 天"; fi
+		fi
+	else
+		_diag_cert_notice "$active" warn 有效期 '剩余天数未知，系统 date 无法解析证书时间' '根据上方到期时间人工核对，检查 date 命令。'
+	fi
+	if [ -n "$name" ]; then
+		_diag_cert_name "$file" "$name"; rc=$?
+		case "$rc" in
+		0) _diag_report ok 证书名称 "覆盖 ${name}" ;;
+		2) _diag_cert_notice "$active" warn 证书名称 '当前 openssl 不支持名称检查，结果未知' '升级 openssl 后重新执行。' ;;
+		*) _diag_cert_notice "$active" fail 证书名称 "不覆盖 ${name}" '更换覆盖当前域名/IP 的证书，或修正 onebox 中的域名。' ;;
+		esac
+	else _diag_cert_notice "$active" warn 证书名称 '未配置需要验证的域名/IP'; fi
+	if [ ! -r "$key" ]; then _diag_cert_notice "$active" fail 私钥 '文件缺失或不可读' '恢复与证书配套的私钥及文件权限。';
+	else
+		public=$(openssl x509 -in "$file" -noout -pubkey 2>/dev/null)
+		private=$(openssl pkey -in "$key" -passin pass: -pubout 2>/dev/null)
+		if [ -n "$public" ] && [ "$public" = "$private" ]; then _diag_report ok 私钥 与证书匹配;
+		else _diag_cert_notice "$active" fail 私钥 '无法读取或与证书不匹配' '恢复配套的无交互密码私钥；不会在此输出私钥内容。'; fi
+	fi
+	if [ "$pinned" = 1 ]; then _diag_report info 信任方式 '自签或固定证书，由客户端固定证书校验';
+	elif openssl verify -untrusted "$file" "$file" >/dev/null 2>&1; then _diag_report ok 证书链 '受本机系统 CA 信任';
+	else _diag_cert_notice "$active" fail 证书链 '本机系统 CA 验证失败' '检查完整证书链、系统 ca-certificates 和系统时间。'; fi
+}
+
+_diag_read_cron() {
+	DIAG_CRON_STATE=unknown DIAG_CRON_TEXT=''
+	has crontab || return 0
+	if DIAG_CRON_TEXT=$(LC_ALL=C crontab -l 2>&1); then DIAG_CRON_STATE=ok;
+	else
+		case "$DIAG_CRON_TEXT" in *'no crontab for '* | *"can't open '"*': No such file or directory') DIAG_CRON_STATE=ok ;; esac
+		DIAG_CRON_TEXT=''
+	fi
+}
+
+_diag_has_renew_job() {
+	local kind=$1 renewal_home=$2 line clean
+	while IFS= read -r line; do
+		clean=${line#"${line%%[![:space:]]*}"}
+		case "$clean" in '' | \#*) continue ;; esac
+		# 去掉 shell 引号后只检查命令，不执行 cron 内容，不显示含凭据的原始行。
+		clean=${clean//\"/} clean=${clean//\'/}
+		case " $clean " in
+		*" ${CMD_PATH} cert-renew ${kind} "*) return 0 ;;
+		*" ${renewal_home}/acme.sh "*) [[ " $clean " =~ [[:space:]]--cron[[:space:]] ]] && return 0 ;;
+		esac
+	done <<<"$DIAG_CRON_TEXT"
+	return 1
+}
+
+_diag_renew_record() {
+	local kind=$1 active=$2 epoch result method extra record="$ONEBOX_DIR/renewal-${1}.status"
+	if [ -r "$record" ]; then
+		{ IFS= read -r epoch; IFS= read -r result; IFS= read -r method; IFS= read -r extra || true; } <"$record"
+		if [[ "$epoch" =~ ^[0-9]{1,12}$ && "$result" =~ ^(success|failed|running)$ && "$method" =~ ^(cron|manual)$ && -z "$extra" ]]; then
+			case "$method" in cron) method=定时 ;; manual) method=手动 ;; esac
+			case "$result" in success) result=成功 ;; failed) result=失败 ;; running) result='执行中（未记录完成结果）' ;; esac
+			_diag_report info 最近续期 "$(_diag_epoch_text "$epoch") / ${method} / ${result}"
+			if [ "$result" = 失败 ]; then _diag_cert_notice "$active" warn 续期结果 '最近一次续期失败' '检查 DNS、80 端口和 CA 连接后，再执行对应的续期命令。'; fi
+			return 0
+		fi
+	fi
+	_diag_report info 最近续期 '未知（未找到有效的续期结果记录）'
+}
+
+_diag_renewal() {
+	local kind=$1 mode=$2 renewal_home=$3 active=$4
+	if [ "$active" != 1 ]; then _diag_report info 自动续期 '当前未使用该证书，不要求存在续期任务';
+	elif [ "$mode" = self ]; then _diag_report info 自动续期 '不适用（自签证书；更换后需重新导入客户端）';
+	elif [ "$mode" != acme ]; then _diag_report info 自动续期 '未知（自有证书由外部工具或人工管理）';
+	elif [ "$DIAG_CRON_STATE" != ok ]; then _diag_report warn 自动续期 '未知（缺少 crontab 或无法读取当前用户的 crontab）' '检查 crontab 命令、权限与调度服务；本命令不会安装依赖。';
+	elif _diag_has_renew_job "$kind" "$renewal_home"; then _diag_report ok 自动续期 '已找到当前用户的续期任务（未验证调度器是否执行）';
+	else _diag_report warn 自动续期 '当前用户 crontab 未找到续期任务；其他调度方式未知' '检查 crontab 或自行维护的 systemd timer，恢复对应证书的定时续期。'; fi
+	[ "$mode" = acme ] || active=0
+	_diag_renew_record "$kind" "$active"
+}
+
+_diag_certificate_panels() {
+	local pinned=0 active=0
+	_diag_read_cron
+	if any_needs_cert; then active=1; fi
+	if any_needs_cert || [ -n "${TLS_MODE:-}" ]; then
+		tls_insecure && pinned=1
+		_diag_certificate 代理TLS "${CERT_FILE:-}" "${KEY_FILE:-}" "$(tls_server_name)" "$pinned" "$active"
+		_diag_renewal proxy "${TLS_MODE:-}" "$ACME_HOME" "$active"
+	else _diag_report info 代理TLS 当前协议不需要独立证书; fi
+	active=0
+	if site_enabled; then active=1; fi
+	if [ "$active" = 1 ] || [ -f "$REALITY_SITE_DIR/cert.pem" ]; then
+		_diag_certificate 自建站 "$REALITY_SITE_DIR/cert.pem" "$REALITY_SITE_DIR/key.pem" "${REALITY_SITE_DOMAIN:-}" 0 "$active"
+		_diag_renewal site acme "$SITE_ACME_HOME" "$active"
+	else _diag_report info 自建站 未配置证书; fi
+}
+
+_diag_ip_key() {
+	local ip=${1,,} left right piece count out='' value a b c d
+	local -a lhs=() rhs=()
+	if [[ "$ip" != *:* ]]; then
+		valid_ipv4 "$ip" || return 1
+		IFS=. read -r a b c d <<<"$ip"
+		printf '4:%d.%d.%d.%d' "$((10#$a))" "$((10#$b))" "$((10#$c))" "$((10#$d))"
+		return 0
+	fi
+	[[ "$ip" =~ ^[0-9a-f:]+$ ]] || return 1
+	if [[ "$ip" == *::* ]]; then
+		left=${ip%%::*} right=${ip#*::}
+		[[ "$right" != *::* ]] || return 1
+		IFS=: read -r -a lhs <<<"$left"
+		IFS=: read -r -a rhs <<<"$right"
+		count=$((8 - ${#lhs[@]} - ${#rhs[@]}))
+		[ "$count" -gt 0 ] || return 1
+		while [ "$count" -gt 0 ]; do lhs+=(0); count=$((count - 1)); done
+		lhs+=("${rhs[@]}")
+	else IFS=: read -r -a lhs <<<"$ip"; [ "${#lhs[@]}" = 8 ] || return 1; fi
+	for piece in "${lhs[@]}"; do
+		[[ "$piece" =~ ^[0-9a-f]{1,4}$ ]] || return 1
+		printf -v value '%04x' "$((16#$piece))"
+		out+=$value
+	done
+	printf '6:%s' "$out"
+}
+
+_diag_resolve_domain() {
+	# 每个域名至多 21 秒：三个 DoH 服务各查 A/AAAA，最后限时查询 NSS。
+	local domain=$1 result='' server type
+	if has curl; then
+		for server in https://cloudflare-dns.com/dns-query https://dns.google/resolve https://dns.alidns.com/resolve; do
+			result=$(
+				for type in A AAAA; do
+					curl -fsS --connect-timeout 2 --max-time 3 -H 'accept: application/dns-json' "${server}?name=${domain}&type=${type}" 2>/dev/null |
+						grep -oE '"data": *"[^"]*"' | sed 's/^"data": *"//; s/"$//'
+				done | _ip_filter
+			)
+			[ -z "$result" ] || break
+		done
+	fi
+	if [ -z "$result" ] && has getent && has timeout; then result=$(timeout 3 getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | _ip_filter); fi
+	[ -z "$result" ] || printf '%s\n' "$result" | sort -u
+}
+
+_diag_dns() {
+	local domain=$1 strict=$2 ips own ip key keys='' mismatch=0 count=0
+	if ! valid_domain "$domain"; then _diag_report fail DNS '配置的域名格式无效' '修正域名后重新执行体检。'; return 0; fi
+	if ! has curl && { ! has getent || ! has timeout; }; then _diag_report warn "DNS ${domain}" '缺少 curl 或 getent+timeout，未检查解析' '安装所需解析工具后重试。'; return 0; fi
+	ips=$(_diag_resolve_domain "$domain" 2>/dev/null)
+	if [ -z "$ips" ]; then _diag_report fail "DNS ${domain}" '未解析到 A/AAAA 地址' '核对域名解析与本机 DNS/DoH 网络。'; return 0; fi
+	own=$(own_ip_list 2>/dev/null)
+	while IFS= read -r ip; do key=$(_diag_ip_key "$ip") && keys+="|$key|"; done <<<"$own"
+	if [ -z "$keys" ]; then _diag_report warn "DNS ${domain}" '无法确认本机公网地址，不能判断解析归属' '检查网卡地址与 onebox addr 中保存的服务器地址。'; return 0; fi
+	while IFS= read -r ip; do
+		key=$(_diag_ip_key "$ip") || { mismatch=1; continue; }
+		count=$((count + 1))
+		[[ "$keys" == *"|$key|"* ]] || mismatch=1
+	done <<<"$ips"
+	if [ "$mismatch" = 0 ] && [ "$count" -gt 0 ]; then _diag_report ok "DNS ${domain}" '本次解析到的 A/AAAA 均属于本机';
+	elif [ "$strict" = 1 ]; then _diag_report fail "DNS ${domain}" '存在未指向本机的 A/AAAA 地址' '将自建站全部 A/AAAA 直连本机并关闭 CDN 代理。';
+	else _diag_report warn "DNS ${domain}" '存在未指向本机的 A/AAAA 地址' '若未使用 CDN，请修正解析；若使用 CDN，请另行确认回源地址和支持的协议。'; fi
+}
+
+_diag_core_check() (
+	local core=$1 bin=$2 conf=$3 work
+	work=$(mktemp -d) || return 1
+	trap 'rm -rf "$work"' EXIT
+	case "$core" in
+	singbox) timeout 15 "$bin" check -D "$work" -c "$conf" ;;
+	xray) cd "$work" && timeout 15 "$bin" run -test -c "$conf" ;;
+	esac
+)
+
+_diag_core() {
+	local core=$1 bin conf rc
+	bin=$(svc_bin "$core") conf=$(svc_conf "$core")
+	if svc_active "$core" >/dev/null 2>&1; then _diag_report ok "$(core_title "$core") 服务" 运行中;
+	else _diag_report fail "$(core_title "$core") 服务" 未运行 '执行 onebox log 查看原因；确认配置后再手动执行 onebox restart。'; fi
+	if [ ! -x "$bin" ]; then _diag_report fail "$(core_title "$core") 内核" '可执行文件缺失或不可执行' '检查内核文件和执行权限，必要时运行 onebox update。'; return 0; fi
+	if [ ! -r "$conf" ]; then _diag_report fail "$(core_title "$core") 配置" '文件缺失或不可读' '检查配置权限或备份，确认状态后执行 onebox regen。'; return 0; fi
+	if ! has timeout; then _diag_report warn "$(core_title "$core") 配置" '缺少 timeout，跳过限时校验' '安装 timeout 后重试；本命令不会安装依赖。'; return 0; fi
+	# 不回显 checker 的任何输出，避免错误消息包含密码、UUID 或私钥。
+	_diag_core_check "$core" "$bin" "$conf" >/dev/null 2>&1
+	rc=$?
+	if [ "$rc" = 0 ]; then _diag_report ok "$(core_title "$core") 配置" '内核校验通过';
+	else _diag_report fail "$(core_title "$core") 配置" "内核校验失败（退出码 ${rc}，原始输出已隐藏）" '在本机核对内核版本和服务配置；不要公开包含凭据的完整配置或日志。'; fi
+}
+
+_diag_listener_owner() {
+	local port=$1 net=$2 flag=t owner=''
+	[ "$net" != udp ] || flag=u
+	if has ss; then
+		owner=$(ss -H -ln"$flag"p 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") {print}' | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -n1)
+	elif has netstat; then
+		owner=$(netstat -ln"$flag"p 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") {sub(/^[0-9]+\//,"",$7); print $7; exit}')
+	fi
+	[[ "$owner" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] || owner=未知
+	printf '%s' "$owner"
+}
+
+_diag_listeners() {
+	local protocol port net transport owner expected
+	if ! has ss && ! has netstat && [ ! -r /proc/net/tcp ]; then
+		_diag_report warn 监听端口 '无法读取本机监听信息' '检查 ss / netstat 或 /proc 权限。'
+		return 0
+	fi
+	for protocol in $PROTOCOLS; do
+		port=$(pget PORT "$protocol") net=$(proto_net "$protocol")
+		case "$(pget CORE "$protocol")" in singbox) expected=sing-box ;; *) expected=xray ;; esac
+		for transport in tcp udp; do
+			[ "$net" = both ] || [ "$net" = "$transport" ] || continue
+			if port_in_use "$port" "$transport"; then
+				owner=$(_diag_listener_owner "$port" "$transport")
+				if [ "$owner" = 未知 ] || [ "$owner" = "$expected" ]; then
+					_diag_report ok "$protocol $port/$transport" "已监听（进程: $owner）；协议握手仍需从客户端验证"
+				else
+					_diag_report warn "$protocol $port/$transport" "监听进程为 $owner，预期 $expected" '检查是否有其他服务占用了节点端口。'
+				fi
+			else _diag_report fail "$protocol $port/$transport" '未发现监听' '检查内核启动日志、监听地址和端口配置。'; fi
+		done
+	done
+}
+
+_diag_http_probe() {
+	local domain=$1 port=$2 addr=${3:-127.0.0.1}
+	curl --noproxy '*' --http1.1 --connect-timeout 3 --max-time 8 -fsS --resolve "$domain:$port:$addr" "https://$domain:$port/" -o /dev/null >/dev/null 2>&1
+}
+
+_diag_site() {
+	local output port addr=127.0.0.1
+	if ! site_enabled; then _diag_report info 自建站 '未启用，跳过内部 HTTPS 和网站入口检查'; return 0; fi
+	if _site_running; then _diag_report ok 网站服务 运行中;
+	else _diag_report fail 网站服务 未运行 '检查 onebox site info 和网站服务日志。'; fi
+	if has curl; then
+		if _diag_http_probe "$REALITY_SITE_DOMAIN" "$REALITY_SITE_PORT"; then _diag_report ok 网站内部HTTPS '本机连接、证书验证与 HTTP 请求通过';
+		else _diag_report fail 网站内部HTTPS '本机请求失败（可能是监听、证书或 HTTP 状态）' '核对网站证书与 nginx 服务；执行 onebox site info 查看内部端口。'; fi
+		port=$(site_public_port)
+		if ! site_uses_https_proxy; then
+			case "${LISTEN_ADDR:-}" in ::) addr='[::1]' ;; *:*) addr="[$LISTEN_ADDR]" ;; '' | 0.0.0.0) ;; *) addr=$LISTEN_ADDR ;; esac
+		fi
+		if _diag_http_probe "$REALITY_SITE_DOMAIN" "$port" "$addr"; then _diag_report ok "网站入口 ${port}" '本机连接通过；公网可达性未验证';
+		else _diag_report fail "网站入口 ${port}" '本机 HTTPS 请求失败' '检查该端口的 nginx / REALITY 服务、SNI 与证书配置。'; fi
+		[ "$port" = 443 ] || _diag_report info 443入口 "未启用，当前网站入口为 ${port}"
+	else _diag_report warn 网站HTTPS '缺少 curl，内部与入口 HTTP/证书探测未执行' '安装 curl 后重试。'; fi
+	if has openssl && has timeout; then
+		output=$(timeout 8 openssl s_client -connect "127.0.0.1:$REALITY_SITE_PORT" -servername "$REALITY_SITE_DOMAIN" -tls1_3 -alpn h2 </dev/null 2>/dev/null)
+		if printf '%s\n' "$output" | grep -q 'ALPN protocol: h2'; then _diag_report ok REALITY内部目标 '可协商 TLS1.3 / h2';
+		else _diag_report fail REALITY内部目标 '未成功协商 TLS1.3 / h2' '检查 nginx 的 ssl_protocols、http2 与内部监听端口。'; fi
+	else _diag_report warn REALITY内部目标 '缺少 openssl/timeout，TLS1.3 与 h2 检查未执行' '安装缺失工具后重试。'; fi
+}
+
+do_cert_status() (
+	DIAG_OK=0 DIAG_WARN=0 DIAG_FAIL=0
+	printf '证书状态（只读）\n'
+	if _diag_load_state; then _diag_certificate_panels; fi
+	_diag_finish
+)
+
+do_doctor() (
+	DIAG_OK=0 DIAG_WARN=0 DIAG_FAIL=0
+	printf 'Onebox 一键体检（只读）\n'
+	if _diag_load_state; then
+		local core
+		for core in singbox xray; do core_used "$core" && _diag_core "$core"; done
+		_diag_listeners
+		if site_enabled; then _diag_dns "$REALITY_SITE_DOMAIN" 1; fi
+		if any_needs_cert && [ -n "${DOMAIN:-}" ] && { ! site_enabled || [ "${DOMAIN,,}" != "${REALITY_SITE_DOMAIN,,}" ]; }; then _diag_dns "$DOMAIN" 0; fi
+		_diag_certificate_panels
+		_diag_site
+	fi
+	printf '\n公网连通性未验证：本机探测不能验证云安全组、外部防火墙或运营商路径，请从外部网络验证网站和代理端口。\n'
+	_diag_finish
+)
+
+# END diagnostics
+
+# BEGIN site-management
+# Website content management: private metadata/backups, no shell evaluation of imported files.
+_sm_path() {
+	local path=$1 part walk='' parts=()
+	[ -n "$path" ] || { err "目录路径不能为空"; return 1; }
+	[[ "$path" != *[[:cntrl:]]* ]] || { err "路径不能包含控制字符"; return 1; }
+	[[ "$path" = /* ]] || path="$PWD/$path"
+	IFS=/ read -r -a parts <<<"$path"
+	for part in "${parts[@]}"; do
+		[ -n "$part" ] || continue
+		case "$part" in . | ..) err "请使用不含 . 或 .. 的明确目录路径"; return 1 ;; esac
+		walk+="/$part"
+		[ ! -L "$walk" ] || { err "路径不能经过符号链接: $walk"; return 1; }
+	done
+	case "$walk" in '' | / | /etc | /var | /var/lib | /root | /home | /usr | /opt | /tmp | /run | /proc | /proc/* | /sys | /sys/* | /dev | /dev/*)
+		err "不能使用系统目录作为网站内容目录"; return 1 ;;
+	esac
+	printf '%s' "$walk"
+}
+
+_sm_tree_safe() {
+	local tree=$1 entry listing failed=0
+	[ -d "$tree" ] && [ ! -L "$tree" ] || return 1
+	listing=$(mktemp) || return 1
+	if ! find "$tree" -print0 >"$listing"; then rm -f "$listing"; return 1; fi
+	while IFS= read -r -d '' entry; do
+		if [ -L "$entry" ] || { [ ! -d "$entry" ] && [ ! -f "$entry" ]; }; then
+			err "静态网站不能包含符号链接或特殊文件: $entry"; failed=1; break
+		fi
+	done <"$listing"
+	rm -f "$listing"
+	[ "$failed" = 0 ]
+}
+
+_sm_paths() {
+	SM_ROOT=$(_sm_path "$REALITY_SITE_ROOT") || return 1
+	SM_PRIVATE=$(_sm_path "$REALITY_SITE_DIR") || return 1
+	case "$SM_ROOT/" in "$SM_PRIVATE/"*) err "网页目录不能位于私密配置目录内"; return 1 ;; esac
+	case "$SM_PRIVATE/" in "$SM_ROOT/"*) err "网页目录不能包含私密配置目录"; return 1 ;; esac
+	[ -f "$SM_ROOT/.onebox-site-owned" ] && [ -f "$SM_PRIVATE/.onebox-site-owned" ] || { err "当前网站目录缺少管理标记，请先完成建站"; return 1; }
+	[ ! -L "$SM_PRIVATE/.onebox-site-owned" ] || return 1
+	_sm_tree_safe "$SM_ROOT" || return 1
+	SM_SETTINGS="$SM_PRIVATE/content-settings.tsv"
+	SM_BACKUPS="$SM_PRIVATE/content-backups"
+	_sm_path "$SM_SETTINGS" >/dev/null && _sm_path "$SM_BACKUPS" >/dev/null || return 1
+	[ ! -e "$SM_SETTINGS" ] || [ -f "$SM_SETTINGS" ] || return 1
+}
+
+_sm_text_valid() {
+	local text=$1 maximum=$2
+	[ -n "$text" ] && [ "${#text}" -le "$maximum" ] && [[ "$text" != *[[:cntrl:]]* ]]
+}
+
+_sm_settings_read() {
+	local file=$1 key value extra seen=' ' decoded expected
+	SM_KIND=custom SM_TEMPLATE=legacy SM_TITLE=${REALITY_SITE_TITLE:-山间手记}
+	SM_DESCRIPTION='记录日常，整理想法，分享值得停留的片刻。' SM_THEME=forest SM_INDEX_HASH=''
+	if [ ! -f "$file" ]; then
+		if [ -f "$SM_ROOT/index.html" ]; then
+			expected=$(site_render_index | _site_hash)
+			[[ "$expected" =~ ^[a-f0-9]{64}$ ]] || return 1
+			[ "$(_site_hash <"$SM_ROOT/index.html")" != "$expected" ] || SM_KIND=template
+		fi
+		return 0
+	fi
+	[ ! -L "$file" ] || return 1
+	while IFS=$'\t' read -r key value extra; do
+		[ -n "$key" ] && [ -z "$extra" ] || return 1
+		case "$seen" in *" $key "*) return 1 ;; esac
+		seen+="$key "
+		case "$key" in
+		version) [ "$value" = 1 ] || return 1 ;;
+		kind) SM_KIND=$value ;;
+		template) SM_TEMPLATE=$value ;;
+		theme) SM_THEME=$value ;;
+		index_sha256) SM_INDEX_HASH=$value ;;
+		title | description)
+			[[ "$value" =~ ^[A-Za-z0-9+/=]+$ ]] || return 1
+			decoded=$(printf '%s' "$value" | base64 -d 2>/dev/null) || return 1
+			if [ "$key" = title ]; then SM_TITLE=$decoded; else SM_DESCRIPTION=$decoded; fi
+			;;
+		*) return 1 ;;
+		esac
+	done <"$file"
+	for key in version kind template theme index_sha256 title description; do case "$seen" in *" $key "*) ;; *) return 1 ;; esac; done
+	case "$SM_KIND:$SM_TEMPLATE" in template:minimal | template:profile | template:docs | template:legacy | import:none) ;; *) return 1 ;; esac
+	case "$SM_THEME" in forest | ocean | slate) ;; *) return 1 ;; esac
+	_sm_text_valid "$SM_TITLE" 80 && _sm_text_valid "$SM_DESCRIPTION" 240 && [[ "$SM_INDEX_HASH" =~ ^[a-f0-9]{64}$ ]] || return 1
+}
+
+_sm_settings_write() {
+	local file=$1 hash=$2
+	{
+		printf 'version\t1\nkind\t%s\ntemplate\t%s\ntheme\t%s\nindex_sha256\t%s\n' "$SM_KIND" "$SM_TEMPLATE" "$SM_THEME" "$hash" &&
+		printf 'title\t%s\ndescription\t%s\n' "$(printf '%s' "$SM_TITLE" | b64)" "$(printf '%s' "$SM_DESCRIPTION" | b64)"
+	} >"$file" && chmod 600 "$file"
+}
+
+_sm_render() {
+	local title description accent wash
+	title=$(site_html_escape "$SM_TITLE") description=$(site_html_escape "$SM_DESCRIPTION")
+	case "$SM_THEME" in forest) accent='#21614c' wash='#edf5ef' ;; ocean) accent='#155e8b' wash='#eaf3fa' ;; slate) accent='#374151' wash='#f1f3f5' ;; *) return 1 ;; esac
+	if [ "$SM_TEMPLATE" = legacy ]; then local REALITY_SITE_TITLE=$SM_TITLE; site_render_index; return $?; fi
+	cat <<EOF
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="$description"><title>$title</title>
+<style>:root{--accent:$accent;--wash:$wash}*{box-sizing:border-box}body{margin:0;background:#fcfcf9;color:#222d29;font:17px/1.85 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}a{color:var(--accent)}.wrap{width:min(960px,calc(100% - 40px));margin:auto}header{display:flex;justify-content:space-between;gap:20px;padding:24px 0;border-bottom:1px solid #ddd}header a{text-decoration:none;overflow-wrap:anywhere}.hero{padding:90px 0 60px}h1{font-size:clamp(36px,7vw,64px);line-height:1.2;letter-spacing:-.04em;overflow-wrap:anywhere;margin:0 0 24px}h2{font-size:26px;line-height:1.4}.intro{font-size:20px;max-width:640px;color:#58645f;overflow-wrap:anywhere}.label{font-size:12px;letter-spacing:.2em;color:var(--accent)}.panel{padding:30px;border-radius:18px;background:var(--wash)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:28px 0 64px}.profile{display:grid;grid-template-columns:2fr 1fr;gap:36px;align-items:center}.monogram{display:grid;place-items:center;aspect-ratio:1;background:var(--wash);border-radius:50%;font-size:64px;color:var(--accent)}.docs{display:grid;grid-template-columns:190px 1fr;gap:44px;padding:48px 0}.docs nav a{display:block;padding:7px 0}.docs section{padding-bottom:32px;scroll-margin-top:24px}footer{border-top:1px solid #ddd;padding:26px 0;color:#69746e;font-size:13px;overflow-wrap:anywhere}a:focus-visible{outline:2px solid var(--accent);outline-offset:5px}@media(max-width:640px){.grid,.profile,.docs{grid-template-columns:1fr}.hero{padding:55px 0 35px}.monogram{max-width:160px}.docs{gap:18px}.docs nav{display:flex;gap:18px;flex-wrap:wrap}header{flex-wrap:wrap}}</style></head><body><div class="wrap"><header><a href="#home">$title</a><a href="#about">关于</a></header>
+EOF
+	case "$SM_TEMPLATE" in
+	minimal)
+		printf '<main id="home"><section class="hero"><p class="label">NOTES &amp; IDEAS</p><h1>%s</h1><p class="intro">%s</p></section><section class="panel" id="about"><h2>留一点空间，给值得记录的事</h2><p>这里收集日常观察、阅读笔记和正在探索的问题。欢迎慢慢阅读。</p></section><div class="grid"><section><h2>日常记录</h2><p>从小处开始，把想法写下来。</p></section><section><h2>持续探索</h2><p>保持好奇，也为新的理解留出空间。</p></section></div></main>\n' "$title" "$description"
+		;;
+	profile)
+		printf '<main id="home"><section class="hero profile"><div><p class="label">PERSONAL SPACE</p><h1>%s</h1><p class="intro">%s</p></div><div class="monogram" aria-hidden="true">✦</div></section><div class="grid" id="about"><section class="panel"><h2>关于这个空间</h2><p>展示自己的作品，分享思考过程，也记录一路积累的经验。</p></section><section class="panel"><h2>最近在关注</h2><p>学习新知识、尝试新方法，把有价值的事情一点点做好。</p></section></div></main>\n' "$title" "$description"
+		;;
+	docs)
+		printf '<main id="home"><section class="hero"><p class="label">KNOWLEDGE BASE</p><h1>%s</h1><p class="intro">%s</p></section><div class="docs"><nav aria-label="文档目录"><a href="#start">开始阅读</a><a href="#notes">记录方法</a><a href="#about">关于文档</a></nav><div><section id="start"><h2>开始阅读</h2><p>按主题整理内容，让信息更容易找到，也更容易持续更新。</p></section><section id="notes"><h2>记录方法</h2><p>先说明问题，再写下过程与结论。保留必要的背景，方便之后回顾。</p></section><section id="about"><h2>关于文档</h2><p>这是一个持续生长的知识空间，欢迎从最感兴趣的部分开始。</p></section></div></div></main>\n' "$title" "$description"
+		;;
+	*) return 1 ;;
+	esac
+	printf '<footer>%s · 持续记录，慢慢成长。</footer></div></body></html>\n' "$title"
+}
+
+_sm_options() {
+	while [ "$#" -gt 0 ]; do
+		[ "$#" -ge 2 ] || { err "$1 需要参数"; return 1; }
+		case "$1" in --title) SM_TITLE=$2 ;; --description) SM_DESCRIPTION=$2 ;; --theme) SM_THEME=$2 ;; *) err "未知网站选项: $1"; return 1 ;; esac
+		shift 2
+	done
+	_sm_text_valid "$SM_TITLE" 80 || { err "标题需为 1–80 个字符且不含控制字符"; return 1; }
+	_sm_text_valid "$SM_DESCRIPTION" 240 || { err "简介需为 1–240 个字符且不含控制字符"; return 1; }
+	case "$SM_THEME" in forest | ocean | slate) ;; *) err "配色可选 forest、ocean、slate"; return 1 ;; esac
+}
+
+_sm_snapshot() {
+	local pending id latest
+	mkdir -p "$SM_BACKUPS" && chmod 700 "$SM_BACKUPS" || return 1
+	_sm_path "$SM_BACKUPS/latest" >/dev/null || return 1
+	pending=$(mktemp -d "$SM_BACKUPS/.pending.XXXXXX") || return 1
+	if ! cp -a "$SM_ROOT" "$pending/root" || ! printf '%s\n' "$SM_ROOT" >"$pending/root-path"; then rm -rf "$pending"; return 1; fi
+	_sm_tree_safe "$pending/root" || { rm -rf "$pending"; return 1; }
+	if [ -f "$SM_SETTINGS" ] && ! cp -p "$SM_SETTINGS" "$pending/settings.tsv"; then rm -rf "$pending"; return 1; fi
+	: >"$pending/complete" || { rm -rf "$pending"; return 1; }
+	id="$(date -u +%Y%m%dT%H%M%SZ)-$(rand_hex 4)"
+	mv -T "$pending" "$SM_BACKUPS/$id" || { rm -rf "$pending"; return 1; }
+	latest=$(mktemp "$SM_BACKUPS/.latest.XXXXXX") || return 1
+	if ! printf '%s\n' "$id" >"$latest" || ! mv -fT "$latest" "$SM_BACKUPS/latest"; then rm -f "$latest"; return 1; fi
+	printf '%s' "$id"
+}
+
+_sm_publish() (
+	local stage=$1 settings=$2 backup=$3 hold moved=0 published=0 committed=0 exit_code
+	hold="${SM_ROOT%/*}/.onebox-content-old-${backup##*/}"
+	[ ! -e "$hold" ] && [ ! -L "$hold" ] || return 1
+	trap 'exit_code=$?; trap "" INT TERM HUP; if [ "$committed" != 1 ] && [ "$moved" = 1 ]; then
+		if [ "$published" = 1 ]; then mv -T "$SM_ROOT" "$stage" || { err "发布恢复失败，原网站保留在: $hold；备份: $backup"; exit 1; };
+		elif [ -e "$SM_ROOT" ] || [ -L "$SM_ROOT" ]; then
+			if [ -e "$hold.concurrent" ] || [ -L "$hold.concurrent" ] || ! mv -T "$SM_ROOT" "$hold.concurrent"; then err "并发修改妨碍恢复，原网站: $hold；备份: $backup"; exit 1; fi
+			warn "并发新增的目录保留在: $hold.concurrent"
+		fi
+		if ! mv -T "$hold" "$SM_ROOT"; then err "无法恢复原网站，原目录: $hold；备份: $backup"; exit 1; fi
+		if [ -f "$backup/settings.tsv" ]; then cp -p "$backup/settings.tsv" "$SM_SETTINGS" || { err "内容设置恢复失败，备份: $backup"; exit 1; }; else rm -f "$SM_SETTINGS"; fi
+	fi; [ "$committed" != 1 ] || rm -rf "$hold"; exit "$exit_code"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+	# Each rename publishes a complete tree; the previous tree and persistent backup
+	# remain available until both content and private metadata have committed.
+	trap '' INT TERM HUP
+	mv -T "$SM_ROOT" "$hold" || return 1
+	moved=1
+	if ! mv -T "$stage" "$SM_ROOT"; then return 1; fi
+	published=1
+	if [ -n "$settings" ]; then mv -fT "$settings" "$SM_SETTINGS" || return 1; else rm -f "$SM_SETTINGS" || return 1; fi
+	committed=1
+	return 0
+)
+
+_sm_prepare_permissions() {
+	local root=$1
+	_sm_tree_safe "$root" || return 1
+	find "$root" -type d -exec chmod 755 {} + && find "$root" -type f -exec chmod 644 {} + || return 1
+	: >"$root/.onebox-site-owned" && chmod 644 "$root/.onebox-site-owned"
+}
+
+_sm_backup_select() {
+	local id=${1:-latest}
+	if [ "$id" = latest ]; then
+		_sm_path "$SM_BACKUPS/latest" >/dev/null || return 1
+		[ -f "$SM_BACKUPS/latest" ] || { err "没有可用的网站内容备份索引"; return 1; }
+		id=$(cat "$SM_BACKUPS/latest" 2>/dev/null) || { err "还没有网站内容备份"; return 1; }
+	fi
+	[[ "$id" =~ ^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$ ]] || { err "没有可用备份，或备份编号无效"; return 1; }
+	_sm_path "$SM_BACKUPS/$id" >/dev/null || return 1
+	_sm_tree_safe "$SM_BACKUPS/$id" || return 1
+	[ -f "$SM_BACKUPS/$id/complete" ] && [ -f "$SM_BACKUPS/$id/root-path" ] && [ "$(cat "$SM_BACKUPS/$id/root-path" 2>/dev/null)" = "$SM_ROOT" ] || { err "备份不完整或不属于当前网站"; return 1; }
+	printf '%s' "$SM_BACKUPS/$id"
+}
+
+do_site_manage() (
+	local action=${1:-} source='' backup='' stage='' settings='' lock='' preview='' expected
+	[ "$#" -gt 0 ] && shift
+	require_installed
+	site_enabled || { err "未启用自有域名网站，请先运行 onebox sni --reality-site 你的域名"; return 1; }
+	_sm_paths || return 1
+	lock="$SM_PRIVATE/.content-lock"
+	mkdir "$lock" 2>/dev/null || { err "另一个网站内容操作正在进行，请稍后重试"; return 1; }
+	trap '[ -z "$stage" ] || rm -rf "$stage"; [ -z "$settings" ] || rm -f "$settings"; [ -z "$lock" ] || rmdir "$lock" 2>/dev/null' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+	_sm_settings_read "$SM_SETTINGS" || { err "网站内容设置损坏，请先从完整备份恢复"; [ "$action" = restore ] || return 1; }
+	case "$action" in
+	title)
+		[ "$#" = 1 ] || { err "用法: onebox site title <标题>"; return 1; }
+		[ "$SM_KIND" = template ] || { err "导入或自定义网页不支持自动改标题，请编辑原始网页后重新导入"; return 1; }
+		if [ -n "$SM_INDEX_HASH" ] && [ "$(_site_hash <"$SM_ROOT/index.html")" != "$SM_INDEX_HASH" ]; then err "主页已手工修改，不能用模板覆盖；请修改原网页后重新导入"; return 1; fi
+		SM_TITLE=$1
+		_sm_options || return 1
+		;;
+	template | preview)
+		[ "$#" -ge 1 ] || { err "模板可选 minimal、profile、docs"; return 1; }
+		SM_TEMPLATE=$1 SM_KIND=template
+		shift
+		case "$SM_TEMPLATE" in minimal | profile | docs) ;; *) err "模板可选 minimal、profile、docs"; return 1 ;; esac
+		_sm_options "$@" || return 1
+		if [ "$action" = preview ]; then
+			_sm_path "$SM_PRIVATE/previews" >/dev/null || return 1
+			mkdir -p "$SM_PRIVATE/previews" && chmod 700 "$SM_PRIVATE/previews" || return 1
+			preview=$(mktemp "$SM_PRIVATE/previews/${SM_TEMPLATE}.XXXXXX.html") || return 1
+			if ! _sm_render >"$preview" || ! chmod 600 "$preview"; then rm -f "$preview"; return 1; fi
+			info "预览已生成，尚未发布: $preview"
+			return 0
+		fi
+		;;
+	import)
+		[ "$#" = 1 ] || { err "用法: onebox site import <静态网站目录>"; return 1; }
+		source=$(_sm_path "$1") || return 1
+		case "$source" in /etc/* | /usr/* | /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* | /var/log | /var/log/*) err "不能导入系统文件目录"; return 1 ;; esac
+		case "$source/" in "$SM_ROOT/"* | "$SM_PRIVATE/"*) err "不能从当前网站或私密配置目录中递归导入"; return 1 ;; esac
+		case "$SM_ROOT/" in "$source/"*) err "导入目录不能包含当前网站"; return 1 ;; esac
+		case "$SM_PRIVATE/" in "$source/"*) err "导入目录不能包含私密配置"; return 1 ;; esac
+		_sm_tree_safe "$source" && [ -f "$source/index.html" ] && [ -s "$source/index.html" ] || { err "请导入含 index.html 的普通静态文件目录"; return 1; }
+		SM_KIND=import SM_TEMPLATE=none SM_TITLE='导入的网站' SM_DESCRIPTION='由本地静态文件目录导入。' SM_THEME=forest
+		;;
+	restore)
+		[ "$#" -le 1 ] || { err "用法: onebox site restore [备份编号|latest]"; return 1; }
+		source=$(_sm_backup_select "${1:-latest}") || return 1
+		;;
+	*) err "网站内容命令: title、template、import、restore、preview"; return 1 ;;
+	esac
+	backup=$(_sm_snapshot) || { err "无法完整备份原网站，已取消发布"; return 1; }
+	backup="$SM_BACKUPS/$backup"
+	stage=$(mktemp -d "${SM_ROOT%/*}/.onebox-content.XXXXXX") || return 1
+	settings=$(mktemp "$SM_PRIVATE/.content-settings.XXXXXX") || return 1
+	case "$action" in
+	import)
+		# A public tree must be owned by the publishing user, never by its source author.
+		cp -R -P "$source/." "$stage/" && _sm_tree_safe "$stage" || return 1
+		;;
+	restore)
+		cp -R -P "$source/root/." "$stage/" && _sm_tree_safe "$stage" || return 1
+		if [ -f "$source/settings.tsv" ]; then cp -p "$source/settings.tsv" "$settings" || return 1; _sm_settings_read "$settings" || { err "备份内容设置损坏"; return 1; }; else rm -f "$settings"; settings=''; fi
+		;;
+	*) cp -R -P "$SM_ROOT/." "$stage/" && _sm_tree_safe "$stage" && _sm_render >"$stage/index.html" || return 1 ;;
+	esac
+	if [ "$action" = import ] || [ "$action" = restore ]; then
+		# Content changes must not replace an active HTTP-01 validation challenge.
+		rm -rf "$stage/.well-known/acme-challenge" || return 1
+		if [ -d "$SM_ROOT/.well-known/acme-challenge" ]; then mkdir -p "$stage/.well-known" && cp -R -P "$SM_ROOT/.well-known/acme-challenge" "$stage/.well-known/" || return 1; fi
+	fi
+	_sm_prepare_permissions "$stage" && [ -f "$stage/index.html" ] && [ -s "$stage/index.html" ] || return 1
+	if [ "$action" != restore ]; then
+		expected=$(_site_hash <"$stage/index.html")
+		[[ "$expected" =~ ^[a-f0-9]{64}$ ]] || return 1
+		_sm_settings_write "$settings" "$expected" || return 1
+	fi
+	_sm_publish "$stage" "$settings" "$backup" || { err "发布失败，原网站恢复信息见上方；完整备份: ${backup##*/}"; return 1; }
+	stage='' settings=''
+	info "网站内容已发布；变更前完整备份: ${backup##*/}"
+)
+
+site_manage_menu() {
+	local choice value template description theme
+	site_enabled || { warn "请先启用自有域名网站"; return 1; }
+	printf '%s\n' '  1) 修改标题  2) 切换模板  3) 导入静态网站  4) 恢复备份  5) 预览模板  0) 返回'
+	ask_num choice "请选择" 0 0 5 || return 1
+	case "$choice" in
+	0) return 0 ;;
+	1) ask value "新标题" "${REALITY_SITE_TITLE:-山间手记}"; do_site_manage title "$value" ;;
+	2 | 5)
+		ask template "模板 (minimal/profile/docs)" minimal
+		ask value "标题" "${REALITY_SITE_TITLE:-山间手记}"
+		ask description "简介" '记录日常，整理想法，分享值得停留的片刻。'
+		ask theme "配色 (forest/ocean/slate)" forest
+		if [ "$choice" = 2 ]; then do_site_manage template "$template" --title "$value" --description "$description" --theme "$theme"; else do_site_manage preview "$template" --title "$value" --description "$description" --theme "$theme"; fi
+		;;
+	3) ask value "静态网站目录 (需包含 index.html)" ''; do_site_manage import "$value" ;;
+	4) ask value "备份编号 (latest 为最近一次变更前)" latest; do_site_manage restore "$value" ;;
+	esac
+}
+
+# END site-management
+
+# BEGIN menus
+# Shared mutation wrapper: snapshots read the previous on-disk state before edits.
+managed_change() {
+	snapshot_checkpoint "before-${1#do_}"
+	"$@"
+}
+
+recovery_menu() {
+	local choice label id
+	echo '  1) 立即备份  2) 查看备份  3) 恢复备份  0) 返回'
+	ask_num choice "请选择" 0 0 3 || return 0
+	case "$choice" in
+	1) ask label "备份标签" manual; do_backup "$label" ;;
+	2) do_backups ;;
+	3)
+		do_backups || return 1
+		ask id "要恢复的完整备份 ID" ''
+		[ -n "$id" ] || return 0
+		confirm "恢复会替换当前节点设置和网页，并先备份当前状态，继续?" n || return 0
+		do_restore "$id"
+		;;
+	esac
+}
+
+update_menu() {
+	local choice channel
+	echo '  1) 检查更新  2) 更新脚本  3) 选择更新渠道  0) 返回'
+	ask_num choice "请选择" 0 0 3 || return 0
+	case "$choice" in
+	1) do_update_check ;;
+	2) managed_change do_update_script && exec "$CMD_PATH" ;;
+	3)
+		ask channel "渠道 (stable 稳定版 / testing 测试版)" "$(update_channel_get)"
+		do_update_channel "$channel"
+		;;
+	esac
+}
+
+plan_menu() (
+	local preset
+	ask_num preset "预演哪个协议组合 (1–7，见安装菜单)" 1 1 7 || return 0
+	OPT_PRESET=$preset
+	do_install_plan
+)
+
+# END menus
+
+# BEGIN snapshots
+# Persistent, local snapshots. Only declarative state is decoded; snapshot files
+# are never sourced. Core executables, ACME programs/accounts and system files
+# stay outside the archive. Format 1 supports the same script major version and
+# managed paths; restored configs are validated by the installed cores.
+SNAPSHOT_RESTORE_SOURCE=""
+
+_snapshot_root() { printf '%s/backups' "$ONEBOX_DIR"; }
+_snapshot_id_valid() { [[ "$1" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]; }
+_snapshot_path_safe() {
+	local path=$1
+	[[ "$path" = /* && "$path" != / && "$path" != *'/../'* && "$path" != */.. && "$path" != *'/./'* && "$path" != */. ]] || return 1
+	while [ "$path" != / ] && [ -n "$path" ]; do
+		[ ! -L "$path" ] || return 1
+		path=${path%/*}; [ -n "$path" ] || path=/
+	done
+}
+_snapshot_paths() {
+	local path
+	case "$ONEBOX_DIR" in /|/etc|/var|/var/lib|/root|/home|/usr|/opt|/tmp|/run) return 1 ;; esac
+	# Never infer a destructive destination from snapshot metadata.
+	[ "$STATE_FILE" = "$ONEBOX_DIR/onebox.conf" ] && [ "$CLIENT_DIR" = "$ONEBOX_DIR/client" ] &&
+		[ "$TLS_DIR" = "$ONEBOX_DIR/tls" ] && [ "$REALITY_SITE_DIR" = "$ONEBOX_DIR/site" ] || return 1
+	for path in "$ONEBOX_DIR" "$(_snapshot_root)" "$CLIENT_DIR" "$TLS_DIR" "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT"; do
+		_snapshot_path_safe "$path" || { err "快照路径包含符号链接或不安全路径: $path"; return 1; }
+	done
+	case "$REALITY_SITE_ROOT" in /etc|/var|/var/lib|/root|/home|/usr|/opt|/tmp|/run) return 1 ;; esac
+	case "$REALITY_SITE_ROOT/" in "$ONEBOX_DIR/"*) return 1 ;; esac
+	for path in "$REALITY_SITE_DIR" "$REALITY_SITE_ROOT"; do
+		if [ -d "$path" ] && [ ! -f "$path/.onebox-site-owned" ] && [ -n "$(ls -A "$path")" ]; then
+			err "拒绝覆盖不归 onebox 管理的网站目录: $path"
+			return 1
+		fi
+	done
+}
+_snapshot_tree_safe() {
+	local tree=$1 file bytes total=0 count=0 limit=${ONEBOX_BACKUP_MAX_BYTES:-67108864}
+	[[ "$limit" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+	[ ! -e "$tree" ] && return 0
+	_snapshot_path_safe "$tree" || return 1
+	[ -z "$(find "$tree" \( -type l -o \( ! -type d ! -type f \) -o \( -type f -links +1 \) \) -print -quit)" ] || {
+		err "快照不接受符号链接、硬链接或特殊文件: $tree"; return 1;
+	}
+	while IFS= read -r -d '' file; do
+		[[ "$file" != *[[:cntrl:]]* ]] || { err "快照文件名不能包含控制字符"; return 1; }
+		bytes=$(stat -c %s "$file") || return 1
+		total=$((total + bytes)) count=$((count + 1))
+		if [ "$total" -gt "$limit" ] || [ "$count" -gt 4096 ]; then
+			err "快照超过大小限制 ${limit} 字节或 4096 个文件；请先缩减网站内容"
+			return 1
+		fi
+	done < <(find "$tree" -type f -print0)
+}
+_snapshot_keys() {
+	local key proto
+	printf '%s\n' $STATE_KEYS
+	for proto in $ALL_PROTOCOLS; do for key in PORT CORE; do printf '%s_%s\n' "$key" "${proto//-/_}"; done; done
+}
+_snapshot_write_state() {
+	local key
+	while IFS= read -r key; do printf '%s\0%s\0' "$key" "${!key-}" || return 1; done < <(_snapshot_keys)
+}
+_snapshot_load_state() {
+	local file=$1 key="" value allowed
+	local -A seen=()
+	allowed=" $(_snapshot_keys | tr '\n' ' ')"
+	reset_state
+	while IFS= read -r -d '' key; do
+		IFS= read -r -d '' value || return 1
+		[[ "$key" =~ ^[A-Z][A-Za-z0-9_]*$ && "$allowed" == *" $key "* ]] || return 1
+		[ -z "${seen[$key]+yes}" ] || return 1
+		seen[$key]=1
+		printf -v "$key" '%s' "$value"
+	done <"$file"
+	[ -z "$key" ] && [ -n "${PROTOCOLS:-}" ] || return 1
+	local proto
+	for proto in $PROTOCOLS; do
+		case " $ALL_PROTOCOLS " in *" $proto "*) ;; *) return 1 ;; esac
+		case "$(pget CORE "$proto")" in singbox|xray) ;; *) return 1 ;; esac
+		value=$(pget PORT "$proto")
+		[[ "$value" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$value" -le 65535 ] || return 1
+	done
+	case "${TLS_MODE:-}" in ''|self|acme|custom) ;; *) return 1 ;; esac
+	if [ "${TLS_MODE:-}" = acme ]; then
+		valid_domain "$DOMAIN" || return 1
+		case "$ACME_METHOD" in standalone|cf) ;; *) return 1 ;; esac
+	fi
+	site_validate_ports
+}
+_snapshot_hash() { openssl dgst -sha256 "$1" 2>/dev/null | sed 's/^.*= *//'; }
+_snapshot_manifest() {
+	local dir=$1 file hash
+	while IFS= read -r -d '' file; do
+		[ "$file" != "$dir/manifest" ] || continue
+		hash=$(_snapshot_hash "$file")
+		[[ "$hash" =~ ^[a-f0-9]{64}$ ]] || return 1
+		printf '%s\0%s\0' "$hash" "${file#"$dir/"}" || return 1
+	done < <(find "$dir" -type f -print0)
+}
+_snapshot_verify() {
+	local dir=$1 hash="" rel count=0 actual version
+	_snapshot_tree_safe "$dir" || return 1
+	[ "$(stat -c %u "$dir")" = "$(id -u)" ] && [ "$(stat -c %a "$dir")" = 700 ] || return 1
+	[ "$(cat "$dir/format" 2>/dev/null)" = 1 ] || return 1
+	version=$(cat "$dir/version")
+	[ "${version%%.*}" = "${SCRIPT_VERSION%%.*}" ] || { err "快照主版本与当前脚本不兼容"; return 1; }
+	[ "$(cat "$dir/paths")" = "$(printf '%s\n' "$ONEBOX_DIR" "$REALITY_SITE_ROOT")" ] || { err "快照仅支持在原受管路径恢复"; return 1; }
+	local -A seen=()
+	while IFS= read -r -d '' hash; do
+		IFS= read -r -d '' rel || return 1
+		[[ "$hash" =~ ^[a-f0-9]{64}$ && "$rel" != /* && "$rel" != manifest && -n "$rel" ]] || return 1
+		case "/$rel/" in */../*|*/./*) return 1 ;; esac
+		[ -z "${seen[$rel]+yes}" ] && [ -f "$dir/$rel" ] || return 1
+		seen[$rel]=1
+		[ "$hash" = "$(_snapshot_hash "$dir/$rel")" ] || { err "快照校验失败: $rel"; return 1; }
+		count=$((count + 1))
+	done <"$dir/manifest"
+	[ -z "$hash" ] || return 1
+	actual=$(find "$dir" -type f | wc -l)
+	[ "$actual" -eq "$((count + 1))" ] && (_snapshot_load_state "$dir/state.dat")
+}
+_snapshot_copy_optional() {
+	local source=$1 target=$2
+	[ -e "$source" ] || return 0
+	_snapshot_tree_safe "$source" && cp -a "$source" "$target"
+}
+_snapshot_capture() (
+	local dir=$1 label=$2 order=$3 file
+	load_state || return 1
+	_snapshot_write_state >"$dir/state.dat" || return 1
+	printf '1\n' >"$dir/format"
+	printf '%s\n' "$SCRIPT_VERSION" >"$dir/version"
+	printf '%s\n' "$label" >"$dir/label"
+	printf '%s\n' "$order" >"$dir/order"
+	printf '%s\n' "$ONEBOX_DIR" "$REALITY_SITE_ROOT" >"$dir/paths"
+	_snapshot_copy_optional "$SB_CONF" "$dir/sing-box.json" &&
+		_snapshot_copy_optional "$XR_CONF" "$dir/xray.json" &&
+		_snapshot_copy_optional "$CLIENT_DIR" "$dir/client" &&
+		_snapshot_copy_optional "$TLS_DIR" "$dir/tls" || return 1
+	if [ -f "$REALITY_SITE_DIR/.onebox-site-owned" ]; then
+		mkdir "$dir/site" || return 1
+		for file in cert.pem key.pem cert-domain index.sha256 content-settings.tsv; do
+			_snapshot_copy_optional "$REALITY_SITE_DIR/$file" "$dir/site/$file" || return 1
+		done
+		[ ! -d "$REALITY_SITE_ROOT" ] || [ -f "$REALITY_SITE_ROOT/.onebox-site-owned" ] || return 1
+		_snapshot_copy_optional "$REALITY_SITE_ROOT" "$dir/public" || return 1
+	fi
+	_snapshot_tree_safe "$dir" || return 1
+	_snapshot_manifest "$dir" >"$dir/manifest" || return 1
+	chown -R "$(id -u):$(id -g)" "$dir" &&
+		find "$dir" -type d -exec chmod 700 {} + && find "$dir" -type f -exec chmod 600 {} +
+)
+_snapshot_prune() {
+	local root dir count=1 keep=$1
+	root=$(_snapshot_root)
+	while IFS= read -r dir; do
+		_snapshot_id_valid "$dir" || continue
+		[ "$dir" != "$keep" ] || continue
+		[ -d "$root/$dir" ] && [ ! -L "$root/$dir" ] || continue
+		count=$((count + 1))
+		[ "$count" -le 5 ] || rm -rf -- "${root:?}/${dir:?}" || return 1
+	done < <(_snapshot_ids "$root")
+}
+_snapshot_ids() {
+	local path order
+	for path in "$1"/*; do
+		[ -d "$path" ] && [ ! -L "$path" ] || continue
+		_snapshot_id_valid "${path##*/}" || continue
+		[ -f "$path/order" ] && [ ! -L "$path/order" ] || continue
+		order=$(cat "$path/order" 2>/dev/null)
+		[[ "$order" =~ ^[1-9][0-9]{0,8}$ ]] && printf '%09d %s\n' "$order" "${path##*/}"
+	done | sort -r | cut -d ' ' -f2-
+}
+snapshot_create() {
+	local label=${1:-manual} root tmp id newest order=1
+	[ "${#label}" -le 80 ] && [[ "$label" != *[[:cntrl:]]* ]] || { err "备份标签最多80个字符，不能含控制字符"; return 1; }
+	_snapshot_paths || return 1
+	root=$(_snapshot_root)
+	if [ -e "$root" ] && [ "$(stat -c %u "$root")" != "$(id -u)" ]; then return 1; fi
+	mkdir -p "$root" && chmod 700 "$root" || return 1
+	newest=$(_snapshot_ids "$root" | head -n1)
+	if [ -n "$newest" ]; then order=$(cat "$root/$newest/order"); order=$((order + 1)); fi
+	tmp=$(mktemp -d "$root/.snapshot.XXXXXX") || return 1
+	if ! _snapshot_capture "$tmp" "$label" "$order" || ! _snapshot_verify "$tmp"; then rm -rf -- "$tmp"; return 1; fi
+	id="$(date -u +%Y%m%dT%H%M%SZ)-${tmp##*.}"
+	if ! mv -T "$tmp" "$root/$id"; then rm -rf -- "$tmp"; return 1; fi
+	_snapshot_prune "$id" || warn "快照已保存，但旧快照清理失败"
+	printf '%s\n' "$id"
+}
+snapshot_checkpoint() {
+	[ -f "$STATE_FILE" ] || return 0
+	local id
+	if id=$(snapshot_create "${1:-automatic}"); then
+		info "已保存本机快照: $id"
+	else
+		warn "未能保存自动快照，已有快照保持可用；可执行 onebox backup 重试"
+	fi
+	return 0
+}
+do_backup() {
+	local id
+	[ $# -le 1 ] || { err "用法: onebox backup [标签]"; return 1; }
+	id=$(snapshot_create "${1:-manual}") || return 1
+	info "快照已保存: $id（包含私钥；仅本机保留最近5份）"
+}
+do_backups() {
+	local root dir
+	_snapshot_paths || return 1
+	root=$(_snapshot_root)
+	[ -d "$root" ] || { info "暂无快照"; return 0; }
+	printf 'ID\t版本\t标签\n'
+	while IFS= read -r dir; do
+		_snapshot_id_valid "$dir" && [ ! -L "$root/$dir" ] || continue
+		[ -f "$root/$dir/version" ] && [ ! -L "$root/$dir/version" ] &&
+			[ -f "$root/$dir/label" ] && [ ! -L "$root/$dir/label" ] || continue
+		printf '%s\t%s\t%s\n' "$dir" "$(cat "$root/$dir/version")" "$(cat "$root/$dir/label")"
+	done < <(_snapshot_ids "$root")
+}
+
+# Called by apply_all after normal client generation, before certificate commit.
+snapshot_restore_clients() {
+	[ -n "${SNAPSHOT_RESTORE_SOURCE:-}" ] || return 0
+	_site_restore_directory "$SNAPSHOT_RESTORE_SOURCE/client" "$CLIENT_DIR"
+}
+_snapshot_restore_assets() {
+	local dir=$1 file
+	_site_restore_directory "$dir/tls" "$TLS_DIR" || return 1
+	if [ -d "$dir/public" ]; then
+		_site_restore_directory "$dir/public" "$REALITY_SITE_ROOT" || return 1
+		find "$REALITY_SITE_ROOT" -type d -exec chmod 755 {} + && find "$REALITY_SITE_ROOT" -type f -exec chmod 644 {} + || return 1
+	fi
+	if [ -d "$dir/site" ]; then
+		mkdir -p "$REALITY_SITE_DIR" && chmod 700 "$REALITY_SITE_DIR" || return 1
+		: >"$REALITY_SITE_DIR/.onebox-site-owned"
+		for file in cert.pem key.pem index.sha256 content-settings.tsv; do
+			if [ -f "$dir/site/$file" ]; then cp -p "$dir/site/$file" "$REALITY_SITE_DIR/$file" || return 1; else rm -f "$REALITY_SITE_DIR/$file" || return 1; fi
+		done
+		# Keep the live cert-domain and ACME home: a domain change must remove the
+		# previous renewal before installing the target deployment. Never restore
+		# nginx configs with a 443 listener before the old core has stopped.
+		rm -f "$REALITY_SITE_DIR/settings.sha256" || return 1
+	fi
+}
+do_restore() {
+	local id=${1:-} root source staging before rc
+	[ $# = 1 ] || { err "用法: onebox restore <备份ID>"; return 1; }
+	_snapshot_id_valid "$id" || { err "请使用 onebox backups 列出的快照 ID"; return 1; }
+	_snapshot_paths || return 1
+	root=$(_snapshot_root) source="$(_snapshot_root)/$id"
+	[ -d "$source" ] && [ ! -L "$source" ] && _snapshot_verify "$source" || { err "快照不存在、不兼容或完整性校验失败"; return 1; }
+	load_state || return 1
+	[ -z "${CERT_TXN_BAK:-}${SITE_TXN_BAK:-}" ] || { err "有尚未完成的事务，请先完成恢复"; return 1; }
+	# Stage the selected snapshot before saving current state: retention may
+	# otherwise remove the oldest selected ID when the sixth backup is created.
+	staging=$(mktemp -d "$root/.restore.XXXXXX") || return 1
+	if ! cp -a "$source/." "$staging/"; then rm -rf -- "$staging"; return 1; fi
+	before=$(snapshot_create before-restore) || { rm -rf -- "$staging"; err "当前状态备份失败，未开始恢复"; return 1; }
+	if [ -d "$CLIENT_DIR" ] && ! cp -a "$CLIENT_DIR" "$staging/previous-client"; then rm -rf -- "$staging"; return 1; fi
+	info "恢复前备份: $before"
+	if ! cert_txn_begin || ! _site_txn_begin; then cert_txn_rollback --files-only; rm -rf -- "$staging"; return 1; fi
+	if ! _snapshot_load_state "$staging/state.dat" || ! _snapshot_restore_assets "$staging"; then
+		cert_txn_rollback --files-only
+		rm -rf -- "$staging"
+		return 1
+	fi
+	# Rebind managed ACME certificates using the existing transaction. This can
+	# require network access/DNS credentials; a failure leaves the old deployment
+	# recoverable. External custom-certificate paths are read, never overwritten.
+	rc=0
+	site_prepare || rc=1
+	if [ "$rc" = 0 ] && [ "$TLS_MODE" = acme ]; then
+		if [ "$ACME_METHOD" = standalone ] && ! site_enabled; then site_service stop || rc=1; fi
+		if [ "$rc" = 0 ]; then cert_acme "$DOMAIN" "$ACME_METHOD" || rc=1; fi
+	fi
+	if [ "$rc" != 0 ]; then
+		cert_txn_rollback
+		_site_restore_directory "$staging/previous-client" "$CLIENT_DIR" || err "原客户端目录恢复失败，请使用快照 $before"
+		rm -rf -- "$staging"
+		return 1
+	fi
+	SNAPSHOT_RESTORE_SOURCE=$staging
+	apply_all
+	rc=$?
+	SNAPSHOT_RESTORE_SOURCE=""
+	if [ "$rc" != 0 ]; then
+		_site_restore_directory "$staging/previous-client" "$CLIENT_DIR" || err "原客户端目录恢复失败，请使用快照 $before"
+	fi
+	rm -rf -- "$staging"
+	if [ "$rc" != 0 ]; then err "恢复未成功，已尝试回滚；恢复前快照: $before"; return "$rc"; fi
+	info "已恢复快照 $id；证书续期使用当前 ACME 安装，未恢复系统软件"
+}
+
+# END snapshots
 
 # ONEBOX_SOURCE_ONLY=1 时仅加载函数 (供测试使用)
 [ -n "${ONEBOX_SOURCE_ONLY:-}" ] || main "$@"

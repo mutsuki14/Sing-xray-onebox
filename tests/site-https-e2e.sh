@@ -168,6 +168,24 @@ check '绝对 URI 不能把反代变成私网正向代理' test "$(fetch /privat
 check '返回内容不包含私网控制组' test "$(grep -c PRIVATE-CANARY "$WORK/response.body")" = 0
 check 'TLS 入口拒绝明文 HTTP' test "$(curl --noproxy '*' -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTPS_PORT/")" = 400
 
+# 新网站内容管理经过真实 nginx/反代，验证发布权限、静态文件与 ACME 目录。
+: >"$REALITY_SITE_ROOT/.onebox-site-owned"
+: >"$REALITY_SITE_DIR/.onebox-site-owned"
+save_state || fatal '保存网站管理测试状态'
+check '在线切换模板' do_site_manage template profile --title E2E-MANAGED --theme ocean
+check '模板发布后反代仍可访问' test "$(fetch /)" = 200
+check '新模板内容已生效' grep -q E2E-MANAGED "$WORK/response.body"
+check '在线修改模板标题' do_site_manage title E2E-MANAGED-TITLE
+mkdir "$WORK/import"
+printf '<!doctype html><title>IMPORTED-CONTENT</title>IMPORTED-CONTENT\n' >"$WORK/import/index.html"
+check '在线导入完整静态目录' do_site_manage import "$WORK/import"
+check '导入内容可通过真实 nginx 读取' test "$(fetch /)" = 200
+check '导入内容正确' grep -q IMPORTED-CONTENT "$WORK/response.body"
+check '内容变更保留活动 ACME 验证文件' test "$(curl --noproxy '*' -fsS --max-time 5 "http://127.0.0.1:$HTTP_PORT/.well-known/acme-challenge/probe")" = ACME-CONTENT
+check '恢复导入前的模板' do_site_manage restore latest
+check '恢复后反代正常' test "$(fetch /)" = 200
+check '恢复后的网页标题正确' grep -q E2E-MANAGED-TITLE "$WORK/response.body"
+
 # 反向控制: 客户端仍信任前端证书，只有 nginx 对后端的信任/名称改变，必须返回 502。
 stop_nginx
 sed 's/proxy_ssl_name test.example;/proxy_ssl_name wrong.example;/' "$WORK/good.conf" >"$REALITY_SITE_DIR/nginx.conf"
