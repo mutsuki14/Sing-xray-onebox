@@ -46,7 +46,7 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="1.5.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
 readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/main/onebox.sh}"
 
@@ -1886,8 +1886,12 @@ hop_setup() {
 }
 
 # ---------------------------------------------------------------------------
-# BBR
+# 系统 TCP BBR / Actions-bbr-v3 Release 集成
 # ---------------------------------------------------------------------------
+readonly BBR_REPO="byJoey/Actions-bbr-v3"
+BBR_SYSCTL_CONF="${ONEBOX_BBR_CONF:-/etc/sysctl.d/99-onebox-bbr.conf}"
+BBR_DATA_DIR="${ONEBOX_BBR_DIR:-/var/lib/onebox-bbr}"
+
 bbr_status() {
 	local cc qd
 	cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
@@ -1895,38 +1899,333 @@ bbr_status() {
 	printf '%s' "${cc:-未知} / ${qd:-未知}"
 }
 
-enable_bbr() {
-	local kv conf=/etc/sysctl.d/99-onebox-bbr.conf
-	if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = bbr ]; then
-		info "BBR 已处于启用状态 ($(bbr_status))"
-		return 0
+_bbr_lock() {
+	has flock || { err "BBR 写操作需要 flock (util-linux)，请先安装"; return 1; }
+	_support_path_safe "$BBR_DATA_DIR/lock" && _support_path_safe "$BBR_SYSCTL_CONF" || {
+		err "BBR 管理路径不能包含符号链接或相对路径"; return 1;
+	}
+	mkdir -p "$BBR_DATA_DIR" && chmod 700 "$BBR_DATA_DIR" || return 1
+	exec 9>"$BBR_DATA_DIR/lock" || return 1
+	flock -n 9 || { err "另一个 BBR 操作正在进行"; return 1; }
+}
+
+_bbr_config_notice() {
+	local file
+	for file in /etc/sysctl.conf /etc/sysctl.d/*.conf; do
+		[ "$file" != "$BBR_SYSCTL_CONF" ] && [ -f "$file" ] || continue
+		if grep -Eq '^[[:space:]]*net[./](core[./]default_qdisc|ipv4[./]tcp_congestion_control)[[:space:]]*=' "$file"; then
+			warn "其他 TCP/队列配置: $file；请核对启动时覆盖关系，Onebox 不修改此文件"
+		fi
+	done
+	return 0
+}
+
+bbr_show_status() {
+	local version disk_version package state
+	printf '运行内核: %s\nTCP / 默认队列: %s\n' "$(uname -r)" "$(bbr_status)"
+	printf '可用拥塞算法: %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)"
+	version=$(cat /sys/module/tcp_bbr/version 2>/dev/null) || version=""
+	if [ "$version" = 3 ]; then
+		printf '运行中的 tcp_bbr: v3 (仅 TCP 当前算法为 bbr 时启用)\n'
+	else
+		printf '运行中的 tcp_bbr 版本: %s (不能仅凭 bbr 名称判断 v3)\n' "${version:-未知}"
 	fi
+	if has modinfo; then
+		disk_version=$(modinfo -k "$(uname -r)" -F version tcp_bbr 2>/dev/null) || disk_version=""
+		[ -z "$disk_version" ] || printf '当前内核磁盘上的 tcp_bbr 模块: v%s (不代表已加载)\n' "$disk_version"
+	fi
+	if has dpkg-query; then
+		while IFS=$'\t' read -r package state; do
+			[ "$state" = 'install ok installed' ] || continue
+			printf '已安装: %s%s\n' "$package" "$([ "${package#linux-image-}" = "$(uname -r)" ] || printf ' (当前未运行)')"
+		done < <(dpkg-query -W -f='${Package}\t${Status}\n' 'linux-image-*joeyblog-bbrv3*' 2>/dev/null)
+	fi
+	[ ! -f "$BBR_SYSCTL_CONF" ] || printf 'Onebox 持久配置: %s\n' "$BBR_SYSCTL_CONF"
+	if has tc; then printf '\n网卡实际队列:\n'; tc qdisc show 2>/dev/null; fi
+	_bbr_config_notice
+	printf '\nTCP BBR 与 Hysteria2/TUIC 的 QUIC 拥塞控制不同；默认队列不等于现有网卡实际队列。\n'
+}
+
+# Apply and verify runtime values before atomically replacing our own config.
+# A partial sysctl failure restores both previous runtime values and leaves the old file intact.
+enable_bbr() (
+	local qdisc=${1:-fq} old_cc old_qd work success=0 rc
+	case "$qdisc" in fq | fq_codel | fq_pie | cake) ;; *) err "队列应为 fq / fq_codel / fq_pie / cake"; return 1 ;; esac
 	if [ "$VIRT" = openvz ]; then
 		warn "OpenVZ 无法修改内核拥塞控制, 请在服务商面板开启 BBR"
 		return 1
 	fi
-	kv=$(uname -r | cut -d- -f1)
-	if ! ver_ge "$kv" "4.9"; then
-		warn "当前内核 ${kv} 低于 4.9, 不支持 BBR, 请先升级内核"
-		return 1
-	fi
-	# LXC 等容器无法加载模块, 但宿主机已加载 tcp_bbr 时 (内核 4.15+ 每个网络命名空间独立) 仍可设置, 所以直接尝试
-	grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null ||
+	_bbr_lock || return 1
+	sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr ||
 		{ has modprobe && modprobe tcp_bbr >/dev/null 2>&1; }
-	if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-		warn "内核未提供 BBR 模块 (tcp_bbr)$(is_container_virt && printf ', 容器环境请在宿主机或服务商面板开启')"
+	if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+		warn "当前内核未提供 BBR；支持的 VPS 可在 BBR 管理中安装 v3 内核，容器请联系宿主机管理员"
 		return 1
 	fi
-	mkdir -p /etc/sysctl.d
-	printf 'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\n' >"$conf"
-	sysctl -p "$conf" >/dev/null 2>&1
-	if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = bbr ]; then
-		info "BBR 已启用 ($(bbr_status))"
-	else
-		rm -f "$conf"
-		warn "BBR 启用失败, 当前: $(bbr_status)"
+	old_cc=$(sysctl -n net.ipv4.tcp_congestion_control) && old_qd=$(sysctl -n net.core.default_qdisc) || return 1
+	[[ "$old_cc" =~ ^[a-zA-Z0-9_]+$ && "$old_qd" =~ ^[a-zA-Z0-9_]+$ ]] || return 1
+	mkdir -p "$(dirname "$BBR_SYSCTL_CONF")" || return 1
+	work=$(mktemp -d "$(dirname "$BBR_SYSCTL_CONF")/.onebox-bbr.XXXXXX") || return 1
+	trap 'rc=$?; if [ "$success" = 0 ]; then
+		sysctl -w "net.core.default_qdisc=$old_qd" "net.ipv4.tcp_congestion_control=$old_cc" >/dev/null 2>&1 || warn "恢复原 TCP/队列参数失败，请手动核对";
+	fi; rm -rf "$work"; exit "$rc"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+	has modprobe && modprobe "sch_$qdisc" >/dev/null 2>&1
+	printf '# Managed by Onebox\nnet.core.default_qdisc = %s\nnet.ipv4.tcp_congestion_control = bbr\n' "$qdisc" >"$work/config" || return 1
+	chmod 644 "$work/config" || return 1
+	if ! sysctl -p "$work/config" >/dev/null 2>&1 ||
+		[ "$(sysctl -n net.ipv4.tcp_congestion_control)" != bbr ] ||
+		[ "$(sysctl -n net.core.default_qdisc)" != "$qdisc" ]; then
+		err "BBR/队列应用失败，恢复原参数与配置"
 		return 1
 	fi
+	mv -f "$work/config" "$BBR_SYSCTL_CONF" || return 1
+	success=1
+	info "TCP BBR + $qdisc 已启用并保存 (BBR 版本取决于运行内核)"
+	info "默认队列用于新建队列；现有网卡的 tc/整形规则保持原状，可用 onebox bbr status 检查"
+	_bbr_config_notice
+)
+
+_bbr_arch() {
+	case "$(uname -m)" in
+	x86_64) BBR_ARCH=x86_64; BBR_DEB_ARCH=amd64 ;;
+	aarch64) BBR_ARCH=arm64; BBR_DEB_ARCH=arm64 ;;
+	*) err "Actions-bbr-v3 内核仅支持 x86_64 / aarch64"; return 1 ;;
+	esac
+}
+
+_bbr_fetch_ready() {
+	has jq && { has curl || has wget; } || { err "读取 BBR Release 需要 jq 和 curl/wget，请先安装"; return 1; }
+	_bbr_arch
+}
+
+_bbr_tag_valid() {
+	local pattern="^${BBR_ARCH}-[0-9]+\.[0-9]+(\.[0-9]+)?"
+	[ "$2" != max ] || pattern+='-max'
+	[[ "$1" =~ ${pattern}$ ]]
+}
+
+# Metadata always comes directly from GitHub HTTPS. GH_PROXY is only used for
+# package bytes, which must match the SHA-256 from this independent metadata.
+_bbr_api() { http_get "https://api.github.com/repos/$BBR_REPO/$1"; }
+
+_bbr_tags() {
+	local profile=$1 page json tags pattern="^${BBR_ARCH}-[0-9]+\\.[0-9]+(\\.[0-9]+)?"
+	[ "$profile" != max ] || pattern+='-max'
+	pattern+='$'
+	for page in 1 2 3 4 5; do
+		json=$(_bbr_api "releases?per_page=100&page=$page") || { err "GitHub Release 请求失败 (网络或 API 限流)，请稍后重试"; return 1; }
+		printf '%s' "$json" | jq -e 'type == "array"' >/dev/null || { err "GitHub Release 响应无效"; return 1; }
+		tags=$(printf '%s' "$json" | jq -r --arg pattern "$pattern" '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(type == "string") | select(test($pattern))') || return 1
+		if [ -n "$tags" ]; then printf '%s\n' "$tags" | sort -ruV; return 0; fi
+		[ "$(printf '%s' "$json" | jq length)" = 100 ] || break
+	done
+	err "最近 500 个 Release 中未找到 $BBR_ARCH / $profile；可指定完整 Release 标签"
+	return 1
+}
+
+_bbr_secure_boot_disabled() {
+	local file value sys_root=${1:-/sys}
+	[ -d "$sys_root/firmware/efi" ] || return 0
+	for file in "$sys_root"/firmware/efi/efivars/SecureBoot-*; do
+		[ -r "$file" ] || continue
+		value=$(od -An -tu1 -j4 -N1 "$file" 2>/dev/null | tr -d ' \n')
+		[ "$value" = 0 ] && return 0
+		[ "$value" = 1 ] && return 1
+	done
+	has mokutil && LC_ALL=C mokutil --sb-state 2>/dev/null | grep -qx 'SecureBoot disabled'
+}
+
+_bbr_space() {
+	local available
+	available=$(df -Pk "$1" 2>/dev/null | awk 'NR == 2 {print $4}')
+	[[ "$available" =~ ^[0-9]+$ ]] && [ "$available" -ge "$2" ] || {
+		err "$1 空间不足或无法读取 (至少需要 $2 KiB 可用空间)"; return 1;
+	}
+}
+
+_bbr_boot_ready() {
+	local root=${1:-} kernel
+	kernel=$(uname -r)
+	[ ! -d "$root/proc/device-tree" ] && [ -s "$root/boot/grub/grub.cfg" ] &&
+		[ -s "$root/boot/vmlinuz-$kernel" ] && [ -s "$root/boot/initrd.img-$kernel" ] &&
+		[ -d "$root/lib/modules/$kernel" ] || {
+		err "仅支持已有 GRUB、当前内核/模块/initrd 可供回退的常规 VPS；不自动处理设备树、U-Boot 或厂商内核"; return 1;
+	}
+}
+
+_bbr_kernel_preflight() {
+	local version=$OS_VER cmd
+	if is_container_virt || { has systemd-detect-virt && systemd-detect-virt --container --quiet; }; then
+		err "容器/WSL 共享宿主机内核，不能在此安装 BBRv3 内核"; return 1
+	fi
+	case "$OS_ID" in
+	debian)
+		if [ -z "$version" ]; then
+			case "$(_osr_get VERSION_CODENAME)" in bookworm) version=12 ;; trixie) version=13 ;; forky) version=14 ;; sid | unstable) version=999 ;; esac
+		fi
+		[[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]] && ver_ge "$version" 12 || { err "需要 Debian 12+"; return 1; }
+		;;
+	ubuntu) [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]] && ver_ge "$version" 24.04 || { err "需要 Ubuntu 24.04+"; return 1; } ;;
+	*) err "BBRv3 内核安装仅支持 Debian 12+ / Ubuntu 24.04+ (其他系统仍可启用自带 BBR)"; return 1 ;;
+	esac
+	_bbr_fetch_ready || return 1
+	for cmd in apt-get dpkg dpkg-deb dpkg-query sha256sum update-grub flock; do
+		has "$cmd" || { err "安装 BBRv3 缺少 $cmd，请先安装对应系统包"; return 1; }
+	done
+	[ "$(dpkg --print-architecture)" = "$BBR_DEB_ARCH" ] || { err "系统用户空间架构与内核架构不匹配"; return 1; }
+	_bbr_boot_ready || return 1
+	_bbr_secure_boot_disabled || { err "Secure Boot 已启用或状态不明，不能安装未经本机信任签名的内核"; return 1; }
+	_bbr_space /boot 524288 && _bbr_space / 2097152
+}
+
+# Exact image/header pair only: no debug packages, linux-libc-dev or scripts.
+_bbr_manifest() {
+	local tag=$1 profile=$2 output=$3 json kernel
+	_bbr_tag_valid "$tag" "$profile" || { err "Release 标签与架构/标准或 Max 类型不匹配"; return 1; }
+	kernel=$(_bbr_kernel_name "$tag")
+	json=$(_bbr_api "releases/tags/$tag") || { err "读取指定 BBR Release 失败"; return 1; }
+	printf '%s' "$json" | jq -er --arg tag "$tag" --arg kernel "$kernel" --arg arch "$BBR_DEB_ARCH" --arg repo "$BBR_REPO" '
+		select(.tag_name == $tag and .draft == false and .prerelease == false)
+		| .assets as $assets
+		| ["image", "headers"] | map(. as $kind
+			| [$assets[] | select(.name | startswith("linux-" + $kind + "-" + $kernel + "_"))
+				| select(.name | endswith("_" + $arch + ".deb"))]
+			| if length == 1 then .[0] else error("expected one image and one headers package") end)
+		| if all(.[];
+			(.name | test("^[a-zA-Z0-9_.+-]+[.]deb$")) and
+			(.browser_download_url == ("https://github.com/" + $repo + "/releases/download/" + $tag + "/" + .name)) and
+			(.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+			(.size | type == "number" and . > 0 and . <= 2147483648 and floor == .))
+		  then .[] | [.name, .digest, .size, .browser_download_url] | @tsv
+		  else error("invalid package URL, size or SHA-256") end
+	' >"$output" || { err "BBR Release 不完整或缺少可信 SHA-256，拒绝安装"; return 1; }
+	[ "$(wc -l <"$output")" = 2 ]
+}
+
+_bbr_kernel_name() {
+	local version=${1#*-}
+	case "$version" in *-max) printf '%s-joeyblog-bbrv3-max\n' "${version%-max}" ;; *) printf '%s-joeyblog-bbrv3\n' "$version" ;; esac
+}
+
+_bbr_verify_deb() {
+	local file=$1 kernel=$2 package version arch
+	package=$(dpkg-deb -f "$file" Package) && version=$(dpkg-deb -f "$file" Version) && arch=$(dpkg-deb -f "$file" Architecture) || return 1
+	case "$package" in "linux-image-$kernel" | "linux-headers-$kernel") ;; *) err "内核包 Package 不匹配"; return 1 ;; esac
+	[ "$arch" = "$BBR_DEB_ARCH" ] && [ "$(basename "$file")" = "${package}_${version}_${arch}.deb" ] || {
+		err "内核包架构/版本/文件名不匹配"; return 1;
+	}
+}
+
+_bbr_installed_files_ready() {
+	[ -s "/boot/vmlinuz-$1" ] && [ -s "/boot/initrd.img-$1" ] && [ -d "/lib/modules/$1" ]
+}
+
+_bbr_grub_has_kernel() { grep -Fq "vmlinuz-$1" /boot/grub/grub.cfg; }
+
+_bbr_apply_kernel() {
+	local kernel=$1 package
+	shift
+	# Refuse any dependency solution that removes a package. Never purge an old kernel.
+	apt-get --simulate --no-remove --no-install-recommends install "$@" || return 1
+	apt-get -o DPkg::Lock::Timeout=60 --no-remove --no-install-recommends install -y "$@" || {
+		err "内核安装失败；保留旧内核，请检查 apt/dpkg 日志，不要重启"; return 1;
+	}
+	for package in "linux-image-$kernel" "linux-headers-$kernel"; do
+		[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" = 'install ok installed' ] || {
+			err "内核包未完成配置，请修复 apt/dpkg 后再重启"; return 1;
+		}
+	done
+	_bbr_installed_files_ready "$kernel" && update-grub && _bbr_grub_has_kernel "$kernel" || {
+		err "内核/initrd/模块或 GRUB 校验失败；旧内核仍保留，请修复引导后再重启"; return 1;
+	}
+}
+
+bbr_install_kernel() (
+	local desired=$1 profile=$2 apply=$3 work tags kernel name digest size url file total rc
+	local -a packages=()
+	_bbr_kernel_preflight || return 1
+	work=$(mktemp -d "${TMPDIR:-/tmp}/onebox-bbr.XXXXXX") || return 1
+	trap 'rm -rf "$work"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+	if [ "$desired" = latest ]; then
+		tags=$(_bbr_tags "$profile") || return 1
+		desired=${tags%%$'\n'*}
+	fi
+	_bbr_manifest "$desired" "$profile" "$work/manifest" || return 1
+	kernel=$(_bbr_kernel_name "$desired")
+	total=$(awk '{n += $3} END {printf "%.0f", n}' "$work/manifest")
+	printf '来源: https://github.com/%s\nRelease: %s\n目标内核: %s\n' "$BBR_REPO" "$desired" "$kernel"
+	printf '下载合计: %s MiB；安装 image + headers，保留全部旧内核。\n' "$(((total + 1048575) / 1048576))"
+	[ "$profile" != max ] || warn "Max 为激进吞吐实验版，可能增加延迟、丢包和带宽争抢；仅用于自有链路实验"
+	printf '保留现有 GRUB 默认项设置；重启时可能需要在控制台手动选择新内核。\n'
+	if [ "$apply" != 1 ]; then info "预览完成；加 --apply 执行安装，无人值守同时加 -y。不会自动重启。"; return 0; fi
+	require_root
+	confirm "安装 $desired？请确认有 VPS 控制台与快照，安装后需手动重启" n || return 1
+	_bbr_lock || return 1
+	_bbr_space "$work" "$((total / 1024 + 262144))" || return 1
+	while IFS=$'\t' read -r name digest size url; do
+		file="$work/$name"
+		info "下载 $name"
+		http_get "$(gh_url "$url")" "$file" || { err "内核包下载失败"; return 1; }
+		[ "$(wc -c <"$file")" = "$size" ] && printf '%s  %s\n' "${digest#sha256:}" "$file" | sha256sum -c - || {
+			err "内核包大小/SHA-256 不匹配，未执行安装"; return 1;
+		}
+		_bbr_verify_deb "$file" "$kernel" || return 1
+		packages+=("$file")
+	done <"$work/manifest"
+	# Recheck disk space after downloads, particularly when /tmp shares the root FS.
+	_bbr_space /boot 524288 && _bbr_space / 2097152 || return 1
+	_bbr_apply_kernel "$kernel" "${packages[@]}"; rc=$?
+	[ "$rc" = 0 ] || return "$rc"
+	_support_path_safe "$BBR_DATA_DIR/last-install.tsv" && cp "$work/manifest" "$BBR_DATA_DIR/last-install.tsv" || warn "安装成功，但未能保存下载校验记录"
+	info "已安装 $kernel；当前仍运行 $(uname -r)。请手动重启，再执行 onebox bbr status / onebox bbr enable fq"
+	info "若新内核无法启动，请从 VPS 控制台的 GRUB Advanced options 选择保留的旧内核"
+)
+
+bbr_menu() {
+	local choice qdisc tag
+	is_interactive || { bbr_show_status; return; }
+	while :; do
+		title "TCP BBR 管理 ($(bbr_status))"
+		printf '1) 状态 / 实际网卡队列\n2) 启用当前内核 BBR / 选择默认队列\n3) 查看 BBRv3 标准版 Release\n4) 安装/更新标准版 (可指定 Release)\n5) 安装 Max 实验版\n0) 返回\n'
+		ask choice "请选择" 0
+		case "$choice" in
+		1) bbr_show_status ;;
+		2) ask qdisc "队列: fq / fq_codel / fq_pie / cake" fq; (require_root; enable_bbr "$qdisc") ;;
+		3) (_bbr_fetch_ready && _bbr_tags standard) ;;
+		4 | 5)
+			ask tag "完整 Release 标签或 latest" latest
+			if [ "$choice" = 5 ]; then bbr_install_kernel "$tag" max 1; else bbr_install_kernel "$tag" standard 1; fi
+			;;
+		0) return 0 ;;
+		*) warn "无效选项" ;;
+		esac
+	done
+}
+
+do_bbr() {
+	local action=${1:-menu} desired=latest profile=standard apply=0 a seen=0
+	[ $# = 0 ] || shift
+	setup_tty; detect_os; detect_virt
+	case "$action" in
+	menu | status) [ $# = 0 ] || { err "BBR $action 不接受参数"; return 1; }; if [ "$action" = menu ]; then bbr_menu; else bbr_show_status; fi ;;
+	enable) [ $# -le 1 ] || return 1; (require_root; enable_bbr "${1:-fq}") ;;
+	releases) [ $# = 0 ] || { [ $# = 1 ] && [ "$1" = --max ]; } || return 1; [ $# = 0 ] || profile=max; _bbr_fetch_ready && _bbr_tags "$profile" ;;
+	install)
+		for a in "$@"; do
+			case "$a" in
+			--max) profile=max ;; --apply) apply=1 ;;
+			-*) err "未知 BBR 参数: $a"; return 1 ;;
+			*) [ "$seen" = 0 ] || { err "只能指定一个 Release"; return 1; }; desired=$a; seen=1 ;;
+			esac
+		done
+		bbr_install_kernel "$desired" "$profile" "$apply"
+		;;
+	*) err "用法: onebox bbr [status|enable [fq|fq_codel|fq_pie|cake]|releases [--max]|install [latest|TAG] [--max] [--apply]]"; return 1 ;;
+	esac
 }
 
 
@@ -5715,9 +6014,9 @@ do_uninstall() {
 	fi
 	rm -rf "$ONEBOX_DIR" "$BIN_DIR" "$LOG_DIR" "$RUN_DIR"
 	rmdir "$(dirname "$BIN_DIR")" 2>/dev/null
-	if [ -f /etc/sysctl.d/99-onebox-bbr.conf ]; then
+	if [ -f "$BBR_SYSCTL_CONF" ]; then
 		if [ "$purge" = 1 ] || ask_yn "是否同时移除 BBR 设置?" n; then
-			rm -f /etc/sysctl.d/99-onebox-bbr.conf
+			rm -f "$BBR_SYSCTL_CONF"
 		fi
 	fi
 	rm -f "$CMD_PATH"
@@ -5770,7 +6069,7 @@ main_menu() {
   ${GREEN}9.${PLAIN}  启动 / 停止 / 重启 / 日志
   ${GREEN}10.${PLAIN} 更新内核 (sing-box / Xray)
   ${GREEN}11.${PLAIN} 证书管理
-  ${GREEN}12.${PLAIN} 开启 BBR
+  ${GREEN}12.${PLAIN} BBR / BBRv3 管理
   ${GREEN}13.${PLAIN} 更新脚本
   ${GREEN}14.${PLAIN} 卸载
   ${GREEN}15.${PLAIN} 更换 REALITY / ShadowTLS 伪装站点
@@ -5800,7 +6099,7 @@ EOF
 		9) service_menu ;;
 		10) (managed_change do_update_core all) ;;
 		11) (managed_change do_cert) ;;
-		12) (enable_bbr) ;;
+		12) (bbr_menu) ;;
 		13) (managed_change do_update_script) && exec "$CMD_PATH" ;;
 		14) (do_uninstall) && ! [ -f "$STATE_FILE" ] && exit 0 ;;
 		15) (managed_change do_change_sni) ;;
@@ -5916,7 +6215,11 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   restore <ID>             恢复快照（先备份当前状态）
   support                  生成本地脱敏诊断包
   cert                     证书管理
-  bbr                      开启 BBR
+  bbr                      BBR / BBRv3 菜单 (非交互时显示状态)
+  bbr status               当前 TCP / 队列 / BBR 版本 / 已装内核
+  bbr enable [队列]         启用自带 BBR，队列默认 fq
+  bbr releases [--max]      查看 Actions-bbr-v3 内核版本
+  bbr install [latest|TAG] [--max] [--apply]   预览 / 安装 BBRv3 内核
   regen                    按当前设置重新生成全部配置
   uninstall                卸载
   help | version
@@ -6095,6 +6398,7 @@ main() {
 	bench | failover) _require_client_tools && _client_runtime "$cmd" "$@"; return $? ;;
 	reality-check) do_reality_check "$@"; return $? ;;
 	tune) do_tune "$@"; return $? ;;
+	bbr) do_bbr "$@"; return $? ;;
 	esac
 	if [ "$cmd" = install ]; then
 		local dry_run=0 install_args=()
@@ -6157,7 +6461,6 @@ main() {
 		*) do_site "${1:-info}" "${2:-}" ;;
 		esac
 		;;
-	bbr) enable_bbr ;;
 	regen)
 		require_installed
 		managed_change apply_or_die

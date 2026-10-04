@@ -2,7 +2,7 @@
 
 **sing-box / Xray 多协议组合 · 交互式一键安装与管理脚本**
 
-当前版本：**v1.4.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+当前版本：**v1.5.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
 
 适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
 服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），并自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
@@ -32,6 +32,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 - **自有域名 REALITY 网站**：使用自己的域名一键生成可编辑的主页、申请 Let's Encrypt 证书并自动续期，普通浏览器与 REALITY 客户端共用公网入口。
 - **管理与恢复**：只读安装预演、一键体检、证书状态、稳定/测试更新渠道、本机快照与手动恢复、静态网站模板和内容导入、本地脱敏诊断包。
 - **链路与性能**：真实客户端链路测试、Hysteria2 拥塞与接收窗口调优、REALITY 一致性检查，以及带连续失败阈值、恢复冷却期的客户端多入口回退。
+- **BBR 管理**：启用系统自带 TCP BBR，选择默认队列；集成 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 的标准版 / Max 版内核 Release，支持安装预览、指定版本与下载校验，保留旧内核。
 - **贴心细节**：自动检测端口占用、放行防火墙（ufw / firewalld / iptables，含甲骨文云默认规则）、Hysteria2 端口跳跃、BBR、
   屏蔽 BT 与回环/内网访问、配置写入前先经内核校验（失败不覆盖旧配置）、国内服务器 GitHub 加速。
 - **经过真实流量测试**：仓库自带端到端测试，覆盖 *协议 × 服务端内核 × 客户端* 的全部组合（TCP 与 UDP）。
@@ -199,11 +200,47 @@ onebox log [singbox|xray]  查看日志
 onebox update [singbox|xray]   更新内核
 onebox update-script       更新脚本
 onebox cert                证书管理 (更换 / 续期)
-onebox bbr                 开启 BBR
+onebox bbr                 BBR / BBRv3 管理菜单 (非交互时显示状态)
 onebox uninstall           卸载
 ```
 
 协议名称：`vless-reality` `vless-xhttp` `vless-grpc` `vless-ws` `vmess-ws` `trojan` `shadowsocks` `hysteria2` `tuic` `anytls` `shadowtls`
+
+## BBR / BBRv3 管理
+
+主菜单 **12** 或 `onebox bbr` 打开管理菜单。普通代理安装仍只尝试启用当前内核的 BBR；`--no-bbr` 可跳过。升级脚本、打开菜单和查看状态不会安装 Linux 内核。
+
+```bash
+onebox bbr status                      # TCP 算法、默认/实际队列、模块与已装内核
+onebox bbr enable                      # 当前内核 BBR + fq，需要 root
+onebox bbr enable fq_codel             # 还支持 fq_pie / cake，取决于内核
+onebox bbr releases                    # 当前 CPU 架构的标准版 Release
+onebox bbr install                     # 预览最新标准版，不安装
+onebox bbr install latest --apply      # 安装前再次确认，需要 root
+onebox bbr install x86_64-7.2.8 --apply # 示例：标签应以 releases 实际输出为准
+onebox bbr releases --max
+onebox bbr install latest --max        # 预览 Max 实验版；安装仍需 --apply
+```
+
+无人值守安装必须显式指定 `--apply -y`。普通预览需要联网查询 Release，但不安装依赖、不修改 sysctl/引导。状态查询不联网，也不要求 root。`onebox bbr` 在非交互环境只显示状态；自动化启用 BBR 请使用 `onebox bbr enable`。
+
+| 功能 | 条件与行为 |
+|---|---|
+| 启用当前内核 BBR | 适用于提供 `tcp_bbr` 的系统；需要 `flock`（util-linux）。OpenVZ 不支持，其他容器受宿主机能力限制 |
+| 安装 BBRv3 Linux 内核 | Debian 12+ / Ubuntu 24.04+，x86_64 / aarch64，用户空间架构匹配；不支持容器、WSL、设备树 / U-Boot / 厂商引导链 |
+| 引导与空间检查 | 已有 GRUB 和可回退的当前内核、initrd、模块；EFI 必须确认 Secure Boot 关闭；`/boot` 至少空闲 512 MiB，根分区 2 GiB，临时目录容纳下载包并留 256 MiB |
+| 依赖 | `jq`、curl 或 wget、apt-get、dpkg、dpkg-deb、dpkg-query、sha256sum、update-grub、flock；缺失时提示手动安装 |
+| Release 选择 | 按 CPU 与标准/Max 类型过滤，排除草稿和预发布；在最近最多 500 项中找到首个包含匹配版本的分页，按版本号排序。更早版本可指定完整标签 |
+| 安装文件 | 仅 image + headers，校验 GitHub API 提供的 SHA-256、大小、URL、包名、架构和版本；不安装 linux-libc-dev 或调试包 |
+| 失败与重启 | apt 使用 `--no-remove`，不删除旧内核；安装失败、引导生成失败时停止并提示修复。不会自动重启，也不改 GRUB 默认启动项 |
+
+内核由 **[byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3)** 构建与发布，Onebox 独立实现下载、验证和安装流程，未复制或执行上游 `install.sh`。GitHub 元数据直连获取；`GH_PROXY` 只用于包下载，内容必须与直连元数据中的校验值一致。校验保证下载完整性，不替代对上游构建者的信任；缺少校验值的旧 Release 会被拒绝。最终下载记录保存在 `/var/lib/onebox-bbr/last-install.tsv`。
+
+**安装前确认有 VPS 控制台访问和可恢复的磁盘快照。** 安装完成后选择维护时间手动重启，必要时在 GRUB 里选择新内核，再执行 `onebox bbr status`、`onebox bbr enable fq`。已安装包不代表正在运行，算法名称 `bbr` 也不证明是 v3；状态页分别报告运行内核、运行中的模块版本和磁盘模块版本。若新内核不能启动，从控制台 GRUB 的 Advanced options 选择保留的旧内核；修复引导前不要清理旧包。卸载 Onebox 不卸载 Linux 内核。
+
+默认使用标准版；**Max** 提高探测与窗口策略的激进程度，仅用于自有链路吞吐实验，可能增加延迟、丢包和带宽争抢，不保证更快。上游的极限 sysctl 配置、测速软件安装、模块黑名单和快捷命令 `b` 不会自动应用。
+
+BBR/队列配置保存到 `/etc/sysctl.d/99-onebox-bbr.conf`，应用失败恢复原运行参数并保留原文件。其他工具（包括上游的 `99-joeyblog.conf`）有相同参数时会提示检查覆盖关系。选择队列仅修改 `net.core.default_qdisc`，**不会替换正在运行的网卡队列或已有带宽整形规则**；查看 `tc qdisc show` 或状态页确认实际队列，新建队列/重启后再检查。系统 TCP BBR 与 Hysteria2/TUIC 的 QUIC 拥塞控制是不同层，后者继续使用 `onebox tune`。
 
 ## 无人值守安装
 
@@ -451,6 +488,7 @@ bash onebox.sh failover combined.json \
 python3 scripts/embed-runtime.py --check
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash tests/performance.sh
+bash tests/bbr.sh                      # 临时目录与命令 mock，不安装/删除内核、不重启
 SB=/path/sing-box XR=/path/xray bash tests/client-runtime-e2e.sh
 ```
 
