@@ -73,6 +73,8 @@ try:
         assert e["loaded_ttfb_ms"] is not None, e
     print("PASS real-core handshake/download/upload/loaded-latency (%d entries)" % len(entries))
     tcp = [e for e in entries if "tcp-" in e["id"]]
+    udp = [e for e in entries if "udp-" in e["id"]]
+    selected = [tcp[0], udp[0] if udp else tcp[1]]
     wrong = copy.deepcopy(tcp[0])
     wrong["outbounds"][0]["settings"]["servers"][0]["password"] = "AAAAAAAAAAAAAAAAAAAAAA=="
     with rt.Core(wrong, args) as core:
@@ -85,7 +87,7 @@ try:
     log_path = work / "failover.log"
     with log_path.open("w") as log:
         forwarder = subprocess.Popen([sys.executable, str(root / "lib/client_runtime.py"), "failover", str(bundle),
-                                      "--xray", xr, "--entries", ",".join(e["id"] for e in tcp),
+                                      "--xray", xr, "--singbox", sb, "--entries", ",".join(e["id"] for e in selected),
                                       "--url", args.url, "--port", str(port), "--interval", "1", "--timeout", "1",
                                       "--failures", "2", "--recoveries", "2", "--cooldown", "3"], stdout=log, stderr=log)
 
@@ -110,9 +112,9 @@ try:
     wait_for(lambda: any(e.get("event") == "ready" for e in events()))
     curl()
     os.kill(int(first_pid), signal.SIGTERM)
-    wait_for(lambda: any(e.get("to") == tcp[1]["id"] for e in events()))
+    wait_for(lambda: any(e.get("to") == selected[1]["id"] for e in events()))
     curl()
-    print("PASS failover switches new TCP requests to live backup")
+    print("PASS failover switches new TCP requests to live %s backup" % selected[1]["transport"])
     restarted = subprocess.Popen([xr, "run", "-c", str(work / "tcp-a.json")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     wait_for(lambda: sum(e.get("to") == tcp[0]["id"] for e in events()) >= 2)
     curl()

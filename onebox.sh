@@ -8005,14 +8005,14 @@ def load_bundle(path):
     if len(raw) > MAX_BUNDLE:
         raise UserError("探测配置超过 2 MiB")
     obj = json.loads(raw)
-    if obj.get("schema") != 1 or not isinstance(obj.get("entries"), list):
+    if not isinstance(obj, dict) or type(obj.get("schema")) is not int or obj["schema"] != 1 or not isinstance(obj.get("entries"), list):
         raise UserError("探测配置 schema 无效")
     entries = obj["entries"]
     if not 1 <= len(entries) <= 32:
         raise UserError("配置需要 1 至 32 个入口")
     seen = set()
     for e in entries:
-        if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", e.get("id", "")) or e["id"] in seen:
+        if not isinstance(e, dict) or not isinstance(e.get("id"), str) or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", e["id"]) or e["id"] in seen:
             raise UserError("入口 ID 无效或重复")
         seen.add(e["id"])
         if e.get("core") not in ("singbox", "xray") or e.get("transport") not in ("tcp", "udp", "both"):
@@ -8271,6 +8271,8 @@ def bench(entries, args):
     report = {"schema": 1, "scope": "current-machine-to-proxy-to-origin", "entries": [],
               "note": "请求失败率不是网络丢包率；setup 包含代理路径与目标 TLS；吞吐包含建连开销；CPU/RSS 仅本机客户端内核。"}
     for e in ordered(entries, args.entries):
+        if STOP.is_set():
+            break
         row = {"id": e["id"]}
         try:
             with Core(e, args) as core:
@@ -8287,6 +8289,8 @@ def bench(entries, args):
                 row["ttfb_ms"] = distribution([s["ttfb_ms"] for s in samples if s["ok"]])
                 loaded, transfer = [], {}
                 for name, url, limit, upload in (("download", args.download_url, args.bytes, 0), ("upload", args.upload_url, 0, args.bytes)):
+                    if STOP.is_set():
+                        break
                     if not url:
                         continue
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -8302,15 +8306,16 @@ def bench(entries, args):
                 after = core.resources()
                 row["client_rss_bytes_at_end"] = after["rss_bytes"]
                 row["client_cpu_seconds"] = None if before["cpu_seconds"] is None or after["cpu_seconds"] is None else round(after["cpu_seconds"] - before["cpu_seconds"], 3)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            row["error"] = "client_start_failed: 检查该入口所需内核、版本及配置"
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            row["error"] = str(exc) if isinstance(exc, UserError) else "client_start_failed: 检查该入口所需内核、版本及配置"
         report["entries"].append(row)
         if STOP.is_set():
             break
+    report["cancelled"] = STOP.is_set()
     if args.output:
         private_json(args.output, report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return int(any(e.get("error") or e.get("request_failure_rate", 1) > 0 or any(not v["ok"] for v in e.get("transfers", {}).values()) for e in report["entries"]))
+    return 130 if STOP.is_set() else int(any(e.get("error") or e.get("request_failure_rate", 1) > 0 or any(not v["ok"] for v in e.get("transfers", {}).values()) for e in report["entries"]))
 
 
 class FailoverPolicy:
@@ -8585,6 +8590,8 @@ def main(argv=None):
         for i, path in enumerate(args.bundles, 1):
             for e in load_bundle(path)["entries"]:
                 e["id"] = "n%d-%s" % (i, e["id"])
+                if len(e["id"]) > 80:
+                    raise UserError("合并后的入口 ID 超过 80 字符，请使用原始导出配置")
                 entries.append(e)
         if len(entries) > 32:
             raise UserError("合并后不能超过 32 个入口")

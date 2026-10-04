@@ -464,7 +464,7 @@ SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/e2e.sh
 ONEBOX_LIFECYCLE=1 SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/lifecycle.sh
 ```
 
-测试目标只能经由代理服务端访问（服务端将测试专用的域名 / TEST-NET 地址改写到本机），因此任何绕过代理的“假通过”都会被判为失败。
+完整协议矩阵的测试目标只能经由代理服务端访问（服务端将测试专用的域名 / TEST-NET 地址改写到本机），因此绕过代理的“假通过”会被判为失败。客户端工具测试另有错误凭据拒绝和真实入口中断用例。
 
 ## 免责声明
 

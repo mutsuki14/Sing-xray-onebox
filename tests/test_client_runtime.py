@@ -68,6 +68,10 @@ class Tests(unittest.TestCase):
             path.write_bytes(b"a" * (rt.MAX_BUNDLE + 1))
             with self.assertRaises(ValueError):
                 rt.load_bundle(path)
+            for invalid in ([], {"schema": True, "entries": [entry]}, {"schema": 1, "entries": [None]}):
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    rt.load_bundle(path)
 
     def test_output_permissions_and_no_clobber(self):
         with tempfile.TemporaryDirectory() as work:
