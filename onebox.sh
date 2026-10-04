@@ -46,9 +46,9 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
-readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/claude/linux-vps-proxy-script-1m1ksn/onebox.sh}"
+readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/main/onebox.sh}"
 
 ONEBOX_DIR="${ONEBOX_DIR:-/etc/onebox}"
 BIN_DIR="${ONEBOX_BIN_DIR:-/opt/onebox/bin}"
@@ -719,7 +719,7 @@ UUID PASSWORD SS_METHOD SS_PASSWORD
 REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SNI REALITY_DEST
 REALITY_SITE_ENABLED REALITY_SITE_DOMAIN REALITY_SITE_PORT REALITY_SITE_TITLE REALITY_SITE_HTTPS
 WS_PATH VMESS_PATH XHTTP_PATH GRPC_SERVICE
-HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP
+HY2_OBFS HY2_OBFS_PASSWORD HY2_HOP HY2_PROFILE HY2_UP_MBPS HY2_DOWN_MBPS RESOURCE_PROFILE
 SHADOWTLS_SNI SHADOWTLS_DEST SHADOWTLS_PASSWORD SHADOWTLS_SS_PASSWORD
 TLS_MODE DOMAIN TLS_SNI CERT_FILE KEY_FILE ACME_METHOD
 SB_VERSION XR_VERSION BLOCK_PRIVATE BLOCK_BT REALITY_GUARD_PORT VMESS_TLS CLASH_SECRET CERT_PINNED OWN_IP_CIDRS INSTALLED_AT"
@@ -3070,6 +3070,7 @@ sb_inbound() {
       "masquerade": { "type": "proxy", "url": "https://www.bing.com", "rewrite_host": true }'
 		[ "$HY2_OBFS" = 1 ] && extra=",
       \"obfs\": { \"type\": \"salamander\", \"password\": $(json_str "$HY2_OBFS_PASSWORD") }"
+		extra+=$(_hy2_tuning server)
 		printf '    {
       "type": "hysteria2",
       "tag": "hysteria2-in",
@@ -3698,6 +3699,7 @@ mh_proxy() {
 		# 端口跳跃: 设置 ports 后客户端只在该范围内随机选端口 (port 仅作展示/兼容), 默认每 30 秒换一次
 		[ -n "$HY2_HOP" ] && printf '    ports: %s\n    hop-interval: 30\n' "$(yq "$HY2_HOP")"
 		[ "$HY2_OBFS" = 1 ] && printf '    obfs: salamander\n    obfs-password: %s\n' "$(yq "$HY2_OBFS_PASSWORD")"
+		_mh_hy2_tuning
 		_mh_tls_common sni
 		;;
 	tuic)
@@ -3721,6 +3723,7 @@ mh_min_version() {
 	local v=1.18.2
 	proto_enabled anytls && v=1.19.3
 	proto_enabled vless-xhttp && v=1.19.22
+	if proto_enabled hysteria2 && [ "${HY2_PROFILE:-}" = conservative ]; then v=1.19.32; fi
 	printf '%s' "$v"
 }
 
@@ -3925,6 +3928,7 @@ sbc_outbound() {
 		if [ -n "$HY2_HOP" ]; then
 			extra+=", \"server_ports\": [$(json_str "${HY2_HOP/-/:}")], \"hop_interval\": \"30s\""
 		fi
+		extra+=$(_hy2_tuning client)
 		printf '    { "type": "hysteria2", "tag": %s, %s, "password": %s%s, "tls": %s }' "$tag" "$srv" "$(json_str "$PASSWORD")" "$extra" "$(_sbc_tls_cert '["h3"]' 0)"
 		;;
 	tuic)
@@ -4141,6 +4145,7 @@ write_client_files() {
 	gen_links >"$tmp/links.txt" || failed=1
 	b64 <"$tmp/links.txt" >"$tmp/sub.txt" || failed=1
 	gen_mihomo >"$tmp/mihomo.yaml" || failed=1
+	gen_probe_bundle >"$tmp/probe.json" || failed=1
 	if [ "$has_sb" = 1 ]; then
 		gen_singbox_client tun >"$tmp/sing-box.json" || failed=1
 		gen_singbox_client notun >"$tmp/sing-box-notun.json" || failed=1
@@ -4148,7 +4153,7 @@ write_client_files() {
 	if [ "$has_xr" = 1 ]; then gen_xray_client >"$tmp/xray.json" || failed=1; fi
 	if [ "$failed" = 0 ]; then chmod 600 "$tmp"/* || failed=1; fi
 	if [ "$failed" = 0 ]; then
-		for f in links.txt sub.txt mihomo.yaml sing-box.json sing-box-notun.json xray.json; do
+		for f in links.txt sub.txt mihomo.yaml sing-box.json sing-box-notun.json xray.json probe.json; do
 			if [ -f "$tmp/$f" ]; then
 				mv -f "$tmp/$f" "$CLIENT_DIR/$f" || { failed=1; break; }
 			else
@@ -5042,6 +5047,7 @@ _apply_rollback() {
 # 返回 0 成功; 1 准备失败; 2 提交失败 (已尝试恢复, 恢复不全时保留备份并明确提示)。
 apply_all() {
 	local bak had_old=0 f snapshot_ok=1 failed=0
+	validate_tuning || return 1
 	# 旧版本升级: 补齐新增的状态项 (随后与新配置一起保存)
 	if xr_has_reality && [ -z "${REALITY_GUARD_PORT:-}" ]; then REALITY_GUARD_PORT=$(pick_guard_port); fi
 	[ -n "${CLASH_SECRET:-}" ] || CLASH_SECRET=$(rand_str 24)
@@ -5775,10 +5781,12 @@ main_menu() {
   ${GREEN}20.${PLAIN} 生成脱敏诊断包
   ${GREEN}21.${PLAIN} 检查更新 / 切换渠道
   ${GREEN}22.${PLAIN} 安装前预演
+  ${GREEN}23.${PLAIN} 链路测试 / REALITY 检查 / 多入口回退
+  ${GREEN}24.${PLAIN} Hysteria2 / 资源调优
   ${GREEN}0.${PLAIN}  退出
 EOF
 		hr
-		ask_num n "请选择" 0 0 22 || exit 0
+		ask_num n "请选择" 0 0 24 || exit 0
 		case "$n" in
 		0) exit 0 ;;
 		1) (managed_change do_install) ;;
@@ -5803,6 +5811,8 @@ EOF
 		20) (do_support_bundle) ;;
 		21) update_menu ;;
 		22) (plan_menu) ;;
+		23) (link_tools_menu) ;;
+		24) (tuning_menu) ;;
 		esac
 		pause
 	done
@@ -5868,6 +5878,16 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   plan [安装选项]          只读预演协议、端口、服务与文件变更
   info                     查看节点信息与分享链接
   client <类型>            输出客户端配置: mihomo | singbox | singbox-notun | xray | links | sub | qr
+  probe export <新文件>     导出私有客户端探测配置 (含客户端凭据)
+  probe list <配置>         列出探测入口 ID，不输出凭据
+  probe merge <新文件> <配置...> 合并不同服务器的探测入口
+  bench <配置> [选项]       真实链路测试；--help 查看吞吐测试等参数
+  failover <配置> [选项]    客户端 SOCKS5/TCP 多入口回退；--help 查看阈值与冷却参数
+  reality-check [配置]     REALITY 证书/ALPN/回落/认证检查；无配置时检查本机安装
+  tune status              查看 Hysteria2 与资源配置
+  tune hy2 <auto|conservative|measured> [--up Mbps --down Mbps] [--apply]
+  tune resource <balanced|low-memory|throughput> [--apply]
+  tune reset [--apply]      预览或恢复原生默认配置；--apply 才执行更改
   add <协议>               添加协议
   del <协议>               删除协议
   port <协议> <端口>       修改端口
@@ -6071,6 +6091,10 @@ main() {
 		do_update_check "$@"
 		return $?
 		;;
+	probe) do_probe "$@"; return $? ;;
+	bench | failover) _require_client_tools && _client_runtime "$cmd" "$@"; return $? ;;
+	reality-check) do_reality_check "$@"; return $? ;;
+	tune) do_tune "$@"; return $? ;;
 	esac
 	if [ "$cmd" = install ]; then
 		local dry_run=0 install_args=()
@@ -7700,6 +7724,901 @@ do_restore() {
 }
 
 # END snapshots
+
+# BEGIN link-performance
+# These settings are intentionally limited to Hysteria2. TCP BBR, QUIC CC and
+# receive windows are independent; never rewrite host-wide sysctls here.
+_hy2_windows() {
+	case "${RESOURCE_PROFILE:-balanced}" in
+	low-memory) echo '2097152 5242880 64' ;;
+	throughput) echo '16777216 41943040 1024' ;;
+	*) echo '0 0 0' ;;
+	esac
+}
+
+_hy2_tuning() {
+	local side=$1 stream connection concurrent
+	case "${HY2_PROFILE:-}" in
+	auto | conservative)
+		[ "$side" != server ] || printf ', "ignore_client_bandwidth": true'
+		[ "${HY2_PROFILE:-}" != conservative ] || printf ', "bbr_profile": "conservative"'
+		;;
+	measured)
+		if [ "$side" = server ]; then
+			# Stored values always use the client's perspective.
+			printf ', "up_mbps": %s, "down_mbps": %s' "$HY2_DOWN_MBPS" "$HY2_UP_MBPS"
+		else printf ', "up_mbps": %s, "down_mbps": %s' "$HY2_UP_MBPS" "$HY2_DOWN_MBPS"; fi
+		;;
+	esac
+	read -r stream connection concurrent <<<"$(_hy2_windows)"
+	if [ "$stream" != 0 ]; then
+		printf ', "stream_receive_window": %s, "connection_receive_window": %s' "$stream" "$connection"
+		[ "$side" != server ] || printf ', "max_concurrent_streams": %s' "$concurrent"
+	fi
+	return 0
+}
+
+_mh_hy2_tuning() {
+	local stream connection concurrent
+	case "${HY2_PROFILE:-}" in
+	conservative) printf '    bbr-profile: conservative\n' ;;
+	measured) printf '    up: %s\n    down: %s\n' "$HY2_UP_MBPS" "$HY2_DOWN_MBPS" ;;
+	esac
+	read -r stream connection concurrent <<<"$(_hy2_windows)"
+	if [ "$stream" != 0 ]; then
+		printf '    initial-stream-receive-window: %s\n    max-stream-receive-window: %s\n' "$stream" "$stream"
+		printf '    initial-connection-receive-window: %s\n    max-connection-receive-window: %s\n' "$connection" "$connection"
+	fi
+	return 0
+}
+
+validate_tuning() {
+	local val version
+	case "${HY2_PROFILE:-}" in '' | auto | conservative | measured) ;; *) err 'Hysteria2 调优配置无效'; return 1 ;; esac
+	case "${RESOURCE_PROFILE:-}" in '' | balanced | low-memory | throughput) ;; *) err '资源配置无效'; return 1 ;; esac
+	if [ "${HY2_PROFILE:-}" = measured ]; then
+		for val in "${HY2_UP_MBPS:-}" "${HY2_DOWN_MBPS:-}"; do
+			[[ "$val" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$val" -le 10000 ] || { err '实测带宽必须为 1..10000 的整数 Mbps (客户端视角)'; return 1; }
+		done
+	fi
+	proto_enabled hysteria2 || return 0
+	if [ -n "${HY2_PROFILE:-}" ] || { [ -n "${RESOURCE_PROFILE:-}" ] && [ "$RESOURCE_PROFILE" != balanced ]; }; then
+		[ "$(pget CORE hysteria2)" = singbox ] || { err '当前调优配置要求 Hysteria2 服务端使用 sing-box；可先 tune reset --apply'; return 1; }
+	fi
+	if [ "${HY2_PROFILE:-}" = conservative ] || { [ -n "${RESOURCE_PROFILE:-}" ] && [ "$RESOURCE_PROFILE" != balanced ]; }; then
+		version=$(sb_installed_version)
+		if ! [[ "$version" =~ ^([0-9]+)\.([0-9]+)\. ]]; then err '无法确认 sing-box 版本；调优需要 >= 1.14'; return 1; fi
+		if [ "${BASH_REMATCH[1]}" -lt 1 ] || { [ "${BASH_REMATCH[1]}" = 1 ] && [ "${BASH_REMATCH[2]}" -lt 14 ]; }; then
+			err '保守 BBR 与接收窗口调优需要 sing-box >= 1.14'; return 1
+		fi
+	fi
+	return 0
+}
+
+tuning_status() {
+	printf 'Hysteria2: %s；资源配置: %s\n' "${HY2_PROFILE:-native}" "${RESOURCE_PROFILE:-balanced}"
+	[ "${HY2_PROFILE:-}" != measured ] || printf '客户端上传/下载: %s / %s Mbps\n' "$HY2_UP_MBPS" "$HY2_DOWN_MBPS"
+	local stream connection concurrent key value
+	read -r stream connection concurrent <<<"$(_hy2_windows)"
+	[ "$stream" = 0 ] || printf 'QUIC 流/连接接收窗口: %s / %s 字节；服务端最大并发流: %s\n' "$stream" "$connection" "$concurrent"
+	for key in net.ipv4.tcp_congestion_control net.core.rmem_max net.core.wmem_max; do
+		value=$(sysctl -n "$key" 2>/dev/null) || value=unknown
+		printf '系统 %s = %s (只读)\n' "$key" "$value"
+	done
+	printf '调优适用 sing-box Hysteria2；系统 TCP BBR 与 QUIC 拥塞控制不同。\n'
+	printf '接收窗口是每连接/每流的上限，非预留内存；吞吐档会增加并发时的内存需求。\n'
+}
+
+do_tune() (
+	local kind=${1:-status} profile='' apply=0 up='' down='' arg
+	[ $# = 0 ] || shift
+	if [ "$kind" = status ]; then
+		[ $# = 0 ] || { err 'tune status 不接受参数'; return 1; }
+		require_installed; tuning_status; return
+	fi
+	case "$kind" in
+	hy2 | resource) [ $# -gt 0 ] || { err '缺少调优配置名称'; return 1; }; profile=$1; shift ;;
+	reset) ;;
+	*) err '用法: onebox tune status|hy2|resource|reset (onebox help)'; return 1 ;;
+	esac
+	while [ $# -gt 0 ]; do
+		arg=$1; shift
+		case "$arg" in
+		--apply) apply=1 ;;
+		--up | --down)
+			[ $# -gt 0 ] || { err "${arg} 缺少值"; return 1; }
+			if [ "$arg" = --up ]; then up=$1; else down=$1; fi; shift
+			;;
+		*) err "未知调优参数: ${arg}"; return 1 ;;
+		esac
+	done
+	[ "$apply" != 1 ] || init_env
+	require_installed
+	printf '当前配置:\n'; tuning_status
+	case "$kind" in
+	hy2)
+		case "$profile" in auto | conservative | measured) ;; *) err 'hy2 仅支持 auto/conservative/measured'; return 1 ;; esac
+		HY2_PROFILE=$profile HY2_UP_MBPS=$up HY2_DOWN_MBPS=$down
+		;;
+	resource)
+		case "$profile" in balanced | low-memory | throughput) ;; *) err '资源档仅支持 balanced/low-memory/throughput'; return 1 ;; esac
+		RESOURCE_PROFILE=$profile
+		;;
+	reset) HY2_PROFILE='' HY2_UP_MBPS='' HY2_DOWN_MBPS='' RESOURCE_PROFILE='' ;;
+	esac
+	if [ -n "$up$down" ] && { [ "$kind" != hy2 ] || [ "$profile" != measured ]; }; then err '--up/--down 仅用于 hy2 measured'; return 1; fi
+	if [ "$kind" != reset ] && ! proto_enabled hysteria2; then err '请先安装 Hysteria2 协议'; return 1; fi
+	validate_tuning || return 1
+	printf '\n计划配置:\n'; tuning_status
+	printf '客户端需重新导入生成的配置；分享链接不携带这些调优字段。Xray 客户端不导出调优字段。\n'
+	if [ "$apply" = 1 ]; then
+		snapshot_checkpoint before-tune || return 1
+		apply_or_die
+		info '调优已应用；可用 tune reset --apply 恢复默认，或 backups / restore 恢复原配置'
+	else info '预览完成；加 --apply 才会保存并应用'; fi
+)
+
+# A portable bundle contains only CLIENT-side credentials. Native server
+# configs/state must never be included. Merge on the client to add another IP.
+gen_probe_bundle() (
+	local scope=${1:-external} p core tag extra ref_host ref_port nodes=()
+	[ "$scope" != local ] || SERVER_ADDR=127.0.0.1
+	for p in $PROTOCOLS; do
+		core=singbox tag=$(node_name "$p") extra=''
+		if [ "$p" = vless-xhttp ] || { [ "$(pget CORE "$p")" = xray ] && proto_client_ok "$p" xray; }; then core=xray; tag=proxy; fi
+		if proto_uses_reality "$p"; then
+			ref_host=${REALITY_DEST%:*} ref_port=${REALITY_DEST##*:}
+			if site_enabled && [ "$scope" != local ]; then
+				if site_https_enabled; then ref_host=$SERVER_ADDR ref_port=443; else ref_host='' ref_port=0; fi
+			fi
+			extra=", \"reality\": {\"host\": $(json_str "$SERVER_ADDR"), \"port\": $(pget PORT "$p"), \"sni\": $(json_str "$REALITY_SNI"), \"reference_host\": $(json_str "$ref_host"), \"reference_port\": $ref_port}"
+		fi
+		if [ "$core" = singbox ]; then
+			nodes+=("{\"id\": $(json_str "$p"), \"core\": \"singbox\", \"transport\": $(json_str "$(proto_net "$p")"), \"tag\": $(json_str "$tag"), \"outbounds\": [$(sbc_outbound "$p")]$extra}")
+		else
+			nodes+=("{\"id\": $(json_str "$p"), \"core\": \"xray\", \"transport\": $(json_str "$(proto_net "$p")"), \"tag\": $(json_str "$tag"), \"outbounds\": [$(xrc_outbound "$p" "$tag")]$extra}")
+		fi
+	done
+	[ ${#nodes[@]} -gt 0 ] || return 1
+	printf '{"schema": 1, "entries": [%s]}\n' "$(json_join "${nodes[@]}")"
+)
+
+_require_client_tools() { has python3 || { err '客户端工具需要 Python 3.8+，请先安装 python3'; return 1; }; }
+
+do_probe() (
+	local cmd=${1:-} output
+	[ $# = 0 ] || shift
+	case "$cmd" in
+	export)
+		[ $# = 1 ] || { err '用法: onebox probe export <新文件路径>'; return 1; }
+		require_installed
+		output=$1; [[ "$output" = /* ]] || output="$PWD/$output"
+		_support_path_safe "$output" || { err '导出路径不安全'; return 1; }
+		# noclobber also rejects a symlink created between the path check and open.
+		(umask 077; set -o noclobber; gen_probe_bundle >"$output") || { err '导出失败，目标必须不存在'; return 1; }
+		info "已导出: $output（含客户端凭据，请私密传输）"
+		;;
+	list | merge) _require_client_tools && _client_runtime "$cmd" "$@" ;;
+	*) err '用法: onebox probe export <新文件> | list <配置> | merge <新文件> <配置...>'; return 1 ;;
+	esac
+)
+
+do_reality_check() (
+	_require_client_tools || return 1
+	if [ $# -gt 0 ]; then _client_runtime reality "$@"; return $?; fi
+	require_installed
+	local work
+	work=$(mktemp -d) || return 1
+	trap 'rm -rf "$work"' EXIT
+	(umask 077; gen_probe_bundle local >"$work/probe.json") || return 1
+	printf '本机回环检查；完整公网路径请将 probe export 的配置带到客户端执行。\n' >&2
+	_client_runtime reality "$work/probe.json" --scope server-local --singbox "$SB_BIN" --xray "$XR_BIN"
+)
+
+link_tools_menu() {
+	require_installed
+	local n output
+	echo '1) 导出客户端探测配置  2) 本机 REALITY 检查  3) 客户端操作说明  0) 返回'
+	ask_num n '请选择' 0 0 3 || return 0
+	case "$n" in
+	1) ask output '导出到新文件' "$ONEBOX_DIR/probe-$(date +%s).json"; do_probe export "$output" ;;
+	2) do_reality_check ;;
+	3)
+		printf '%s\n' '将 onebox.sh 与 probe.json 私密复制到客户端，安装对应内核及 Python 3.8+：' \
+			'bash onebox.sh bench probe.json --help' 'bash onebox.sh reality-check probe.json' \
+			'bash onebox.sh probe merge combined.json server-a.json server-b.json' \
+			'bash onebox.sh failover combined.json --help'
+		;;
+	esac
+}
+
+tuning_menu() {
+	local n up down
+	echo '1) 查看状态  2) 自动 BBR  3) 保守 BBR  4) 实测带宽  5) 低内存  6) 吞吐档  7) 恢复默认  0) 返回'
+	ask_num n '请选择' 0 0 7 || return 0
+	case "$n" in
+	1) do_tune status ;;
+	2) do_tune hy2 auto --apply ;;
+	3) do_tune hy2 conservative --apply ;;
+	4) ask up '客户端实际可用上传 Mbps (建议留余量)' ''; ask down '客户端实际可用下载 Mbps' ''; do_tune hy2 measured --up "$up" --down "$down" --apply ;;
+	5) do_tune resource low-memory --apply ;;
+	6) do_tune resource throughput --apply ;;
+	7) do_tune reset --apply ;;
+	esac
+}
+# END link-performance
+
+# BEGIN embedded-client-runtime
+_client_runtime() {
+	python3 - "$@" <<'ONEBOX_CLIENT_PY'
+"""Onebox client-side probes and ordered TCP failover (Python 3.8+, stdlib only).
+
+Embedded in onebox.sh by scripts/embed-runtime.py. No server private keys are
+needed. Native clients remain responsible for transport, crypto and DNS.
+"""
+import argparse
+import concurrent.futures
+import copy
+import hashlib
+import http.client
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import re
+import secrets
+import select
+import shutil
+import signal
+import socket
+import socketserver
+import ssl
+import statistics
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+
+MAX_BUNDLE = 2 * 1024 * 1024
+STOP = threading.Event()
+
+
+class UserError(ValueError):
+    """Only fixed, non-secret messages may be presented to the user."""
+
+
+def private_json(path, data):
+    """Never overwrite a user file or follow a destination symlink."""
+    raw = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(raw)
+
+
+def load_bundle(path):
+    with open(path, "rb") as src:
+        raw = src.read(MAX_BUNDLE + 1)
+    if len(raw) > MAX_BUNDLE:
+        raise UserError("探测配置超过 2 MiB")
+    obj = json.loads(raw)
+    if obj.get("schema") != 1 or not isinstance(obj.get("entries"), list):
+        raise UserError("探测配置 schema 无效")
+    entries = obj["entries"]
+    if not 1 <= len(entries) <= 32:
+        raise UserError("配置需要 1 至 32 个入口")
+    seen = set()
+    for e in entries:
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", e.get("id", "")) or e["id"] in seen:
+            raise UserError("入口 ID 无效或重复")
+        seen.add(e["id"])
+        if e.get("core") not in ("singbox", "xray") or e.get("transport") not in ("tcp", "udp", "both"):
+            raise UserError("入口类型无效")
+        outs = e.get("outbounds")
+        if not isinstance(outs, list) or not 1 <= len(outs) <= 2:
+            raise UserError("入口出站无效")
+        # Only supported proxy protocols: never accept a direct/block outbound.
+        allowed = {"vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "anytls", "shadowtls"}
+        if e["core"] == "xray":
+            allowed = {"vless", "vmess", "trojan", "shadowsocks", "hysteria"}
+        key = "type" if e["core"] == "singbox" else "protocol"
+        if any(not isinstance(o, dict) or o.get(key) not in allowed for o in outs):
+            raise UserError("出站包含未支持的协议")
+        if e.get("tag") != outs[0].get("tag"):
+            raise UserError("出站标签不匹配")
+    return obj
+
+
+def ordered(entries, order=None, default_pair=False):
+    if order:
+        ids = order.split(",")
+        by_id = {e["id"]: e for e in entries}
+        if len(set(ids)) != len(ids) or any(i not in by_id for i in ids):
+            raise UserError("--entries 包含未知或重复的 ID（先执行 probe list）")
+        return [by_id[i] for i in ids]
+    if default_pair:
+        tcp = [e for e in entries if e["transport"] in ("tcp", "both")]
+        udp = [e for e in entries if e["transport"] == "udp"]
+        return (tcp[:1] + udp[:1]) or entries[:1]
+    return entries
+
+
+def read_exact(sock, n):
+    data = bytearray()
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise OSError("连接提前关闭")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def socks_address(sock, atyp):
+    if atyp == 1:
+        return socket.inet_ntop(socket.AF_INET, read_exact(sock, 4))
+    if atyp == 4:
+        return socket.inet_ntop(socket.AF_INET6, read_exact(sock, 16))
+    if atyp == 3:
+        return read_exact(sock, read_exact(sock, 1)[0]).decode("ascii")
+    raise OSError("SOCKS 地址类型无效")
+
+
+def socks_login(port, token, timeout):
+    sock = socket.create_connection(("127.0.0.1", port), timeout)
+    try:
+        sock.sendall(b"\x05\x01\x02")
+        if read_exact(sock, 2) != b"\x05\x02":
+            raise OSError("SOCKS 认证方式不匹配")
+        raw = token.encode("ascii")
+        sock.sendall(b"\x01\x07onebox-" + bytes([len(raw)]) + raw)
+        if read_exact(sock, 2) != b"\x01\x00":
+            raise OSError("SOCKS 认证失败")
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def socks_connect(core, host, port, timeout):
+    sock = socks_login(core.port, core.token, timeout)
+    try:
+        try:
+            ip = ipaddress.ip_address(host)
+            address = (b"\x01" if ip.version == 4 else b"\x04") + ip.packed
+        except ValueError:
+            raw = host.encode("idna")
+            if not 1 <= len(raw) <= 255:
+                raise UserError("域名长度无效")
+            address = b"\x03" + bytes([len(raw)]) + raw
+        sock.sendall(b"\x05\x01\x00" + address + struct.pack("!H", port))
+        response = read_exact(sock, 4)
+        if response[:3] != b"\x05\x00\x00":
+            raise OSError("代理拒绝连接")
+        socks_address(sock, response[3])
+        read_exact(sock, 2)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+class Core:
+    def __init__(self, entry, args):
+        self.entry, self.args = entry, args
+        self.proc, self.work = None, None
+        self.port = 0
+        self.token = secrets.token_hex(24)
+
+    def __enter__(self):
+        try:
+            return self.start()
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
+
+    def start(self):
+        name = self.entry["core"]
+        binary = getattr(self.args, name) or shutil.which("sing-box" if name == "singbox" else "xray")
+        if not binary:
+            raise UserError("缺少客户端内核: " + name)
+        binary = str(Path(binary).resolve())
+        self.work = tempfile.TemporaryDirectory(prefix="onebox-client-")
+        with socket.socket() as reserve:
+            reserve.bind(("127.0.0.1", 0))
+            self.port = reserve.getsockname()[1]
+        outs = copy.deepcopy(self.entry["outbounds"])
+        if name == "singbox":
+            config = {"log": {"disabled": True}, "dns": {"servers": [{"type": "local", "tag": "local"}]},
+                      "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": self.port,
+                                    "users": [{"username": "onebox-", "password": self.token}]}],
+                      "outbounds": outs, "route": {"final": self.entry["tag"], "default_domain_resolver": "local"}}
+            run = [binary, "run", "-c", "config.json", "-D", self.work.name]
+            check = [binary, "check", "-c", "config.json", "-D", self.work.name]
+        else:
+            config = {"log": {"loglevel": "none"},
+                      "inbounds": [{"protocol": "socks", "listen": "127.0.0.1", "port": self.port,
+                                    "settings": {"auth": "password", "accounts": [{"user": "onebox-", "pass": self.token}], "udp": False}}],
+                      "outbounds": outs}
+            run = [binary, "run", "-c", "config.json"]
+            check = [binary, "run", "-test", "-c", "config.json"]
+        private_json(Path(self.work.name) / "config.json", config)
+        result = subprocess.run(check, cwd=self.work.name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        if result.returncode:
+            raise UserError("客户端配置校验失败（请检查内核版本；未打印含凭据的日志）")
+        self.proc = subprocess.Popen(run, cwd=self.work.name, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not STOP.is_set():
+            if self.proc.poll() is not None:
+                raise UserError("客户端内核启动失败")
+            try:
+                with socks_login(self.port, self.token, 0.3):
+                    return self
+            except OSError:
+                STOP.wait(0.05)
+        raise UserError("客户端内核启动超时")
+
+    def __exit__(self, *unused):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        if self.work:
+            self.work.cleanup()
+
+    def resources(self):
+        try:
+            fields = Path("/proc/%d/stat" % self.proc.pid).read_text().rsplit(")", 1)[1].split()
+            return {"cpu_seconds": (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK"),
+                    "rss_bytes": int(fields[21]) * os.sysconf("SC_PAGE_SIZE")}
+        except (OSError, ValueError, IndexError, AttributeError):
+            return {"cpu_seconds": None, "rss_bytes": None}
+
+
+def url_parts(url):
+    p = urllib.parse.urlsplit(url)
+    if p.scheme not in ("http", "https") or not p.hostname or p.username is not None or p.password is not None or p.fragment:
+        raise UserError("测试 URL 必须为不含账号或片段的 HTTP(S) URL")
+    if any(ord(c) < 33 or ord(c) == 127 for c in url):
+        raise UserError("测试 URL 包含空白或控制字符")
+    _ = p.port
+    return p
+
+
+def request(core, url, timeout=8, limit=0, upload=0, cafile=None, direct=None):
+    """Bound bytes/time, no redirect, proxy-side DNS, no ambient proxy settings.
+
+    setup_ms includes the proxy path and origin TLS. It is not the native
+    protocol's isolated handshake time. TTFB starts before connecting.
+    """
+    p = url_parts(url)
+    started = time.monotonic()
+    port = p.port or (443 if p.scheme == "https" else 80)
+    sock = None
+    try:
+        sock = socks_connect(core, p.hostname, port, timeout) if core else socket.create_connection(direct or (p.hostname, port), timeout)
+        if p.scheme == "https":
+            ctx = ssl.create_default_context(cafile=cafile)
+            ctx.set_alpn_protocols(["http/1.1"])
+            sock = ctx.wrap_socket(sock, server_hostname=p.hostname)
+        setup = time.monotonic() - started
+        path = urllib.parse.urlunsplit(("", "", p.path or "/", p.query, ""))
+        host = p.netloc
+        headers = ["%s %s HTTP/1.1" % ("POST" if upload else "GET", path), "Host: " + host,
+                   "Connection: close", "Accept-Encoding: identity", "User-Agent: onebox-probe/1"]
+        if upload:
+            headers += ["Content-Length: %d" % upload, "Content-Type: application/octet-stream"]
+        elif limit:
+            headers += ["Range: bytes=0-%d" % (limit - 1)]
+        sock.settimeout(max(0.01, timeout - (time.monotonic() - started)))
+        sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
+        sent = 0
+        payload = os.urandom(65536) if upload else b""
+        while sent < upload:
+            sock.settimeout(max(0.01, timeout - (time.monotonic() - started)))
+            chunk = payload[:min(len(payload), upload - sent)]
+            sock.sendall(chunk)
+            sent += len(chunk)
+        response = http.client.HTTPResponse(sock)
+        response.begin()
+        # HTTP headers are the first application response bytes.
+        ttfb = time.monotonic() - started
+        received, digest = 0, hashlib.sha256()
+        while received < limit:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise TimeoutError()
+            sock.settimeout(remaining)
+            chunk = response.read(min(65536, limit - received))
+            if not chunk:
+                break
+            digest.update(chunk)
+            received += len(chunk)
+        duration = time.monotonic() - started
+        return {"ok": 200 <= response.status < 300, "status": response.status,
+                "setup_ms": round(setup * 1000, 3), "ttfb_ms": round(ttfb * 1000, 3),
+                "total_ms": round(duration * 1000, 3), "received_bytes": received, "sent_bytes": sent,
+                "download_mbps": round(received * 8 / max(duration, 1e-9) / 1e6, 3),
+                "upload_mbps": round(sent * 8 / max(duration, 1e-9) / 1e6, 3),
+                "body_sha256": digest.hexdigest(), "location": response.getheader("Location", "")}
+    finally:
+        if sock:
+            sock.close()
+
+
+def safe_request(*args, **kwargs):
+    try:
+        return request(*args, **kwargs)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        # Exceptions can contain target URLs/credentials. Only expose the type.
+        return {"ok": False, "error": type(exc).__name__}
+
+
+def distribution(values):
+    if not values:
+        return None
+    values = sorted(values)
+    return {"median": round(statistics.median(values), 3), "p95": values[math.ceil(len(values) * 0.95) - 1]}
+
+
+def bench(entries, args):
+    report = {"schema": 1, "scope": "current-machine-to-proxy-to-origin", "entries": [],
+              "note": "请求失败率不是网络丢包率；setup 包含代理路径与目标 TLS；吞吐包含建连开销；CPU/RSS 仅本机客户端内核。"}
+    for e in ordered(entries, args.entries):
+        row = {"id": e["id"]}
+        try:
+            with Core(e, args) as core:
+                before = core.resources()
+                samples = []
+                for _ in range(args.samples):
+                    if STOP.is_set():
+                        break
+                    samples.append(safe_request(core, args.url, args.timeout, cafile=args.ca))
+                if not samples:
+                    raise UserError("测试已停止")
+                row["samples"] = [{k: s[k] for k in ("ok", "status", "setup_ms", "ttfb_ms", "error") if k in s} for s in samples]
+                row["request_failure_rate"] = sum(not s["ok"] for s in samples) / len(samples)
+                row["ttfb_ms"] = distribution([s["ttfb_ms"] for s in samples if s["ok"]])
+                loaded, transfer = [], {}
+                for name, url, limit, upload in (("download", args.download_url, args.bytes, 0), ("upload", args.upload_url, 0, args.bytes)):
+                    if not url:
+                        continue
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        task = pool.submit(safe_request, core, url, args.timeout, limit, upload, args.ca)
+                        while not task.done() and len(loaded) < args.samples * 2 and not STOP.is_set():
+                            sample = safe_request(core, args.url, args.timeout, cafile=args.ca)
+                            if sample["ok"]:
+                                loaded.append(sample["ttfb_ms"])
+                            STOP.wait(0.1)
+                        transfer[name] = {k: v for k, v in task.result().items() if k not in ("body_sha256", "location")}
+                row["transfers"] = transfer
+                row["loaded_ttfb_ms"] = distribution(loaded)
+                after = core.resources()
+                row["client_rss_bytes_at_end"] = after["rss_bytes"]
+                row["client_cpu_seconds"] = None if before["cpu_seconds"] is None or after["cpu_seconds"] is None else round(after["cpu_seconds"] - before["cpu_seconds"], 3)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            row["error"] = "client_start_failed: 检查该入口所需内核、版本及配置"
+        report["entries"].append(row)
+        if STOP.is_set():
+            break
+    if args.output:
+        private_json(args.output, report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return int(any(e.get("error") or e.get("request_failure_rate", 1) > 0 or any(not v["ok"] for v in e.get("transfers", {}).values()) for e in report["entries"]))
+
+
+class FailoverPolicy:
+    """A switch never migrates or terminates an existing connection."""
+    def __init__(self, count, failures=3, recoveries=3, cooldown=60):
+        self.failures, self.recoveries, self.cooldown = failures, recoveries, cooldown
+        self.bad, self.good = [0] * count, [0] * count
+        self.available, self.active = [False] * count, None
+        self.last_switch = float("-inf")
+
+    def update(self, results, now):
+        for i, ok in enumerate(results):
+            self.good[i] = self.good[i] + 1 if ok else 0
+            self.bad[i] = 0 if ok else self.bad[i] + 1
+            if ok and (self.last_switch == float("-inf") or self.good[i] >= self.recoveries):
+                self.available[i] = True
+            if self.bad[i] >= self.failures:
+                self.available[i] = False
+        candidates = [i for i, ok in enumerate(results) if ok and self.available[i]]
+        old = self.active
+        if old is None or not self.available[old]:
+            self.active = candidates[0] if candidates else None
+        elif candidates and candidates[0] < old and now - self.last_switch >= self.cooldown and self.good[candidates[0]] >= self.recoveries:
+            self.active = candidates[0]
+        if old != self.active:
+            self.last_switch = now
+        return self.active
+
+
+def relay(left, right):
+    """Bounded buffers, half-close propagation and a five-minute idle limit."""
+    sockets = (left, right)
+    buffers = {left: bytearray(), right: bytearray()}
+    readable = set(sockets)
+    closed_write = set()
+    last = time.monotonic()
+    for s in sockets:
+        s.setblocking(False)
+    while not STOP.is_set() and time.monotonic() - last < 300:
+        for src, dst in ((left, right), (right, left)):
+            if src not in readable and not buffers[dst] and dst not in closed_write:
+                dst.shutdown(socket.SHUT_WR)
+                closed_write.add(dst)
+        if not readable and not any(buffers.values()):
+            return
+        readers = [s for s in readable if len(buffers[right if s is left else left]) < 262144]
+        writers = [s for s in sockets if buffers[s]]
+        ready_r, ready_w, _ = select.select(readers, writers, [], 1)
+        for s in ready_r:
+            chunk = s.recv(65536)
+            if chunk:
+                buffers[right if s is left else left].extend(chunk)
+                last = time.monotonic()
+            else:
+                readable.remove(s)
+        for s in ready_w:
+            sent = s.send(buffers[s])
+            del buffers[s][:sent]
+            last = time.monotonic()
+
+
+class Front(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, address, handler):
+        self.slots = threading.BoundedSemaphore(128)
+        super().__init__(address, handler)
+
+    def process_request(self, request_socket, address):
+        if self.slots.acquire(False):
+            super().process_request(request_socket, address)
+        else:
+            self.shutdown_request(request_socket)
+
+    def process_request_thread(self, *args):
+        try:
+            super().process_request_thread(*args)
+        finally:
+            self.slots.release()
+
+    def handle_error(self, *args):
+        pass  # No tracebacks containing destination information.
+
+
+def failover(entries, args):
+    entries = ordered(entries, args.entries, default_pair=True)
+    if not 2 <= len(entries) <= 8:
+        raise UserError("回退需要 2 至 8 个入口；可用 --entries 指定顺序，或 probe merge 合并不同服务器配置")
+    cores = []
+    policy = FailoverPolicy(len(entries), args.failures, args.recoveries, args.cooldown)
+    lock = threading.Lock()
+    try:
+        for e in entries:
+            cores.append(Core(e, args).__enter__())
+
+        def health_round():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(cores)) as pool:
+                results = list(pool.map(lambda c: safe_request(c, args.url, args.timeout, cafile=args.ca)["ok"], cores))
+            with lock:
+                old = policy.active
+                new = policy.update(results, time.monotonic())
+            if old != new:
+                print(json.dumps({"event": "switch", "from": entries[old]["id"] if old is not None else None,
+                                  "to": entries[new]["id"] if new is not None else None}, ensure_ascii=False), flush=True)
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                upstream = None
+                try:
+                    self.request.settimeout(5)
+                    head = read_exact(self.request, 2)
+                    if head[0] != 5 or not head[1]:
+                        return
+                    methods = read_exact(self.request, head[1])
+                    if 0 not in methods:
+                        self.request.sendall(b"\x05\xff")
+                        return
+                    self.request.sendall(b"\x05\x00")
+                    req = read_exact(self.request, 4)
+                    if req[:3] != b"\x05\x01\x00":
+                        self.request.sendall(b"\x05\x07\x00\x01" + b"\x00" * 6)
+                        return
+                    host = socks_address(self.request, req[3])
+                    port = struct.unpack("!H", read_exact(self.request, 2))[0]
+                    with lock:
+                        active = policy.active
+                    if active is None:
+                        raise OSError("无健康入口")
+                    upstream = socks_connect(cores[active], host, port, args.timeout)
+                    self.request.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
+                    relay(self.request, upstream)
+                except (OSError, ValueError):
+                    try:
+                        self.request.sendall(b"\x05\x04\x00\x01" + b"\x00" * 6)
+                    except OSError:
+                        pass
+                finally:
+                    if upstream:
+                        upstream.close()
+
+        health_round()
+        with Front(("127.0.0.1", args.port), Handler) as server:
+            print(json.dumps({"event": "ready", "socks": "127.0.0.1:%d" % args.port,
+                              "entries": [e["id"] for e in entries], "tcp_only": True}, ensure_ascii=False), flush=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                while not STOP.wait(args.interval):
+                    health_round()
+            finally:
+                server.shutdown()
+                thread.join()
+    finally:
+        for core in reversed(cores):
+            core.__exit__(None, None, None)
+    return 0
+
+
+def tls_probe(host, port, sni, timeout, ca):
+    ctx = ssl.create_default_context(cafile=ca)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.set_alpn_protocols(["h2", "http/1.1"])
+    with socket.create_connection((host, port), timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=sni) as sock:
+            return {"tls": sock.version(), "alpn": sock.selected_alpn_protocol(),
+                    "certificate_sha256": hashlib.sha256(sock.getpeercert(binary_form=True)).hexdigest()}
+
+
+def reality(entries, args):
+    rows = []
+    for e in ordered(entries, args.entries):
+        meta = e.get("reality")
+        if not meta:
+            continue
+        row = {"id": e["id"], "checks": {}, "warnings": []}
+        checks = row["checks"]
+        try:
+            ordinary = tls_probe(meta["host"], meta["port"], meta["sni"], args.timeout, args.ca)
+            checks["ordinary_tls13_valid_certificate"] = True
+            checks["ordinary_h2"] = ordinary["alpn"] == "h2"
+            if meta.get("reference_host"):
+                reference = tls_probe(meta["reference_host"], meta["reference_port"], meta["sni"], args.timeout, args.ca)
+                checks["same_certificate"] = ordinary["certificate_sha256"] == reference["certificate_sha256"]
+                checks["same_alpn"] = ordinary["alpn"] == reference["alpn"]
+                url = "https://%s/" % meta["sni"]
+                first = request(None, url, args.timeout, 65536, cafile=args.ca, direct=(meta["host"], meta["port"]))
+                second = request(None, url, args.timeout, 65536, cafile=args.ca, direct=(meta["reference_host"], meta["reference_port"]))
+                checks["same_http_status"] = first["status"] == second["status"]
+                checks["same_redirect"] = first["location"] == second["location"]
+                if first["body_sha256"] != second["body_sha256"]:
+                    row["warnings"].append("前 64 KiB 内容不同；动态页面可能正常，需核对有无特有错误页")
+            else:
+                row["warnings"].append("自建站未开放可比较的 HTTPS 入口；可在服务器执行本地检查")
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            checks["ordinary_or_reference_probe"] = False
+            row["warnings"].append(type(exc).__name__)
+        try:
+            with Core(e, args) as core:
+                checks["authenticated_proxy"] = safe_request(core, args.url, args.timeout, cafile=args.ca)["ok"]
+            wrong = copy.deepcopy(e)
+            outbound = wrong["outbounds"][0]
+            if e["core"] == "singbox":
+                cfg, key = outbound["tls"]["reality"], "short_id"
+            else:
+                cfg, key = outbound["streamSettings"]["realitySettings"], "shortId"
+            old = cfg[key]
+            cfg[key] = secrets.token_hex(8)
+            while cfg[key] == old:
+                cfg[key] = secrets.token_hex(8)
+            with Core(wrong, args) as core:
+                checks["wrong_short_id_rejected"] = not safe_request(core, args.url, args.timeout, cafile=args.ca)["ok"]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            checks["authentication_test_completed"] = False
+        rows.append(row)
+    if not rows:
+        raise UserError("配置中没有 REALITY 入口")
+    result = {"schema": 1, "scope": args.scope, "entries": rows,
+              "note": "普通 TLS 回落与错误 short ID 的代理拒绝分别测试；不证明不可识别或公网可达。"}
+    if args.output:
+        private_json(args.output, result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if any(not all(r["checks"].values()) for r in rows) else (2 if any(r["warnings"] for r in rows) else 0)
+
+
+def bounded(low, high):
+    def parse(value):
+        number = int(value)
+        if not low <= number <= high:
+            raise argparse.ArgumentTypeError("必须在 %d..%d 之间" % (low, high))
+        return number
+    return parse
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="onebox", description="Onebox 客户端工具；需要 Python 3.8+ 和所选入口对应的 sing-box / Xray")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for command in ("bench", "failover", "reality"):
+        cmd = sub.add_parser(command)
+        cmd.add_argument("bundle")
+        cmd.add_argument("--entries", help="probe list 中的 ID，以逗号分隔；回退优先级从左到右")
+        cmd.add_argument("--singbox", help="sing-box 可执行文件路径")
+        cmd.add_argument("--xray", help="Xray 可执行文件路径")
+        cmd.add_argument("--url", default="https://www.gstatic.com/generate_204", help="端到端健康测试 URL，需要返回 2xx；不会跟随跳转")
+        cmd.add_argument("--timeout", type=bounded(1, 60), default=8)
+        cmd.add_argument("--ca", help="测试目标的自有 CA 文件（不关闭证书校验）")
+        if command != "failover":
+            cmd.add_argument("--output", help="新建 0600 JSON 报告，不覆盖文件")
+        if command == "bench":
+            cmd.add_argument("--samples", type=bounded(1, 20), default=5)
+            cmd.add_argument("--download-url", help="可选下载测试端点；最多读取 --bytes 字节")
+            cmd.add_argument("--upload-url", help="可选、由你授权接收 POST 数据的上传端点")
+            cmd.add_argument("--bytes", type=bounded(1024, 67108864), default=4194304)
+        elif command == "failover":
+            cmd.add_argument("--port", type=bounded(1024, 65535), default=2080)
+            cmd.add_argument("--interval", type=bounded(1, 3600), default=15)
+            cmd.add_argument("--failures", type=bounded(1, 20), default=3)
+            cmd.add_argument("--recoveries", type=bounded(1, 20), default=3)
+            cmd.add_argument("--cooldown", type=bounded(0, 3600), default=60)
+        else:
+            cmd.add_argument("--scope", choices=("server-local", "current-machine-to-server"), default="current-machine-to-server")
+    show = sub.add_parser("list")
+    show.add_argument("bundle")
+    merge = sub.add_parser("merge")
+    merge.add_argument("output")
+    merge.add_argument("bundles", nargs="+")
+    args = parser.parse_args(argv)
+    if getattr(args, "output", None) and os.path.lexists(args.output):
+        raise UserError("输出文件已存在；请选择新文件路径")
+    if args.command == "merge":
+        entries = []
+        for i, path in enumerate(args.bundles, 1):
+            for e in load_bundle(path)["entries"]:
+                e["id"] = "n%d-%s" % (i, e["id"])
+                entries.append(e)
+        if len(entries) > 32:
+            raise UserError("合并后不能超过 32 个入口")
+        private_json(args.output, {"schema": 1, "entries": entries})
+        return 0
+    entries = load_bundle(args.bundle)["entries"]
+    if args.command == "list":
+        for e in entries:
+            print("%s\t%s\t%s" % (e["id"], e["transport"], e["core"]))
+        return 0
+    url_parts(args.url)
+    for attr in ("download_url", "upload_url"):
+        if getattr(args, attr, None):
+            url_parts(getattr(args, attr))
+    return {"bench": bench, "failover": failover, "reality": reality}[args.command](entries, args)
+
+
+def stop_signal(*unused):
+    STOP.set()
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, stop_signal)
+    signal.signal(signal.SIGTERM, stop_signal)
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        # Do not print exception strings: malformed configs/URLs can contain secrets.
+        message = str(error) if isinstance(error, UserError) else "客户端工具失败 (%s)；检查参数、配置和客户端内核版本。" % type(error).__name__
+        print("[错误] " + message, file=sys.stderr)
+        sys.exit(1)
+ONEBOX_CLIENT_PY
+}
+# END embedded-client-runtime
 
 # ONEBOX_SOURCE_ONLY=1 时仅加载函数 (供测试使用)
 [ -n "${ONEBOX_SOURCE_ONLY:-}" ] || main "$@"

@@ -18,6 +18,11 @@ jobs:
         run: shellcheck -s bash -S warning onebox.sh tests/*.sh
       - name: unit tests
         run: bash tests/unit.sh
+      - name: Embedded client runtime and policy tests
+        run: |
+          python3 scripts/embed-runtime.py --check
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          bash tests/performance.sh
       - name: Owned-domain REALITY site regressions
         run: bash tests/site.sh
       - name: Failure-path and compatibility regressions
@@ -66,6 +71,9 @@ jobs:
 
       - name: Snapshot restore with real core validation
         run: ONEBOX_TEST_SINGBOX="$RUNNER_TEMP/bin/sing-box" bash tests/snapshots.sh
+
+      - name: Real client benchmark, Hysteria2 tuning and failover recovery
+        run: SB="$RUNNER_TEMP/bin/sing-box" XR="$RUNNER_TEMP/bin/xray" bash tests/client-runtime-e2e.sh
 
       - name: Download mihomo
         run: |

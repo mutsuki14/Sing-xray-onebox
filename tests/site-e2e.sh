@@ -219,6 +219,10 @@ EOF
 	check "$core 公网 REALITY 入口支持 TLS 1.3 / h2" browser_h2 "$port" "$dir/h2.log"
 	check "$core 认证客户端仍可代理访问测试目标" authenticated_get "$socks"
 	check "$core 认证客户端仍禁止直接访问 loopback" private_rejected "$socks" "$dir/private.txt"
+	gen_probe_bundle local >"$dir/probe.json"
+	check "$core REALITY 一致性、正确认证、错误 short ID 检查" \
+		_client_runtime reality "$dir/probe.json" --scope server-local --singbox "$SB" --xray "$XR" \
+		--ca "$WORK/pki/ca.pem" --url "http://allowed.site-e2e.test:$TARGET_HTTP_PORT/" --timeout 3
 	if [ "$core" = xray ]; then
 		check '错误 SNI 的 nginx 后端控制组可访问' wrong_sni_backend
 		check 'Xray guard 拒绝错误 SNI（不依赖客户端验签）' wrong_sni_rejected
