@@ -2,7 +2,7 @@
 
 **sing-box / Xray 多协议组合 · 交互式一键安装与管理脚本**
 
-当前版本：**v1.3.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+当前版本：**v1.4.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
 
 适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
 服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），并自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
@@ -31,6 +31,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 - **证书**：自签证书（客户端自动固定证书指纹，无需关闭校验即可安全连接）/ Let's Encrypt（HTTP 验证或 Cloudflare DNS 验证，acme.sh 自动续期）/ 自有证书。
 - **自有域名 REALITY 网站**：使用自己的域名一键生成可编辑的主页、申请 Let's Encrypt 证书并自动续期，普通浏览器与 REALITY 客户端共用公网入口。
 - **管理与恢复**：只读安装预演、一键体检、证书状态、稳定/测试更新渠道、本机快照与手动恢复、静态网站模板和内容导入、本地脱敏诊断包。
+- **链路与性能**：真实客户端链路测试、Hysteria2 拥塞与接收窗口调优、REALITY 一致性检查，以及带连续失败阈值、恢复冷却期的客户端多入口回退。
 - **贴心细节**：自动检测端口占用、放行防火墙（ufw / firewalld / iptables，含甲骨文云默认规则）、Hysteria2 端口跳跃、BBR、
   屏蔽 BT 与回环/内网访问、配置写入前先经内核校验（失败不覆盖旧配置）、国内服务器 GitHub 加速。
 - **经过真实流量测试**：仓库自带端到端测试，覆盖 *协议 × 服务端内核 × 客户端* 的全部组合（TCP 与 UDP）。
@@ -354,9 +355,106 @@ Xray 需要重启，可在 certbot 的续期钩子中加入 `onebox restart`（�
 校验通过后才替换；若新配置下服务无法启动，脚本会自动回滚到修改前的配置并以非零状态退出。
 更换证书时若申请失败、配置无法生效或中途按 Ctrl-C，证书文件、acme.sh 的域名配置与 Cloudflare 凭据、临时放行的 80 端口也会一并恢复。
 
+## 链路测试、调优与回退（1.4.0）
+
+菜单 **23** 提供探测配置导出和 REALITY 本机检查，菜单 **24** 提供调优。`onebox.sh` 内嵌客户端工具；日常安装不新增 Python 依赖，**运行探测/回退工具的客户端**需要 Bash 4+、Python 3.8+，以及对应的 sing-box / Xray 可执行文件。无需 root，不会启动系统服务。
+
+### 真实链路测试
+
+先在服务器导出，再将 `onebox.sh` 和导出的文件私密复制到实际使用代理的客户端。也可使用 `/etc/onebox/client/probe.json`，它随客户端配置一起生成。
+
+```bash
+# 服务器：目标文件必须不存在，权限为 0600；包含客户端凭据，不含服务端私钥
+onebox probe export /root/probe.json
+
+# 客户端：查看 ID，再从真实客户端网络进行测试
+bash onebox.sh probe list probe.json
+bash onebox.sh bench probe.json --output bench-before.json
+
+# 自选、允许你进行测试的端点；下载最多读取 4 MiB，上传 POST 4 MiB
+bash onebox.sh bench probe.json --entries vless-reality,hysteria2 \
+  --download-url https://your-test.example/4MiB.bin \
+  --upload-url https://your-test.example/upload --bytes 4194304 \
+  --samples 5 --output bench-after.json
+```
+
+`--singbox /path/sing-box`、`--xray /path/xray` 可指定客户端内核，否则从 PATH 寻找。每个入口启动独立的临时原生客户端，所有测试请求通过该入口；没有直连兜底。目标域名由代理链路解析；代理服务器自身域名仍使用客户端本地 DNS。默认只访问 `https://www.gstatic.com/generate_204` 做轻量检测，`--url` 可替换为返回 2xx 的稳定端点；不跟随跳转，不关闭 TLS 校验。下载/上传只有显式传入 URL 才执行，上传端点应由你管理或授权使用。
+
+报告包含逐次建连/目标 TLS 总耗时（`setup_ms`）、TTFB 的中位数与 P95、请求失败率、实测字节数与吞吐，以及传输期间的 TTFB、本机客户端内核 CPU 时间和结束时 RSS。吞吐包含建连开销，短测试不能代表最大带宽；请求失败率**不等于网络丢包率**，也不测 VPS CPU 或逐包 RTT。在 VPS 自己运行只代表该机器的路径，不能代表客户端到 VPS 的性能。报告不包含凭据、完整 URL 或原始日志；`--output` 不覆盖已有文件。存在失败时返回 1。
+
+### Hysteria2 与资源调优
+
+```bash
+onebox tune status
+onebox tune hy2 auto                         # 预览：原生 BBR 自动估计带宽
+onebox tune hy2 conservative --apply         # 保守 BBR
+onebox tune hy2 measured --up 20 --down 100 --apply
+onebox tune resource low-memory --apply
+onebox tune resource throughput --apply
+onebox tune resource balanced --apply        # 撤销接收窗口覆盖，保留拥塞选择
+onebox tune reset --apply                    # 恢复全部原生默认设置
+```
+
+命令默认只预览，`--apply` 才备份并应用；菜单中的“自动/保守/实测”等选项直接应用。配置经过内核校验，失败由原有事务恢复。可用 `onebox backups` / `onebox restore ID` 回到调优前的精确状态。应用后需重新导入客户端配置/探测文件，再用同一客户端、端点和参数对比报告。
+
+| 选项 | 实际改变 | 适用范围 |
+|---|---|---|
+| `auto` | 服务端要求客户端使用 BBR，不指定固定带宽 | sing-box Hysteria2 服务端 |
+| `conservative` | 上述行为 + `bbr_profile=conservative` | sing-box 服务端/客户端 ≥ 1.14；mihomo ≥ 1.19.32 |
+| `measured` | 指定上传/下载 Mbps，选择 Hysteria 带宽控制；服务端方向自动反转 | sing-box Hysteria2 服务端；sing-box / mihomo 客户端 |
+| `balanced` | 不覆盖内核接收窗口和并发默认值 | 原生默认行为 |
+| `low-memory` | 流/连接接收窗口 2 / 5 MiB；服务端并发流上限 64 | sing-box Hysteria2 ≥ 1.14；客户端窗口同时输出到 mihomo |
+| `throughput` | 流/连接接收窗口 16 / 40 MiB；服务端并发流上限 1024 | 同上；高时延/带宽链路需实测验证 |
+
+`--up` 和 `--down` 始终以**客户端视角**填写，范围 1–10000 整数 Mbps。请依据可用带宽并留余量；随意填大数可能拥塞。窗口是上限而非预分配量，高并发下仍可能增加内存占用。保持 QUIC 默认 MTU 探测和握手特征设置，不关闭私网拦截。系统 TCP BBR、UDP socket buffer 和 QUIC 拥塞控制是不同层面的设置，本功能仅报告系统参数，不修改 sysctl。
+
+这些调优不作用于 TUIC 或 Xray Hysteria2 服务端；不支持的服务端组合会明确拒绝。Xray 客户端和分享链接不携带这些新增调优字段，需要完整 sing-box / mihomo 配置才能复现实测设置。原有未调优的 sing-box 客户端仍兼容 ≥ 1.12。
+
+### REALITY 一致性检查
+
+```bash
+onebox reality-check                           # 服务器：回环检查
+bash onebox.sh reality-check probe.json         # 客户端：真实路径检查
+bash onebox.sh reality-check probe.json --entries vless-reality \
+  --url https://your-test.example/health --output reality-report.json
+```
+
+检查普通 TLS 访问的证书名称/信任链、TLS 1.3、h2、参考目标与节点的证书/ALPN/HTTP 状态/重定向一致性；比较页面前 64 KiB 摘要，内容不同给出警告。还会分别启动正确凭据和错误 short ID 的真实客户端，验证正常代理成功、错误凭据无法代理。动态页面或负载均衡证书可能产生差异，需要人工核对，不能仅据此认定被识别。
+
+自建站的远端参考入口使用服务器的 HTTPS 443；未启用时提示无法从客户端比较，服务器回环检查仍比较实际内部端口。自有测试 CA 可通过 `--ca` 指定。只检查配置中的入口与参考站，不枚举其他目标。返回 0 表示所检项目通过，1 表示有失败，2 表示只有警告。普通 TLS 回落和错误凭据拒绝分别验证，不声称捕获了错误 REALITY 握手的完整指纹，也不保证不可识别。本机检查不证明公网可达。
+
+### 客户端多入口回退
+
+```bash
+# 一个服务器：默认选首个 TCP 入口为主、首个 UDP 传输入口为备
+bash onebox.sh failover probe.json
+
+# 不同服务器/IP：分别导出，然后在客户端合并（不复制服务端私钥）
+bash onebox.sh probe merge combined.json server-a.json server-b.json
+bash onebox.sh probe list combined.json
+bash onebox.sh failover combined.json \
+  --entries n1-vless-reality,n2-hysteria2 \
+  --port 2080 --interval 15 --failures 3 --recoveries 3 --cooldown 60
+```
+
+应用程序连接 `socks5h://127.0.0.1:2080`，域名应通过 SOCKS 发送。`--entries` 从左到右为优先级，支持 2–8 个入口；没有 TCP+UDP 组合时可显式选择两个入口。每轮经各入口请求健康端点，连续失败达到阈值才切换，优先入口连续恢复且冷却期到期才切回；全部失败时拒绝新连接，不直连。冷却期不妨碍从已经故障的入口紧急切走。
+
+这是前台运行的 **SOCKS5 CONNECT/TCP** 工具：Hysteria2/TUIC 入口可用 UDP 传输承载这些 TCP 流，但本地接口不提供 SOCKS UDP ASSOCIATE、HTTP 代理或 TUN；游戏等原生 UDP 应用继续使用完整客户端配置。只切换新连接，不迁移或主动切断已有连接。Ctrl+C 会清理临时内核、配置与监听端口。监听仅限本机，临时内核另设随机认证；每个所选入口运行一个内核，低内存设备建议只选两个。最多同时处理 128 条连接，空闲连接 5 分钟回收。
+
+同 IP 的多协议能应对部分协议/传输故障，不能应对整个 IP 不可达；IP 冗余需要合并实际不同服务器的配置。健康端点失效也会触发切换，请使用稳定的自有端点。合并文件含所有入口的客户端凭据，保持私密。
+
 ## 测试
 
 仓库自带的测试直接调用脚本的配置生成函数，在本机回环地址上运行真实的服务端与客户端：
+
+```bash
+python3 scripts/embed-runtime.py --check
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+bash tests/performance.sh
+SB=/path/sing-box XR=/path/xray bash tests/client-runtime-e2e.sh
+```
+
+`lib/client_runtime.py` 是客户端工具源码，修改后运行 `python3 scripts/embed-runtime.py` 同步到单文件脚本；CI 检查两份代码一致。新增端到端用例覆盖带宽/窗口配置后的真实 Hysteria2、上传/下载、错误凭据、主入口中断与恢复；网站端到端用例包含 REALITY 一致性和错误 short ID 验证。
 
 ```bash
 # 端到端: 每个 协议 × 服务端内核 × 客户端 (sing-box / Xray / mihomo / 分享链接) 组合均验证 TCP 与 UDP 连通
@@ -366,7 +464,7 @@ SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/e2e.sh
 ONEBOX_LIFECYCLE=1 SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/lifecycle.sh
 ```
 
-测试目标只能经由代理服务端访问（服务端将测试专用的域名 / TEST-NET 地址改写到本机），因此任何绕过代理的“假通过”都会被判为失败。
+完整协议矩阵的测试目标只能经由代理服务端访问（服务端将测试专用的域名 / TEST-NET 地址改写到本机），因此绕过代理的“假通过”会被判为失败。客户端工具测试另有错误凭据拒绝和真实入口中断用例。
 
 ## 免责声明
 
