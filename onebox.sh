@@ -1904,6 +1904,9 @@ _bbr_lock() {
 	_support_path_safe "$BBR_DATA_DIR/lock" && _support_path_safe "$BBR_SYSCTL_CONF" || {
 		err "BBR 管理路径不能包含符号链接或相对路径"; return 1;
 	}
+	[ ! -e "$BBR_SYSCTL_CONF" ] || [ -f "$BBR_SYSCTL_CONF" ] || {
+		err "BBR 配置路径必须是普通文件"; return 1;
+	}
 	mkdir -p "$BBR_DATA_DIR" && chmod 700 "$BBR_DATA_DIR" || return 1
 	exec 9>"$BBR_DATA_DIR/lock" || return 1
 	flock -n 9 || { err "另一个 BBR 操作正在进行"; return 1; }
@@ -2075,8 +2078,8 @@ _bbr_kernel_preflight() {
 		has "$cmd" || { err "安装 BBRv3 缺少 $cmd，请先安装对应系统包"; return 1; }
 	done
 	[ "$(dpkg --print-architecture)" = "$BBR_DEB_ARCH" ] || { err "系统用户空间架构与内核架构不匹配"; return 1; }
-	_bbr_boot_ready || return 1
-	_bbr_secure_boot_disabled || { err "Secure Boot 已启用或状态不明，不能安装未经本机信任签名的内核"; return 1; }
+	_bbr_boot_ready "" || return 1
+	_bbr_secure_boot_disabled /sys || { err "Secure Boot 已启用或状态不明，不能安装未经本机信任签名的内核"; return 1; }
 	_bbr_space /boot 524288 && _bbr_space / 2097152
 }
 

@@ -324,6 +324,12 @@ symlink_rejected() {
 	! enable_bbr fq && [ "$(cat "$CASE/other")" = untouched ] && [ "$(cat "$CASE/cc")" = cubic ]
 }
 check symlink_rejected
+config_directory_rejected() {
+	sysctl_fixture
+	rm "$BBR_SYSCTL_CONF"; mkdir "$BBR_SYSCTL_CONF"
+	! enable_bbr fq && [ "$(cat "$CASE/cc")" = cubic ] && [ ! -e "$BBR_SYSCTL_CONF/config" ]
+}
+check config_directory_rejected
 status_no_mutations() {
 	sysctl_fixture
 	dpkg-query() { return 1; }; tc() { echo 'qdisc existing-root'; }; modinfo() { echo 3; }
