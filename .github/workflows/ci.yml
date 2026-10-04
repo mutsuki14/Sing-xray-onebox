@@ -25,6 +25,8 @@ jobs:
           bash tests/performance.sh
       - name: Owned-domain REALITY site regressions
         run: bash tests/site.sh
+      - name: BBR management and kernel install safety (mock system only)
+        run: bash tests/bbr.sh
       - name: Failure-path and compatibility regressions
         run: |
           for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh tests/site-https.sh tests/preflight.sh tests/releases.sh tests/diagnostics.sh tests/support.sh tests/snapshots.sh tests/site-management.sh; do
