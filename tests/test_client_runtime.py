@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import tempfile
 import threading
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,6 +153,33 @@ class Tests(unittest.TestCase):
         finally:
             for sock in (a, left, right, b):
                 sock.close()
+
+    def test_trickling_headers_obey_total_read_deadline(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                try:
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+                    for _ in range(20):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(0.03)
+                    self.wfile.write(b"\r\nContent-Length: 0\r\n\r\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            def log_message(self, *args):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            start = time.monotonic()
+            result = rt.safe_request(None, "http://127.0.0.1:%d/" % server.server_port, timeout=0.15)
+            self.assertFalse(result["ok"])
+            self.assertLess(time.monotonic() - start, 0.5)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
 
 if __name__ == "__main__":

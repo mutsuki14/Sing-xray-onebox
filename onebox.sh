@@ -7962,6 +7962,7 @@ import copy
 import hashlib
 import http.client
 import ipaddress
+import io
 import json
 import math
 import os
@@ -8191,6 +8192,30 @@ def url_parts(url):
     return p
 
 
+class DeadlineReader(io.RawIOBase):
+    """Bound the complete response read, including trickling HTTP headers."""
+    def __init__(self, sock, deadline):
+        self.sock, self.deadline = sock, deadline
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        self.sock.settimeout(remaining)
+        return self.sock.recv_into(buffer)
+
+
+class ResponseSocket:
+    def __init__(self, sock, deadline):
+        self.sock, self.deadline = sock, deadline
+
+    def makefile(self, *unused):
+        return io.BufferedReader(DeadlineReader(self.sock, self.deadline))
+
+
 def request(core, url, timeout=8, limit=0, upload=0, cafile=None, direct=None):
     """Bound bytes/time, no redirect, proxy-side DNS, no ambient proxy settings.
 
@@ -8225,7 +8250,7 @@ def request(core, url, timeout=8, limit=0, upload=0, cafile=None, direct=None):
             chunk = payload[:min(len(payload), upload - sent)]
             sock.sendall(chunk)
             sent += len(chunk)
-        response = http.client.HTTPResponse(sock)
+        response = http.client.HTTPResponse(ResponseSocket(sock, started + timeout))
         response.begin()
         # HTTP headers are the first application response bytes.
         ttfb = time.monotonic() - started
@@ -8365,14 +8390,20 @@ def relay(left, right):
         writers = [s for s in sockets if buffers[s]]
         ready_r, ready_w, _ = select.select(readers, writers, [], 1)
         for s in ready_r:
-            chunk = s.recv(65536)
+            try:
+                chunk = s.recv(65536)
+            except BlockingIOError:
+                continue
             if chunk:
                 buffers[right if s is left else left].extend(chunk)
                 last = time.monotonic()
             else:
                 readable.remove(s)
         for s in ready_w:
-            sent = s.send(buffers[s])
+            try:
+                sent = s.send(buffers[s])
+            except BlockingIOError:
+                continue
             del buffers[s][:sent]
             last = time.monotonic()
 
@@ -8425,6 +8456,7 @@ def failover(entries, args):
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
                 upstream = None
+                established = False
                 try:
                     self.request.settimeout(5)
                     head = read_exact(self.request, 2)
@@ -8447,10 +8479,12 @@ def failover(entries, args):
                         raise OSError("无健康入口")
                     upstream = socks_connect(cores[active], host, port, args.timeout)
                     self.request.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
+                    established = True
                     relay(self.request, upstream)
                 except (OSError, ValueError):
                     try:
-                        self.request.sendall(b"\x05\x04\x00\x01" + b"\x00" * 6)
+                        if not established:
+                            self.request.sendall(b"\x05\x04\x00\x01" + b"\x00" * 6)
                     except OSError:
                         pass
                 finally:
