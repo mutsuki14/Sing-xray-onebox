@@ -6036,7 +6036,7 @@ do_uninstall() {
 			rm -f "$BBR_SYSCTL_CONF"
 		fi
 	fi
-	if _frps_installed; then info "FRP 仍在运行，保留 onebox 管理命令；单独卸载请用 onebox frps uninstall";
+	if _frps_installed; then info "检测到独立 FRP 安装，保留 onebox 管理命令；单独卸载请用 onebox frps uninstall";
 	else rm -f "$CMD_PATH"; fi
 	info "卸载完成"
 }

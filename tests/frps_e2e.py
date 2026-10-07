@@ -123,6 +123,7 @@ class Runner:
         self.work, self.frps, self.frpc, self.nginx = work, frps, frpc, nginx
         self.ports = json.loads((work / "ports.json").read_text())
         self.processes, self.logs, self.servers = [], [], []
+        self.named_processes, self.original_tls_clients = {}, {}
         self.passed = self.failed = 0
 
     def start(self, name, args, cwd=None):
@@ -130,7 +131,28 @@ class Runner:
         self.logs.append(log)
         process = subprocess.Popen(args, cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
         self.processes.append(process)
+        self.named_processes[name] = process
         return process
+
+    @staticmethod
+    def stop(process):
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    def dump_logs(self):
+        for path in sorted(self.work.glob("*.log")):
+            if not path.name.startswith(("client-", "frps-", "nginx")):
+                continue
+            text = "\n".join(path.read_text(errors="replace").splitlines()[-25:])[-6000:]
+            text = re.sub(r"\b[a-f0-9]{64}\b", "[redacted-token-or-digest]", text)
+            text = text.replace("incorrect-e2e-token", "[redacted-test-token]")
+            text = re.sub(r"(?im)(auth[.]token\s*=\s*)[^\n]*", r"\1[redacted]", text)
+            print(f"[fixture log: {path.name}]\n{text}", file=sys.stderr, flush=True)
 
     def close(self):
         for process in reversed(self.processes):
@@ -168,6 +190,7 @@ class Runner:
         except Exception as error:  # Continue to expose all independent regressions.
             self.failed += 1
             print(f"[FAIL] {label}: {error}", file=sys.stderr, flush=True)
+            self.dump_logs()
 
     @staticmethod
     def listener(port, host="127.0.0.1"):
@@ -207,6 +230,11 @@ class Runner:
             # modified out-of-range fixture derived from the valid TCP export.
             text, count = re.subn(r'(?m)^name\s*=.*$', f'name = "{config.parent.name}"', text)
             assert count == 1, "proxy name missing or duplicated"
+            if config.parent.name in ("client-bad-ca", "client-bad-name"):
+                # FRP routes yamux's underlying TLS errors to trace; info logs
+                # may only expose the resulting "session shutdown" wrapper.
+                text = text.replace('log.to = "console"', 'log.to = "console"\nlog.level = "trace"')
+                self.original_tls_clients[config.parent.name] = text, ca.read_bytes()
             if config.parent.name == "client-bad-token":
                 text, count = re.subn(r'(?m)^auth\.token\s*=.*$', 'auth.token = "incorrect-e2e-token"', text)
                 assert count == 1, "auth.token missing"
@@ -282,6 +310,35 @@ class Runner:
                 time.sleep(0.1)
                 continue
             raise AssertionError(f"forbidden proxy opened port {port}")
+
+    def tls_rejection_and_recovery(self, name, port):
+        # Require the actual certificate rejection from yamux's trace output,
+        # then prove the same proxy works after restoring only the trust root
+        # or expected server name. A generic session error is not evidence.
+        self.denied_client(name, port,
+                           r"x509|unknown authority|certificate.*(?:valid|verif)")
+        self.assert_log(self.work / (name + ".log"), r"try to connect to server")
+        self.stop(self.named_processes[name])
+        config = self.work / "tcp" / name / "frpc.toml"
+        ca = config.parent / "ca.pem"
+        good_config, good_ca = self.original_tls_clients[name]
+        if name == "client-bad-ca":
+            assert config.read_text() == good_config, "CA test changed non-CA settings"
+            assert ca.read_bytes() != good_ca, "CA corruption was not applied"
+            ca.write_bytes(good_ca)
+        elif name == "client-bad-name":
+            assert ca.read_bytes() == good_ca, "server-name test changed its CA"
+            bad_config, count = re.subn(r'(?m)^transport\.tls\.serverName\s*=.*$',
+                                        'transport.tls.serverName = "wrong.example.test"', good_config)
+            assert count == 1 and config.read_text() == bad_config, "server-name test changed unrelated settings"
+            config.write_text(good_config)
+        else:
+            raise AssertionError("unknown TLS rejection fixture")
+        recovered = self.start(name + "-recovered", [self.frpc, "-c", str(config)], cwd=config.parent)
+        try:
+            self.eventually(lambda: self.content(port))
+        finally:
+            self.stop(recovered)
 
     @staticmethod
     def assert_log(path, pattern):
@@ -363,9 +420,9 @@ class Runner:
         self.check("incorrect token cannot create a TCP proxy",
                    lambda: self.denied_client("client-bad-token", self.ports["range_start"] + 2, r"token.*(?:match|invalid|error)|authentication.*fail"))
         self.check("incorrect CA cannot authenticate the control server",
-                   lambda: self.denied_client("client-bad-ca", self.ports["range_start"] + 3, r"x509|unknown authority|certificate.*verif"))
+                   lambda: self.tls_rejection_and_recovery("client-bad-ca", self.ports["range_start"] + 3))
         self.check("incorrect TLS server name cannot authenticate the control server",
-                   lambda: self.denied_client("client-bad-name", self.ports["range_start"] + 4, r"x509|certificate.*valid|certificate.*verif"))
+                   lambda: self.tls_rejection_and_recovery("client-bad-name", self.ports["range_start"] + 4))
         self.check("server enforces allowed remote port range",
                    lambda: self.denied_client("client-bad-port", self.ports["range_end"] + 1, r"(?:port.*(?:not allowed|not allow|denied)|port not)"))
         print(f"FRP E2E: {self.passed} passed, {self.failed} failed", flush=True)
@@ -384,6 +441,9 @@ def main():
     runner = Runner(work, *sys.argv[3:6])
     try:
         return 0 if runner.run() else 1
+    except Exception:
+        runner.dump_logs()
+        raise
     finally:
         runner.close()
 
