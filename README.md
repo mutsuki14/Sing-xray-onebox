@@ -2,7 +2,7 @@
 
 **sing-box / Xray 多协议组合 · 交互式一键安装与管理脚本**
 
-当前版本：**v1.6.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+当前版本：**v1.6.1**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
 
 适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
 服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），并自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
@@ -12,7 +12,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 ```
 
-安装完成后，随时输入 `onebox` 打开管理菜单。
+安装完成后，随时输入 `onebox` 打开管理菜单。菜单按「部署与连接」「代理与网站配置」「运行与诊断」「性能与维护」分组，保留原有选项编号；FRP 管理仍为 **25**。
 
 ---
 
@@ -248,6 +248,10 @@ BBR/队列配置保存到 `/etc/sysctl.d/99-onebox-bbr.conf`，应用失败恢�
 
 `onebox frps` 管理独立的 [fatedier/frp](https://github.com/fatedier/frp) 服务端。默认安装 **0.71.0**，下载时校验官方 GitHub Release 的 SHA-256、文件大小与版本；可指定更新版本或 `latest`。配置预览用 `onebox frps plan`，实际安装 / 配置需要确认；无人值守时显式添加 `-y`。
 
+直接运行 `onebox frps install` 或 `onebox frps configure`，不附加参数，即可进入交互向导：**用途 → 域名 → 公网端口 → 网站证书 → 高级设置**；TCP/UDP 模式自动跳过网站证书步骤。回车保留默认值，`b` 返回上一步，`q` 取消，Ctrl+D 结束输入并安全退出。最后显示部署摘要，可确认部署、返回修改或取消；确认后才安装依赖、验证 DNS、申请证书并应用配置。
+
+向导会检查端口占用和已有代理的预留范围，并建议可用的候选端口；例如 443 不可用时建议 8443 或 9443。泛域名默认选择 Cloudflare DNS 验证；TCP 80 已被占用时，HTTP-01 不可选，需使用 DNS 验证或自备证书。Cloudflare Token 输入不回显，可使用环境变量提供的凭据；检测到已保存凭据时，可选择继续使用或更换 Token。DNS 记录仍需提前手动配置。
+
 | 模式 | 用途与公网入口 | 内部连接 |
 |---|---|---|
 | `web`（默认） | 浏览器通过应用域名的 HTTPS 443 访问内网网站；支持单域名或一级泛域名 | 独立 Nginx 终止 HTTPS，保留 Host 反代到 `127.0.0.1:7080` 的 frps HTTP 入口；客户端使用 `type = "http"` |
@@ -317,6 +321,8 @@ onebox frps client /root/frpc-udp --type udp --local-port 27015 --remote-port 45
 
 ### 客户端配置与证书
 
+已部署 FRP 后，直接运行 **`onebox frps client`** 可交互导出：选择内网服务端口，按模式选择 TCP / UDP 与公网转发端口，或填写泛域名的子域标签，再指定新的导出目录。目录已存在时可重新选择；`b` 返回上一步，`q` 或 Ctrl+D 取消。原有带目录和选项的命令仍可用于自动化，例如 `onebox frps client /root/frpc-home --type http --local-port 8080`。
+
 导出目录必须尚不存在。目录权限为 `700`，文件为 `600`，包含 `frpc.toml`、公开的 `ca.pem` 和使用说明；配置含 token，**不包含 CA 私钥、服务端私钥或网站私钥**。在内网机器安装与服务端相同版本的官方 frpc，私密传输整个导出目录，然后先进入该目录再运行：
 
 ```bash
@@ -332,6 +338,9 @@ frpc -c frpc.toml
 ### 管理与参数
 
 ```bash
+onebox frps install                       # 无附加参数：交互安装向导
+onebox frps configure                     # 无附加参数：交互重新配置
+onebox frps client                        # 交互选择内网服务并导出客户端配置
 onebox frps info                          # 域名、端口、配置与证书位置
 onebox frps status                        # 独立 FRP 服务状态
 onebox frps start                         # 也支持 stop / restart

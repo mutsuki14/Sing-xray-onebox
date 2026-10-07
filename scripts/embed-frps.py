@@ -7,7 +7,7 @@ root = pathlib.Path(__file__).resolve().parent.parent
 script = root / "onebox.sh"
 start = "# BEGIN embedded-frps\n"
 end = "# END embedded-frps\n"
-files = ["frps.sh", "frps-domain.sh", "frps-firewall.sh"]
+files = ["frps.sh", "frps-domain.sh", "frps-firewall.sh", "frps-ui.sh"]
 block = start + "\n".join((root / "lib" / name).read_text().rstrip() + "\n" for name in files) + end
 old = script.read_text()
 if start in old:
