@@ -17,7 +17,9 @@ jobs:
       - name: shellcheck
         run: shellcheck -s bash -S warning onebox.sh tests/*.sh
       - name: unit tests
-        run: bash tests/unit.sh
+        run: |
+          bash tests/unit.sh
+          timeout 30 bash tests/interaction.sh
       - name: Embedded client runtime and policy tests
         run: |
           python3 scripts/embed-runtime.py --check
@@ -34,6 +36,7 @@ jobs:
           bash tests/frps-firewall.sh
           bash tests/frps-lifecycle.sh
           bash tests/frps-acme.sh
+          timeout 60 bash tests/frps-interaction.sh
       - name: Failure-path and compatibility regressions
         run: |
           for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh tests/site-https.sh tests/preflight.sh tests/releases.sh tests/diagnostics.sh tests/support.sh tests/snapshots.sh tests/site-management.sh; do

@@ -553,11 +553,11 @@ _frps_ensure_manager() {
 
 _frps_apply() (
 	local rotate=${1:-0} staged
-	_frps_validate || return 1
+	_frps_validate && _frps_ui_check_ports || return 1
+	_frps_review "$rotate" || return $?
 	init_env
 	for staged in curl jq openssl tar timeout flock crontab sha256sum ip; do ensure_cmds "$staged" || return 1; done
 	_frps_check_dns || return 1
-	confirm "部署 FRP $FRPS_MODE 模式？只管理 FRP 自身服务、证书及端口" n || return 1
 	_frps_begin || return 1
 	_frps_make_dirs || return 1
 	_frps_ensure_manager || return 1
@@ -591,6 +591,7 @@ _frps_apply() (
 	FRPS_TXN_OK=1
 	info "FRP 已部署：$FRPS_MODE / v$FRPS_VERSION；请导出客户端配置并在内网机器运行 frpc"
 	_frps_dns_info
+	_frps_next_steps
 )
 
 _frps_renew() (
@@ -626,12 +627,17 @@ _frps_uninstall() (
 )
 
 _frps_parse() {
+	local frps_domain_option=''
 	FRPS_DRY_RUN=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--dry-run) FRPS_DRY_RUN=1; shift; continue ;;
 		--mode | --domain | --port | --http-port | --https-port | --redirect-port | --web-domain | --subdomain-host | --allow-ports | --tls | --cert | --key | --version)
 			[ $# -ge 2 ] && [ -n "$2" ] || { err "$1 缺少值"; return 1; }
+			case "$1" in --web-domain | --subdomain-host)
+				[ -z "$frps_domain_option" ] || [ "$frps_domain_option" = "$1" ] || { err '--web-domain 与 --subdomain-host 不能同时使用'; return 1; }
+				frps_domain_option=$1 ;;
+			esac
 			case "$1" in
 			--mode) FRPS_MODE=$2 ;; --domain) FRPS_DOMAIN=${2,,} ;; --port) FRPS_BIND_PORT=$2 ;;
 			--http-port) FRPS_HTTP_PORT=$2 ;; --https-port) FRPS_HTTPS_PORT=$2 ;; --redirect-port) FRPS_REDIRECT_PORT=$2 ;;
@@ -645,32 +651,11 @@ _frps_parse() {
 		esac
 	done
 }
-_frps_wizard() {
-	local n
-	ask n '用途: 1=域名 HTTPS 网站，2=公网 TCP/UDP 转发' "$([ "$FRPS_MODE" = tcp ] && echo 2 || echo 1)"
-	case "$n" in 1) FRPS_MODE=web ;; 2) FRPS_MODE=tcp ;; *) return 1 ;; esac
-	ask_domain FRPS_DOMAIN 'FRP 控制域名 (DNS 直连 VPS)' "$FRPS_DOMAIN"
-	ask_num FRPS_BIND_PORT 'frpc 控制连接端口' "$FRPS_BIND_PORT" 1024 65535 || return 1
-	if [ "$FRPS_MODE" = web ]; then
-		ask n '应用域名: 1=单域名，2=泛域名' "$([ -n "$FRPS_SUBDOMAIN_HOST" ] && echo 2 || echo 1)"
-		case "$n" in
-		1) FRPS_SUBDOMAIN_HOST=""; ask_domain FRPS_WEB_DOMAIN '应用域名 (例如 app.example.com)' "$FRPS_WEB_DOMAIN" ;;
-		2) FRPS_WEB_DOMAIN=""; ask_domain FRPS_SUBDOMAIN_HOST '泛域名根 (例如 apps.example.com，DNS 配置 *.apps.example.com)' "$FRPS_SUBDOMAIN_HOST" ;;
-		*) return 1 ;;
-		esac
-		ask_num FRPS_HTTP_PORT 'frps 内部 HTTP 端口 (仅回环监听)' "$FRPS_HTTP_PORT" 1024 65535 || return 1
-		ask_num FRPS_HTTPS_PORT '公网 HTTPS 端口 (443 被 REALITY/网站占用时可选 8443)' "$FRPS_HTTPS_PORT" 1 65535 || return 1
-		ask FRPS_TLS_METHOD '网站证书: http / cf / custom (泛域名仅 cf/custom)' "$FRPS_TLS_METHOD"
-		ask_num FRPS_REDIRECT_PORT 'HTTP 跳转入口 (HTTP验证须80；cf/custom可填0关闭)' "$FRPS_REDIRECT_PORT" 0 65535 || return 1
-		if [ "$FRPS_TLS_METHOD" = custom ]; then ask FRPS_CERT_INPUT '完整证书链文件路径' "$FRPS_CERT_INPUT"; ask FRPS_KEY_INPUT '私钥文件路径' "$FRPS_KEY_INPUT"; fi
-	else
-		ask_num FRPS_RANGE_START '允许的公网转发端口起点' "$FRPS_RANGE_START" 1024 65535 || return 1
-		ask_num FRPS_RANGE_END '允许的公网转发端口终点 (最多1000个)' "$FRPS_RANGE_END" "$FRPS_RANGE_START" 65535 || return 1
-	fi
-	_frps_validate
-}
 _frps_info() {
-	_frps_load || { info '未安装 FRP；onebox frps install 可独立安装'; return 0; }
+	if ! _frps_load; then
+		if _frps_installed; then err "FRP 状态文件无效，请检查 $FRPS_STATE；现有文件已保留"; return 1; fi
+		info '未安装 FRP；onebox frps install 可独立安装'; return 0
+	fi
 	printf 'FRP v%s / %s 模式\n控制入口: %s:%s (TLS + 私有 CA + token)\n' "$FRPS_VERSION" "$FRPS_MODE" "$FRPS_DOMAIN" "$FRPS_BIND_PORT"
 	printf 'frps: %s\n' "$(_frps_service_active frps && echo 运行中 || echo 已停止)"
 	if [ "$FRPS_MODE" = web ]; then
@@ -683,7 +668,11 @@ _frps_info() {
 }
 _frps_plan() {
 	_frps_validate || return 1
-	printf 'FRP 预览 (未联网、未安装、未修改配置)\n模式: %s；版本: %s\n' "$FRPS_MODE" "$FRPS_VERSION"
+	printf 'FRP 预览 (未联网、未修改配置)\n'
+	_frps_summary
+}
+_frps_summary() {
+	printf '模式: %s；版本: %s\n' "$FRPS_MODE" "$FRPS_VERSION"
 	_frps_dns_info
 	printf '计划端口 (现有站点/代理或其他进程占用时将拒绝部署):\n'
 	_frps_wanted_ports
@@ -704,37 +693,73 @@ _frps_client_cli() {
 	_frps_export "$output" "$type" "$local_port" "$remote_port" "$name"
 }
 _frps_menu() {
-	local choice dir
+	local choice rc installed action approval
 	is_interactive || { _frps_info; return; }
 	while :; do
 		title 'FRP 服务端 / 域名管理'
-		printf '1) 安装 / 重新配置\n2) 状态与 DNS 说明\n3) 导出客户端配置\n4) 启动\n5) 停止\n6) 重启\n7) 更新 frps\n8) 检查/续期证书\n9) 轮换 token\n10) 日志\n11) 卸载 FRP\n0) 返回\n'
-		ask choice '请选择' 0
+		installed=0
+		if _frps_installed; then
+			installed=1
+			(_frps_info)
+			printf '\n  1) 修改已有配置（保留 CA，默认保留 token）\n'
+		else
+			printf '  当前尚未安装 FRP，可独立于代理使用。\n\n  1) 安装 FRP（分步向导）\n'
+		fi
+		printf '  2) 状态与 DNS 说明\n'
+		if [ "$installed" = 1 ]; then
+			printf '\n  客户端\n  3) 导出配置（选择内网端口、协议、域名）\n\n  服务管理\n  4) 启动   5) 停止   6) 重启   10) 日志\n\n  维护\n  7) 更新 frps   8) 检查/续期证书\n  9) 轮换 token（所有客户端需要重新配置）\n  11) 卸载 FRP\n'
+		fi
+		printf '\n  0) 返回上级菜单（也可 q / b）\n'
+		_frps_ui_read choice '请选择' 0; rc=$?
+		case "$rc" in 125 | 126) return 0 ;; 0) ;; *) return "$rc" ;; esac
+		case "$choice" in 0) return 0 ;; 1 | 2) ;; 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11)
+			[ "$installed" = 1 ] || { warn '请先选择 1 安装 FRP'; continue; } ;;
+		*) warn '请选择菜单中列出的数字'; continue ;; esac
+		rc=0
 		case "$choice" in
-		0) return 0 ;;
-		1) (do_frps install) ;; 2) _frps_info ;;
-		3) ask dir '新的客户端导出目录' /root/frpc-client; (do_frps client "$dir") ;;
-		4) (do_frps start) ;; 5) (do_frps stop) ;; 6) (do_frps restart) ;;
-		7) (do_frps update) ;; 8) (do_frps renew) ;; 9) (do_frps rotate-token) ;;
-		10) (do_frps log) ;; 11) (do_frps uninstall) ;; *) warn '无效选项' ;;
+		1) (do_frps configure); rc=$? ;; 2) (_frps_info); rc=$? ;;
+		3) (do_frps client); rc=$? ;;
+		4 | 5 | 6)
+			case "$choice" in 4) action=start ;; 5) action=stop ;; 6) action=restart ;; esac
+			if [ "$action" != start ]; then
+				_frps_ui_choice approval '此操作会中断 FRP 隧道：1 继续 / 0 取消' 0 '^[01]$'; rc=$?
+				[ "$rc" = 0 ] && [ "$approval" = 1 ] || { [ "$rc" != 130 ] || return 130; continue; }
+			fi
+			(do_frps "$action"); rc=$? ;;
+		7) (do_frps update); rc=$? ;; 8) (do_frps renew); rc=$? ;; 9) (do_frps rotate-token); rc=$? ;;
+		10) (do_frps log); rc=$? ;; 11) (do_frps uninstall); rc=$? ;;
 		esac
+		case "$rc" in
+		130) return 130 ;;
+		125 | 126) info '已取消，返回 FRP 菜单'; continue ;;
+		0) info '操作完成' ;;
+		*) warn '操作未完成，请查看上方原因；可以重试或返回。' ;;
+		esac
+		pause
 	done
 }
 
 do_frps() (
-	local action=${1:-menu}
+	local action=${1:-menu} rc
 	[ $# = 0 ] || shift
 	setup_tty; detect_os; detect_init
 	case "$action" in
 	plan | install | configure)
 		if _frps_installed; then _frps_load || return 1; else _frps_defaults; fi
 		_frps_parse "$@" || return 1
-		if [ "$action" != plan ] && [ "$FRPS_DRY_RUN" = 0 ] && [ $# = 0 ] && is_interactive; then _frps_wizard || return 1; fi
+		if [ "$action" != plan ] && [ "$FRPS_DRY_RUN" = 0 ] && [ $# = 0 ] && is_interactive; then
+			FRPS_UI_WIZARD=1
+			while :; do
+				_frps_wizard || return $?
+				_frps_apply; rc=$?
+				[ "$rc" = 126 ] || return "$rc"
+			done
+		fi
 		if [ "$action" = plan ] || [ "$FRPS_DRY_RUN" = 1 ]; then _frps_plan; else _frps_apply; fi
 		return $?
 		;;
 	help | --help)
-		printf 'onebox frps [plan|install|configure|info|status|start|stop|restart|update [版本]|renew|rotate-token|client 新目录|log|uninstall]\n配置参数: --mode web|tcp --domain 控制域名 --web-domain 应用域名 / --subdomain-host 泛域名根\n--port 7000 --http-port 7080 --https-port 443 --redirect-port 80 --allow-ports 20000-20100\n--tls http|cf|custom --cert 完整链 --key 私钥 --version %s|latest --dry-run\n' "$TESTED_FRP_VERSION"
+		printf 'onebox frps [plan|install|configure|info|status|start|stop|restart|update [版本]|renew|rotate-token|client [新目录]|log|uninstall]\n配置参数: --mode web|tcp --domain 控制域名 --web-domain 应用域名 / --subdomain-host 泛域名根\n--port 7000 --http-port 7080 --https-port 443 --redirect-port 80 --allow-ports 20000-20100\n--tls http|cf|custom --cert 完整链 --key 私钥 --version %s|latest --dry-run\n' "$TESTED_FRP_VERSION"
 		return 0 ;;
 	esac
 	require_root
@@ -746,7 +771,7 @@ do_frps() (
 		case "$action" in
 		# Invoked by the service manager while the parent apply holds the lock.
 		net-apply) [ $# = 0 ] && _frps_fw_apply open ;;
-		client) _frps_client_cli "$@" ;;
+		client) if [ $# = 0 ] && is_interactive; then _frps_client_wizard; else _frps_client_cli "$@"; fi ;;
 		update) [ $# -le 1 ] || return 1; FRPS_VERSION=${1:-latest}; FRPS_VERSION=${FRPS_VERSION#v}; _frps_apply ;;
 		rotate-token) [ $# = 0 ] && _frps_apply 1 ;;
 		renew) [ $# = 0 ] || { [ $# = 1 ] && [ "$1" = --cron ]; } || return 1; _frps_renew "${1:-manual}" ;;
