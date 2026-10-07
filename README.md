@@ -2,7 +2,7 @@
 
 **sing-box / Xray 多协议组合 · 交互式一键安装与管理脚本**
 
-当前版本：**v1.5.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+当前版本：**v1.6.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
 
 适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
 服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），并自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
@@ -33,6 +33,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 - **管理与恢复**：只读安装预演、一键体检、证书状态、稳定/测试更新渠道、本机快照与手动恢复、静态网站模板和内容导入、本地脱敏诊断包。
 - **链路与性能**：真实客户端链路测试、Hysteria2 拥塞与接收窗口调优、REALITY 一致性检查，以及带连续失败阈值、恢复冷却期的客户端多入口回退。
 - **BBR 管理**：启用系统自带 TCP BBR，选择默认队列；集成 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 的标准版 / Max 版内核 Release，支持安装预览、指定版本与下载校验，保留旧内核。
+- **FRP 服务端**：独立管理官方 frps，支持控制域名、强制 TLS 与 token、HTTPS 应用域名 / 泛域名、证书申请与续期、TCP/UDP 转发范围、客户端配置导出和失败回滚。
 - **贴心细节**：自动检测端口占用、放行防火墙（ufw / firewalld / iptables，含甲骨文云默认规则）、Hysteria2 端口跳跃、BBR、
   屏蔽 BT 与回环/内网访问、配置写入前先经内核校验（失败不覆盖旧配置）、国内服务器 GitHub 加速。
 - **经过真实流量测试**：仓库自带端到端测试，覆盖 *协议 × 服务端内核 × 客户端* 的全部组合（TCP 与 UDP）。
@@ -201,6 +202,7 @@ onebox update [singbox|xray]   更新内核
 onebox update-script       更新脚本
 onebox cert                证书管理 (更换 / 续期)
 onebox bbr                 BBR / BBRv3 管理菜单 (非交互时显示状态)
+onebox frps                FRP 服务端与域名管理
 onebox uninstall           卸载
 ```
 
@@ -241,6 +243,124 @@ onebox bbr install latest --max        # 预览 Max 实验版；安装仍需 --a
 默认使用标准版；**Max** 提高探测与窗口策略的激进程度，仅用于自有链路吞吐实验，可能增加延迟、丢包和带宽争抢，不保证更快。上游的极限 sysctl 配置、测速软件安装、模块黑名单和快捷命令 `b` 不会自动应用。
 
 BBR/队列配置保存到 `/etc/sysctl.d/99-onebox-bbr.conf`，应用失败恢复原运行参数并保留原文件。其他工具（包括上游的 `99-joeyblog.conf`）有相同参数时会提示检查覆盖关系。选择队列仅修改 `net.core.default_qdisc`，**不会替换正在运行的网卡队列或已有带宽整形规则**；查看 `tc qdisc show` 或状态页确认实际队列，新建队列/重启后再检查。系统 TCP BBR 与 Hysteria2/TUIC 的 QUIC 拥塞控制是不同层，后者继续使用 `onebox tune`。
+
+## FRP 服务端与完整域名配置
+
+`onebox frps` 管理独立的 [fatedier/frp](https://github.com/fatedier/frp) 服务端。默认安装 **0.71.0**，下载时校验官方 GitHub Release 的 SHA-256、文件大小与版本；可指定更新版本或 `latest`。配置预览用 `onebox frps plan`，实际安装 / 配置需要确认；无人值守时显式添加 `-y`。
+
+| 模式 | 用途与公网入口 | 内部连接 |
+|---|---|---|
+| `web`（默认） | 浏览器通过应用域名的 HTTPS 443 访问内网网站；支持单域名或一级泛域名 | 独立 Nginx 终止 HTTPS，保留 Host 反代到 `127.0.0.1:7080` 的 frps HTTP 入口；客户端使用 `type = "http"` |
+| `tcp` | 通过控制域名与选定公网端口访问内网 TCP / UDP 服务 | 仅开放配置的转发范围，默认 `20000-20100`；不启用网站虚拟主机或 Nginx |
+
+两种模式均默认使用 TCP 7000 建立 frpc → frps 控制连接，强制 TLS、生成随机 token，并认证心跳和新工作连接。不启用 Dashboard。网站模式的 HTTP 入口仅监听回环，不直接开放公网 TCP/UDP 转发；需要通用公网端口转发时选择 `tcp` 模式。
+
+### 准备 DNS 与端口
+
+先在 DNS 服务商处手动添加记录，脚本会检查解析结果，但不会替你创建或修改 DNS 记录。
+
+| 记录示例 | 用途 | 指向 |
+|---|---|---|
+| `frp.example.com` | 两种模式都需要的控制域名 | VPS 的公网 A；使用 IPv6 时同时配置正确 AAAA |
+| `app.example.com` | 单应用网站模式的访问域名 | 同一 VPS 的公网 A / AAAA |
+| `*.apps.example.com` | 泛域网站模式，例如 `home.apps.example.com` | 同一 VPS 的公网 A / AAAA |
+
+所有已发布的 A / AAAA 必须指向当前 VPS；残留的旧 IP、错误 AAAA 或 CDN 代理地址会导致预检失败。Cloudflare 等服务的记录请设为 **仅 DNS，关闭 CDN 代理**。主机有可用 IPv6 时，控制服务默认使用 `::` 监听；否则使用 IPv4。云安全组也需放行控制端口，以及所选模式的 HTTPS / HTTP 入口或 TCP/UDP 转发范围。
+
+安装会检查已有代理、REALITY 网站、Hysteria2 跳跃范围和其他进程的端口；冲突时停止，不接管已有服务。已有 443 / 80 占用时，可为 FRP 选择 **8443 + Cloudflare DNS 验证 + `--redirect-port 0`**，访问地址相应为 `https://app.example.com:8443/`。HTTP-01 必须使用并持续开放 TCP 80，不能用其他端口替代。
+
+### 安装网站模式
+
+```bash
+# 只读预览：控制域名 + 应用域名，默认使用 HTTP-01 申请网站证书
+onebox frps plan --mode web --domain frp.example.com --web-domain app.example.com
+
+# 实际安装：HTTPS 443，HTTP 80 自动跳转至 HTTPS，并用于证书验证
+onebox frps install --mode web --domain frp.example.com --web-domain app.example.com --tls http
+
+# 导出给内网机器：示例网站运行在该机器的 127.0.0.1:8080
+onebox frps client /root/frpc-home --type http --local-port 8080
+```
+
+若需避开已占用的 80 / 443，使用 Cloudflare DNS API token 申请证书。相关凭据由独立的 FRP ACME 配置保存以便续期，不要提交到仓库或分享给他人。
+
+```bash
+CF_Token='替换为你的 DNS API Token' onebox frps install \
+  --mode web --domain frp.example.com --web-domain app.example.com \
+  --tls cf --https-port 8443 --redirect-port 0
+```
+
+泛域名模式需要 Cloudflare DNS 验证或自备泛域证书，HTTP-01 不支持。下例导出 `home.apps.example.com` 的客户端；每台内网机器可选择不同的一级子域标签。
+
+```bash
+CF_Token='替换为你的 DNS API Token' onebox frps install \
+  --mode web --domain frp.example.com --subdomain-host apps.example.com --tls cf
+onebox frps client /root/frpc-home --type http --local-port 8080 --subdomain home
+
+# 自备网站 fullchain 与未加密私钥：证书需覆盖应用域名；泛域模式需同时覆盖根域和 *.根域
+onebox frps configure --tls custom --cert /root/fullchain.pem --key /root/privkey.pem
+```
+
+### 安装 TCP / UDP 模式
+
+```bash
+onebox frps install --mode tcp --domain frp.example.com --allow-ports 45000-45100
+
+# 公网 frp.example.com:45001 → 内网机器 127.0.0.1:22
+onebox frps client /root/frpc-ssh --type tcp --local-port 22 --remote-port 45001
+
+# UDP 服务示例：公网 45002 → 内网机器 127.0.0.1:27015
+onebox frps client /root/frpc-udp --type udp --local-port 27015 --remote-port 45002
+```
+
+`--remote-port` 必须落在已配置范围内。整个范围会为 FRP 预留并按 TCP / UDP 放行，即使某个端口尚无客户端连接；后续配置代理时也会避开 FRP 的保留端口。目标服务自身的登录、访问控制等设置仍由该服务管理。
+
+### 客户端配置与证书
+
+导出目录必须尚不存在。目录权限为 `700`，文件为 `600`，包含 `frpc.toml`、公开的 `ca.pem` 和使用说明；配置含 token，**不包含 CA 私钥、服务端私钥或网站私钥**。在内网机器安装与服务端相同版本的官方 frpc，私密传输整个导出目录，然后先进入该目录再运行：
+
+```bash
+cd /path/to/frpc-home
+frpc verify -c frpc.toml
+frpc -c frpc.toml
+```
+
+配置中的 `transport.tls.trustedCaFile = "./ca.pem"` 与控制域名校验必须保留；仅开启 TLS 而移除 CA 文件会失去服务端证书验证。网站模式已经生成 HTTPS 协议转发头，Nginx 支持 WebSocket。改变控制域名或执行 `rotate-token` 后，需要重新导出并更新各客户端配置。
+
+控制连接和浏览器网站使用两套证书：控制连接由私有 CA 签发（CA 有效期约 10 年，服务端证书 397 天）；浏览器使用 ACME 公有证书或自备证书。每日计划任务检查续期，控制证书变化时才重启 frps，网站证书更新后 reload 独立 Nginx。网站证书通过 HTTP-01 续期时，需要保持 HTTP 80 入口可达。自备网站证书不自动申请或续期；更新原证书文件后执行 `onebox frps configure --tls custom --cert ... --key ...`。私有 CA 临近到期会明确报错，需要人工规划 CA 轮换和客户端重新分发。
+
+### 管理与参数
+
+```bash
+onebox frps info                          # 域名、端口、配置与证书位置
+onebox frps status                        # 独立 FRP 服务状态
+onebox frps start                         # 也支持 stop / restart
+onebox frps log                           # 服务日志
+onebox frps configure --port 7001         # 调整配置，失败恢复原配置和服务状态
+onebox frps update                        # 更新官方 FRP 稳定版
+onebox frps update 0.71.0                 # 指定版本（最低支持 0.71.0）
+onebox frps renew                         # 检查控制证书并续期托管网站证书
+onebox frps rotate-token                  # 更换 token，随后重新导出客户端
+onebox frps uninstall                     # 单独卸载 FRP
+```
+
+`plan` / `install` / `configure` 接受下列参数：
+
+| 参数 | 含义 / 默认值 |
+|---|---|
+| `--mode web\|tcp` | 网站域名模式 / 通用 TCP、UDP 模式，默认 `web` |
+| `--domain 域名` | FRP 控制域名，两种模式都必填 |
+| `--web-domain 域名` / `--subdomain-host 根域` | 网站模式使用单应用域名或泛域名根，二选一 |
+| `--port 7000` | 控制连接端口 |
+| `--http-port 7080` | 网站模式的内部回环 HTTP 端口，不对公网放行 |
+| `--https-port 443` | 网站模式的公网 HTTPS 端口 |
+| `--redirect-port 80` | HTTP 跳转入口；`0` 关闭。HTTP-01 必须为 `80` |
+| `--allow-ports 20000-20100` | 通用模式允许的 TCP / UDP 转发范围 |
+| `--tls http\|cf\|custom` | 网站证书验证方式；不改变控制连接的私有 CA 方案 |
+| `--cert 文件 --key 文件` | 自备网站证书 fullchain 与未加密私钥 |
+| `--version 0.71.0\|latest` | 官方 frp 版本，最低支持 `0.71.0` |
+
+FRP 的状态、证书、防火墙台账、服务与续期任务独立管理；普通 `onebox uninstall` 保留 FRP 及所需管理命令，删除 FRP 请使用 `onebox frps uninstall`。防火墙仅清理本功能记录的规则，已有用户规则保留。安装、配置与更新使用临时事务备份，失败时尝试恢复旧文件、服务与防火墙；恢复未完成时保留备份并提示处理位置。**代理的 `onebox snapshot` 不包含 FRP**，FRP 当前没有公开的历史快照 / 手动恢复命令。
 
 ## 无人值守安装
 
@@ -294,6 +414,10 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `/etc/onebox/client/` | 客户端配置、分享链接、订阅 |
 | `/var/lib/onebox-site/index.html` | 自有域名网站主页，可直接编辑；具体管理路径见 `onebox site info` |
 | `/opt/onebox/bin/` | sing-box / xray 内核 |
+| `/etc/onebox-frp/` | 独立 FRP 状态、`frps.toml`、私有 CA / 服务端证书、网站证书、Nginx 配置与防火墙台账 |
+| `/opt/onebox-frp/frps` | 官方 FRP 服务端程序 |
+| `/var/lib/onebox-frp/`、`/var/log/onebox-frp/` | FRP 网站验证目录、运行数据与日志 |
+| `onebox-frps`、`onebox-frp-web` | FRP 控制服务与独立网站入口的系统服务名 |
 | `onebox-sing-box`、`onebox-xray` | 系统服务名 (systemd / OpenRC) |
 | `/usr/local/bin/onebox` | 管理命令 |
 

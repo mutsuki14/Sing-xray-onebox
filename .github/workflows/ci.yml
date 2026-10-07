@@ -21,12 +21,19 @@ jobs:
       - name: Embedded client runtime and policy tests
         run: |
           python3 scripts/embed-runtime.py --check
+          python3 scripts/embed-frps.py --check
           python3 -m unittest discover -s tests -p 'test_*.py' -v
           bash tests/performance.sh
       - name: Owned-domain REALITY site regressions
         run: bash tests/site.sh
       - name: BBR management and kernel install safety (mock system only)
         run: bash tests/bbr.sh
+      - name: FRP configuration, certificates, firewall and rollback
+        run: |
+          bash tests/frps.sh
+          bash tests/frps-firewall.sh
+          bash tests/frps-lifecycle.sh
+          bash tests/frps-acme.sh
       - name: Failure-path and compatibility regressions
         run: |
           for test in tests/updates.sh tests/transactions.sh tests/site-recovery.sh tests/system.sh tests/config-regressions.sh tests/site-https.sh tests/preflight.sh tests/releases.sh tests/diagnostics.sh tests/support.sh tests/snapshots.sh tests/site-management.sh; do
@@ -57,6 +64,16 @@ jobs:
 
       - name: HTTPS 443 reverse proxy through real nginx
         run: sudo env ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/site-https-e2e.sh
+
+      - name: Download verified frps and frpc
+        run: |
+          mkdir -p "$RUNNER_TEMP/frp"
+          ONEBOX_SOURCE_ONLY=1 bash -c '. ./onebox.sh; FRPS_VERSION=$TESTED_FRP_VERSION; _frps_download "$RUNNER_TEMP/frp/frps" "$RUNNER_TEMP/frp/frpc"'
+
+      - name: Real FRP TCP, UDP, domain HTTPS, WebSocket and authentication
+        run: |
+          sudo env FRPS_TEST_BIN="$RUNNER_TEMP/frp/frps" FRPC_TEST_BIN="$RUNNER_TEMP/frp/frpc" \
+            ONEBOX_TEST_NGINX="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" bash tests/frps-e2e.sh
 
       - name: Download cores with the script's own installer functions
         run: |
