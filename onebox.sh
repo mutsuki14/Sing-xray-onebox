@@ -46,7 +46,7 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.5.0"
+readonly SCRIPT_VERSION="1.6.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
 readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/main/onebox.sh}"
 
@@ -479,7 +479,9 @@ pkg_install() {
 pkg_name_of() {
 	local cmd=$1
 	case "$cmd:$PKG" in
-	ss:dnf | ss:yum) echo iproute ;;
+	ip:dnf | ip:yum | ss:dnf | ss:yum) echo iproute ;;
+	ip:emerge) echo sys-apps/iproute2 ;;
+	ip:*) echo iproute2 ;;
 	ss:apk) echo "iproute2-ss iproute2" ;;
 	ss:emerge) echo sys-apps/iproute2 ;;
 	ss:*) echo iproute2 ;;
@@ -490,7 +492,10 @@ pkg_name_of() {
 	crontab:emerge) echo sys-process/cronie ;;
 	crontab:*) echo cronie ;;
 	update-ca-certificates:* | ca-certificates:*) echo ca-certificates ;;
-	base64:* | od:* | head:*) echo coreutils ;;
+	flock:emerge) echo sys-apps/util-linux ;;
+	flock:apk) echo "util-linux-misc util-linux" ;;
+	flock:*) echo util-linux ;;
+	base64:* | od:* | head:* | timeout:* | sha256sum:*) echo coreutils ;;
 	unzip:emerge) echo app-arch/unzip ;;
 	*) echo "$cmd" ;;
 	esac
@@ -1743,7 +1748,7 @@ EOF
 
 # 端口跳跃范围与其他 UDP 协议端口冲突时输出冲突项 (协议/端口), 无冲突返回 1
 hop_range_conflicts() {
-	local range=$1 a b p port net out=""
+	local range=$1 a b p port net out="" frp_conflict
 	a=${range%-*} b=${range#*-}
 	for p in $PROTOCOLS; do
 		[ "$p" = hysteria2 ] && continue
@@ -1753,6 +1758,7 @@ hop_range_conflicts() {
 		[ "$net" = tcp ] && continue
 		[ "$port" -ge "$a" ] && [ "$port" -le "$b" ] && out+="$(proto_title "$p")/${port} "
 	done
+	if frp_conflict=$(_frps_hop_conflict "$range"); then out+="$frp_conflict "; fi
 	[ -n "$out" ] && printf '%s' "${out% }"
 }
 
@@ -2640,8 +2646,11 @@ EOF
 site_validate_ports() {
 	site_enabled || return 0
 	valid_domain "${REALITY_SITE_DOMAIN:-}" || { err "自有站点需要合法域名"; return 1; }
-	local port=${REALITY_SITE_PORT:-} p pp net
+	local port=${REALITY_SITE_PORT:-} p pp net frp_port
 	[[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || { err "站点内部 TLS 端口必须为 1024–65535"; return 1; }
+	for frp_port in 80 "$port" $(site_https_enabled && echo 443); do
+		if _frps_reserved "$frp_port" tcp; then err "TCP $frp_port 已保留给 FRP，请为网站选择其他端口或调整 FRP"; return 1; fi
+	done
 	[ "$port" != "${REALITY_GUARD_PORT:-}" ] && [ "${REALITY_GUARD_PORT:-}" != 80 ] || { err "站点端口与 REALITY 防偷跑端口冲突"; return 1; }
 	if site_https_enabled && [ "${REALITY_GUARD_PORT:-}" = 443 ]; then err "TCP 443 与 REALITY 防偷跑端口冲突，请先更换该端口"; return 1; fi
 	for p in $PROTOCOLS; do
@@ -4589,6 +4598,10 @@ port_ok() {
 		warn "端口需为 1-65535 之间的数字"
 		return 1
 	}
+	if _frps_reserved "$port" "$net"; then
+		warn "端口 $port/$net 已保留给 FRP，请选择其他端口"
+		return 1
+	fi
 	if site_enabled && [ "$net" != udp ] && { [ "$port" = 80 ] || [ "$port" = "$REALITY_SITE_PORT" ]; }; then
 		warn "TCP ${port} 已保留给自有域名网站 (HTTP 80 / 本机 HTTPS ${REALITY_SITE_PORT})"
 		return 1
@@ -4627,6 +4640,7 @@ pick_guard_port() {
 	local i port
 	for i in $(seq 1 100); do
 		port=$(rand_port)
+		_frps_reserved "$port" tcp && continue
 		site_https_enabled && [ "$port" = 443 ] && continue
 		site_enabled && [ "$port" = "$REALITY_SITE_PORT" ] && continue
 		port_taken_by_other "$port" tcp "" && continue
@@ -6022,7 +6036,8 @@ do_uninstall() {
 			rm -f "$BBR_SYSCTL_CONF"
 		fi
 	fi
-	rm -f "$CMD_PATH"
+	if _frps_installed; then info "FRP 仍在运行，保留 onebox 管理命令；单独卸载请用 onebox frps uninstall";
+	else rm -f "$CMD_PATH"; fi
 	info "卸载完成"
 }
 
@@ -6085,10 +6100,11 @@ main_menu() {
   ${GREEN}22.${PLAIN} 安装前预演
   ${GREEN}23.${PLAIN} 链路测试 / REALITY 检查 / 多入口回退
   ${GREEN}24.${PLAIN} Hysteria2 / 资源调优
+  ${GREEN}25.${PLAIN} FRP 服务端 / 域名 HTTPS / 客户端配置
   ${GREEN}0.${PLAIN}  退出
 EOF
 		hr
-		ask_num n "请选择" 0 0 24 || exit 0
+		ask_num n "请选择" 0 0 25 || exit 0
 		case "$n" in
 		0) exit 0 ;;
 		1) (managed_change do_install) ;;
@@ -6115,6 +6131,7 @@ EOF
 		22) (plan_menu) ;;
 		23) (link_tools_menu) ;;
 		24) (tuning_menu) ;;
+		25) (do_frps) ;;
 		esac
 		pause
 	done
@@ -6223,6 +6240,8 @@ Sing-Xray-Onebox v${SCRIPT_VERSION} —— sing-box / Xray 多协议组合一键
   bbr enable [队列]         启用自带 BBR，队列默认 fq
   bbr releases [--max]      查看 Actions-bbr-v3 内核版本
   bbr install [latest|TAG] [--max] [--apply]   预览 / 安装 BBRv3 内核
+  frps                     FRP 服务端管理 (安装、域名、证书、客户端导出)
+  frps help                查看 FRP 安装与管理命令
   regen                    按当前设置重新生成全部配置
   uninstall                卸载
   help | version
@@ -6402,6 +6421,7 @@ main() {
 	reality-check) do_reality_check "$@"; return $? ;;
 	tune) do_tune "$@"; return $? ;;
 	bbr) do_bbr "$@"; return $? ;;
+	frps) do_frps "$@"; return $? ;;
 	esac
 	if [ "$cmd" = install ]; then
 		local dry_run=0 install_args=()
@@ -8253,6 +8273,1302 @@ tuning_menu() {
 	esac
 }
 # END link-performance
+
+# BEGIN embedded-frps
+# FRP server management. Embedded into onebox.sh by scripts/embed-frps.py.
+readonly TESTED_FRP_VERSION="0.71.0"
+FRPS_DIR="${ONEBOX_FRPS_DIR:-/etc/onebox-frp}"
+FRPS_BIN_DIR="${ONEBOX_FRPS_BIN_DIR:-/opt/onebox-frp}"
+FRPS_BIN="$FRPS_BIN_DIR/frps"
+FRPS_CONF="$FRPS_DIR/frps.toml"
+FRPS_STATE="$FRPS_DIR/state.conf"
+FRPS_WEB_VAR="${ONEBOX_FRPS_WEB_VAR:-/var/lib/onebox-frp}"
+FRPS_WEB_ROOT="$FRPS_WEB_VAR/www"
+FRPS_LOG_DIR="${ONEBOX_FRPS_LOG_DIR:-/var/log/onebox-frp}"
+FRPS_RUN_DIR="${ONEBOX_FRPS_RUN_DIR:-/run/onebox-frp}"
+FRPS_LOCK="${ONEBOX_FRPS_LOCK:-/run/onebox-frp.lock}"
+FRPS_SYSTEMD_DIR="${ONEBOX_FRPS_SYSTEMD_DIR:-/etc/systemd/system}"
+readonly FRPS_KEYS="FRPS_MODE FRPS_DOMAIN FRPS_BIND_ADDR FRPS_BIND_PORT FRPS_HTTP_PORT FRPS_HTTPS_PORT FRPS_REDIRECT_PORT FRPS_WEB_DOMAIN FRPS_SUBDOMAIN_HOST FRPS_RANGE_START FRPS_RANGE_END FRPS_TOKEN FRPS_TLS_METHOD FRPS_CERT_INPUT FRPS_KEY_INPUT FRPS_VERSION"
+
+_frps_defaults() {
+	FRPS_MODE=web FRPS_DOMAIN="" FRPS_BIND_PORT=7000 FRPS_HTTP_PORT=7080
+	FRPS_HTTPS_PORT=443 FRPS_REDIRECT_PORT=80 FRPS_WEB_DOMAIN="" FRPS_SUBDOMAIN_HOST=""
+	FRPS_RANGE_START=20000 FRPS_RANGE_END=20100 FRPS_TOKEN="" FRPS_TLS_METHOD=http
+	FRPS_CERT_INPUT="" FRPS_KEY_INPUT="" FRPS_VERSION=$TESTED_FRP_VERSION
+	FRPS_BIND_ADDR=0.0.0.0
+	host_has_ipv6 && FRPS_BIND_ADDR=::
+	return 0
+}
+
+_frps_installed() { [ -f "$FRPS_DIR/.managed" ] && [ -f "$FRPS_STATE" ]; }
+_frps_paths_safe() {
+	local path other roots_seen=" "
+	for path in "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR" "$FRPS_LOG_DIR" "$FRPS_RUN_DIR" "$FRPS_LOCK" "$FRPS_SYSTEMD_DIR"; do
+		[[ "$path" =~ ^/[A-Za-z0-9_./-]+$ ]] && _support_path_safe "$path" || { err "FRP 路径必须是无符号链接的绝对路径，且不能包含空格"; return 1; }
+		[[ "$path" != *//* && "$path" != */ ]] || { err "FRP 路径不能含重复或末尾斜杠"; return 1; }
+		case "$path" in / | /etc | /opt | /var | /var/lib | /var/log | /run | /usr | /usr/local) err "FRP 路径不能指向系统顶层目录"; return 1 ;; esac
+	done
+	for path in "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR" "$FRPS_LOG_DIR" "$FRPS_RUN_DIR"; do
+		[[ "$roots_seen" != *" $path "* ]] || { err "FRP 数据根目录不能相同"; return 1; }
+		roots_seen+="$path "
+		for other in "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR" "$FRPS_LOG_DIR" "$FRPS_RUN_DIR"; do
+			[ "$path" = "$other" ] && continue
+			case "$path/" in "$other/"*) err "FRP 数据根目录不能互相包含"; return 1 ;; esac
+			case "$other/" in "$path/"*) err "FRP 数据根目录不能互相包含"; return 1 ;; esac
+		done
+		for other in "$FRPS_SYSTEMD_DIR" "$INITD_DIR"; do
+			case "$path/" in "$other/"*) err "FRP 数据目录不能位于服务目录中"; return 1 ;; esac
+			case "$other/" in "$path/"*) err "FRP 数据目录不能包含服务目录"; return 1 ;; esac
+		done
+		case "$FRPS_LOCK/" in "$path/"*) err "FRP 锁文件必须独立于可回滚的数据目录"; return 1 ;; esac
+		for other in "$ONEBOX_DIR" "$BIN_DIR" "$LOG_DIR" "$RUN_DIR"; do
+			case "$path/" in "$other/"*) err "FRP 数据必须独立于代理数据目录"; return 1 ;; esac
+			case "$other/" in "$path/"*) err "FRP 数据路径不能包含代理数据目录"; return 1 ;; esac
+		done
+	done
+}
+
+_frps_load() {
+	local key value frps_seen_keys=" "
+	_frps_installed && _support_path_safe "$FRPS_STATE" || return 1
+	_frps_defaults
+	while IFS='=' read -r key value || [ -n "$key" ]; do
+		[ -n "$key" ] || continue
+		[[ " $FRPS_KEYS " = *" $key "* && "$frps_seen_keys" != *" $key "* && "$value" != *[[:cntrl:]]* ]] || { err "FRP 状态文件无效"; return 1; }
+		printf -v "$key" '%s' "$value"
+		frps_seen_keys+="$key "
+	done <"$FRPS_STATE"
+	for key in $FRPS_KEYS; do [[ "$frps_seen_keys" = *" $key "* ]] || { err "FRP 状态缺少 $key"; return 1; }; done
+	[[ "$FRPS_TOKEN" =~ ^[a-f0-9]{64}$ ]] || { err "FRP 状态缺少有效 token"; return 1; }
+	_frps_validate
+}
+
+_frps_save() {
+	local tmp key
+	tmp=$(mktemp "$FRPS_DIR/.state.XXXXXX") || return 1
+	for key in $FRPS_KEYS; do printf '%s=%s\n' "$key" "${!key}"; done >"$tmp" || { rm -f "$tmp"; return 1; }
+	chmod 600 "$tmp" && mv -f "$tmp" "$FRPS_STATE"
+}
+
+_frps_port_valid() { [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$1" -le 65535 ]; }
+_frps_validate() {
+	local port key frps_seen_ports=" "
+	for key in $FRPS_KEYS; do [[ "${!key-}" != *[[:cntrl:]]* ]] || { err "FRP 参数不能含控制字符"; return 1; }; done
+	case "$FRPS_MODE" in web | tcp) ;; *) err "FRP 模式应为 web 或 tcp"; return 1 ;; esac
+	case "$FRPS_BIND_ADDR" in 0.0.0.0 | :: | 127.0.0.1 | ::1) ;; *) err "FRP 监听地址无效"; return 1 ;; esac
+	valid_domain "$FRPS_DOMAIN" && [ "${#FRPS_DOMAIN}" -le 253 ] || { err "请设置有效的 FRP 控制域名"; return 1; }
+	[[ "$FRPS_VERSION" = latest || "$FRPS_VERSION" =~ ^0\.[0-9]+\.[0-9]+$ ]] || { err "FRP 版本格式无效"; return 1; }
+	[ "$FRPS_VERSION" = latest ] || ver_ge "$FRPS_VERSION" "$TESTED_FRP_VERSION" || { err "FRP 需要 >= $TESTED_FRP_VERSION"; return 1; }
+	[[ -z "$FRPS_TOKEN" || "$FRPS_TOKEN" =~ ^[a-f0-9]{64}$ ]] || { err "FRP token 必须为自动生成的 64 位十六进制值"; return 1; }
+	for key in FRPS_BIND_PORT FRPS_HTTP_PORT FRPS_HTTPS_PORT FRPS_RANGE_START FRPS_RANGE_END; do
+		_frps_port_valid "${!key}" || { err "$key 端口无效"; return 1; }
+	done
+	[ "$FRPS_REDIRECT_PORT" = 0 ] || _frps_port_valid "$FRPS_REDIRECT_PORT" || return 1
+	[ "$FRPS_RANGE_START" -le "$FRPS_RANGE_END" ] && [ "$((FRPS_RANGE_END - FRPS_RANGE_START))" -le 999 ] || { err "FRP 转发端口范围最多 1000 个"; return 1; }
+	for port in "$FRPS_BIND_PORT" $([ "$FRPS_MODE" != web ] || printf '%s %s %s' "$FRPS_HTTP_PORT" "$FRPS_HTTPS_PORT" "$FRPS_REDIRECT_PORT"); do
+		[ "$port" != 0 ] || continue
+		[[ "$frps_seen_ports" != *" $port "* ]] || { err "FRP 监听端口不能重复"; return 1; }; frps_seen_ports+="$port "
+		[ "$port" -lt "$FRPS_RANGE_START" ] || [ "$port" -gt "$FRPS_RANGE_END" ] || { err "FRP 监听端口不能位于转发端口范围中"; return 1; }
+	done
+	_frps_domain_validate
+}
+
+_frps_lock() {
+	_frps_paths_safe || return 1
+	has flock || { err "FRP 写操作需要 flock (util-linux)"; return 1; }
+	mkdir -p "$(dirname "$FRPS_LOCK")" || return 1
+	exec 8>"$FRPS_LOCK" || return 1
+	flock -n 8 || { err "另一个 FRP 管理操作正在进行"; return 1; }
+}
+
+# No eval/source: stored credentials and values are data, never shell code.
+_frps_render() {
+	_frps_validate && [[ "$FRPS_TOKEN" =~ ^[a-f0-9]{64}$ ]] || return 1
+	local proxy_addr=$FRPS_BIND_ADDR
+	[ "$FRPS_MODE" != web ] || proxy_addr=127.0.0.1
+	cat >"$FRPS_CONF" <<EOF
+bindAddr = "$FRPS_BIND_ADDR"
+bindPort = $FRPS_BIND_PORT
+proxyBindAddr = "$proxy_addr"
+auth.method = "token"
+auth.token = "$FRPS_TOKEN"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+transport.tls.force = true
+transport.tls.certFile = "$FRPS_DIR/server-cert.pem"
+transport.tls.keyFile = "$FRPS_DIR/server-key.pem"
+allowPorts = [{ start = $FRPS_RANGE_START, end = $FRPS_RANGE_END }]
+maxPortsPerClient = 10
+log.to = "console"
+log.level = "info"
+log.disablePrintColor = true
+EOF
+	if [ "$FRPS_MODE" = web ]; then
+		printf 'vhostHTTPPort = %s\n' "$FRPS_HTTP_PORT" >>"$FRPS_CONF"
+		[ -z "$FRPS_SUBDOMAIN_HOST" ] || printf 'subDomainHost = "%s"\n' "$FRPS_SUBDOMAIN_HOST" >>"$FRPS_CONF"
+	fi
+	chmod 600 "$FRPS_CONF"
+}
+
+_frps_control_certificate() (
+	local work
+	valid_domain "$FRPS_DOMAIN" || return 1
+	mkdir -p "$FRPS_DIR" && chmod 700 "$FRPS_DIR" || return 1
+	umask 077
+	work=$(mktemp -d "$FRPS_DIR/.control-cert.XXXXXX") || return 1
+	trap 'rm -rf "$work"' EXIT
+	if [ ! -e "$FRPS_DIR/ca.pem" ] && [ ! -e "$FRPS_DIR/ca-key.pem" ]; then
+		cat >"$work/ca.cnf" <<'EOF'
+[req]
+distinguished_name=dn
+x509_extensions=ca
+prompt=no
+[dn]
+CN=Onebox FRP private CA
+[ca]
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+EOF
+		openssl ecparam -genkey -name prime256v1 -out "$work/ca-key.pem" >/dev/null 2>&1 &&
+			openssl req -new -x509 -sha256 -days 3650 -key "$work/ca-key.pem" -config "$work/ca.cnf" -out "$work/ca.pem" >/dev/null 2>&1 || return 1
+		mv "$work/ca.pem" "$FRPS_DIR/ca.pem" && mv "$work/ca-key.pem" "$FRPS_DIR/ca-key.pem" || return 1
+	fi
+	openssl x509 -in "$FRPS_DIR/ca.pem" -checkend 2592000 -noout >/dev/null 2>&1 &&
+		[ "$(openssl x509 -in "$FRPS_DIR/ca.pem" -pubkey -noout 2>/dev/null)" = "$(openssl pkey -in "$FRPS_DIR/ca-key.pem" -pubout 2>/dev/null)" ] || { err "FRP CA 无效或即将过期，请保留旧部署并人工处理 CA 轮换"; return 1; }
+	if openssl x509 -in "$FRPS_DIR/server-cert.pem" -checkend 2592000 -noout >/dev/null 2>&1 &&
+		openssl verify -CAfile "$FRPS_DIR/ca.pem" -verify_hostname "$FRPS_DOMAIN" "$FRPS_DIR/server-cert.pem" >/dev/null 2>&1 &&
+		[ "$(openssl x509 -in "$FRPS_DIR/server-cert.pem" -pubkey -noout 2>/dev/null)" = "$(openssl pkey -in "$FRPS_DIR/server-key.pem" -pubout 2>/dev/null)" ]; then return 0; fi
+	cat >"$work/server.cnf" <<EOF
+[req]
+distinguished_name=dn
+prompt=no
+[dn]
+CN=$FRPS_DOMAIN
+[server]
+subjectAltName=DNS:$FRPS_DOMAIN
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=serverAuth
+EOF
+	openssl ecparam -genkey -name prime256v1 -out "$work/server-key.pem" >/dev/null 2>&1 &&
+		openssl req -new -sha256 -key "$work/server-key.pem" -config "$work/server.cnf" -out "$work/server.csr" >/dev/null 2>&1 &&
+		openssl x509 -req -in "$work/server.csr" -CA "$FRPS_DIR/ca.pem" -CAkey "$FRPS_DIR/ca-key.pem" -CAcreateserial -days 397 -sha256 -extfile "$work/server.cnf" -extensions server -out "$work/server-cert.pem" >/dev/null 2>&1 &&
+		openssl verify -CAfile "$FRPS_DIR/ca.pem" -verify_hostname "$FRPS_DOMAIN" "$work/server-cert.pem" >/dev/null 2>&1 || return 1
+	mv "$work/server-cert.pem" "$FRPS_DIR/server-cert.pem" && mv "$work/server-key.pem" "$FRPS_DIR/server-key.pem"
+)
+
+_frps_download() (
+	local output=$1 client_output=${2:-} arch version=$FRPS_VERSION requested=$FRPS_VERSION json asset url digest size work member
+	case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64 | arm64) arch=arm64 ;; armv7* | armv6*) arch=arm ;; riscv64) arch=riscv64 ;; loongarch64) arch=loong64 ;; *) err "FRP 暂不支持此 CPU 架构"; return 1 ;; esac
+	case "$version" in latest) url=https://api.github.com/repos/fatedier/frp/releases/latest ;; *) url="https://api.github.com/repos/fatedier/frp/releases/tags/v$version" ;; esac
+	json=$(http_get "$url") || { err "读取 FRP Release 失败"; return 1; }
+	version=$(printf '%s' "$json" | jq -er 'select(.draft == false and .prerelease == false) | .tag_name | select(test("^v0[.][0-9]+[.][0-9]+$"))') || return 1
+	version=${version#v}
+	[ "$requested" = latest ] || [ "$version" = "$requested" ] || { err "FRP Release 标签与请求版本不符"; return 1; }
+	ver_ge "$version" "$TESTED_FRP_VERSION" || return 1
+	asset="frp_${version}_linux_${arch}.tar.gz"
+	url="https://github.com/fatedier/frp/releases/download/v$version/$asset"
+	digest=$(printf '%s' "$json" | jq -er --arg name "$asset" --arg url "$url" '[.assets[] | select(.name == $name and .browser_download_url == $url)] | select(length == 1) | .[0].digest | select(test("^sha256:[0-9a-f]{64}$"))') || { err "FRP 安装包缺少 SHA-256 校验值"; return 1; }
+	size=$(printf '%s' "$json" | jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .size | select(type == "number" and . > 0 and . < 268435456 and floor == .)') || return 1
+	work=$(mktemp -d) || return 1
+	trap 'rm -rf "$work"' EXIT
+	http_get "$(gh_url "$url")" "$work/frp.tar.gz" && [ "$(wc -c <"$work/frp.tar.gz")" = "$size" ] &&
+		printf '%s  %s\n' "${digest#sha256:}" "$work/frp.tar.gz" | sha256sum -c - >/dev/null || { err "FRP 下载或 SHA-256 校验失败"; return 1; }
+	member="frp_${version}_linux_${arch}"
+	tar -xOzf "$work/frp.tar.gz" "$member/frps" >"$output" && chmod 755 "$output" && [ "$("$output" -v)" = "$version" ] || return 1
+	if [ -n "$client_output" ]; then
+		tar -xOzf "$work/frp.tar.gz" "$member/frpc" >"$client_output" && chmod 755 "$client_output" && [ "$("$client_output" -v)" = "$version" ] || return 1
+	fi
+)
+
+_frps_export() (
+	local output=$1 type=$2 local_port=$3 remote_port=$4 subdomain=${5:-www} domain tmp
+	_frps_validate && _frps_port_valid "$local_port" && [[ "$FRPS_TOKEN" =~ ^[a-f0-9]{64}$ ]] || return 1
+	case "$FRPS_MODE/$type" in web/http | tcp/tcp | tcp/udp) ;; *) err "web 模式只导出 HTTP 域名隧道；tcp 模式只导出公网 TCP/UDP 隧道"; return 1 ;; esac
+	if [ "$type" = http ]; then
+		[[ "$subdomain" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { err "子域名标签无效"; return 1; }
+		domain=$FRPS_WEB_DOMAIN
+		[ -z "$FRPS_SUBDOMAIN_HOST" ] || domain="$subdomain.$FRPS_SUBDOMAIN_HOST"
+	else
+		_frps_port_valid "$remote_port" && [ "$remote_port" -ge "$FRPS_RANGE_START" ] && [ "$remote_port" -le "$FRPS_RANGE_END" ] || { err "转发端口不在允许范围内"; return 1; }
+	fi
+	case "$output" in /*) ;; *) output="$PWD/$output" ;; esac
+	_support_path_safe "$output" && [ ! -e "$output" ] || { err "导出目录已存在或含不安全路径"; return 1; }
+	umask 077
+	mkdir "$output" || return 1
+	tmp=$output
+	trap '[ -z "$tmp" ] || rm -rf "$tmp"' EXIT
+	cp "$FRPS_DIR/ca.pem" "$output/ca.pem" || return 1
+	cat >"$output/frpc.toml" <<EOF
+serverAddr = "$FRPS_DOMAIN"
+serverPort = $FRPS_BIND_PORT
+auth.method = "token"
+auth.token = "$FRPS_TOKEN"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+transport.tls.enable = true
+transport.tls.serverName = "$FRPS_DOMAIN"
+transport.tls.trustedCaFile = "./ca.pem"
+log.to = "console"
+log.disablePrintColor = true
+
+[[proxies]]
+name = "onebox-$type-${domain:-$remote_port}"
+type = "$type"
+localIP = "127.0.0.1"
+localPort = $local_port
+EOF
+	if [ "$type" = http ]; then
+		if [ -n "$FRPS_SUBDOMAIN_HOST" ]; then printf 'subdomain = "%s"\n' "$subdomain"; else printf 'customDomains = ["%s"]\n' "$domain"; fi >>"$output/frpc.toml"
+		printf 'requestHeaders.set."X-Forwarded-Proto" = "https"\n' >>"$output/frpc.toml"
+	else printf 'remotePort = %s\n' "$remote_port" >>"$output/frpc.toml"; fi
+	printf '此目录含 FRP token，请私密保存。不要复制服务端 CA 私钥。\n在内网机器安装同版本 frpc，将此整个目录复制过去，先 cd 到目录，再运行：\nfrpc verify -c frpc.toml\nfrpc -c frpc.toml\n后端：127.0.0.1:%s\n' "$local_port" >"$output/README.txt"
+	if [ "$type" = http ]; then printf '访问：https://%s:%s/\n' "$domain" "$FRPS_HTTPS_PORT"; else printf '访问：%s:%s (%s)\n' "$FRPS_DOMAIN" "$remote_port" "$type"; fi >>"$output/README.txt"
+	chmod 600 "$output"/* || return 1
+	tmp=""
+	info "已导出客户端配置与 CA 到 $output (不包含服务器私钥)"
+)
+
+_frps_unit() {
+	if [ "$INIT" = systemd ]; then printf '%s/onebox-frp%s.service' "$FRPS_SYSTEMD_DIR" "$([ "$1" = frps ] && echo s || echo -web)";
+	else printf '%s/onebox-frp%s' "$INITD_DIR" "$([ "$1" = frps ] && echo s || echo -web)"; fi
+}
+_frps_name() { if [ "$1" = frps ]; then echo onebox-frps; else echo onebox-frp-web; fi; }
+_frps_pid_running() {
+	local kind=$1 pid bin
+	if [ "$kind" = frps ]; then bin=$FRPS_BIN; pid=$(cat "$FRPS_RUN_DIR/frps.pid" 2>/dev/null); else bin=$(_frps_nginx_bin); pid=$(cat "$FRPS_DIR/nginx.pid" 2>/dev/null); fi
+	[[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null && [ -r "/proc/$pid/cmdline" ] || return 1
+	tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF "$bin" || return 1
+	if [ "$kind" = web ]; then tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF "$FRPS_DIR/nginx.conf"; fi
+}
+_frps_service_active() {
+	case "$INIT" in
+	systemd) systemctl is-active --quiet "$(_frps_name "$1")" ;;
+	openrc) rc-service "$(_frps_name "$1")" status >/dev/null 2>&1 ;;
+	none) _frps_pid_running "$1" ;;
+	esac
+}
+_frps_service_enabled() {
+	case "$INIT" in
+	systemd) systemctl is-enabled --quiet "$(_frps_name "$1")" ;;
+	openrc) rc-update show default 2>/dev/null | grep -qw "$(_frps_name "$1")" ;;
+	none) return 1 ;;
+	esac
+}
+_frps_service() {
+	local action=$1 kind=$2 name pid i log bin
+	name=$(_frps_name "$kind")
+	if [ "$action/$kind" = reload/web ]; then
+		_frps_web_check && "$(_frps_nginx_bin)" -p "$FRPS_DIR/" -c "$FRPS_DIR/nginx.conf" -s reload 8>&-
+		return $?
+	fi
+	case "$INIT" in
+	systemd)
+		case "$action" in stop | disable) [ -f "$(_frps_unit "$kind")" ] || return 0 ;; esac
+		systemctl "$action" "$name" >/dev/null 2>&1 8>&-
+		;;
+	openrc)
+		case "$action" in
+		enable) rc-update add "$name" default >/dev/null 2>&1 ;;
+		disable) _frps_service_enabled "$kind" || return 0; rc-update del "$name" default >/dev/null 2>&1 ;;
+		stop) _frps_service_active "$kind" || return 0; rc-service "$name" stop >/dev/null 2>&1 ;;
+			*) rc-service "$name" "$action" >/dev/null 2>&1 8>&- ;;
+		esac
+		;;
+	none)
+		case "$action" in
+		enable | disable) return 0 ;;
+		restart) _frps_service stop "$kind" && _frps_service start "$kind" ;;
+		reload) if [ "$kind" = web ]; then "$(_frps_nginx_bin)" -p "$FRPS_DIR/" -c "$FRPS_DIR/nginx.conf" -s reload; else _frps_service restart frps; fi ;;
+		start)
+			_frps_pid_running "$kind" && return 0
+			mkdir -p "$FRPS_LOG_DIR" "$FRPS_RUN_DIR" && chmod 700 "$FRPS_LOG_DIR" "$FRPS_RUN_DIR" || return 1
+			if [ "$kind" = web ]; then "$(_frps_nginx_bin)" -p "$FRPS_DIR/" -c "$FRPS_DIR/nginx.conf" 8>&-; return $?; fi
+			log="$FRPS_LOG_DIR/frps.log"; trim_log "$log"
+			(exec 8>&-; umask 077; exec nohup "$FRPS_BIN" -c "$FRPS_CONF" >>"$log" 2>&1 </dev/null) &
+			printf '%s\n' "$!" >"$FRPS_RUN_DIR/frps.pid"
+			;;
+		stop)
+			_frps_pid_running "$kind" || return 0
+			if [ "$kind" = frps ]; then pid=$(cat "$FRPS_RUN_DIR/frps.pid"); else pid=$(cat "$FRPS_DIR/nginx.pid"); fi
+			kill "$pid" 2>/dev/null || return 1
+			for i in 1 2 3 4 5; do _frps_pid_running "$kind" || break; sleep 1; done
+			_frps_pid_running "$kind" && { err "FRP 服务尚未停止，请检查进程 $pid"; return 1; }
+			[ "$kind" != frps ] || rm -f "$FRPS_RUN_DIR/frps.pid"
+			return 0
+			;;
+		*) return 1 ;;
+		esac
+		;;
+	*) return 1 ;;
+	esac
+}
+_frps_write_services() {
+	local kind name bin args unit
+	mkdir -p "$FRPS_LOG_DIR" "$FRPS_RUN_DIR" || return 1
+	chmod 700 "$FRPS_LOG_DIR" "$FRPS_RUN_DIR" || return 1
+	for kind in frps web; do
+		[ "$kind" != web ] || [ "$FRPS_MODE" = web ] || continue
+		name=$(_frps_name "$kind"); unit=$(_frps_unit "$kind")
+		if [ "$kind" = frps ]; then bin=$FRPS_BIN; args="-c $FRPS_CONF"; else bin=$(_frps_nginx_bin); args="-p $FRPS_DIR/ -c $FRPS_DIR/nginx.conf -g 'daemon off;'"; fi
+		[[ "$bin" =~ ^/[A-Za-z0-9_./-]+$ ]] || return 1
+		case "$INIT" in
+		systemd)
+			cat >"$unit" <<UNIT
+# Managed by Onebox FRP
+[Unit]
+Description=Onebox FRP $kind
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=$bin $args
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65535
+KillMode=mixed
+TimeoutStopSec=15
+[Install]
+WantedBy=multi-user.target
+UNIT
+			if [ "$kind" = frps ]; then sed -i "/^ExecStart=/i ExecStartPre=$CMD_PATH frps net-apply" "$unit"; fi
+			;;
+		openrc)
+			cat >"$unit" <<UNIT
+#!/sbin/openrc-run
+# Managed by Onebox FRP
+name="$name"
+supervisor="supervise-daemon"
+command="$bin"
+command_args="$args"
+output_log="$FRPS_LOG_DIR/$kind.log"
+error_log="$FRPS_LOG_DIR/$kind.log"
+respawn_delay=5
+respawn_max=10
+respawn_period=120
+depend() { need net; after firewall; }
+UNIT
+			if [ "$kind" = frps ]; then printf 'start_pre() { "%s" frps net-apply; }\n' "$CMD_PATH" >>"$unit"; fi
+			chmod 755 "$unit" || return 1
+			;;
+		esac
+	done
+	[ "$INIT" != systemd ] || systemctl daemon-reload
+}
+_frps_health() {
+	local i addr=127.0.0.1 scope=${1:-all}
+	[ "$FRPS_BIND_ADDR" != ::1 ] || addr='[::1]'
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		if _frps_service_active frps && port_in_use "$FRPS_BIND_PORT" tcp &&
+			timeout 4 openssl s_client -connect "$addr:$FRPS_BIND_PORT" -servername "$FRPS_DOMAIN" -verify_hostname "$FRPS_DOMAIN" -CAfile "$FRPS_DIR/ca.pem" -verify_return_error </dev/null >/dev/null 2>&1; then
+			if [ "$FRPS_MODE" != web ] || [ "$scope" = frps ]; then return 0; fi
+			_frps_service_active web && _frps_web_check && port_in_use "$FRPS_HTTPS_PORT" tcp && return 0
+		fi
+		sleep 1
+	done
+	err "FRP 服务启动或 TLS 健康检查失败"
+	return 1
+}
+
+# Static reservations also protect stopped instances and remote ports that a
+# client has not opened yet. Existing proxy/hopping reservations are symmetric.
+_frps_reserved() (
+	local port=$1 proto=$2
+	_frps_load >/dev/null 2>&1 || return 1
+	if [ "$proto" != udp ]; then
+		[ "$port" = "$FRPS_BIND_PORT" ] && return 0
+		if [ "$FRPS_MODE" = web ]; then
+			[ "$port" = "$FRPS_HTTP_PORT" ] || [ "$port" = "$FRPS_HTTPS_PORT" ] || [ "$port" = "$FRPS_REDIRECT_PORT" ] && return 0
+		fi
+	fi
+	[ "$FRPS_MODE" = tcp ] && [ "$port" -ge "$FRPS_RANGE_START" ] && [ "$port" -le "$FRPS_RANGE_END" ]
+)
+_frps_hop_conflict() (
+	_frps_load >/dev/null 2>&1 && [ "$FRPS_MODE" = tcp ] || return 1
+	_frps_ranges_overlap "$1" "$FRPS_RANGE_START-$FRPS_RANGE_END" || return 1
+	printf 'FRP/%s-%s' "$FRPS_RANGE_START" "$FRPS_RANGE_END"
+)
+_frps_proxy_reservations() (
+	[ -f "$STATE_FILE" ] || return 0
+	load_state || return 1
+	local p port net
+	for p in $PROTOCOLS; do port=$(pget PORT "$p"); net=$(proto_net "$p"); printf '%s %s\n' "$port" "$net"; done
+	if site_enabled; then printf '80 tcp\n%s tcp\n' "$REALITY_SITE_PORT"; site_https_enabled && echo '443 tcp'; fi
+	[ "$TLS_MODE/$ACME_METHOD" != acme/standalone ] || echo '80 tcp'
+	[ -z "$REALITY_GUARD_PORT" ] || printf '%s tcp\n' "$REALITY_GUARD_PORT"
+	[ -z "$HY2_HOP" ] || printf '%s udp\n' "$HY2_HOP"
+	return 0
+)
+_frps_wanted_ports() {
+	printf '%s tcp\n' "$FRPS_BIND_PORT"
+	if [ "$FRPS_MODE" = web ]; then
+		printf '%s tcp\n%s tcp\n' "$FRPS_HTTP_PORT" "$FRPS_HTTPS_PORT"
+		[ "$FRPS_REDIRECT_PORT" = 0 ] || printf '%s tcp\n' "$FRPS_REDIRECT_PORT"
+	else printf '%s-%s both\n' "$FRPS_RANGE_START" "$FRPS_RANGE_END"; fi
+}
+_frps_ranges_overlap() {
+	local lo=${1%-*} hi=${1#*-} other_lo=${2%-*} other_hi=${2#*-}
+	[[ "$lo$hi$other_lo$other_hi" =~ ^[0-9]+$ ]] && [ "$lo" -le "$other_hi" ] && [ "$other_lo" -le "$hi" ]
+}
+_frps_check_ports() {
+	local requested reserved range proto port other_proto lo hi p
+	requested=$(_frps_wanted_ports)
+	reserved=$(_frps_proxy_reservations) || { err "无法读取已有代理端口分配，取消 FRP 配置"; return 1; }
+	while read -r range proto; do
+		while read -r port other_proto; do
+			[ -n "$port" ] || continue
+			[ "$proto" = both ] || [ "$other_proto" = both ] || [ "$proto" = "$other_proto" ] || continue
+			_frps_ranges_overlap "$range" "$port" && { err "FRP $range/$proto 与已有代理/网站/端口跳跃 $port/$other_proto 冲突；请选择其他端口或独立 VPS"; return 1; }
+		done <<<"$reserved"
+		lo=${range%-*}; hi=${range#*-}
+		for ((p=lo; p<=hi; p++)); do
+			if { [ "$proto" != udp ] && port_in_use "$p" tcp; } || { [ "$proto" != tcp ] && port_in_use "$p" udp; }; then
+				err "FRP 需要的 $p/$proto 已被其他服务占用，未接管该服务"; return 1
+			fi
+		done
+	done <<<"$requested"
+}
+
+_frps_cron() {
+	local action=$1 current tmp
+	has crontab || { [ "$action" = del ] && return 0; err "需要 crontab 安排证书自动续期"; return 1; }
+	current=$(_site_read_crontab) || return 1
+	tmp=$(mktemp) || return 1
+	printf '%s\n' "$current" | sed '/ # onebox-frps-renew$/d; / # onebox-frps-boot$/d' >"$tmp"
+	if [ "$action" = add ]; then
+		printf '17 3 * * * %s frps renew --cron >>%s/renew.log 2>&1 # onebox-frps-renew\n' "$CMD_PATH" "$FRPS_LOG_DIR" >>"$tmp"
+		[ "$INIT" != none ] || printf '@reboot %s frps start >>%s/boot.log 2>&1 # onebox-frps-boot\n' "$CMD_PATH" "$FRPS_LOG_DIR" >>"$tmp"
+	fi
+	crontab "$tmp"; local rc=$?; rm -f "$tmp"; return "$rc"
+}
+_frps_snapshot() {
+	local backup=$1 path kind index=0
+	for path in "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR"; do
+		if [ -e "$path" ]; then cp -a "$path" "$backup/dir-$index" || return 1; fi
+		index=$((index + 1))
+	done
+	for kind in frps web; do
+		path=$(_frps_unit "$kind")
+		[ ! -f "$path" ] || cp -p "$path" "$backup/unit-$kind" || return 1
+		_frps_service_active "$kind" && touch "$backup/active-$kind"
+		_frps_service_enabled "$kind" && touch "$backup/enabled-$kind"
+	done
+	if has crontab; then _site_read_crontab >"$backup/cron" || return 1; fi
+	touch "$backup/complete"
+}
+_frps_rollback() {
+	local backup=$1 path kind index=0 failed=0
+	[ -f "$backup/complete" ] || return 1
+	_frps_service stop web || failed=1
+	_frps_service stop frps || failed=1
+	[ "$failed" = 0 ] || { err "FRP 新服务未停止，拒绝覆盖运行文件；备份保留在 $backup"; return 1; }
+	_frps_fw_close_all || failed=1
+	# Do not lose a cleanup ledger when firewall restoration needs a retry.
+	[ "$failed" = 0 ] || { err "FRP 防火墙清理失败，保留配置与备份 $backup"; return 1; }
+	for kind in frps web; do _frps_service disable "$kind" || failed=1; done
+	for path in "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR"; do
+		rm -rf "$path" || failed=1
+		[ ! -d "$backup/dir-$index" ] || cp -a "$backup/dir-$index" "$path" || failed=1
+		index=$((index + 1))
+	done
+	for kind in frps web; do
+		path=$(_frps_unit "$kind")
+		if [ -f "$backup/unit-$kind" ]; then cp -p "$backup/unit-$kind" "$path" || failed=1; else rm -f "$path" || failed=1; fi
+	done
+	[ "$INIT" != systemd ] || systemctl daemon-reload || failed=1
+	[ ! -f "$backup/cron" ] || crontab "$backup/cron" || failed=1
+	if _frps_installed; then
+		_frps_load && _frps_fw_apply open || failed=1
+		for kind in frps web; do
+			[ ! -f "$backup/enabled-$kind" ] || _frps_service enable "$kind" || failed=1
+			[ ! -f "$backup/active-$kind" ] || _frps_service start "$kind" || failed=1
+		done
+	fi
+	[ "$failed" = 0 ] || { err "FRP 恢复未完成，请保留 $backup 并检查服务/防火墙"; return 1; }
+}
+_frps_mutation_cleanup() {
+	local rc=$1
+	trap - EXIT INT TERM HUP
+	if [ "${FRPS_TXN_OK:-0}" != 1 ]; then
+		_frps_rollback "$FRPS_BACKUP" || return 1
+		warn "FRP 操作失败，已恢复旧配置和服务状态"
+	fi
+	rm -rf "$FRPS_BACKUP"
+	return "$rc"
+}
+_frps_begin() {
+	local path kind
+	_frps_lock || return 1
+	for path in "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR"; do
+		if [ -e "$path" ] && [ ! -f "$path/.managed" ]; then err "FRP 路径已有非本脚本文件，拒绝接管: $path"; return 1; fi
+	done
+	for kind in frps web; do
+		path=$(_frps_unit "$kind")
+		[ ! -e "$path" ] || { [ -f "$path" ] && [ ! -L "$path" ] && grep -qF '# Managed by Onebox FRP' "$path"; } || { err "拒绝接管现有 FRP 服务: $path"; return 1; }
+	done
+	mkdir -p "$(dirname "$FRPS_DIR")" || return 1
+	FRPS_BACKUP=$(mktemp -d "$(dirname "$FRPS_DIR")/.onebox-frps-backup.XXXXXX") || return 1
+	chmod 700 "$FRPS_BACKUP" || return 1
+	_frps_snapshot "$FRPS_BACKUP" || { rm -rf "$FRPS_BACKUP"; return 1; }
+	FRPS_TXN_OK=0
+	trap '_frps_mutation_cleanup $?; exit $?' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+}
+_frps_make_dirs() {
+	local path
+	for path in "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR"; do
+		mkdir -p "$path" && chmod 700 "$path" && touch "$path/.managed" || return 1
+	done
+	mkdir -p "$FRPS_LOG_DIR" "$FRPS_RUN_DIR" && chmod 700 "$FRPS_LOG_DIR" "$FRPS_RUN_DIR"
+}
+_frps_ensure_manager() {
+	install_self || return 1
+	[ -x "$CMD_PATH" ] && grep -qF '# BEGIN embedded-frps' "$CMD_PATH" || { err "FRP 需要可用的 onebox 管理命令以启停和续期，请先保存最新版脚本后执行"; return 1; }
+}
+
+_frps_apply() (
+	local rotate=${1:-0} staged
+	_frps_validate || return 1
+	init_env
+	for staged in curl jq openssl tar timeout flock crontab sha256sum ip; do ensure_cmds "$staged" || return 1; done
+	_frps_check_dns || return 1
+	confirm "部署 FRP $FRPS_MODE 模式？只管理 FRP 自身服务、证书及端口" n || return 1
+	_frps_begin || return 1
+	_frps_make_dirs || return 1
+	_frps_ensure_manager || return 1
+	# Download/validate new binary before stopping the running instance.
+	staged="$FRPS_BACKUP/new-frps"
+	_frps_download "$staged" || return 1
+	FRPS_VERSION=$("$staged" -v) || return 1
+	_frps_service stop web && _frps_service stop frps || return 1
+	_frps_check_ports || return 1
+	_frps_fw_close_all || return 1
+	[ "$rotate" != 1 ] && [ -n "$FRPS_TOKEN" ] || FRPS_TOKEN=$(rand_hex 32)
+	_frps_control_certificate || return 1
+	cp "$staged" "$FRPS_BIN" && chmod 755 "$FRPS_BIN" || return 1
+	_frps_render && "$FRPS_BIN" verify -c "$FRPS_CONF" >/dev/null || { err "frps 配置校验失败"; return 1; }
+	_frps_save || return 1
+	if [ "$FRPS_MODE" = web ]; then site_install_nginx || return 1; fi
+	_frps_write_services && _frps_fw_apply open || return 1
+	if [ "$FRPS_MODE/$FRPS_TLS_METHOD" = web/http ]; then
+		_frps_web_render 1 && _frps_service start web || return 1
+	fi
+	_frps_web_certificate || return 1
+	if [ "$FRPS_MODE" = web ]; then
+		_frps_service stop web && _frps_web_render 0 && _frps_service start web && _frps_service enable web || return 1
+	else
+		_frps_service disable web || return 1
+		rm -f "$(_frps_unit web)"
+		[ "$INIT" != systemd ] || systemctl daemon-reload || return 1
+	fi
+	_frps_service start frps && _frps_service enable frps && _frps_health && _frps_cron add || return 1
+	_site_scheduler_ready || { err "FRP 需要运行中的 cron 服务执行证书检查"; return 1; }
+	FRPS_TXN_OK=1
+	info "FRP 已部署：$FRPS_MODE / v$FRPS_VERSION；请导出客户端配置并在内网机器运行 frpc"
+	_frps_dns_info
+)
+
+_frps_renew() (
+	local mode=${1:-manual} frps_active=0 web_active=0
+	_frps_load && _frps_begin || return 1
+	_frps_service_active frps && frps_active=1
+	_frps_service_active web && web_active=1
+	trim_log "$FRPS_LOG_DIR/renew.log"
+	_frps_control_certificate || return 1
+	if [ "$FRPS_MODE" = web ] && [ "$FRPS_TLS_METHOD" != custom ]; then
+		if [ "$FRPS_TLS_METHOD" != http ] || [ "$web_active" = 1 ]; then
+			_frps_web_renew "$mode" && _frps_web_check || return 1
+		else warn "FRP 网站已停止，本次跳过需要 HTTP 入口的续期"; fi
+	fi
+	if [ "$web_active" = 1 ] && ! cmp -s "$FRPS_BACKUP/dir-0/web-cert.pem" "$FRPS_DIR/web-cert.pem"; then _frps_service reload web || return 1; fi
+	if [ "$frps_active" = 1 ] && ! cmp -s "$FRPS_BACKUP/dir-0/server-cert.pem" "$FRPS_DIR/server-cert.pem"; then
+		_frps_service restart frps && _frps_health frps || return 1
+	fi
+	FRPS_TXN_OK=1
+	[ "$mode" = --cron ] || info "FRP 证书检查/续期完成 (私有 CA 保持不变)"
+)
+_frps_uninstall() (
+	_frps_load || { err "未安装托管 FRP"; return 1; }
+	confirm "卸载 FRP 服务、独立配置和证书？原有代理和网站保留" n || return 1
+	_frps_begin || return 1
+	_frps_service stop web && _frps_service stop frps && _frps_fw_close_all && _frps_cron del || return 1
+	_frps_service disable web && _frps_service disable frps || return 1
+	rm -f "$(_frps_unit web)" "$(_frps_unit frps)" || return 1
+	[ "$INIT" != systemd ] || systemctl daemon-reload || return 1
+	rm -rf "$FRPS_DIR" "$FRPS_BIN_DIR" "$FRPS_WEB_VAR" "$FRPS_RUN_DIR" "$FRPS_LOG_DIR" || return 1
+	FRPS_TXN_OK=1
+	info "FRP 已卸载；已导出的客户端 token/配置不再有效"
+)
+
+_frps_parse() {
+	FRPS_DRY_RUN=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--dry-run) FRPS_DRY_RUN=1; shift; continue ;;
+		--mode | --domain | --port | --http-port | --https-port | --redirect-port | --web-domain | --subdomain-host | --allow-ports | --tls | --cert | --key | --version)
+			[ $# -ge 2 ] && [ -n "$2" ] || { err "$1 缺少值"; return 1; }
+			case "$1" in
+			--mode) FRPS_MODE=$2 ;; --domain) FRPS_DOMAIN=${2,,} ;; --port) FRPS_BIND_PORT=$2 ;;
+			--http-port) FRPS_HTTP_PORT=$2 ;; --https-port) FRPS_HTTPS_PORT=$2 ;; --redirect-port) FRPS_REDIRECT_PORT=$2 ;;
+			--web-domain) FRPS_WEB_DOMAIN=${2,,}; FRPS_SUBDOMAIN_HOST="" ;;
+			--subdomain-host) FRPS_SUBDOMAIN_HOST=${2,,}; FRPS_WEB_DOMAIN="" ;;
+			--allow-ports) [[ "$2" =~ ^[1-9][0-9]{0,4}-[1-9][0-9]{0,4}$ ]] || { err '--allow-ports 格式为 20000-20100'; return 1; }; FRPS_RANGE_START=${2%-*}; FRPS_RANGE_END=${2#*-} ;;
+			--tls) FRPS_TLS_METHOD=$2 ;; --cert) FRPS_CERT_INPUT=$2 ;; --key) FRPS_KEY_INPUT=$2 ;; --version) FRPS_VERSION=${2#v} ;;
+			esac
+			shift 2 ;;
+		*) err "未知 FRP 选项: $1"; return 1 ;;
+		esac
+	done
+}
+_frps_wizard() {
+	local n
+	ask n '用途: 1=域名 HTTPS 网站，2=公网 TCP/UDP 转发' "$([ "$FRPS_MODE" = tcp ] && echo 2 || echo 1)"
+	case "$n" in 1) FRPS_MODE=web ;; 2) FRPS_MODE=tcp ;; *) return 1 ;; esac
+	ask_domain FRPS_DOMAIN 'FRP 控制域名 (DNS 直连 VPS)' "$FRPS_DOMAIN"
+	ask_num FRPS_BIND_PORT 'frpc 控制连接端口' "$FRPS_BIND_PORT" 1024 65535 || return 1
+	if [ "$FRPS_MODE" = web ]; then
+		ask n '应用域名: 1=单域名，2=泛域名' "$([ -n "$FRPS_SUBDOMAIN_HOST" ] && echo 2 || echo 1)"
+		case "$n" in
+		1) FRPS_SUBDOMAIN_HOST=""; ask_domain FRPS_WEB_DOMAIN '应用域名 (例如 app.example.com)' "$FRPS_WEB_DOMAIN" ;;
+		2) FRPS_WEB_DOMAIN=""; ask_domain FRPS_SUBDOMAIN_HOST '泛域名根 (例如 apps.example.com，DNS 配置 *.apps.example.com)' "$FRPS_SUBDOMAIN_HOST" ;;
+		*) return 1 ;;
+		esac
+		ask_num FRPS_HTTP_PORT 'frps 内部 HTTP 端口 (仅回环监听)' "$FRPS_HTTP_PORT" 1024 65535 || return 1
+		ask_num FRPS_HTTPS_PORT '公网 HTTPS 端口 (443 被 REALITY/网站占用时可选 8443)' "$FRPS_HTTPS_PORT" 1 65535 || return 1
+		ask FRPS_TLS_METHOD '网站证书: http / cf / custom (泛域名仅 cf/custom)' "$FRPS_TLS_METHOD"
+		ask_num FRPS_REDIRECT_PORT 'HTTP 跳转入口 (HTTP验证须80；cf/custom可填0关闭)' "$FRPS_REDIRECT_PORT" 0 65535 || return 1
+		if [ "$FRPS_TLS_METHOD" = custom ]; then ask FRPS_CERT_INPUT '完整证书链文件路径' "$FRPS_CERT_INPUT"; ask FRPS_KEY_INPUT '私钥文件路径' "$FRPS_KEY_INPUT"; fi
+	else
+		ask_num FRPS_RANGE_START '允许的公网转发端口起点' "$FRPS_RANGE_START" 1024 65535 || return 1
+		ask_num FRPS_RANGE_END '允许的公网转发端口终点 (最多1000个)' "$FRPS_RANGE_END" "$FRPS_RANGE_START" 65535 || return 1
+	fi
+	_frps_validate
+}
+_frps_info() {
+	_frps_load || { info '未安装 FRP；onebox frps install 可独立安装'; return 0; }
+	printf 'FRP v%s / %s 模式\n控制入口: %s:%s (TLS + 私有 CA + token)\n' "$FRPS_VERSION" "$FRPS_MODE" "$FRPS_DOMAIN" "$FRPS_BIND_PORT"
+	printf 'frps: %s\n' "$(_frps_service_active frps && echo 运行中 || echo 已停止)"
+	if [ "$FRPS_MODE" = web ]; then
+		printf '网站: %s；内部 HTTP: 127.0.0.1:%s\n' "$(_frps_service_active web && echo 运行中 || echo 已停止)" "$FRPS_HTTP_PORT"
+		printf '网站证书: '; openssl x509 -in "$FRPS_DIR/web-cert.pem" -noout -enddate 2>/dev/null || true
+	else printf '公网 TCP/UDP 转发范围: %s-%s\n' "$FRPS_RANGE_START" "$FRPS_RANGE_END"; fi
+	printf '控制证书: '; openssl x509 -in "$FRPS_DIR/server-cert.pem" -noout -enddate 2>/dev/null || true
+	printf '配置: %s\n凭据隐藏；用 onebox frps client 目录 导出客户端。Dashboard 默认关闭。\n' "$FRPS_CONF"
+	_frps_dns_info
+}
+_frps_plan() {
+	_frps_validate || return 1
+	printf 'FRP 预览 (未联网、未安装、未修改配置)\n模式: %s；版本: %s\n' "$FRPS_MODE" "$FRPS_VERSION"
+	_frps_dns_info
+	printf '计划端口 (现有站点/代理或其他进程占用时将拒绝部署):\n'
+	_frps_wanted_ports
+	printf '配置/二进制: %s / %s\n' "$FRPS_DIR" "$FRPS_BIN_DIR"
+	if [ "$FRPS_MODE" = web ]; then printf '独立 Nginx + %s 网站证书；frps 转发端口只绑定回环地址。\n' "$FRPS_TLS_METHOD"; fi
+	printf '控制 TLS 由独立私有 CA 签名；客户端必须携带导出的 ca.pem。\n'
+}
+_frps_client_cli() {
+	local output=${1:-} type local_port=8080 remote_port=$FRPS_RANGE_START name=www
+	[ -n "$output" ] || { err '用法: onebox frps client 新目录 [--type http|tcp|udp --local-port N --remote-port N --subdomain 标签]'; return 1; }
+	shift
+	if [ "$FRPS_MODE" = web ]; then type=http; else type=tcp; fi
+	while [ $# -gt 0 ]; do
+		[ $# -ge 2 ] || return 1
+		case "$1" in --type) type=$2 ;; --local-port) local_port=$2 ;; --remote-port) remote_port=$2 ;; --subdomain) name=$2 ;; *) err "未知导出选项: $1"; return 1 ;; esac
+		shift 2
+	done
+	_frps_export "$output" "$type" "$local_port" "$remote_port" "$name"
+}
+_frps_menu() {
+	local choice dir
+	is_interactive || { _frps_info; return; }
+	while :; do
+		title 'FRP 服务端 / 域名管理'
+		printf '1) 安装 / 重新配置\n2) 状态与 DNS 说明\n3) 导出客户端配置\n4) 启动\n5) 停止\n6) 重启\n7) 更新 frps\n8) 检查/续期证书\n9) 轮换 token\n10) 日志\n11) 卸载 FRP\n0) 返回\n'
+		ask choice '请选择' 0
+		case "$choice" in
+		0) return 0 ;;
+		1) (do_frps install) ;; 2) _frps_info ;;
+		3) ask dir '新的客户端导出目录' /root/frpc-client; (do_frps client "$dir") ;;
+		4) (do_frps start) ;; 5) (do_frps stop) ;; 6) (do_frps restart) ;;
+		7) (do_frps update) ;; 8) (do_frps renew) ;; 9) (do_frps rotate-token) ;;
+		10) (do_frps log) ;; 11) (do_frps uninstall) ;; *) warn '无效选项' ;;
+		esac
+	done
+}
+
+do_frps() (
+	local action=${1:-menu}
+	[ $# = 0 ] || shift
+	setup_tty; detect_os; detect_init
+	case "$action" in
+	plan | install | configure)
+		if _frps_installed; then _frps_load || return 1; else _frps_defaults; fi
+		_frps_parse "$@" || return 1
+		if [ "$action" != plan ] && [ "$FRPS_DRY_RUN" = 0 ] && [ $# = 0 ] && is_interactive; then _frps_wizard || return 1; fi
+		if [ "$action" = plan ] || [ "$FRPS_DRY_RUN" = 1 ]; then _frps_plan; else _frps_apply; fi
+		return $?
+		;;
+	help | --help)
+		printf 'onebox frps [plan|install|configure|info|status|start|stop|restart|update [版本]|renew|rotate-token|client 新目录|log|uninstall]\n配置参数: --mode web|tcp --domain 控制域名 --web-domain 应用域名 / --subdomain-host 泛域名根\n--port 7000 --http-port 7080 --https-port 443 --redirect-port 80 --allow-ports 20000-20100\n--tls http|cf|custom --cert 完整链 --key 私钥 --version %s|latest --dry-run\n' "$TESTED_FRP_VERSION"
+		return 0 ;;
+	esac
+	require_root
+	case "$action" in
+	menu) [ $# = 0 ] && _frps_menu ;;
+	info | status) [ $# = 0 ] && _frps_info ;;
+	*)
+		_frps_load || { err '尚未安装 FRP 或配置无效'; return 1; }
+		case "$action" in
+		# Invoked by the service manager while the parent apply holds the lock.
+		net-apply) [ $# = 0 ] && _frps_fw_apply open ;;
+		client) _frps_client_cli "$@" ;;
+		update) [ $# -le 1 ] || return 1; FRPS_VERSION=${1:-latest}; FRPS_VERSION=${FRPS_VERSION#v}; _frps_apply ;;
+		rotate-token) [ $# = 0 ] && _frps_apply 1 ;;
+		renew) [ $# = 0 ] || { [ $# = 1 ] && [ "$1" = --cron ]; } || return 1; _frps_renew "${1:-manual}" ;;
+		uninstall) [ $# = 0 ] && _frps_uninstall ;;
+		start | stop | restart)
+			[ $# = 0 ] && _frps_lock || return 1
+			if [ "$action" != start ]; then _frps_service stop web && _frps_service stop frps || return 1; fi
+			if [ "$action" != stop ]; then
+				_frps_fw_apply open || return 1
+				[ "$FRPS_MODE" != web ] || _frps_service start web || return 1
+				_frps_service start frps && _frps_health || return 1
+			fi
+			;;
+		log)
+			[ $# = 0 ] || return 1
+			if [ "$INIT" = systemd ]; then journalctl -u onebox-frps -u onebox-frp-web -n 80 --no-pager;
+			else tail -n 80 "$FRPS_LOG_DIR/frps.log" "$FRPS_DIR/nginx-error.log" 2>/dev/null; fi
+			;;
+		*) err "未知 FRP 命令: $action；查看 onebox frps help"; return 1 ;;
+		esac
+		;;
+	esac
+)
+
+# Independent FRP website / public certificate helpers. Inlined for distribution.
+# The control channel uses its own private CA managed by the FRP lifecycle module.
+
+_frps_nginx_bin() {
+	if [ -n "${ONEBOX_NGINX_BIN:-}" ]; then
+		[ -x "$ONEBOX_NGINX_BIN" ] && printf '%s' "$ONEBOX_NGINX_BIN"
+	else command -v nginx; fi
+}
+
+_frps_domain_validate() {
+	local value
+	case "${FRPS_MODE:-}" in tcp | web) ;; *) err 'FRP 模式必须为 tcp 或 web'; return 1 ;; esac
+	valid_domain "${FRPS_DOMAIN:-}" && [ "${#FRPS_DOMAIN}" -le 253 ] || { err 'FRP 控制域名无效'; return 1; }
+	[ "$FRPS_MODE" = web ] || return 0
+	if [ -n "${FRPS_SUBDOMAIN_HOST:-}" ]; then
+		valid_domain "$FRPS_SUBDOMAIN_HOST" && [ "${#FRPS_SUBDOMAIN_HOST}" -le 238 ] || { err 'FRP 泛域名根无效'; return 1; }
+		[ "${FRPS_TLS_METHOD:-}" != http ] || { err '泛域名证书需要 Cloudflare DNS 验证或自备证书'; return 1; }
+	else
+		valid_domain "${FRPS_WEB_DOMAIN:-}" && [ "${#FRPS_WEB_DOMAIN}" -le 253 ] || { err 'FRP 应用域名无效'; return 1; }
+	fi
+	case "${FRPS_TLS_METHOD:-}" in http | cf | custom) ;; *) err '网站证书方式必须为 http、cf 或 custom'; return 1 ;; esac
+	for value in "${FRPS_HTTP_PORT:-}" "${FRPS_HTTPS_PORT:-}"; do
+		[[ "$value" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$value" -le 65535 ] || { err 'FRP 网站端口无效'; return 1; }
+	done
+	value=${FRPS_REDIRECT_PORT:-0}
+	[[ "$value" =~ ^(0|[1-9][0-9]{0,4})$ ]] && [ "$value" -le 65535 ] || { err 'FRP HTTP 入口端口无效'; return 1; }
+	if [ "$FRPS_TLS_METHOD" = http ] && [ "$value" != 80 ]; then err 'HTTP-01 验证要求 HTTP 入口为 TCP 80'; return 1; fi
+	[ "$FRPS_HTTP_PORT" != "$FRPS_HTTPS_PORT" ] && [ "$FRPS_HTTP_PORT" != "$value" ] && [ "$FRPS_HTTPS_PORT" != "$value" ] || {
+		err 'FRP 内部 HTTP、公开 HTTPS 与重定向端口不能相同'; return 1;
+	}
+}
+
+_frps_web_cert_names() {
+	if [ -n "${FRPS_SUBDOMAIN_HOST:-}" ]; then printf '%s\n%s\n' "$FRPS_SUBDOMAIN_HOST" "*.$FRPS_SUBDOMAIN_HOST";
+	else printf '%s\n' "$FRPS_WEB_DOMAIN"; fi
+}
+
+_frps_web_server_names() {
+	if [ -n "${FRPS_SUBDOMAIN_HOST:-}" ]; then printf '*.%s' "$FRPS_SUBDOMAIN_HOST";
+	else printf '%s' "$FRPS_WEB_DOMAIN"; fi
+}
+
+_frps_check_dns() {
+	local own resolved domain ip discovered=0 names="$FRPS_DOMAIN"
+	_frps_domain_validate || return 1
+	if [ "$FRPS_MODE" = web ]; then
+		if [ -n "${FRPS_SUBDOMAIN_HOST:-}" ]; then
+			names+=" onebox-$(openssl rand -hex 5).$FRPS_SUBDOMAIN_HOST"
+		else names+=" $FRPS_WEB_DOMAIN"; fi
+	fi
+	own=$(own_ip_list)
+	if [ -z "$own" ]; then detect_public_ip; own=$(own_ip_list); discovered=1; fi
+	[ -n "$own" ] || { err '无法确认本机公网地址，不能验证 FRP 域名'; return 1; }
+	for domain in $names; do
+		resolved=$(resolve_domain "$domain")
+		[ -n "$resolved" ] || { err "无法解析 FRP 域名 $domain，请先添加 DNS 记录"; return 1; }
+		while IFS= read -r ip; do
+			# NAT guests may have only private interfaces (or native IPv6 plus
+			# NAT IPv4). Discover the public egress once before rejecting DNS.
+			if [ "$discovered" = 0 ] && ! printf '%s\n' "$own" | grep -qixF "$ip"; then
+				detect_public_ip; own=$(own_ip_list); discovered=1
+			fi
+			printf '%s\n' "$own" | grep -qixF "$ip" || { err "FRP 域名 $domain 的地址 $ip 不属于本机，请检查全部 A/AAAA 并关闭 CDN 代理"; return 1; }
+		done <<<"$resolved"
+	done
+}
+
+_frps_dns_info() {
+	printf '  控制域名: %s → 本 VPS 公网 A/AAAA，关闭 CDN 代理\n' "$FRPS_DOMAIN"
+	if [ "${FRPS_MODE:-}" = web ]; then
+		if [ -n "${FRPS_SUBDOMAIN_HOST:-}" ]; then
+			printf '  泛域解析: *.%s → 本 VPS 公网 A/AAAA，关闭 CDN 代理\n' "$FRPS_SUBDOMAIN_HOST"
+			printf '  客户端 subdomain = "app" → https://app.%s' "$FRPS_SUBDOMAIN_HOST"
+		else printf '  应用域名: %s → 本 VPS 公网 A/AAAA，关闭 CDN 代理\n  网站地址: https://%s' "$FRPS_WEB_DOMAIN" "$FRPS_WEB_DOMAIN"; fi
+		[ "${FRPS_HTTPS_PORT:-443}" = 443 ] || printf ':%s' "$FRPS_HTTPS_PORT"
+		printf '/\n'
+		[ "${FRPS_TLS_METHOD:-}" != http ] || printf '  HTTP-01 签发和续期需持续放行公网 TCP 80；云防火墙也需放行。\n'
+	fi
+	printf '  无 IPv6 连通性时请删除 AAAA；本脚本不会修改域名商 DNS 记录。\n'
+}
+
+_frps_web_check() {
+	local bin
+	bin=$(_frps_nginx_bin) || return 1
+	"$bin" -t -p "$FRPS_DIR/" -c "$FRPS_DIR/nginx.conf" >/dev/null 2>&1
+}
+
+# Bootstrap serves HTTP-01 only; the lifecycle caller starts the web service
+# before issuance, then renders the full config and restarts/reloads that service.
+_frps_web_render() {
+	local bootstrap=${1:-0} user='' group='' candidate ipv6='' https_ipv6='' names suffix='' tmp http_port
+	[ "${FRPS_MODE:-}" = web ] || return 0
+	_frps_domain_validate || return 1
+	case "$bootstrap" in 0 | 1) ;; *) return 1 ;; esac
+	for candidate in nginx www-data nobody; do
+		id "$candidate" >/dev/null 2>&1 || continue
+		user=$candidate group=$(id -gn "$candidate")
+		break
+	done
+	[ -n "$user" ] || { err 'nginx 需要非 root 工作进程账号'; return 1; }
+	names=$(_frps_web_server_names)
+	http_port=${FRPS_REDIRECT_PORT:-0}
+	if [ "$bootstrap" = 1 ]; then
+		[ "$FRPS_TLS_METHOD" = http ] && [ "$http_port" = 80 ] || return 1
+	fi
+	[ "$FRPS_HTTPS_PORT" = 443 ] || suffix=":$FRPS_HTTPS_PORT"
+	if host_has_ipv6; then
+		ipv6="listen [::]:$http_port;"
+		https_ipv6="listen [::]:$FRPS_HTTPS_PORT ssl;"
+	fi
+	mkdir -p "$FRPS_DIR" "$FRPS_WEB_ROOT/.well-known/acme-challenge" || return 1
+	chmod 700 "$FRPS_DIR" || return 1
+	chmod 755 "$FRPS_WEB_VAR" "$FRPS_WEB_ROOT" "$FRPS_WEB_ROOT/.well-known" "$FRPS_WEB_ROOT/.well-known/acme-challenge" || return 1
+	tmp=$(mktemp "$FRPS_DIR/.nginx.XXXXXX") || return 1
+	{
+		cat <<EOF
+# Managed by onebox FRP; no system nginx includes.
+user $user $group;
+worker_processes 1;
+pid "$FRPS_DIR/nginx.pid";
+error_log "$FRPS_DIR/nginx-error.log" warn;
+events { worker_connections 1024; }
+http {
+    access_log off;
+    server_tokens off;
+    default_type text/plain;
+    map \$http_upgrade \$onebox_frp_connection { default upgrade; '' close; }
+    client_body_temp_path "$FRPS_WEB_VAR/tmp/body";
+    proxy_temp_path "$FRPS_WEB_VAR/tmp/proxy";
+    fastcgi_temp_path "$FRPS_WEB_VAR/tmp/fastcgi";
+    uwsgi_temp_path "$FRPS_WEB_VAR/tmp/uwsgi";
+    scgi_temp_path "$FRPS_WEB_VAR/tmp/scgi";
+EOF
+		if [ "$http_port" != 0 ]; then
+			cat <<EOF
+    server {
+        listen $http_port;
+        $ipv6
+        server_name $names;
+        location ^~ /.well-known/acme-challenge/ {
+            root "$FRPS_WEB_ROOT";
+            try_files \$uri =404;
+        }
+EOF
+			if [ "$bootstrap" = 1 ]; then printf '        location / { return 404; }\n';
+			else printf '        location / { return 301 https://$host%s$request_uri; }\n' "$suffix"; fi
+			printf '    }\n'
+			# Prevent unrecognised Host values from becoming open redirects.
+			printf '    server { listen %s default_server; ' "$http_port"
+			[ -z "$ipv6" ] || printf 'listen [::]:%s default_server; ' "$http_port"
+			printf 'server_name _; return 404; }\n'
+		fi
+		if [ "$bootstrap" = 0 ]; then
+			cat <<EOF
+    server {
+        listen $FRPS_HTTPS_PORT ssl;
+        $https_ipv6
+        server_name $names;
+        ssl_certificate "$FRPS_DIR/web-cert.pem";
+        ssl_certificate_key "$FRPS_DIR/web-key.pem";
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:onebox_frp:1m;
+        ssl_session_timeout 10m;
+        client_max_body_size 0;
+        location / {
+            proxy_pass http://127.0.0.1:$FRPS_HTTP_PORT;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$onebox_frp_connection;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$remote_addr;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host \$host;
+            proxy_set_header X-Forwarded-Port $FRPS_HTTPS_PORT;
+            proxy_set_header Forwarded "";
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+    }
+    server {
+        listen $FRPS_HTTPS_PORT ssl default_server;
+EOF
+			[ -z "$https_ipv6" ] || printf '        listen [::]:%s ssl default_server;\n' "$FRPS_HTTPS_PORT"
+			cat <<EOF
+        server_name _;
+        ssl_certificate "$FRPS_DIR/web-cert.pem";
+        ssl_certificate_key "$FRPS_DIR/web-key.pem";
+        ssl_protocols TLSv1.2 TLSv1.3;
+        return 404;
+    }
+EOF
+		fi
+		printf '}\n'
+	} >"$tmp" || { rm -f "$tmp"; return 1; }
+	# nginx creates its own worker-owned child directories, outside the secret root.
+	mkdir -p "$FRPS_WEB_VAR/tmp" && chmod 755 "$FRPS_WEB_VAR/tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$FRPS_DIR/nginx.conf" || { rm -f "$tmp"; return 1; }
+	_frps_web_check
+}
+
+_frps_web_cert_validate() {
+	local cert=${1:-$FRPS_DIR/web-cert.pem} key=${2:-$FRPS_DIR/web-key.pem} domain cert_pub key_pub
+	[ -s "$cert" ] && [ -s "$key" ] || { err '网站证书或私钥为空'; return 1; }
+	openssl x509 -in "$cert" -noout -checkend 3600 >/dev/null 2>&1 || { err '网站证书已过期或即将过期'; return 1; }
+	# Verify validity times and server usage without assuming GNU date syntax.
+	# The supplied leaf is a local trust anchor for these checks only; this does
+	# not claim that browsers trust a self-signed or incomplete custom chain.
+	openssl verify -partial_chain -trusted "$cert" -purpose sslserver "$cert" >/dev/null 2>&1 || {
+		err '网站证书生效时间、签名或服务端用途校验失败'; return 1;
+	}
+	cert_pub=$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null) || return 1
+	key_pub=$(openssl pkey -in "$key" -passin pass: -pubout 2>/dev/null) || { err '无法读取网站私钥（请使用未加密私钥）'; return 1; }
+	[ -n "$cert_pub" ] && [ "$cert_pub" = "$key_pub" ] || { err '网站证书与私钥不匹配'; return 1; }
+	while IFS= read -r domain; do
+		if [[ "$domain" == \*.* ]]; then
+			# A certificate for one concrete probe hostname is not a wildcard.
+			openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' |
+				sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -qixF "DNS:$domain" || {
+				err "网站证书缺少泛域名 SAN $domain"; return 1;
+			}
+			domain="onebox-cert-check.${domain#*.}"
+		fi
+		# x509 -checkhost may return zero on mismatch; verify fails reliably.
+		openssl verify -partial_chain -trusted "$cert" -purpose sslserver -verify_hostname "$domain" "$cert" >/dev/null 2>&1 || {
+			err "网站证书未覆盖域名 $domain"; return 1;
+		}
+	done < <(_frps_web_cert_names)
+}
+
+# acme_install may add its own scheduler. Keep only the lifecycle module's
+# managed `onebox frps renew --cron` task, without touching unrelated cron jobs.
+_frps_acme_cron_remove() {
+	has crontab || return 0
+	local current filtered
+	current=$(_site_read_crontab) || return 1
+	filtered=$(printf '%s\n' "$current" | awk -v exe="$FRPS_DIR/acme/acme.sh" '
+		# acme.sh quotes only its home directory: "/home/acme"/acme.sh.
+		# Normalise quoting of this single token, then require an exact path.
+		{ cmd=$6; gsub(/["\047]/, "", cmd); own = (cmd == exe && $7 == "--cron");
+		  if (!own) print; }') || return 1
+	[ "$current" = "$filtered" ] || printf '%s\n' "$filtered" | crontab -
+}
+
+_frps_web_certificate() (
+	[ "${FRPS_MODE:-}" = web ] || return 0
+	_frps_domain_validate || return 1
+	local name primary='' args=() rc staged
+	mkdir -p "$FRPS_DIR" && chmod 700 "$FRPS_DIR" || return 1
+	if [ "$FRPS_TLS_METHOD" = custom ]; then
+		[ -f "${FRPS_CERT_INPUT:-}" ] && [ -f "${FRPS_KEY_INPUT:-}" ] || { err '请提供自备 fullchain 与私钥文件'; return 1; }
+		_frps_web_cert_validate "$FRPS_CERT_INPUT" "$FRPS_KEY_INPUT" || return 1
+		staged=$(mktemp -d "$FRPS_DIR/.web-certificate.XXXXXX") || return 1
+		trap 'rm -rf "$staged"' EXIT
+		cp "$FRPS_CERT_INPUT" "$staged/cert" && cp "$FRPS_KEY_INPUT" "$staged/key" && chmod 600 "$staged/cert" "$staged/key" || return 1
+		mv -f "$staged/cert" "$FRPS_DIR/web-cert.pem" && mv -f "$staged/key" "$FRPS_DIR/web-key.pem"
+		return $?
+	fi
+	ACME_HOME="$FRPS_DIR/acme" ACME_SH="$FRPS_DIR/acme/acme.sh"
+	acme_install "${FRPS_ACME_EMAIL:-}"; rc=$?
+	_frps_acme_cron_remove || return 1
+	[ "$rc" = 0 ] || return "$rc"
+	while IFS= read -r name; do args+=(-d "$name"); [ -n "$primary" ] || primary=$name; done < <(_frps_web_cert_names)
+	if [ "$FRPS_TLS_METHOD" = http ]; then args+=(--webroot "$FRPS_WEB_ROOT"); else args+=(--dns dns_cf); fi
+	acme --issue "${args[@]}" -k ec-256 --server letsencrypt
+	rc=$?
+	[ "$rc" = 0 ] || [ "$rc" = 2 ] || return "$rc"
+	# No reload command: the caller validates the new certificate and coordinates
+	# service reloads inside the independent FRP transaction.
+	acme --install-cert -d "$primary" --ecc --key-file "$FRPS_DIR/web-key.pem" --fullchain-file "$FRPS_DIR/web-cert.pem" --reloadcmd ':' || return 1
+	chmod 600 "$FRPS_DIR/web-cert.pem" "$FRPS_DIR/web-key.pem" || return 1
+	_frps_web_cert_validate
+)
+
+_frps_web_renew() (
+	local method=${1:-manual} primary rc args=()
+	[ "${FRPS_MODE:-}" = web ] || { err '当前 FRP 模式没有网站证书'; return 1; }
+	[ "${FRPS_TLS_METHOD:-}" != custom ] || { err '自备证书请替换原证书文件后重新配置；不使用 ACME 自动续期'; return 1; }
+	case "$method" in cron | --cron) ;; manual | '') args+=(--force) ;; *) return 1 ;; esac
+	ACME_HOME="$FRPS_DIR/acme" ACME_SH="$FRPS_DIR/acme/acme.sh"
+	primary=$(_frps_web_cert_names | head -n1)
+	[ -x "$ACME_SH" ] && [ -f "$ACME_HOME/${primary}_ecc/${primary}.conf" ] || { err '缺少 FRP 网站证书续期部署'; return 1; }
+	acme --renew -d "$primary" --ecc "${args[@]}"
+	rc=$?
+	_frps_acme_cron_remove || return 1
+	[ "$rc" = 0 ] || [ "$rc" = 2 ] || return "$rc"
+	chmod 600 "$FRPS_DIR/web-cert.pem" "$FRPS_DIR/web-key.pem" || return 1
+	_frps_web_cert_validate
+)
+
+#!/usr/bin/env bash
+# FRP-owned firewall rules. Embedded into onebox.sh; no proxy-state migration.
+# Journal each new rule before applying it so a partial failure remains retryable.
+
+_frps_fw_ledger() { printf '%s/firewall.list' "$FRPS_DIR"; }
+_frps_fw_ledger_has() { grep -qxF "$1" "$(_frps_fw_ledger)" 2>/dev/null; }
+_frps_fw_ledger_add() (
+	umask 077
+	local f tmp
+	f=$(_frps_fw_ledger)
+	[ ! -L "$f" ] && [ ! -L "$FRPS_DIR" ] || return 1
+	_frps_fw_ledger_has "$1" && return 0
+	mkdir -p "$FRPS_DIR" || return 1
+	tmp=$(mktemp "$FRPS_DIR/.firewall.XXXXXX") || return 1
+	if { [ ! -e "$f" ] || cat "$f"; } >"$tmp" && printf '%s\n' "$1" >>"$tmp" && mv -f "$tmp" "$f"; then
+		return 0
+	fi
+	rm -f "$tmp"
+	return 1
+)
+_frps_fw_ledger_del() (
+	umask 077
+	local f tmp rc
+	f=$(_frps_fw_ledger)
+	[ ! -L "$f" ] || return 1
+	[ -f "$f" ] || return 0
+	tmp=$(mktemp "$FRPS_DIR/.firewall.XXXXXX") || return 1
+	grep -vxF "$1" "$f" >"$tmp"; rc=$?
+	if [ "$rc" -le 1 ] && mv -f "$tmp" "$f"; then return 0; fi
+	rm -f "$tmp"
+	return 1
+)
+_frps_fw_port_valid() {
+	local first last
+	[[ "$1" =~ ^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$ ]] || return 1
+	first=${1%%-*}; last=${1##*-}
+	[ "$first" -le "$last" ] && [ "$last" -le 65535 ]
+}
+_frps_fw_ufw_active() { has ufw && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; }
+_frps_fw_firewalld_active() { has firewall-cmd && [ "$(firewall-cmd --state 2>/dev/null)" = running ]; }
+
+# Only delete UFW rules with our exact owner comment. Numbered deletions run
+# backwards to preserve numbering, including separate IPv4 and IPv6 entries.
+_frps_fw_ufw_numbers() {
+	local port=${1/-/:} proto=$2 listing
+	listing=$(LC_ALL=C ufw status numbered 2>/dev/null) || return 1
+	printf '%s\n' "$listing" | awk -v p="$port" -v proto="$proto" '
+		/ on |OUT|FWD/ { next }
+		/#[[:space:]]*onebox-frp[[:space:]]*$/ {
+			line=$0; sub(/^\[[[:space:]]*/, "", line); n=line; sub(/\].*$/, "", n)
+			sub(/^[^]]*\][[:space:]]*/, "", line); split(line,a,/[[:space:]]+/)
+			if (a[1] == p "/" proto && line ~ /ALLOW( IN)?[[:space:]]+Anywhere/) print n
+		}' | sort -rn
+}
+_frps_fw_ufw_open() {
+	local port=$1 proto=$2 status key="ufw $1/$2" ipt_port=${1/-/:}
+	status=$(LC_ALL=C ufw status 2>/dev/null) || return 1
+	if printf '%s\n' "$status" | grep -vE ' on |OUT|FWD' |
+		grep -qE "^${ipt_port}(/${proto})?( \\(v6\\))?[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere"; then
+		# A prior owned rule may survive a lost ledger; ownership is its comment.
+		if printf '%s\n' "$status" | grep -vE ' on |OUT|FWD' |
+			grep -E "^${ipt_port}/${proto}( \\(v6\\))?[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere" |
+			grep -qE '#[[:space:]]*onebox-frp[[:space:]]*$'; then
+			_frps_fw_ledger_add "$key" || return 1
+		fi
+		return 0
+	fi
+	_frps_fw_ledger_add "$key" || return 1
+	ufw allow "${ipt_port}/${proto}" comment onebox-frp >/dev/null 2>&1
+}
+_frps_fw_firewalld_zone() {
+	local dev zone=''
+	dev=$(ip route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1);exit}}')
+	[ -n "$dev" ] || dev=$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1);exit}}')
+	if [ -n "$dev" ]; then zone=$(firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null) || zone=''; fi
+	[ -n "$zone" ] || zone=$(firewall-cmd --get-default-zone 2>/dev/null) || return 1
+	[[ "$zone" =~ ^[a-zA-Z0-9_.-]+$ ]] || return 1
+	printf '%s' "$zone"
+}
+_frps_fw_firewalld_open() {
+	local port=$1 proto=$2 zone scope rc args=()
+	zone=$(_frps_fw_firewalld_zone) || return 1
+	for scope in runtime permanent; do
+		args=(--zone="$zone"); [ "$scope" != permanent ] || args+=(--permanent)
+		firewall-cmd "${args[@]}" --query-port="$port/$proto" >/dev/null 2>&1; rc=$?
+		[ "$rc" -ne 0 ] || continue # Never adopt pre-existing runtime/permanent rules.
+		[ "$rc" = 1 ] || return 1
+		_frps_fw_ledger_add "firewalld $port/$proto $zone $scope" || return 1
+		firewall-cmd "${args[@]}" --add-port="$port/$proto" >/dev/null 2>&1 || return 1
+	done
+}
+_frps_fw_iptables_open() {
+	local tool=$1 port=$2 proto=$3 rules rc
+	rules=$("$tool" -S INPUT 2>/dev/null) || return 1
+	printf '%s\n' "$rules" | grep -qE '^-P INPUT (DROP|REJECT)|-j (REJECT|DROP)' || return 0
+	"$tool" -t filter -C INPUT -p "$proto" --dport "${port/-/:}" -m comment --comment onebox-frp -j ACCEPT 2>/dev/null; rc=$?
+	[ "$rc" -le 1 ] || return 1
+	_frps_fw_ledger_add "$tool $port/$proto" || return 1
+	[ "$rc" != 0 ] || return 0
+	# No unowned fallback if xt_comment is unavailable.
+	"$tool" -t filter -I INPUT -p "$proto" --dport "${port/-/:}" -m comment --comment onebox-frp -j ACCEPT 2>/dev/null
+}
+_frps_fw_nft_chains() {
+	local rules
+	rules=$(nft list ruleset 2>/dev/null) || return 1
+	printf '%s\n' "$rules" | awk '
+		$1=="table" {fam=$2;tbl=$3;next}
+		$1=="chain" {ch=$2;hook=0;blk=0;next}
+		/hook input/ {hook=1;if(/policy drop/)blk=1;next}
+		hook && /^[[:space:]]*(counter( packets [0-9]+ bytes [0-9]+)? )?(drop|reject)/ {blk=1;next}
+		$1=="}" && ch!="" {if(hook&&blk&&ch!="INPUT"&&tbl!="firewalld")print fam,tbl,ch;ch="";hook=0;blk=0}'
+}
+_frps_fw_nft_open() {
+	local port=$1 proto=$2 chains fam tbl chain listing rule rc=0
+	chains=$(_frps_fw_nft_chains) || return 1
+	rule="$proto dport $port accept comment \"onebox-frp\""
+	while read -r fam tbl chain; do
+		[ -n "$chain" ] || continue
+		[[ "$fam" =~ ^(ip|ip6|inet)$ && "$tbl" =~ ^[a-zA-Z0-9_.-]+$ && "$chain" =~ ^[a-zA-Z0-9_.-]+$ ]] || { rc=1; continue; }
+		listing=$(nft list chain "$fam" "$tbl" "$chain" 2>/dev/null) || { rc=1; continue; }
+		_frps_fw_ledger_add "nft $port/$proto $fam $tbl $chain" || { rc=1; continue; }
+		printf '%s\n' "$listing" | grep -qF "$rule" && continue
+		nft insert rule "$fam" "$tbl" "$chain" "$proto" dport "$port" accept comment '"onebox-frp"' 2>/dev/null || rc=1
+	done <<<"$chains"
+	return "$rc"
+}
+
+# Close the exact journal entry, regardless of current firewall backend/zone.
+# Do not discard entries on failure: callers can retry after fixing the backend.
+_frps_fw_close_entry() {
+	local entry=$1 backend key a b c extra port proto rc listing rule handles h args=()
+	read -r backend key a b c extra <<<"$entry"
+	port=${key%/*}; proto=${key##*/}
+	_frps_fw_port_valid "$port" && [[ "$proto" =~ ^(tcp|udp)$ ]] && [ -z "$extra" ] || return 1
+	case "$backend" in
+	ufw)
+		[ -z "$a$b$c" ] && has ufw || return 1
+		handles=$(_frps_fw_ufw_numbers "$port" "$proto") || return 1
+		for h in $handles; do [[ "$h" =~ ^[0-9]+$ ]] || return 1; ufw --force delete "$h" >/dev/null 2>&1 || return 1; done
+		;;
+	firewalld)
+		[[ "$a" =~ ^[a-zA-Z0-9_.-]+$ && "$b" =~ ^(runtime|permanent)$ ]] && [ -z "$c" ] && has firewall-cmd || return 1
+		args=(--zone="$a"); [ "$b" != permanent ] || args+=(--permanent)
+		firewall-cmd "${args[@]}" --query-port="$key" >/dev/null 2>&1; rc=$?
+		case "$rc" in 0) firewall-cmd "${args[@]}" --remove-port="$key" >/dev/null 2>&1 || return 1 ;; 1) : ;; *) return 1 ;; esac
+		;;
+	iptables | ip6tables)
+		[ -z "$a$b$c" ] && has "$backend" || return 1
+		while :; do
+			"$backend" -t filter -C INPUT -p "$proto" --dport "${port/-/:}" -m comment --comment onebox-frp -j ACCEPT 2>/dev/null; rc=$?
+			case "$rc" in 0) ;; 1) break ;; *) return 1 ;; esac
+			"$backend" -t filter -D INPUT -p "$proto" --dport "${port/-/:}" -m comment --comment onebox-frp -j ACCEPT 2>/dev/null || return 1
+		done
+		;;
+	nft)
+		[[ "$a" =~ ^(ip|ip6|inet)$ && "$b" =~ ^[a-zA-Z0-9_.-]+$ && "$c" =~ ^[a-zA-Z0-9_.-]+$ ]] && has nft || return 1
+		# The chain may now accept traffic; locate the recorded chain directly.
+		listing=$(nft -a list chain "$a" "$b" "$c" 2>/dev/null) || return 1
+		rule="$proto dport $port accept comment \"onebox-frp\""
+		handles=$(printf '%s\n' "$listing" | grep -F "$rule" | sed -n 's/.*# handle \([0-9]*\).*/\1/p')
+		for h in $handles; do nft delete rule "$a" "$b" "$c" handle "$h" 2>/dev/null || return 1; done
+		;;
+	*) return 1 ;;
+	esac
+	_frps_fw_ledger_del "$entry"
+}
+_frps_fw_close_all() {
+	local entry entries rc=0 f
+	f=$(_frps_fw_ledger)
+	[ ! -L "$f" ] || return 1
+	[ -f "$f" ] || return 0
+	entries=$(cat "$f") || return 1
+	while IFS= read -r entry; do
+		[ -n "$entry" ] || continue
+		_frps_fw_close_entry "$entry" || rc=1
+	done <<<"$entries"
+	return "$rc"
+}
+_frps_fw_rule() {
+	local act=$1 port=$2 proto=$3 rc=0 tool entry entries backend key rest
+	_frps_fw_port_valid "$port" && [[ "$proto" =~ ^(tcp|udp)$ ]] || return 1
+	case "$act" in
+	close)
+		[ ! -L "$(_frps_fw_ledger)" ] || return 1
+		[ -f "$(_frps_fw_ledger)" ] || return 0
+		entries=$(cat "$(_frps_fw_ledger)") || return 1
+		while IFS= read -r entry; do
+			read -r backend key rest <<<"$entry"
+			[ "$key" != "$port/$proto" ] || _frps_fw_close_entry "$entry" || rc=1
+		done <<<"$entries"
+		return "$rc"
+		;;
+	open) ;;
+	*) return 1 ;;
+	esac
+	if _frps_fw_ufw_active; then _frps_fw_ufw_open "$port" "$proto"; return $?; fi
+	if _frps_fw_firewalld_active; then _frps_fw_firewalld_open "$port" "$proto"; return $?; fi
+	for tool in iptables ip6tables; do
+		has "$tool" || continue
+		[ "$tool" != ip6tables ] || host_has_ipv6 || continue
+		_frps_fw_iptables_open "$tool" "$port" "$proto" || rc=1
+	done
+	if has nft; then _frps_fw_nft_open "$port" "$proto" || rc=1; fi
+	return "$rc"
+}
+_frps_fw_apply() {
+	local act=${1:-open} rc=0 port range
+	case "$act" in open | close) ;; *) return 1 ;; esac
+	[[ "$FRPS_MODE" =~ ^(web|tcp)$ ]] || return 1
+	_frps_fw_port_valid "$FRPS_BIND_PORT" && [[ "$FRPS_BIND_PORT" != *-* ]] || return 1
+	if [ "$FRPS_MODE" = web ]; then
+		for port in "$FRPS_HTTPS_PORT" "$FRPS_REDIRECT_PORT"; do
+			[ "$port" = 0 ] || { _frps_fw_port_valid "$port" && [[ "$port" != *-* ]]; } || return 1
+		done
+	else
+		range="$FRPS_RANGE_START-$FRPS_RANGE_END"
+		_frps_fw_port_valid "$range" || return 1
+	fi
+	_frps_fw_rule "$act" "$FRPS_BIND_PORT" tcp || rc=1
+	if [ "$FRPS_MODE" = web ]; then
+		for port in "$FRPS_HTTPS_PORT" "$FRPS_REDIRECT_PORT"; do
+			[ "$port" = 0 ] || _frps_fw_rule "$act" "$port" tcp || rc=1
+		done
+	else
+		_frps_fw_rule "$act" "$range" tcp || rc=1
+		_frps_fw_rule "$act" "$range" udp || rc=1
+	fi
+	return "$rc"
+}
+# END embedded-frps
 
 # BEGIN embedded-client-runtime
 _client_runtime() {
