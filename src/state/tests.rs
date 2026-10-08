@@ -257,6 +257,16 @@ fn symlinks_and_oversized_files_are_refused() {
     );
     assert!(l.load().is_err());
     assert!(StateStore::current_hash_at(&l.paths).is_err());
+    let before = fs::read(&real).unwrap();
+    assert!(
+        StateStore::save_to(&l.paths, &node()).is_err(),
+        "a save never replaces or follows a symlinked state.json"
+    );
+    assert_eq!(fs::read(&real).unwrap(), before);
+    assert!(fs::symlink_metadata(l.paths.state())
+        .unwrap()
+        .file_type()
+        .is_symlink());
     fs::remove_file(l.paths.state()).unwrap();
 
     l.write(

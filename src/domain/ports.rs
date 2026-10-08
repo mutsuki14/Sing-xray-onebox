@@ -385,7 +385,10 @@ impl PortPlan {
     }
 }
 
-/// Who answers HTTP-01 challenges for the proxy certificate on TCP 80.
+/// Who answers HTTP-01 challenges for the proxy certificate on TCP 80 in
+/// steady state. While that nginx is not running yet (first enable in the
+/// same apply), port 80 is free and the built-in responder may serve the
+/// challenge instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Http01Responder {
     /// The website's nginx; challenges go to its webroot.
