@@ -201,17 +201,75 @@ fn old_rules_that_cannot_be_retired_stay_recorded() {
         Output::success(""),
     )
     .on("iptables", &[], Output::failure(4, "resource problem"));
-    let err = apply(&ctx, range(30000, 31000), 443)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.starts_with("新的端口跳跃规则已生效，但旧规则清理失败"),
-        "{err}"
-    );
+    apply(&ctx, range(30001, 31000), 443).unwrap();
     let hops = recorded(&ctx).unwrap();
     assert_eq!(hops.len(), 2, "old and new both recorded");
     assert_eq!(hops[0].token, "onebox-hop-1111111111111111");
-    assert_eq!(hops[1].start, 30000);
+    assert_eq!(hops[1].start, 30001);
+    // The next change retries the leftover (and replaces the current hop).
+    exec.clear_history();
+    apply(&ctx, range(30001, 31000), 443).unwrap();
+    let retried = exec
+        .history()
+        .iter()
+        .filter(|c| c.contains(" -C ") && c.contains("onebox-hop-1111111111111111"))
+        .count();
+    assert_eq!(retried, 1);
+    assert_eq!(recorded(&ctx).unwrap().len(), 3);
+}
+
+#[test]
+fn a_leftover_that_redirects_new_ports_elsewhere_fails_the_change() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("iptables");
+    let old = r#"[{"backend":"iptables","start":20000,"end":30000,"target":8443,"token":"onebox-hop-1111111111111111"}]"#;
+    std::fs::write(ledger_path(&ctx), old).unwrap();
+    exec.on(
+        "iptables",
+        &["-w", "5", "-t", "nat", "-A"],
+        Output::success(""),
+    )
+    .on("iptables", &[], Output::failure(4, "resource problem"));
+    let err = apply(&ctx, range(25000, 31000), 443)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.starts_with("新的端口跳跃规则已生效，但与其冲突的旧规则清理失败（已保留记录）: iptables 20000-30000/udp → 8443: 无法读取跳跃规则: resource problem"),
+        "{err}"
+    );
+    assert_eq!(recorded(&ctx).unwrap().len(), 2, "both kept for recover");
+}
+
+#[test]
+fn a_broken_nft_does_not_block_changes_or_clearing() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("nft").provide("iptables");
+    // nf_tables is gone from the running kernel: nft cannot list or load.
+    exec.on(
+        "nft",
+        &[],
+        Output::failure(1, "Error: Could not process rule: Operation not supported"),
+    )
+    .on("iptables", &[], Output::success(""));
+    let old = r#"[{"backend":"nft","start":20000,"end":30000,"target":443,"token":"onebox_hop_aaaaaaaaaaaaaaaa"}]"#;
+    std::fs::write(ledger_path(&ctx), old).unwrap();
+    apply(&ctx, range(20000, 30000), 443).unwrap();
+    let hops = recorded(&ctx).unwrap();
+    assert_eq!(
+        hops.iter().map(|h| h.backend.as_str()).collect::<Vec<_>>(),
+        ["nft", "iptables"],
+        "the leftover redirects to the same port: kept and retried later"
+    );
+    let report = clear(&ctx).unwrap();
+    assert_eq!(report.removed, ["iptables 20000-30000/udp → 443"]);
+    assert_eq!(report.failed.len(), 1);
+    assert!(
+        report.failed[0].starts_with("nft 20000-30000/udp → 443: nft 执行失败 (1)"),
+        "{report:?}"
+    );
+    let left = recorded(&ctx).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].backend, "nft");
 }
 
 #[test]
@@ -321,14 +379,23 @@ fn hopping_needs_some_backend() {
 }
 
 #[test]
-fn clear_stops_at_the_first_failure_and_keeps_the_rest() {
+fn clear_attempts_every_hop_and_keeps_only_failures() {
     let (_dir, ctx, exec) = setup();
     exec.provide("iptables").provide("ip6tables");
     let v2 = r#"[{"backend":"iptables","start":20000,"end":40000,"target":443,"token":"onebox-hop-1111111111111111"},{"backend":"ip6tables","start":20000,"end":40000,"target":443,"token":"onebox-hop-2222222222222222"}]"#;
     std::fs::write(ledger_path(&ctx), v2).unwrap();
-    exec.on("iptables", &[], Output::failure(3, "table nat missing"));
-    assert_eq!(clear(&ctx).unwrap_err().to_string(), "无法读取跳跃规则");
-    assert_eq!(std::fs::read_to_string(ledger_path(&ctx)).unwrap(), v2);
+    exec.on("iptables", &[], Output::failure(3, "table nat missing"))
+        .on("ip6tables", &[], Output::success(""));
+    let report = clear(&ctx).unwrap();
+    assert_eq!(report.removed, ["ip6tables 20000-40000/udp → 443"]);
+    assert_eq!(
+        report.failed,
+        ["iptables 20000-40000/udp → 443: 无法读取跳跃规则: table nat missing"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(ledger_path(&ctx)).unwrap(),
+        r#"[{"backend":"iptables","start":20000,"end":40000,"target":443,"token":"onebox-hop-1111111111111111"}]"#
+    );
 }
 
 #[test]
@@ -358,13 +425,20 @@ fn unsafe_records_are_refused() {
         r#"[{"backend":"nft","start":20000,"end":40000,"target":443,"token":"x; flush ruleset"}]"#,
     )
     .unwrap();
-    assert_eq!(clear(&ctx).unwrap_err().to_string(), "跳跃表名称无效");
+    let err = clear(&ctx).unwrap_err().to_string();
+    assert!(err.starts_with("端口跳跃记录无效: "), "{err}");
+    assert!(err.ends_with("hop-v2.json: 跳跃表名称无效"), "{err}");
+    assert!(
+        apply(&ctx, range(20000, 21000), 443).is_err(),
+        "refused before installing"
+    );
     std::fs::write(
         ledger_path(&ctx),
         r#"[{"backend":"pf","start":20000,"end":40000,"target":443,"token":"t"}]"#,
     )
     .unwrap();
-    assert_eq!(clear(&ctx).unwrap_err().to_string(), "未知端口跳跃记录类型");
+    let err = clear(&ctx).unwrap_err().to_string();
+    assert!(err.ends_with(": 未知端口跳跃记录类型"), "{err}");
     assert!(exec.history().is_empty());
 }
 

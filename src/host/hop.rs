@@ -23,11 +23,17 @@
 //! - a change installs the new rules before removing the old ones and
 //!   undoes a partial install (e.g. ip6tables failing after iptables), so a
 //!   failed change no longer leaves the host without hopping or with an
-//!   unreported IPv4-only hop.
+//!   unreported IPv4-only hop;
+//! - an old rule that cannot be removed stays recorded with a warning and
+//!   is retried by the next change; only an old rule that would redirect
+//!   some of the new ports elsewhere fails the change. `clear` attempts
+//!   every recorded rule and reports the ones it could not remove, so a
+//!   broken nft no longer blocks rollback, recover and boot forever;
+//! - records are validated when the ledger is read, before anything runs.
 
 use crate::ctx::Ctx;
 use crate::domain::config::PortRange;
-use crate::error::{Error, Result};
+use crate::error::{Context, Error, Result};
 use crate::host::firewall::{lock_waiting, safe_word};
 use crate::sys::exec::Cmd;
 use crate::sys::fs::{atomic_write, read_bounded, remove_file_if_exists, write_new_exclusive};
@@ -57,6 +63,42 @@ pub struct Hop {
 /// `ROOT/hop-v2.json`.
 pub fn ledger_path(ctx: &Ctx) -> PathBuf {
     ctx.paths.root.join(LEDGER)
+}
+
+/// What [`clear`] did. Failed removals were printed as warnings; their
+/// records are kept for the next attempt.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Report {
+    /// `"{backend} {start}-{end}/udp → {target}"` per hop.
+    pub removed: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+impl Hop {
+    fn describe(&self) -> String {
+        format!(
+            "{} {}-{}/udp → {}",
+            self.backend, self.start, self.end, self.target
+        )
+    }
+
+    /// IP families the hop redirects (an nft table may exist in both).
+    fn families(&self) -> &'static [&'static str] {
+        match self.backend.as_str() {
+            "iptables" => &["ip"],
+            "ip6tables" => &["ip6"],
+            _ => &["ip", "ip6"],
+        }
+    }
+
+    /// Whether a leftover `self` can send some of `new`'s ports to another
+    /// target (both are NAT redirects at the same hook; the first wins).
+    fn shadows(&self, new: &Hop) -> bool {
+        self.target != new.target
+            && self.start <= new.end
+            && new.start <= self.end
+            && self.families().iter().any(|f| new.families().contains(f))
+    }
 }
 
 /// The recorded hops (empty when nothing is recorded).
@@ -160,41 +202,69 @@ fn undo(ctx: &Ctx, path: &Path, hops: &mut Vec<Hop>, keep: usize) {
     }
 }
 
-/// Remove the first `count` (previous) hops now that the new ones work.
+/// Remove the first `count` (previous) hops now that the new ones work. A
+/// hop that cannot be removed stays recorded (retried by the next change)
+/// with a warning; the change fails only when such a leftover shadows a new
+/// hop.
 fn retire(ctx: &Ctx, path: &Path, mut hops: Vec<Hop>, count: usize) -> Result<()> {
-    for _ in 0..count {
-        let Some(old) = hops.first() else { break };
-        remove(ctx, old).map_err(|e| {
-            Error::msg(format!(
-                "新的端口跳跃规则已生效，但旧规则清理失败（已保留记录）: {e}"
-            ))
-        })?;
-        hops.remove(0);
-        save(path, &hops)?;
+    let fresh = hops.split_off(count);
+    let mut kept = Vec::new();
+    let mut shadowing = Vec::new();
+    for (i, old) in hops.iter().enumerate() {
+        match remove(ctx, old) {
+            Ok(()) => {}
+            Err(e) if fresh.iter().any(|new| old.shadows(new)) => {
+                shadowing.push(format!("{}: {e}", old.describe()));
+                kept.push(old.clone());
+            }
+            Err(e) => {
+                out::warn(format!(
+                    "旧端口跳跃规则清理失败，已保留记录，下次应用时重试: {}: {e}",
+                    old.describe()
+                ));
+                kept.push(old.clone());
+            }
+        }
+        save(
+            path,
+            &[kept.as_slice(), &hops[i + 1..], fresh.as_slice()].concat(),
+        )?;
     }
-    Ok(())
-}
-
-/// Remove every recorded hop. Hops are removed in order and the ledger is
-/// rewritten after each one; the first failure stops, leaving the rest
-/// recorded.
-pub fn clear(ctx: &Ctx) -> Result<()> {
-    let path = ledger_path(ctx);
-    let _lock = lock(&path)?;
-    clear_locked(ctx, &path)
-}
-
-fn clear_locked(ctx: &Ctx, path: &Path) -> Result<()> {
-    if !path.exists() {
+    if shadowing.is_empty() {
         return Ok(());
     }
-    let mut hops = load(path)?;
-    while let Some(first) = hops.first() {
-        remove(ctx, first)?;
-        hops.remove(0);
-        save(path, &hops)?;
+    Err(Error::msg(format!(
+        "新的端口跳跃规则已生效，但与其冲突的旧规则清理失败（已保留记录）: {}",
+        shadowing.join("; ")
+    )))
+}
+
+/// Remove every recorded hop, each attempted even when another fails. The
+/// ledger is rewritten after each removal; failures stay recorded, are
+/// printed as warnings and listed in the report. Errors are only ledger and
+/// lock problems.
+pub fn clear(ctx: &Ctx) -> Result<Report> {
+    let path = ledger_path(ctx);
+    let _lock = lock(&path)?;
+    let mut report = Report::default();
+    if !path.exists() {
+        return Ok(report);
     }
-    Ok(())
+    let hops = load(&path)?;
+    let mut kept = Vec::new();
+    for (i, hop) in hops.iter().enumerate() {
+        match remove(ctx, hop) {
+            Ok(()) => report.removed.push(hop.describe()),
+            Err(e) => {
+                let message = format!("{}: {e}", hop.describe());
+                out::warn(format!("未能删除端口跳跃规则（已保留记录）: {message}"));
+                report.failed.push(message);
+                kept.push(hop.clone());
+            }
+        }
+        save(&path, &[kept.as_slice(), &hops[i + 1..]].concat())?;
+    }
+    Ok(report)
 }
 
 /// iptables binaries usable for hops: iptables, plus ip6tables with IPv6.
@@ -290,7 +360,10 @@ fn remove(ctx: &Ctx, hop: &Hop) -> Result<()> {
             match check.code {
                 1 => Ok(()),
                 0 => ctx.check(&iptables_cmd(hop, "-D")).map(drop),
-                _ => Err(Error::msg("无法读取跳跃规则")),
+                _ => Err(match check.stderr.trim() {
+                    "" => Error::msg("无法读取跳跃规则"),
+                    detail => Error::msg(format!("无法读取跳跃规则: {detail}")),
+                }),
             }
         }
         _ => Err(Error::msg("未知端口跳跃记录类型")),
@@ -298,9 +371,6 @@ fn remove(ctx: &Ctx, hop: &Hop) -> Result<()> {
 }
 
 fn remove_nft(ctx: &Ctx, token: &str) -> Result<()> {
-    if !safe_word(token) {
-        return Err(Error::msg("跳跃表名称无效"));
-    }
     if !ctx.has("nft") {
         return Ok(());
     }
@@ -320,14 +390,33 @@ fn remove_nft(ctx: &Ctx, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read and validate the ledger (its values end up in command arguments).
 fn load(path: &Path) -> Result<Vec<Hop>> {
-    match read_bounded(path, MAX_LEDGER_BYTES) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+    let hops: Vec<Hop> = match read_bounded(path, MAX_LEDGER_BYTES) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("端口跳跃记录无效: {}", path.display()))?,
         Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-            Ok(Vec::new())
+            return Ok(Vec::new())
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+    for hop in &hops {
+        validate(hop).with_context(|| format!("端口跳跃记录无效: {}", path.display()))?;
     }
+    Ok(hops)
+}
+
+fn validate(hop: &Hop) -> Result<()> {
+    if !matches!(hop.backend.as_str(), "nft" | "iptables" | "ip6tables") {
+        return Err(Error::msg("未知端口跳跃记录类型"));
+    }
+    if !safe_word(&hop.token) {
+        return Err(Error::msg("跳跃表名称无效"));
+    }
+    if hop.start == 0 || hop.start > hop.end || hop.target == 0 {
+        return Err(Error::msg("跳跃端口无效"));
+    }
+    Ok(())
 }
 
 /// Compact JSON like v2; `[]` once everything is cleared.
