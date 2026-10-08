@@ -4,7 +4,9 @@
 //! or `export`). Both convert into the typed [`FrpState`]; the token is
 //! preserved, never rotated.
 
-use super::{AppDomain, BindAddr, FrpState, Mode, WebSettings, WebTls, SCHEMA};
+use super::{
+    AppDomain, BindAddr, FrpState, Mode, PortLayout, WebSettings, WebTls, DEFAULT_RANGE, SCHEMA,
+};
 use crate::domain::config::PortRange;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -54,8 +56,32 @@ pub const STATE_CONF_KEYS: [&str; 16] = [
 ];
 
 impl V2Config {
-    /// The typed state (validated). Web-only fields are dropped in tcp
-    /// mode, where v2 ignored them too; domains are lower-cased.
+    /// The port fields by mode (the forwarding range only in tcp mode, the
+    /// web ports only in web mode), unchecked.
+    pub fn ports(&self) -> Result<PortLayout> {
+        let bind_port = self.bind_port;
+        Ok(match self.mode.as_str() {
+            "web" => PortLayout::Web {
+                bind_port,
+                http_port: self.http_port,
+                https_port: self.https_port,
+                redirect_port: self.redirect_port,
+            },
+            "tcp" => PortLayout::Tcp {
+                bind_port,
+                range: PortRange {
+                    start: self.range_start,
+                    end: self.range_end,
+                },
+            },
+            _ => bail!("FRP 模式应为 web 或 tcp"),
+        })
+    }
+
+    /// The typed state (validated as stored: domains v2 accepted, IP
+    /// literals included, are kept). Fields of the other mode are dropped
+    /// (v2 ignored the web fields in tcp mode; the range means nothing in
+    /// web mode, H-8.1#8); domains are lower-cased.
     pub fn into_state(self) -> Result<FrpState> {
         let texts = [
             &self.mode,
@@ -73,10 +99,9 @@ impl V2Config {
             !texts.iter().any(|t| t.chars().any(char::is_control)),
             "FRP 参数不能含控制字符"
         );
-        let mode = match self.mode.as_str() {
-            "web" => Mode::Web(self.web_settings()?),
-            "tcp" => Mode::Tcp,
-            _ => bail!("FRP 模式应为 web 或 tcp"),
+        let mode = match self.ports()? {
+            PortLayout::Web { .. } => Mode::Web(self.web_settings()?),
+            PortLayout::Tcp { range, .. } => Mode::Tcp { range },
         };
         let bind_addr =
             BindAddr::parse(&self.bind_addr).ok_or_else(|| Error::msg("FRP 监听地址无效"))?;
@@ -85,10 +110,6 @@ impl V2Config {
             domain: self.domain.to_ascii_lowercase(),
             bind_addr,
             bind_port: self.bind_port,
-            range: PortRange {
-                start: self.range_start,
-                end: self.range_end,
-            },
             token: self.token,
             version: self.version,
             mode,
@@ -126,7 +147,8 @@ impl V2Config {
     }
 
     /// The v2 shape of `state` (tcp mode gets v2's defaults for the web
-    /// fields), e.g. for comparisons with v2 output.
+    /// fields, web mode v2's default range), e.g. for comparisons with v2
+    /// output.
     pub fn from_state(state: &FrpState) -> V2Config {
         let web = state.web().cloned().unwrap_or_else(|| {
             WebSettings::new(
@@ -144,6 +166,7 @@ impl V2Config {
             WebTls::Custom { cert, key } => (cert.clone(), key.clone()),
             _ => (String::new(), String::new()),
         };
+        let range = state.range().unwrap_or(DEFAULT_RANGE);
         V2Config {
             mode: if state.is_web() { "web" } else { "tcp" }.to_owned(),
             domain: state.domain.clone(),
@@ -154,8 +177,8 @@ impl V2Config {
             redirect_port: web.redirect_port,
             web_domain,
             subdomain_host,
-            range_start: state.range.start,
-            range_end: state.range.end,
+            range_start: range.start,
+            range_end: range.end,
             token: state.token.clone(),
             tls_method: web.tls.v2_id().to_owned(),
             cert_input,
@@ -169,6 +192,19 @@ impl V2Config {
 /// every other line is `KEY=VALUE` with one of the 16 keys, each exactly
 /// once, values without control characters; ports are decimal.
 pub fn parse_state_conf(text: &str) -> Result<FrpState> {
+    state_conf_fields(text)?.into_state()
+}
+
+/// Only the port fields of v1 `state.conf` (lines parsed as strictly as
+/// [`parse_state_conf`] does), checked.
+pub(super) fn parse_conf_ports(text: &str) -> Result<PortLayout> {
+    let layout = state_conf_fields(text)?.ports()?;
+    layout.check()?;
+    Ok(layout)
+}
+
+/// The 16 fields of `state.conf`, as the v2 shape.
+fn state_conf_fields(text: &str) -> Result<V2Config> {
     let mut values: BTreeMap<&str, &str> = BTreeMap::new();
     for line in text.lines().filter(|l| !l.is_empty()) {
         let (key, value) = line
@@ -194,7 +230,7 @@ pub fn parse_state_conf(text: &str) -> Result<FrpState> {
             .and_then(|v| v.parse().ok())
             .ok_or_else(|| Error::msg(format!("旧 FRP 状态 {key} 不是有效端口")))
     };
-    V2Config {
+    Ok(V2Config {
         mode: text("FRPS_MODE"),
         domain: text("FRPS_DOMAIN"),
         bind_addr: text("FRPS_BIND_ADDR"),
@@ -211,6 +247,5 @@ pub fn parse_state_conf(text: &str) -> Result<FrpState> {
         cert_input: text("FRPS_CERT_INPUT"),
         key_input: text("FRPS_KEY_INPUT"),
         version: text("FRPS_VERSION"),
-    }
-    .into_state()
+    })
 }

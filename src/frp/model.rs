@@ -16,33 +16,43 @@
 //! - typed model: `Mode::{Web, Tcp}`, `AppDomain::{Single, Wildcard}`,
 //!   `WebTls::{Http01, Cloudflare, Custom}`, `BindAddr` (H-8.2), persisted
 //!   with `schema: 2`; web-only settings exist only in web mode;
-//! - web mode no longer reserves the forwarding range (H-8.1#8): only tcp
-//!   mode exposes it publicly;
-//! - IP literals are no longer accepted as domains (H-8.1#15) and domains
-//!   from v2/v1 files are lower-cased;
+//! - web mode has no forwarding range at all (H-8.1#8): the range belongs
+//!   to `Mode::Tcp`, so it is neither reserved nor rendered as frps
+//!   `allowPorts` in web mode (v2 let clients bind 127.0.0.1:20000–20100
+//!   there, inside the node's fallback port pool). Reading a v2 web state
+//!   drops its range; [`V2Config::from_state`] writes v2's default;
+//! - new domains must be DNS names (H-8.1#15: frpc cannot verify a
+//!   certificate for an IP literal). Stored states keep v2's rule, so an IP
+//!   literal v2 accepted is still read and kept while it is unchanged, with
+//!   a notice from [`FrpState::warnings`] (ARCH §10: lenient migration);
+//!   only a changed domain is refused ([`FrpState::validate_change`],
+//!   enforced by [`save`]). Domains from v2/v1 files are lower-cased;
+//! - [`reservations`] reads the port fields alone ([`PortLayout`]), so a
+//!   problem elsewhere in the FRP state cannot stop node port planning;
 //! - precise messages instead of shared ones (H-8.1#16): an invalid
 //!   wildcard root, unknown vs duplicate vs control-character keys in
 //!   `state.conf`, and Chinese text instead of raw integer-parse errors;
 //! - symlinked state files are refused instead of followed.
 
+mod files;
 mod legacy;
+mod ports;
 
+pub use files::{
+    installed, legacy_state_path, load, managed_path, parse_ports_json, parse_state_json,
+    reservations, save, state_path,
+};
 pub use legacy::{parse_state_conf, V2Config, STATE_CONF_KEYS};
+pub use ports::{PortLayout, MAX_RANGE_PORTS};
 
 use crate::domain::config::PortRange;
 use crate::domain::defaults::FRP_VERSION;
 use crate::domain::ports::Reservation;
 use crate::domain::protocol::Transport;
-use crate::error::{Context, Error, Result};
-use crate::paths::Paths;
-use crate::sys::fs::{atomic_write, read_bounded};
-use crate::sys::text::valid_domain;
+use crate::error::{Error, Result};
+use crate::sys::text::{valid_domain, valid_label};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeSet;
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 /// `schema` of the state written by v3.
 pub const SCHEMA: u32 = 2;
@@ -60,8 +70,6 @@ pub const DEFAULT_RANGE: PortRange = PortRange {
     start: 20000,
     end: 20100,
 };
-/// A forwarding range spans at most this many ports.
-pub const MAX_RANGE_PORTS: u32 = 1000;
 /// Longest wildcard root (`*.{root}` must stay a valid name).
 pub const WILDCARD_ROOT_MAX: usize = 238;
 const OLDEST_VERSION: (u32, u32, u32) = (0, 71, 0);
@@ -206,9 +214,48 @@ impl WebSettings {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Mode {
+    /// HTTP applications behind nginx. There is no forwarding range: frps
+    /// must not let clients open TCP/UDP proxies in web mode (mind that an
+    /// empty frps `allowPorts` allows every port).
     Web(WebSettings),
-    /// Public TCP/UDP forwarding inside the range.
-    Tcp,
+    /// Public TCP/UDP forwarding inside `range` (frps `allowPorts`).
+    Tcp { range: PortRange },
+}
+
+impl Mode {
+    /// Tcp mode with the default range.
+    pub fn tcp() -> Mode {
+        Mode::Tcp {
+            range: DEFAULT_RANGE,
+        }
+    }
+}
+
+/// Which name a domain field holds (for messages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameField {
+    Control,
+    App,
+    WildcardRoot,
+}
+
+impl NameField {
+    fn label(self) -> &'static str {
+        match self {
+            NameField::Control => "FRP 控制域名",
+            NameField::App => "FRP 应用域名",
+            NameField::WildcardRoot => "FRP 泛域名根",
+        }
+    }
+}
+
+/// The domain rule of stored states: v2's `util::valid_domain` (in lower
+/// case), which also accepted IP literals and all-digit suffixes.
+fn stored_domain(name: &str) -> bool {
+    name.len() <= 253
+        && name.contains('.')
+        && !name.ends_with('.')
+        && name.split('.').all(valid_label)
 }
 
 /// The FRP server configuration (`state.json`, schema 2).
@@ -220,8 +267,6 @@ pub struct FrpState {
     pub domain: String,
     pub bind_addr: BindAddr,
     pub bind_port: u16,
-    /// Remote ports clients may open (frps `allowPorts`, both modes).
-    pub range: PortRange,
     /// 64 lowercase hex; also authenticates heartbeats and work connections.
     pub token: String,
     /// `latest` or a concrete `0.x.y` (≥ 0.71.0); concrete after an apply.
@@ -230,14 +275,13 @@ pub struct FrpState {
 }
 
 impl FrpState {
-    /// A state with the default ports, range and frp version.
+    /// A state with the default bind port and frp version.
     pub fn new(domain: String, token: String, bind_addr: BindAddr, mode: Mode) -> FrpState {
         FrpState {
             schema: SCHEMA,
             domain,
             bind_addr,
             bind_port: DEFAULT_BIND_PORT,
-            range: DEFAULT_RANGE,
             token,
             version: FRP_VERSION.to_owned(),
             mode,
@@ -247,7 +291,7 @@ impl FrpState {
     pub fn web(&self) -> Option<&WebSettings> {
         match &self.mode {
             Mode::Web(web) => Some(web),
-            Mode::Tcp => None,
+            Mode::Tcp { .. } => None,
         }
     }
 
@@ -255,72 +299,109 @@ impl FrpState {
         self.web().is_some()
     }
 
-    /// Ports frps or the web nginx listen on outside the range: the bind
-    /// port, plus the vhost, HTTPS and (when enabled) redirect ports in
-    /// web mode.
+    /// The forwarding range (tcp mode only).
+    pub fn range(&self) -> Option<PortRange> {
+        match self.mode {
+            Mode::Tcp { range } => Some(range),
+            Mode::Web(_) => None,
+        }
+    }
+
+    pub fn ports(&self) -> PortLayout {
+        match &self.mode {
+            Mode::Web(web) => PortLayout::Web {
+                bind_port: self.bind_port,
+                http_port: web.http_port,
+                https_port: web.https_port,
+                redirect_port: web.redirect_port,
+            },
+            Mode::Tcp { range } => PortLayout::Tcp {
+                bind_port: self.bind_port,
+                range: *range,
+            },
+        }
+    }
+
+    /// See [`PortLayout::listeners`].
     pub fn listeners(&self) -> Vec<u16> {
-        let mut ports = vec![self.bind_port];
-        if let Some(web) = self.web() {
-            ports.extend([web.http_port, web.https_port, web.redirect_port]);
-            ports.retain(|p| *p != 0);
-        }
-        ports
+        self.ports().listeners()
     }
 
-    /// Ports other Onebox components must leave to FRP — also while FRP is
-    /// stopped. The range only in tcp mode, where it is public (H-8.1#8).
+    /// See [`PortLayout::reservations`].
     pub fn reservations(&self) -> Vec<Reservation> {
-        let reserve = |port: u16, label: &str| Reservation {
-            start: port,
-            end: port,
-            transport: Transport::Tcp,
-            label: label.to_owned(),
-        };
-        let mut out = vec![reserve(self.bind_port, "控制端口")];
-        match &self.mode {
-            Mode::Web(web) => {
-                out.push(reserve(web.http_port, "HTTP 端口"));
-                out.push(reserve(web.https_port, "HTTPS 端口"));
-                if web.redirect_port != 0 {
-                    out.push(reserve(web.redirect_port, "HTTP 跳转端口"));
-                }
-            }
-            Mode::Tcp => out.push(Reservation {
-                start: self.range.start,
-                end: self.range.end,
-                transport: Transport::Both,
-                label: "转发端口".to_owned(),
-            }),
-        }
-        out
+        self.ports().reservations()
     }
 
-    /// What the FRP firewall owner opens: the bind port; in web mode HTTPS
-    /// and the redirect port (the vhost port stays on loopback); in tcp mode
-    /// the whole range for TCP and UDP.
+    /// See [`PortLayout::firewall_ports`].
     pub fn firewall_ports(&self) -> Vec<(u16, u16, Transport)> {
-        let mut out = vec![(self.bind_port, self.bind_port, Transport::Tcp)];
-        match &self.mode {
-            Mode::Web(web) => {
-                out.push((web.https_port, web.https_port, Transport::Tcp));
-                if web.redirect_port != 0 {
-                    out.push((web.redirect_port, web.redirect_port, Transport::Tcp));
-                }
-            }
-            Mode::Tcp => out.push((self.range.start, self.range.end, Transport::Both)),
-        }
-        out
+        self.ports().firewall_ports()
     }
 
-    /// Full validation, token required (load, save, render).
+    /// The invariants of a stored state (load, save, render), token
+    /// required. Domains follow v2's rule, so a state v2 accepted stays
+    /// readable; new input goes through [`FrpState::validate_change`].
     pub fn validate(&self) -> Result<()> {
         self.check(true)
     }
 
-    /// Validation of settings before the first install (the token is
-    /// generated later).
+    /// Settings entered before the first install (the token is generated
+    /// later): every domain must be a DNS name.
     pub fn validate_draft(&self) -> Result<()> {
-        self.check(false)
+        self.check(false)?;
+        self.check_new_names(None)
+    }
+
+    /// A state about to replace `previous` (flags, wizard, [`save`]): the
+    /// stored invariants, and every domain that is not the same field with
+    /// the same value in `previous` must be a DNS name — an IP literal v2
+    /// accepted is kept only while it is unchanged.
+    pub fn validate_change(&self, previous: Option<&FrpState>) -> Result<()> {
+        self.check(true)?;
+        self.check_new_names(previous)
+    }
+
+    /// Notices about settings v2 accepted that cannot work (IP literals as
+    /// names), for FRP commands to print.
+    pub fn warnings(&self) -> Vec<String> {
+        self.names()
+            .into_iter()
+            .filter(|(_, name)| !valid_domain(name))
+            .map(|(field, name)| {
+                let effect = match field {
+                    NameField::Control => "，frpc 无法校验服务端证书",
+                    NameField::App | NameField::WildcardRoot => "",
+                };
+                format!(
+                    "{} {name} 不是有效域名（v2 曾允许 IP 地址）{effect}；请通过 onebox frps 重新配置为域名",
+                    field.label()
+                )
+            })
+            .collect()
+    }
+
+    /// Every domain field with its value.
+    fn names(&self) -> Vec<(NameField, &str)> {
+        let mut names = vec![(NameField::Control, self.domain.as_str())];
+        match self.web().map(|w| &w.app) {
+            Some(AppDomain::Single { domain }) => names.push((NameField::App, domain)),
+            Some(AppDomain::Wildcard { root }) => names.push((NameField::WildcardRoot, root)),
+            None => {}
+        }
+        names
+    }
+
+    fn check_new_names(&self, previous: Option<&FrpState>) -> Result<()> {
+        let kept = previous.map(FrpState::names).unwrap_or_default();
+        for (field, name) in self.names() {
+            if !kept.contains(&(field, name)) {
+                ensure!(
+                    valid_domain(name),
+                    "{}必须是域名，不能是 IP 地址: {name}",
+                    field.label()
+                );
+            }
+        }
+        Ok(())
     }
 
     fn check(&self, credentials: bool) -> Result<()> {
@@ -330,7 +411,7 @@ impl FrpState {
             self.schema
         );
         self.check_text()?;
-        ensure!(valid_domain(&self.domain), "请设置有效的 FRP 控制域名");
+        ensure!(stored_domain(&self.domain), "请设置有效的 FRP 控制域名");
         check_version(&self.version)?;
         if credentials || !self.token.is_empty() {
             ensure!(
@@ -338,10 +419,10 @@ impl FrpState {
                 "FRP token 必须为 64 位小写十六进制值"
             );
         }
-        self.check_ports()?;
+        self.ports().check()?;
         match &self.mode {
             Mode::Web(web) => check_web(web),
-            Mode::Tcp => Ok(()),
+            Mode::Tcp { .. } => Ok(()),
         }
     }
 
@@ -362,35 +443,13 @@ impl FrpState {
         );
         Ok(())
     }
-
-    fn check_ports(&self) -> Result<()> {
-        let range = self.range;
-        let web_ports_ok = self
-            .web()
-            .is_none_or(|w| w.http_port != 0 && w.https_port != 0);
-        ensure!(
-            self.bind_port != 0
-                && web_ports_ok
-                && range.start != 0
-                && range.start <= range.end
-                && u32::from(range.end - range.start) < MAX_RANGE_PORTS,
-            "FRP 端口无效，转发范围必须为 1 至 1000 个端口"
-        );
-        let mut seen = BTreeSet::new();
-        let clash = self
-            .listeners()
-            .into_iter()
-            .any(|p| !seen.insert(p) || range.contains(p));
-        ensure!(!clash, "FRP 监听端口重复或落在转发范围内");
-        Ok(())
-    }
 }
 
 fn check_web(web: &WebSettings) -> Result<()> {
     match &web.app {
-        AppDomain::Single { domain } => ensure!(valid_domain(domain), "请设置有效应用域名"),
+        AppDomain::Single { domain } => ensure!(stored_domain(domain), "请设置有效应用域名"),
         AppDomain::Wildcard { root } => ensure!(
-            valid_domain(root) && root.len() <= WILDCARD_ROOT_MAX,
+            stored_domain(root) && root.len() <= WILDCARD_ROOT_MAX,
             "请设置有效的泛域名根（不超过 {WILDCARD_ROOT_MAX} 个字符）"
         ),
     }
@@ -425,93 +484,6 @@ pub fn check_version(version: &str) -> Result<()> {
         parts.is_some_and(|p| p.len() == 3 && p[0] == 0 && (p[0], p[1], p[2]) >= OLDEST_VERSION);
     ensure!(ok, "FRP 版本须为 0.71.0 或更新的稳定版本");
     Ok(())
-}
-
-pub fn state_path(paths: &Paths) -> PathBuf {
-    paths.frp_root.join(STATE_FILE)
-}
-
-pub fn legacy_state_path(paths: &Paths) -> PathBuf {
-    paths.frp_root.join(LEGACY_STATE_FILE)
-}
-
-pub fn managed_path(paths: &Paths) -> PathBuf {
-    paths.frp_root.join(MANAGED_FILE)
-}
-
-/// Present without following a final symlink (a symlinked state file
-/// counts as present so that `load` reports it instead of ignoring it).
-fn present(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok()
-}
-
-/// FRP is installed: `.managed` is a regular file and a state file exists.
-pub fn installed(paths: &Paths) -> bool {
-    let managed = fs::symlink_metadata(managed_path(paths)).is_ok_and(|m| m.is_file());
-    managed && (present(&state_path(paths)) || present(&legacy_state_path(paths)))
-}
-
-fn read_state_file(path: &Path) -> Result<Vec<u8>> {
-    let meta = fs::symlink_metadata(path).map_err(|e| Error::io(path, e))?;
-    ensure!(meta.len() <= MAX_STATE_BYTES, "FRP 状态文件异常大");
-    read_bounded(path, MAX_STATE_BYTES)
-}
-
-/// The installed FRP state (`None` when FRP is not installed): `state.json`
-/// (schema 2 or the v2 shape), else the v1 `state.conf`; validated.
-pub fn load(paths: &Paths) -> Result<Option<FrpState>> {
-    if !installed(paths) {
-        return Ok(None);
-    }
-    let json = state_path(paths);
-    let path = if present(&json) {
-        json
-    } else {
-        legacy_state_path(paths)
-    };
-    let parsed = read_state_file(&path).and_then(|bytes| {
-        if path == state_path(paths) {
-            parse_state_json(&bytes)
-        } else {
-            let text = String::from_utf8(bytes).map_err(|_| Error::msg("旧 FRP 状态不是 UTF-8"))?;
-            parse_state_conf(&text)
-        }
-    });
-    let state = parsed.with_context(|| format!("FRP 状态 {} 无效", path.display()))?;
-    Ok(Some(state))
-}
-
-/// Parse `state.json`: schema 2, or the v2 shape (no `schema` member).
-pub fn parse_state_json(bytes: &[u8]) -> Result<FrpState> {
-    let doc: Value = serde_json::from_slice(bytes)?;
-    let state = match doc.get("schema") {
-        None => serde_json::from_value::<V2Config>(doc)?.into_state()?,
-        Some(schema) => match schema.as_u64() {
-            Some(2) => serde_json::from_value::<FrpState>(doc)?,
-            Some(n) if n > 2 => {
-                bail!("FRP 配置由更新版本的 Onebox 写入（schema {n}），请先更新程序")
-            }
-            _ => bail!("FRP 状态 schema 无效"),
-        },
-    };
-    state.validate()?;
-    Ok(state)
-}
-
-/// Validate, then write `state.json` (schema 2, pretty JSON + newline,
-/// 0600) atomically. `state.conf` is left untouched.
-pub fn save(paths: &Paths, state: &FrpState) -> Result<()> {
-    state.validate()?;
-    let mut text = serde_json::to_string_pretty(state)?;
-    text.push('\n');
-    atomic_write(&state_path(paths), text.as_bytes(), 0o600)
-}
-
-/// The ports FRP reserves (empty when FRP is not installed). A state that
-/// cannot be read is an error naming FRP: other components must not take
-/// ports FRP may own.
-pub fn reservations(paths: &Paths) -> Result<Vec<Reservation>> {
-    Ok(load(paths)?.map(|s| s.reservations()).unwrap_or_default())
 }
 
 #[cfg(test)]

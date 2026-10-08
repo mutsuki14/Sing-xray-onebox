@@ -2,8 +2,12 @@ use super::*;
 use crate::domain::fixtures::config;
 use crate::domain::ports::PortPlan;
 use crate::domain::protocol::{Core, Protocol};
+use crate::paths::Paths;
 use crate::sys::fs::TempDir;
+use serde_json::Value;
+use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::path::Path;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -86,7 +90,7 @@ fn reads_the_v2_shape() {
     assert_eq!(state.domain, "frp.example.com");
     assert_eq!(state.bind_addr, BindAddr::AnyV6);
     assert_eq!(state.bind_port, 7000);
-    assert_eq!(state.range, DEFAULT_RANGE);
+    assert_eq!(state.range(), None, "web mode has no forwarding range");
     assert_eq!(state.token, TOKEN);
     assert_eq!(state.version, "0.71.0");
     assert_eq!(
@@ -99,7 +103,8 @@ fn reads_the_v2_shape() {
         ))
     );
     let tcp = v2_tcp().into_state().unwrap();
-    assert_eq!(tcp.mode, Mode::Tcp);
+    assert_eq!(tcp.mode, Mode::tcp());
+    assert_eq!(tcp.range(), Some(DEFAULT_RANGE));
     assert_eq!(tcp.bind_addr, BindAddr::AnyV4);
 }
 
@@ -145,6 +150,33 @@ fn v2_conversions_round_trip() {
     let state = upper.into_state().unwrap();
     assert_eq!(state.domain, "frp.example.com");
     assert_eq!(state.web().unwrap().app.cert_domains(), ["app.example.com"]);
+    // A web-mode range means nothing: it is dropped, and v2's shape gets
+    // v2's default back.
+    let custom_range = V2Config {
+        range_start: 30000,
+        range_end: 30100,
+        ..v2_web()
+    };
+    let state = custom_range.into_state().unwrap();
+    assert_eq!(state.range(), None);
+    assert_eq!(V2Config::from_state(&state), v2_web());
+    // A tcp range is kept.
+    let tcp = V2Config {
+        range_start: 30000,
+        range_end: 30999,
+        ..v2_tcp()
+    };
+    let state = tcp.clone().into_state().unwrap();
+    assert_eq!(
+        state.mode,
+        Mode::Tcp {
+            range: PortRange {
+                start: 30000,
+                end: 30999
+            }
+        }
+    );
+    assert_eq!(V2Config::from_state(&state), tcp);
 }
 
 #[test]
@@ -153,7 +185,7 @@ fn v2_validation_messages() {
     let overlap = "FRP 监听端口重复或落在转发范围内";
     let http01 = "HTTP-01 要求 TCP 80 且不支持泛域名；泛域名请选择 cf 或 custom";
     type Edit = fn(&mut V2Config);
-    let cases: [(Edit, &str); 22] = [
+    let cases: [(Edit, &str); 19] = [
         (
             |c| c.web_domain = "app\u{1b}.com".into(),
             "FRP 参数不能含控制字符",
@@ -165,7 +197,6 @@ fn v2_validation_messages() {
             |c| c.domain = "localhost".into(),
             "请设置有效的 FRP 控制域名",
         ),
-        (|c| c.domain = "1.2.3.4".into(), "请设置有效的 FRP 控制域名"),
         (
             |c| c.version = "0.70.9".into(),
             "FRP 版本须为 0.71.0 或更新的稳定版本",
@@ -184,10 +215,8 @@ fn v2_validation_messages() {
         ),
         (|c| c.bind_port = 0, ports),
         (|c| c.https_port = 0, ports),
-        (|c| c.range_end = 19999, ports),
-        (|c| c.range_end = 21000, ports),
-        (|c| c.bind_port = 20050, overlap),
         (|c| c.http_port = 443, overlap),
+        (|c| c.redirect_port = 7000, overlap),
         (|c| c.web_domain = "app".into(), "请设置有效应用域名"),
         (
             |c| c.subdomain_host = "apps.example.com".into(),
@@ -228,6 +257,21 @@ fn v2_validation_messages() {
         v2.into_state().unwrap_err().to_string(),
         "请设置有效的泛域名根（不超过 238 个字符）"
     );
+    // The forwarding range is checked in tcp mode only.
+    let range_cases: [(Edit, &str); 4] = [
+        (|c| c.range_end = 19999, ports),
+        (|c| c.range_end = 21000, ports),
+        (|c| c.range_start = 0, ports),
+        (|c| c.bind_port = 20050, overlap),
+    ];
+    for (edit, expected) in range_cases {
+        let mut tcp = v2_tcp();
+        edit(&mut tcp);
+        assert_eq!(tcp.into_state().unwrap_err().to_string(), expected);
+        let mut web = v2_web();
+        edit(&mut web);
+        web.into_state().unwrap();
+    }
     // Tcp mode ignores the web fields (and accepts `latest`).
     let tcp = V2Config {
         tls_method: "garbage".into(),
@@ -256,7 +300,6 @@ fn schema_2_round_trip_and_format() {
         "domain": "frp.example.com",
         "bind_addr": "::",
         "bind_port": 7000,
-        "range": "20000-20100",
         "token": TOKEN,
         "version": "0.71.0",
         "mode": {
@@ -290,11 +333,15 @@ fn schema_2_round_trip_and_format() {
         "frp.example.com".into(),
         TOKEN.into(),
         BindAddr::AnyV4,
-        Mode::Tcp,
+        Mode::tcp(),
     );
     save(&l.paths, &tcp).unwrap();
     let doc: Value = serde_json::from_slice(&fs::read(state_path(&l.paths)).unwrap()).unwrap();
-    assert_eq!(doc["mode"], serde_json::json!({"type": "tcp"}));
+    assert_eq!(
+        doc["mode"],
+        serde_json::json!({"type": "tcp", "range": "20000-20100"})
+    );
+    assert_eq!(doc.get("range"), None);
     assert_eq!(load(&l.paths).unwrap(), Some(tcp));
 }
 
@@ -327,10 +374,10 @@ fn schema_numbers_are_checked() {
 #[test]
 fn reads_the_v1_state_conf() {
     let state = parse_state_conf(&v1_state_conf()).unwrap();
-    assert_eq!(state.mode, Mode::Tcp);
+    assert_eq!(state.mode, Mode::tcp());
     assert_eq!(state.token, TOKEN, "the token is preserved");
     assert_eq!(state.bind_addr, BindAddr::AnyV6);
-    assert_eq!(state.range, DEFAULT_RANGE);
+    assert_eq!(state.range(), Some(DEFAULT_RANGE));
     // Web mode, wildcard with Cloudflare, CRLF line ends, blank lines.
     let web = v1_state_conf()
         .replace("FRPS_MODE=tcp", "FRPS_MODE=web")
@@ -444,7 +491,7 @@ fn load_prefers_state_json_and_names_the_broken_file() {
     assert_eq!(load(paths).unwrap(), None);
     managed(paths);
     write(&legacy_state_path(paths), &v1_state_conf());
-    assert_eq!(load(paths).unwrap().unwrap().mode, Mode::Tcp);
+    assert_eq!(load(paths).unwrap().unwrap().mode, Mode::tcp());
     write(&state_path(paths), &v2_web_json());
     assert!(load(paths).unwrap().unwrap().is_web(), "state.json wins");
     write(&state_path(paths), "{");
@@ -594,4 +641,189 @@ fn drafts_may_lack_the_token() {
     assert!(draft.validate().is_err());
     draft.token = "zz".into();
     assert!(draft.validate_draft().is_err());
+}
+
+fn installed_with(paths: &Paths, file: &Path, content: &str) {
+    managed(paths);
+    write(file, content);
+}
+
+#[test]
+fn ip_literal_domains_v2_accepted_stay_readable() {
+    // v2's `valid_domain` accepted IP literals: such hosts must keep working
+    // (ARCH §10), with a notice, and node port planning must not break.
+    let l = layout();
+    let paths = &l.paths;
+    let ip_v2 = v2_web_json().replace("frp.example.com", "203.0.113.5");
+    installed_with(paths, &state_path(paths), &ip_v2);
+    let state = load(paths).unwrap().unwrap();
+    assert_eq!(state.domain, "203.0.113.5");
+    assert_eq!(
+        state.warnings(),
+        ["FRP 控制域名 203.0.113.5 不是有效域名（v2 曾允许 IP 地址），frpc 无法校验服务端证书；请通过 onebox frps 重新配置为域名"]
+    );
+    assert_eq!(
+        spans(&reservations(paths).unwrap()),
+        [
+            (7000, 7000, Transport::Tcp),
+            (7080, 7080, Transport::Tcp),
+            (443, 443, Transport::Tcp),
+            (80, 80, Transport::Tcp)
+        ]
+    );
+    // Saving it unchanged (the lazy schema-2 migration) keeps it readable.
+    save(paths, &state).unwrap();
+    let saved = load(paths).unwrap().unwrap();
+    assert_eq!(saved, state);
+    assert!(fs::read_to_string(state_path(paths))
+        .unwrap()
+        .contains("\"schema\": 2"));
+    // A changed domain must be a DNS name.
+    let mut other_ip = state.clone();
+    other_ip.domain = "198.51.100.7".into();
+    assert_eq!(
+        save(paths, &other_ip).unwrap_err().to_string(),
+        "FRP 控制域名必须是域名，不能是 IP 地址: 198.51.100.7"
+    );
+    assert_eq!(load(paths).unwrap().unwrap(), state, "nothing written");
+    let mut fixed = state.clone();
+    fixed.domain = "frp.example.com".into();
+    save(paths, &fixed).unwrap();
+    assert!(load(paths).unwrap().unwrap().warnings().is_empty());
+    // New input never accepts an IP literal.
+    assert!(state.validate_change(None).is_err());
+    let mut draft = state.clone();
+    draft.token.clear();
+    assert_eq!(
+        draft.validate_draft().unwrap_err().to_string(),
+        "FRP 控制域名必须是域名，不能是 IP 地址: 203.0.113.5"
+    );
+    // v1 state.conf with an IP control domain.
+    fs::remove_file(state_path(paths)).unwrap();
+    let conf = v1_state_conf().replace("FRPS_DOMAIN=frp.example.com", "FRPS_DOMAIN=203.0.113.5");
+    write(&legacy_state_path(paths), &conf);
+    assert_eq!(load(paths).unwrap().unwrap().domain, "203.0.113.5");
+    assert_eq!(reservations(paths).unwrap().len(), 2);
+}
+
+#[test]
+fn ip_literal_application_names_are_kept_only_while_unchanged() {
+    let single = V2Config {
+        web_domain: "203.0.113.9".into(),
+        ..v2_web()
+    };
+    let state = single.into_state().unwrap();
+    assert_eq!(state.warnings().len(), 1);
+    assert!(state.warnings()[0].starts_with("FRP 应用域名 203.0.113.9 不是有效域名"));
+    state.validate_change(Some(&state)).unwrap();
+    assert_eq!(
+        state.validate_change(None).unwrap_err().to_string(),
+        "FRP 应用域名必须是域名，不能是 IP 地址: 203.0.113.9"
+    );
+    // The same value in another field is a change.
+    let mut moved = state.clone();
+    moved.domain = "203.0.113.9".into();
+    if let Mode::Web(web) = &mut moved.mode {
+        web.app = AppDomain::Single {
+            domain: "app.example.com".into(),
+        };
+    }
+    assert_eq!(
+        moved.validate_change(Some(&state)).unwrap_err().to_string(),
+        "FRP 控制域名必须是域名，不能是 IP 地址: 203.0.113.9"
+    );
+    let wildcard = V2Config {
+        web_domain: String::new(),
+        subdomain_host: "apps.123".into(),
+        tls_method: "cf".into(),
+        ..v2_web()
+    };
+    let state = wildcard.into_state().unwrap();
+    assert!(state.warnings()[0].starts_with("FRP 泛域名根 apps.123"));
+    assert!(state.validate_change(None).is_err());
+    // v2 never accepted these, and neither does v3.
+    for bad in ["localhost", "1.2.3.", "-a.com", "a..b"] {
+        let v2 = V2Config {
+            domain: bad.into(),
+            ..v2_web()
+        };
+        assert_eq!(
+            v2.into_state().unwrap_err().to_string(),
+            "请设置有效的 FRP 控制域名",
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn reservations_need_only_the_port_fields() {
+    let l = layout();
+    let paths = &l.paths;
+    let web4 = 4;
+    // A v2 state with problems outside its ports: load refuses it, port
+    // planning still gets FRP's ports.
+    let broken = v2_web_json()
+        .replace(TOKEN, "short")
+        .replace("\"version\": \"0.71.0\"", "\"version\": \"garbage\"")
+        .replace("\"tls_method\": \"http\"", "\"tls_method\": \"dns\"");
+    installed_with(paths, &state_path(paths), &broken);
+    assert!(load(paths).is_err());
+    assert_eq!(reservations(paths).unwrap().len(), web4);
+    // Schema 2 likewise (unknown members, bad bind address, no token).
+    let mut doc = serde_json::to_value(web_state()).unwrap();
+    doc["bind_addr"] = "1.1.1.1".into();
+    doc.as_object_mut().unwrap().remove("token");
+    doc["future"] = true.into();
+    write(&state_path(paths), &doc.to_string());
+    assert!(load(paths).is_err());
+    assert_eq!(reservations(paths).unwrap().len(), web4);
+    // v1 state.conf with a bad token.
+    fs::remove_file(state_path(paths)).unwrap();
+    let conf = v1_state_conf().replace(&format!("FRPS_TOKEN={TOKEN}"), "FRPS_TOKEN=x");
+    write(&legacy_state_path(paths), &conf);
+    assert!(load(paths).is_err());
+    assert_eq!(
+        spans(&reservations(paths).unwrap()),
+        [
+            (7000, 7000, Transport::Tcp),
+            (20000, 20100, Transport::Both)
+        ]
+    );
+    fs::remove_file(legacy_state_path(paths)).unwrap();
+    // Broken port fields are errors naming the FRP state file.
+    let prefix = format!("FRP 状态 {} 无效: ", state_path(paths).display());
+    let cases = [
+        (
+            v2_web_json().replace("\"bind_port\": 7000", "\"bind_port\": 0"),
+            "FRP 端口无效，转发范围必须为 1 至 1000 个端口",
+        ),
+        (
+            v2_web_json().replace("\"https_port\": 443", "\"https_port\": 7000"),
+            "FRP 监听端口重复或落在转发范围内",
+        ),
+        (
+            v2_web_json().replace("\"mode\": \"web\"", "\"mode\": \"udp\""),
+            "FRP 模式应为 web 或 tcp",
+        ),
+        (
+            serde_json::json!({"schema": 3}).to_string(),
+            "FRP 配置由更新版本的 Onebox 写入（schema 3），请先更新程序",
+        ),
+    ];
+    for (text, detail) in cases {
+        write(&state_path(paths), &text);
+        let err = reservations(paths).unwrap_err().to_string();
+        assert_eq!(err, format!("{prefix}{detail}"));
+    }
+    let mut doc = serde_json::to_value(FrpState::new(
+        "frp.example.com".into(),
+        TOKEN.into(),
+        BindAddr::AnyV4,
+        Mode::tcp(),
+    ))
+    .unwrap();
+    doc["mode"].as_object_mut().unwrap().remove("range");
+    write(&state_path(paths), &doc.to_string());
+    let err = reservations(paths).unwrap_err().to_string();
+    assert!(err.starts_with(&prefix), "{err}");
 }
