@@ -536,8 +536,8 @@ fn site_port_derivation_and_https_default() {
         (9000, true, "127.0.0.1:9000".into())
     );
     assert_eq!(port(&[]), (10443, true, "127.0.0.1:10443".into()));
-    assert_eq!(port(&[("REALITY_SITE_HTTPS", "0")]).1, false);
-    assert_eq!(port(&[("REALITY_SITE_HTTPS", "1")]).1, true);
+    assert!(!port(&[("REALITY_SITE_HTTPS", "0")]).1);
+    assert!(port(&[("REALITY_SITE_HTTPS", "1")]).1);
 
     let m = run(&with(site.clone(), &[("SITE_ACME_METHOD", "standalone")])).unwrap();
     assert_eq!(m.config.site.unwrap().cert, WebCert::Http01);
