@@ -53,17 +53,17 @@ impl Fixture {
     /// The sing-box service with a real (fake) binary on disk.
     fn core(&self) -> ServiceDef {
         let def = ServiceDef::core(&self.ctx.paths, Core::Singbox, false);
-        fs::create_dir_all(def.program.parent().unwrap()).unwrap();
-        fs::write(&def.program, b"bin").unwrap();
+        fs::create_dir_all(def.program().parent().unwrap()).unwrap();
+        fs::write(def.program(), b"bin").unwrap();
         def
     }
 
     /// A fake process of `def` (its exact command line).
     fn run(&self, def: &ServiceDef, pid: u32, start: u64) {
-        let program = def.program.to_string_lossy().into_owned();
+        let program = def.program().to_string_lossy().into_owned();
         let mut argv = vec![program.as_str()];
-        argv.extend(def.args.iter().map(String::as_str));
-        self.procs.add(pid, start, &def.program, &argv);
+        argv.extend(def.args().iter().map(String::as_str));
+        self.procs.add(pid, start, def.program(), &argv);
     }
 
     fn supervisor(&self, ignored: &[i32]) -> (Supervisor<'_>, Arc<FakeSignals>) {
@@ -105,8 +105,8 @@ fn start_spawns_an_isolated_daemon_and_records_its_identity() {
     let spawned = f.exec.spawned();
     assert_eq!(spawned.len(), 1);
     let (cmd, log) = &spawned[0];
-    assert_eq!(cmd.program, def.program.to_string_lossy());
-    assert_eq!(cmd.args, def.args);
+    assert_eq!(cmd.program, def.program().to_string_lossy());
+    assert_eq!(cmd.args, def.args());
     assert!(cmd.clear_env, "daemons never inherit the admin shell");
     assert_eq!(cmd.env[0], ("PATH".to_owned(), SAFE_PATH.to_owned()));
     assert_eq!(cmd.env[1..], f.env()[..]);
@@ -216,11 +216,11 @@ fn reused_or_foreign_pids_are_never_signalled() {
     f.procs
         .add(51, 3, &other, &[&other.to_string_lossy(), "run", "-c", "x"]);
     // Our program with another configuration.
-    let program = def.program.to_string_lossy().into_owned();
+    let program = def.program().to_string_lossy().into_owned();
     f.procs.add(
         52,
         4,
-        &def.program,
+        def.program(),
         &[&program, "run", "-c", "/elsewhere.json"],
     );
     for (pid, start) in [(51, 3), (52, 4), (1, 1), (0, 0)] {
@@ -234,13 +234,13 @@ fn reused_or_foreign_pids_are_never_signalled() {
 }
 
 #[test]
-fn legacy_pid_files_are_adopted_once_and_removed_on_stop() {
+fn legacy_pid_files_are_adopted_kept_and_removed_on_stop() {
     let f = Fixture::new();
     let nginx = f.ctx.paths.bin.join("nginx");
     fs::create_dir_all(&f.ctx.paths.bin).unwrap();
     fs::write(&nginx, b"nginx").unwrap();
     let def = ServiceDef::site(&f.ctx.paths, &nginx);
-    let legacy = def.legacy_pid_files[0].clone();
+    let legacy = def.legacy_pid_files()[0].clone();
     fs::create_dir_all(legacy.parent().unwrap()).unwrap();
     let site = f.ctx.paths.site();
     let title = format!(
@@ -264,12 +264,14 @@ fn legacy_pid_files_are_adopted_once_and_removed_on_stop() {
     );
     sup.start(&def, &f.env()).unwrap();
     assert!(f.exec.spawned().is_empty(), "adopted, not started twice");
-    assert!(!legacy.exists());
     assert_eq!(record(&def.pid_file()), r#"{"pid":700,"start":70}"#);
     assert!(!sup.find(&def).unwrap().legacy);
+    // nginx keeps using its own pid file (`nginx -s reload`): it stays.
+    assert_eq!(record(&legacy), "700\n");
+    sup.start(&def, &f.env()).unwrap();
+    assert!(legacy.exists() && f.exec.spawned().is_empty());
 
-    // nginx writes its pid file again; stop removes both files.
-    fs::write(&legacy, "700\n").unwrap();
+    // Stop removes both files.
     sup.stop(&def).unwrap();
     assert_eq!(*signals.sent.lock().unwrap(), [(700, libc::SIGTERM)]);
     assert!(!legacy.exists() && !def.pid_file().exists());
@@ -291,7 +293,7 @@ fn pre_start_runs_first_and_its_failure_aborts() {
     let f = Fixture::new();
     let def = ServiceDef::frps(&f.ctx.paths);
     fs::create_dir_all(&f.ctx.paths.frp_bin).unwrap();
-    fs::write(&def.program, b"frps").unwrap();
+    fs::write(def.program(), b"frps").unwrap();
     let exe = f.ctx.paths.executable.to_string_lossy().into_owned();
     f.exec.on(
         &exe,
@@ -306,7 +308,7 @@ fn pre_start_runs_first_and_its_failure_aborts() {
     let f = Fixture::new();
     let def = ServiceDef::frps(&f.ctx.paths);
     fs::create_dir_all(&f.ctx.paths.frp_bin).unwrap();
-    fs::write(&def.program, b"frps").unwrap();
+    fs::write(def.program(), b"frps").unwrap();
     let exe = f.ctx.paths.executable.to_string_lossy().into_owned();
     f.exec.on(&exe, &["frps", "net-apply"], Output::success(""));
     f.run(&def, FAKE_PID_BASE, 1);
@@ -316,7 +318,7 @@ fn pre_start_runs_first_and_its_failure_aborts() {
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].display(), format!("{exe} frps net-apply"));
     assert!(calls[0].clear_env && calls[0].timeout.is_some());
-    assert_eq!(calls[1].program, def.program.to_string_lossy());
+    assert_eq!(calls[1].program, def.program().to_string_lossy());
     assert_eq!(def.pid_file(), f.ctx.paths.frp_run.join("onebox-frps.pid"));
     assert!(def.pid_file().exists());
 }
@@ -363,8 +365,8 @@ fn concurrent_operations_on_one_service_are_serialized() {
     let f = Fixture::new();
     let def = f.core();
     let (sup, _) = f.supervisor(&[]);
-    fs::create_dir_all(&def.run_dir).unwrap();
-    let held = FileLock::acquire(&def.run_dir.join("onebox-sing-box.lock"), "busy").unwrap();
+    fs::create_dir_all(def.run_dir()).unwrap();
+    let held = FileLock::acquire(&def.run_dir().join("onebox-sing-box.lock"), "busy").unwrap();
     let err = sup.start(&def, &f.env()).unwrap_err();
     assert!(matches!(err, Error::Busy(_)), "{err}");
     assert!(err.to_string().contains("onebox-sing-box"));
@@ -457,8 +459,13 @@ fn real_daemons_are_started_identified_and_stopped() {
     assert!(environ.contains("ONEBOX_INIT=none") && environ.contains(SAFE_PATH));
     assert!(!environ.contains("CARGO"), "cleared environment: {environ}");
 
-    let mut other = def.clone();
-    other.args = vec!["301".into()];
+    let other = ServiceDef::new(
+        &ctx.paths,
+        "onebox-sleep",
+        &sleep,
+        vec!["301".into()],
+        vec![],
+    );
     assert!(!sup.running(&other), "different arguments are not ours");
     sup.stop(&def).unwrap();
     assert!(!sup.running(&def));

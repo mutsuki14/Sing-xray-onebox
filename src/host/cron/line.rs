@@ -40,19 +40,54 @@ pub fn line(
     if !log.is_absolute() {
         return Err(Error::msg("计划任务日志必须是绝对路径"));
     }
-    let mut words = vec![format!("PATH={SAFE_PATH}"), "env".to_owned()];
-    for (key, value) in service_env(paths, init) {
-        words.push(format!("{key}={}", quote_shell(&value)));
-    }
-    words.push(quote_shell(&paths.executable.to_string_lossy()));
-    words.extend(args.iter().map(|a| shell_word(a)));
-    words.push(format!(">>{}", quote_shell(&log.to_string_lossy())));
-    words.push("2>&1".to_owned());
-    let command = words.join(" ");
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let command = command(
+        &service_env(paths, init),
+        &paths.executable.to_string_lossy(),
+        &args,
+        &log.to_string_lossy(),
+    );
     if command.chars().any(char::is_control) {
         return Err(Error::msg("计划任务命令包含控制字符"));
     }
-    Ok(format!("{schedule} {}{MARKER}{tag}", cron_escape(&command)))
+    Ok(assemble(schedule, &command, tag))
+}
+
+/// The command of a v3 line before `%` escaping.
+pub(super) fn command(env: &[(String, String)], exe: &str, args: &[String], log: &str) -> String {
+    let mut words = vec![format!("PATH={SAFE_PATH}"), "env".to_owned()];
+    words.push(env_words(env));
+    words.push(quote_shell(exe));
+    words.extend(args.iter().map(|a| shell_word(a)));
+    words.push(format!(">>{}", quote_shell(log)));
+    words.push("2>&1".to_owned());
+    words.retain(|w| !w.is_empty());
+    words.join(" ")
+}
+
+/// `KEY='value' …` (an `env` prefix's assignments).
+pub(super) fn env_words(env: &[(String, String)]) -> String {
+    env.iter()
+        .map(|(key, value)| format!("{key}={}", quote_shell(value)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `{schedule} {escaped command} # onebox:{tag}`.
+pub(super) fn assemble(schedule: &str, command: &str, tag: &Tag) -> String {
+    format!("{schedule} {}{MARKER}{tag}", cron_escape(command))
+}
+
+/// Split `{schedule} {command}`: a named `@` schedule or five time fields.
+pub(super) fn split_schedule(text: &str) -> Option<(&str, &str)> {
+    let end = if text.starts_with('@') {
+        text.find(' ')?
+    } else {
+        text.match_indices(' ').nth(4)?.0
+    };
+    let schedule = &text[..end];
+    validate_schedule(schedule).ok()?;
+    Some((schedule, &text[end + 1..]))
 }
 
 /// Five time fields of `[A-Za-z0-9*/,-]` or a named `@` schedule.
@@ -76,7 +111,7 @@ fn validate_schedule(schedule: &str) -> Result<()> {
 }
 
 /// A plain word stays bare (readable lines); anything else is quoted.
-fn shell_word(word: &str) -> String {
+pub(super) fn shell_word(word: &str) -> String {
     let plain = !word.is_empty()
         && word
             .bytes()

@@ -1,5 +1,8 @@
 use super::*;
+use crate::domain::protocol::Core;
 use crate::host::init::InitSystem;
+use crate::sys::fs::TempDir;
+use std::os::unix::fs::PermissionsExt;
 
 fn paths() -> Paths {
     Paths::from_lookup(|_| None).unwrap()
@@ -83,6 +86,96 @@ fn known_services_carry_their_traits_as_data() {
     assert_eq!(site.legacy_pid_files, [p.site().join("nginx.pid")]);
     assert_eq!(site.spec_path(), p.root.join("services/onebox-site.json"));
     assert_eq!(site.log_file(), p.log.join("onebox-site.log"));
+
+    // nginx temp-path parents live under the tmpfs run directory.
+    for (def, dir) in [
+        (ServiceDef::site(&p, nginx), "/run/onebox/nginx-site"),
+        (
+            ServiceDef::subscription_web(&p, nginx),
+            "/run/onebox/nginx-subscription",
+        ),
+        (ServiceDef::frp_web(&p, nginx), "/run/onebox/nginx-frp"),
+    ] {
+        assert_eq!(def.runtime_dirs(), [PathBuf::from(dir)], "{}", def.name());
+    }
+    assert_eq!(nginx_runtime_dir(&p, "site"), p.run.join("nginx-site"));
+    assert!(xray.runtime_dirs().is_empty() && network.runtime_dirs().is_empty());
+
+    // Which configuration each service belongs to, and which lock its own
+    // start commands take.
+    assert_eq!(network.takes_lock(), Some(Scope::Node));
+    assert_eq!(frps.takes_lock(), Some(Scope::Frp));
+    for def in [&xray, &singbox, &site, &web] {
+        assert_eq!(def.takes_lock(), None, "{}", def.name());
+    }
+    assert_eq!(frps.scope(), Scope::Frp);
+    assert_eq!(web.scope(), Scope::Frp);
+    assert_eq!(xray.scope(), Scope::Node);
+    assert_eq!(network.scope(), Scope::Node);
+    assert_eq!(Scope::Node.lock_path(&p), p.lock());
+    assert_eq!(
+        Scope::Frp.lock_path(&p),
+        PathBuf::from("/etc/.onebox-frp.lock")
+    );
+}
+
+fn every_known(p: &Paths) -> Vec<ServiceDef> {
+    let nginx = Path::new("/usr/sbin/nginx");
+    vec![
+        ServiceDef::core(p, Core::Singbox, true),
+        ServiceDef::core(p, Core::Xray, false),
+        ServiceDef::site(p, nginx),
+        ServiceDef::network(p),
+        ServiceDef::subscription(p),
+        ServiceDef::subscription_web(p, nginx),
+        ServiceDef::frps(p),
+        ServiceDef::frp_web(p, nginx),
+    ]
+}
+
+#[test]
+fn every_trait_survives_the_spec_round_trip() {
+    let p = paths();
+    let env = service_env(&p, InitSystem::None);
+    for def in every_known(&p) {
+        let spec = def.spec(&env);
+        let json = serde_json::to_vec(&spec).unwrap();
+        let back: ServiceSpec = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            ServiceDef::from_spec(&p, def.name(), &back).unwrap(),
+            def,
+            "{}",
+            def.name()
+        );
+        // The skeleton (no spec yet) agrees on every name-derived trait.
+        let skeleton = ServiceDef::skeleton(&p, def.name());
+        assert_eq!(skeleton.spec_path(), def.spec_path());
+        assert_eq!(skeleton.takes_lock(), def.takes_lock());
+        assert_eq!(skeleton.scope(), def.scope());
+        assert_eq!(skeleton.log_candidates(), def.log_candidates());
+    }
+}
+
+#[test]
+fn prepare_dir_creates_traversable_ancestors_and_refuses_links() {
+    let dir = TempDir::new("prepare").unwrap();
+    let deep = dir.join("run/onebox/nginx-site");
+    prepare_dir(&deep).unwrap();
+    for path in [dir.join("run"), dir.join("run/onebox"), deep.clone()] {
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "{}", path.display());
+    }
+    // Existing modes are left alone.
+    std::fs::set_permissions(&deep, std::fs::Permissions::from_mode(0o700)).unwrap();
+    prepare_dir(&deep).unwrap();
+    let mode = std::fs::metadata(&deep).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    // An ancestor may be a symlink (`/var/run`), the directory itself not.
+    let link = dir.join("var-run");
+    std::os::unix::fs::symlink(dir.join("run"), &link).unwrap();
+    prepare_dir(&link.join("onebox/other")).unwrap();
+    assert!(dir.join("run/onebox/other").is_dir());
+    assert!(prepare_dir(&link).is_err());
 }
 
 #[test]
@@ -223,6 +316,11 @@ fn names_and_definitions_are_validated() {
     let mut def = ServiceDef::frps(&p);
     def.description = "x\n[Service]".into();
     assert!(def.validate().is_err());
+    let mut def = ServiceDef::frp_web(&p, Path::new("/usr/sbin/nginx"));
+    def.runtime_dirs = vec!["relative".into()];
+    assert!(def.validate().is_err(), "relative runtime directory");
+    def.runtime_dirs = vec!["/run/a\nb".into()];
+    assert!(def.validate().is_err(), "line break in a runtime directory");
     assert!(ServiceDef::from_spec(&p, "bad name", &def.spec(&[])).is_err());
 }
 
@@ -249,5 +347,8 @@ fn unit_and_script_paths() {
         script_file(&p, XRAY),
         PathBuf::from("/etc/init.d/onebox-xray")
     );
-    assert_eq!(init_value(InitSystem::None), "none");
+    assert_eq!(
+        service_env(&p, InitSystem::None)[13].1,
+        InitSystem::None.id()
+    );
 }

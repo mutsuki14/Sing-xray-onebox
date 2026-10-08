@@ -31,13 +31,16 @@ pub(super) struct ChildSetup {
     pub(super) new_session: bool,
     /// Descriptor to expose as [`INHERITED_LOCK_FD`] without CLOEXEC.
     pub(super) lock_fd: Option<RawFd>,
+    /// Open-files limit to raise to ([`Cmd::nofile_limit`]).
+    pub(super) nofile: Option<u64>,
 }
 
 impl ChildSetup {
     pub(super) fn install(self, command: &mut Command) {
         // SAFETY: the closure only performs async-signal-safe syscalls
-        // (pthread_sigmask, setpgid, setsid, dup2, fcntl) and constructs
-        // io::Error from raw errno values, which does not allocate.
+        // (pthread_sigmask, setpgid, setsid, dup2, fcntl, getrlimit,
+        // setrlimit) and constructs io::Error from raw errno values, which
+        // does not allocate.
         unsafe {
             command.pre_exec(move || self.apply());
         }
@@ -45,6 +48,9 @@ impl ChildSetup {
 
     fn apply(self) -> io::Result<()> {
         reset_signal_mask()?;
+        if let Some(limit) = self.nofile {
+            raise_nofile(limit);
+        }
         // SAFETY: plain syscalls on our own process / valid descriptor numbers.
         unsafe {
             if self.new_group && libc::setpgid(0, 0) != 0 {
@@ -70,6 +76,33 @@ impl ChildSetup {
 
     fn own_group(self) -> bool {
         self.new_group || self.new_session
+    }
+}
+
+/// Best effort, like systemd's `setrlimit_closest`: `limit` for both soft
+/// and hard limits when the hard limit may be raised, else the soft limit
+/// up to the current hard limit. A soft limit already at `limit` or above
+/// is left alone.
+fn raise_nofile(limit: u64) {
+    let limit = libc::rlim_t::from(limit);
+    // SAFETY: getrlimit/setrlimit read and write a plain struct we own.
+    unsafe {
+        let mut current: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut current) != 0 || current.rlim_cur >= limit {
+            return;
+        }
+        let wanted = libc::rlimit {
+            rlim_cur: limit,
+            rlim_max: limit.max(current.rlim_max),
+        };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &wanted) == 0 {
+            return;
+        }
+        let closest = libc::rlimit {
+            rlim_cur: limit.min(current.rlim_max),
+            rlim_max: current.rlim_max,
+        };
+        libc::setrlimit(libc::RLIMIT_NOFILE, &closest);
     }
 }
 

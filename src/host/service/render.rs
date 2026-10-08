@@ -6,8 +6,13 @@ use super::{validate_env, ServiceDef, ServiceKind, TARGETS};
 use crate::error::Result;
 use crate::sys::text::{quote_shell, quote_unit, quote_unit_env};
 
-/// The open-files limit of every daemon, under systemd and OpenRC alike.
-pub const NOFILE_LIMIT: u32 = 1_048_576;
+/// The open-files limit of every daemon (systemd `LimitNOFILE`, the OpenRC
+/// `start_pre`, the supervisor), lowered to the hard limit where it cannot
+/// be raised.
+pub const NOFILE_LIMIT: u64 = 1_048_576;
+/// Creates runtime directories under systemd (an absolute path: systemd
+/// before 239 does not search `PATH`).
+const SYSTEMD_MKDIR: &str = "/bin/mkdir";
 
 /// Units a oneshot that restores firewall state waits for under systemd.
 const SYSTEMD_FIREWALLS: [&str; 6] = [
@@ -50,6 +55,10 @@ pub fn render_systemd(def: &ServiceDef, env: &[(String, String)]) -> Result<Stri
     for (key, value) in env {
         unit.push_str(&format!("Environment={}\n", quote_unit_env(key, value)?));
     }
+    if !def.runtime_dirs.is_empty() {
+        let mkdir = mkdir_argv(SYSTEMD_MKDIR, def);
+        unit.push_str(&format!("ExecStartPre={}\n", systemd_command(&mkdir)?));
+    }
     if let Some(pre) = &def.pre_start {
         unit.push_str(&format!("ExecStartPre={}\n", systemd_command(pre)?));
     }
@@ -79,10 +88,48 @@ pub fn render_openrc(def: &ServiceDef, env: &[(String, String)]) -> Result<Strin
         ServiceKind::Daemon => script.push_str(&openrc_daemon(def)),
         ServiceKind::Oneshot => script.push_str(&openrc_oneshot(def)),
     }
-    if let Some(pre) = &def.pre_start {
-        script.push_str(&format!("start_pre() {{ {}; }}\n", shell_command(pre)));
-    }
+    script.push_str(&openrc_start_pre(def));
     Ok(script)
+}
+
+/// `start_pre()`: the open-files limit (daemons; supervise-daemon and its
+/// child inherit it from this shell), runtime directories, then the
+/// pre-start command, whose status is the function's.
+fn openrc_start_pre(def: &ServiceDef) -> String {
+    let mut steps = Vec::new();
+    if def.kind == ServiceKind::Daemon {
+        steps.push(format!(
+            "ulimit -n {NOFILE_LIMIT} 2>/dev/null || ulimit -n \"$(ulimit -Hn)\" 2>/dev/null || :"
+        ));
+    }
+    if !def.runtime_dirs.is_empty() {
+        let mkdir = mkdir_argv("mkdir", def);
+        let words: Vec<String> = mkdir.iter().map(|w| shell_word(w)).collect();
+        steps.push(format!("{} || return 1", words.join(" ")));
+    }
+    if let Some(pre) = &def.pre_start {
+        steps.push(shell_command(pre));
+    }
+    if steps.is_empty() {
+        return String::new();
+    }
+    let body: String = steps.iter().map(|s| format!("  {s}\n")).collect();
+    format!("start_pre() {{\n{body}}}\n")
+}
+
+/// `mkdir -p -m 0755 DIR…`: missing parents get the umask default (0755
+/// under systemd and OpenRC); existing directories keep their modes.
+fn mkdir_argv(program: &str, def: &ServiceDef) -> Vec<String> {
+    let mut argv: Vec<String> = [program, "-p", "-m", "0755"]
+        .iter()
+        .map(|w| w.to_string())
+        .collect();
+    argv.extend(
+        def.runtime_dirs
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned()),
+    );
+    argv
 }
 
 fn openrc_daemon(def: &ServiceDef) -> String {
@@ -92,8 +139,7 @@ fn openrc_daemon(def: &ServiceDef) -> String {
     let log = quote_shell(&def.log_file().to_string_lossy());
     format!(
         "supervisor=supervise-daemon\ncommand={}\ncommand_args={}\noutput_log={log}\n\
-         error_log={log}\nrespawn_delay=5\nrespawn_max=10\nrespawn_period=120\n\
-         rc_ulimit='-n {NOFILE_LIMIT}'\n{}",
+         error_log={log}\nrespawn_delay=5\nrespawn_max=10\nrespawn_period=120\n{}",
         quote_shell(&program),
         quote_shell(&args.join(" ")),
         openrc_depend(def)
@@ -165,14 +211,23 @@ fn shell_command(argv: &[String]) -> String {
     argv.iter()
         .enumerate()
         .map(|(index, word)| {
-            if index > 0 && plain_word(word) {
-                word.clone()
+            if index > 0 {
+                shell_word(word)
             } else {
                 quote_shell(word)
             }
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A plain word bare, anything else single-quoted.
+fn shell_word(word: &str) -> String {
+    if plain_word(word) {
+        word.to_owned()
+    } else {
+        quote_shell(word)
+    }
 }
 
 /// A word that needs no quoting for systemd or sh (no specifiers, no

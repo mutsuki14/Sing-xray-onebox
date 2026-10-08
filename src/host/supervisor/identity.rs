@@ -63,24 +63,24 @@ pub fn executable_matches(system_root: &Path, pid: u32, program: &Path) -> bool 
 ///
 /// [`Identity`]: crate::host::service::Identity
 pub fn command_matches(def: &ServiceDef, argv: &[Vec<u8>]) -> bool {
-    if def.identity.nginx_title && argv.len() == 1 {
+    if def.identity().nginx_title && argv.len() == 1 {
         return nginx_title_matches(def, &argv[0]);
     }
     if argv.is_empty() {
         return false;
     }
-    if let Some(sub) = &def.identity.subcommand {
+    if let Some(sub) = &def.identity().subcommand {
         if argv.get(1).map(Vec::as_slice) != Some(sub.as_bytes()) {
             return false;
         }
     }
-    match &def.identity.config {
+    match &def.identity().config {
         Some(config) => config_matches(argv, &config.to_string_lossy()),
         None => {
-            argv.len() == def.args.len() + 1
+            argv.len() == def.args().len() + 1
                 && argv[1..]
                     .iter()
-                    .zip(&def.args)
+                    .zip(def.args())
                     .all(|(actual, expected)| actual.as_slice() == expected.as_bytes())
         }
     }
@@ -116,12 +116,13 @@ fn config_matches(argv: &[Vec<u8>], config: &str) -> bool {
 /// nginx must not be adopted). The prefix may carry a trailing slash and
 /// `-g daemon off;` may be absent (older Onebox versions).
 fn nginx_title_matches(def: &ServiceDef, title: &[u8]) -> bool {
-    let program = def.program.to_string_lossy();
+    let program = def.program().to_string_lossy();
     let mut candidates = vec![format!(
         "nginx: master process {program} {}",
-        def.args.join(" ")
+        def.args().join(" ")
     )];
-    if let (Some(prefix), Some(config)) = (arg_after(&def.args, "-p"), arg_after(&def.args, "-c")) {
+    if let (Some(prefix), Some(config)) = (arg_after(def.args(), "-p"), arg_after(def.args(), "-c"))
+    {
         let prefix = prefix.trim_end_matches('/');
         for slash in ["", "/"] {
             for foreground in ["", " -g daemon off;"] {

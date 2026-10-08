@@ -1,8 +1,10 @@
 //! Golden texts: `golden/*.service|*.openrc` were produced by v2.0.1's
 //! `write_service_for_init` templates (copied verbatim into a generator)
 //! for the default layout, then the documented fixes were applied: no
-//! trailing space after the targets / in `depend()`, and
-//! `rc_ulimit='-n 1048576'`.
+//! trailing space after the targets / in `depend()`; the OpenRC open-files
+//! limit and the nginx runtime directories in `start_pre()` instead of
+//! `rc_ulimit='-n 65535'`; `ExecStartPre=` creating the nginx runtime
+//! directories.
 
 use super::*;
 use crate::domain::protocol::Core;
@@ -119,7 +121,10 @@ fn every_word_is_escaped_for_its_format() {
     assert!(script.contains("command='/opt/my dir/$x'\n"), "{script}");
     assert!(script.contains(r#"command_args=''\''100% a'\'' '\''it'\''\'\'''\''s "q" \'\'''"#));
     assert!(script.contains("depend() { want net; after net firewall dns onebox-site; }\n"));
-    assert!(script.ends_with("start_pre() { '/bin/pre' plain 'needs quote'; }\n"));
+    assert!(
+        script.ends_with("  '/bin/pre' plain 'needs quote'\n}\n"),
+        "{script}"
+    );
 }
 
 #[test]

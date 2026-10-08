@@ -16,7 +16,16 @@
 //! A *group* is every line with one tag; [`Crontab::replace`] swaps a
 //! group in place (at the position of its first line) and every other line
 //! keeps its text and order. Transactions snapshot the owned lines of their
-//! [`Scope`] and put them back group by group.
+//! [`Scope`] with their positions and put each line back where it was, so a
+//! rollback reinstalls the original crontab byte for byte; a journal line
+//! is reinstalled only when it has the exact shape some Onebox version
+//! writes (`shape.rs`).
+//!
+//! Every change goes through [`Crontab::edit`], which holds the crontab
+//! lock (`RUN/crontab.lock`) from `crontab -l` to `crontab FILE`: node and
+//! FRP operations run under different configuration locks and must not
+//! drop each other's lines. It is the innermost lock (taken after the
+//! node/FRP locks, never held while taking another).
 //!
 //! Changes from v2:
 //! - one reader with one rule for "no crontab yet" (v2 had four, E-8.1#9);
@@ -28,22 +37,27 @@
 //! - `%` is escaped in every generated line (E-8.1#8);
 //! - markers are matched after trimming trailing blanks/CR everywhere
 //!   (H-8.1#11) and the crontab always ends with a newline;
-//! - journal lines are validated before they are reinstalled (E-8.1#17).
+//! - journal lines are validated against the exact shapes before they are
+//!   reinstalled (E-8.1#17); retired renewal jobs are never reinstalled;
+//! - concurrent edits are serialized by the crontab lock.
 
 mod line;
 mod scheduler;
+mod shape;
 #[cfg(test)]
 pub(crate) mod testing;
 
+pub use crate::host::service::Scope;
 pub use line::line;
-pub use scheduler::{ensure_available, scheduler_running, NOT_RUNNING};
+pub use scheduler::{ensure_scheduler, ensure_scheduler_as, scheduler_active, NOT_RUNNING};
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::host::service::{validate_name, FRPS, FRP_WEB};
+use crate::host::service::{prepare_dir, validate_name, FRPS, FRP_WEB};
 use crate::paths::Paths;
 use crate::sys::exec::{Cmd, Output};
 use crate::sys::fs::{remove_file_if_exists, write_new_exclusive, TEMP_PREFIX};
+use crate::sys::lock::FileLock;
 use crate::sys::text::quote_shell;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -53,6 +67,12 @@ use std::time::Duration;
 pub const MARKER: &str = " # onebox:";
 const CRONTAB_TIMEOUT: Duration = Duration::from_secs(30);
 const TAG_MAX: usize = 96;
+/// How long an edit waits for a concurrent one.
+const EDIT_LOCK_WAIT: Duration = Duration::from_secs(30);
+const EDIT_BUSY: &str = "另一个操作正在修改 crontab；稍后重试";
+const NOT_OWNED: &str = "事务记录的 crontab 行不属于 Onebox，拒绝恢复";
+const UNKNOWN_SHAPE: &str = "事务记录的 crontab 行不是 Onebox 写入的格式，拒绝恢复";
+const BAD_ANCHORS: &str = "事务记录的 crontab 位置无效，拒绝恢复";
 
 /// The ownership tag of a crontab line (`renew`, `boot:onebox-xray`, …).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -108,16 +128,10 @@ impl std::fmt::Display for Tag {
     }
 }
 
-/// Which owned lines an independent transaction covers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Scope {
-    /// The proxy node: renewal, autostart of its services, the v1 line.
-    Node,
-    /// The FRP server manager.
-    Frp,
-}
-
 impl Scope {
+    /// Whether a line of `tag` belongs to this scope: FRP owns `frp-renew`,
+    /// `frp-boot` and the autostart of its two services; the node owns the
+    /// rest (renewal, autostart of its services, the v1 line).
     pub fn covers(self, tag: &Tag) -> bool {
         let frp = matches!(tag.as_str(), "frp-renew" | "frp-boot")
             || [FRPS, FRP_WEB]
@@ -147,29 +161,38 @@ impl Ownership {
 
     /// The tag owning `line`, if Onebox owns it.
     fn classify(&self, line: &str) -> Option<Tag> {
+        self.classify_form(line).map(|(tag, _)| tag)
+    }
+
+    /// The owning tag and the form (version) of an owned line.
+    fn classify_form(&self, line: &str) -> Option<(Tag, Form)> {
         let trimmed = line.trim_end_matches([' ', '\t', '\r']);
         if let Some((_, tag)) = trimmed.rsplit_once(MARKER) {
             if let Ok(tag) = Tag::new(tag) {
-                return Some(tag);
+                return Some((tag, Form::V3));
             }
         }
         if let Some((_, service)) = trimmed.rsplit_once("# onebox-rust:") {
-            return Tag::boot(service.trim()).ok();
+            return Tag::boot(service.trim()).ok().map(|t| (t, Form::V2Boot));
         }
-        let v2_markers = [
-            ("# onebox-native-cert-proxy", Tag::renew()),
-            ("# onebox-native-cert-site", Tag::renew()),
-            ("# onebox-native-cert-subscription", Tag::renew()),
+        for target in ["proxy", "site", "subscription"] {
+            if trimmed.ends_with(&format!("# onebox-native-cert-{target}")) {
+                return Some((Tag::renew(), Form::V2Cert(target)));
+            }
+        }
+        for (marker, tag) in [
             ("# onebox-frps-renew", Tag::frp_renew()),
             ("# onebox-frps-boot", Tag::frp_boot()),
-        ];
-        if let Some((_, tag)) = v2_markers.into_iter().find(|(m, _)| trimmed.ends_with(m)) {
-            return Some(tag);
+        ] {
+            if trimmed.ends_with(marker) {
+                return Some((tag, Form::V2Frp));
+            }
         }
         if self.is_v1_boot(line) {
-            return Some(Tag::legacy_boot());
+            return Some((Tag::legacy_boot(), Form::V1Boot));
         }
-        self.is_retired_renew(trimmed).then(Tag::renew)
+        self.is_retired_renew(trimmed)
+            .then(|| (Tag::renew(), Form::Retired))
     }
 
     /// The exact v1 boot line, with the executable bare (when it is a plain
@@ -210,6 +233,22 @@ impl Ownership {
     }
 }
 
+/// Which version wrote an owned line (decides its exact shape).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    V3,
+    /// `# onebox-rust:{service}`.
+    V2Boot,
+    /// `# onebox-native-cert-{target}`.
+    V2Cert(&'static str),
+    /// `# onebox-frps-renew` / `# onebox-frps-boot`.
+    V2Frp,
+    /// The exact v1 `@reboot` line.
+    V1Boot,
+    /// Renewal jobs older versions installed without a marker.
+    Retired,
+}
+
 #[derive(Clone, Debug)]
 struct Line {
     text: String,
@@ -243,9 +282,28 @@ impl Crontab {
     }
 
     /// The current user's crontab (`crontab -l`); none yet reads as empty.
+    /// For queries; changes go through [`edit`](Crontab::edit).
     pub fn read(ctx: &Ctx) -> Result<Crontab> {
         let out = ctx.run(&Cmd::new("crontab").arg("-l").timeout(CRONTAB_TIMEOUT))?;
         Ok(Crontab::parse(&ctx.paths, &listing(&out)?))
+    }
+
+    /// Read the crontab, apply `change` and install the result when its
+    /// text changed, all under the crontab lock (see the module docs).
+    /// Nothing is installed when `change` fails.
+    pub fn edit<T>(ctx: &Ctx, change: impl FnOnce(&mut Crontab) -> Result<T>) -> Result<T> {
+        prepare_dir(&ctx.paths.run)?;
+        let path = ctx.paths.run.join("crontab.lock");
+        let _lock = FileLock::acquire_waiting(
+            &path,
+            EDIT_BUSY,
+            EDIT_LOCK_WAIT,
+            Duration::from_millis(100),
+        )?;
+        let mut tab = Crontab::read(ctx)?;
+        let value = change(&mut tab)?;
+        tab.save(ctx)?;
+        Ok(value)
     }
 
     /// The crontab text to install.
@@ -278,8 +336,8 @@ impl Crontab {
 
     /// Make `new_lines` the whole group of `tag`, at the position of the
     /// group's first line (appended when the group is new). Each new line
-    /// must be a single line owned by exactly `tag`. Returns whether the
-    /// crontab changed.
+    /// must be a single line owned by exactly `tag` (build it with
+    /// [`line`]). Returns whether the crontab changed.
     pub fn replace(&mut self, tag: &Tag, new_lines: &[String]) -> Result<bool> {
         let mut fresh = Vec::with_capacity(new_lines.len());
         for text in new_lines {
@@ -293,6 +351,12 @@ impl Crontab {
             });
         }
         let before = self.text();
+        self.splice_group(tag, fresh);
+        Ok(self.text() != before)
+    }
+
+    /// Put `fresh` where the group of `tag` starts (or at the end).
+    fn splice_group(&mut self, tag: &Tag, fresh: Vec<Line>) {
         let position = self
             .lines
             .iter()
@@ -301,7 +365,6 @@ impl Crontab {
         self.lines.retain(|l| l.tag.as_ref() != Some(tag));
         let position = position.min(self.lines.len());
         self.lines.splice(position..position, fresh);
-        Ok(self.text() != before)
     }
 
     /// Remove the group of `tag`; returns whether a line was removed.
@@ -319,49 +382,135 @@ impl Crontab {
         self.lines.len() != before
     }
 
-    /// The owned lines of `scope`, for a transaction journal.
-    pub fn snapshot(&self, scope: Scope) -> Vec<String> {
-        self.owned()
-            .filter(|(tag, _)| scope.covers(tag))
-            .map(|(_, text)| text.to_owned())
-            .collect()
-    }
-
-    /// Put the owned lines of `scope` back to `lines` (a [`snapshot`]):
-    /// each group returns to its position, groups absent from the snapshot
-    /// are removed, foreign lines are untouched. Lines that are not owned
-    /// within `scope` are refused before anything changes.
-    ///
-    /// [`snapshot`]: Crontab::snapshot
-    pub fn restore(&mut self, lines: &[String], scope: Scope) -> Result<()> {
-        let mut groups: Vec<(Tag, Vec<String>)> = Vec::new();
-        for text in lines {
-            let tag = self
-                .ownership
-                .classify(text)
-                .filter(|t| scope.covers(t) && !text.contains(['\n', '\0']))
-                .ok_or_else(|| Error::msg("事务记录的 crontab 行不属于 Onebox，拒绝恢复"))?;
-            match groups.iter_mut().find(|(t, _)| *t == tag) {
-                Some((_, group)) => group.push(text.clone()),
-                None => groups.push((tag, vec![text.clone()])),
+    /// The owned lines of `scope` with their positions, for a transaction
+    /// journal.
+    pub fn snapshot(&self, scope: Scope) -> CronSnapshot {
+        let mut lines = Vec::new();
+        let mut anchors = Vec::new();
+        let mut others = 0;
+        for line in &self.lines {
+            if in_scope(line, scope) {
+                lines.push(line.text.clone());
+                anchors.push(others);
+            } else {
+                others += 1;
             }
         }
-        let stale: Vec<Tag> = self
-            .owned()
-            .map(|(t, _)| t.clone())
-            .filter(|t| scope.covers(t) && !groups.iter().any(|(g, _)| g == t))
-            .collect();
-        for tag in &stale {
-            self.remove(tag);
+        CronSnapshot {
+            available: true,
+            lines,
+            anchors: Some(anchors),
         }
-        for (tag, group) in &groups {
-            self.replace(tag, group)?;
+    }
+
+    /// Put the owned lines of `scope` back to a [`snapshot`]. With anchors
+    /// (v3 journals) every line returns to its position among the lines
+    /// outside the scope, so `restore(snapshot())` changes nothing and a
+    /// rollback reinstalls the original text; without them (v2 journals)
+    /// each group returns to the position of its current first line and a
+    /// group that already has exactly these lines stays as it is. Groups
+    /// absent from the snapshot are removed; lines outside the scope are
+    /// untouched. Every line must be owned within `scope` and have a known
+    /// shape (checked before anything changes); a retired renewal job (no
+    /// exact shape) is kept only while the crontab still has it, never
+    /// reinstalled.
+    ///
+    /// [`snapshot`]: Crontab::snapshot
+    pub fn restore(&mut self, snapshot: &CronSnapshot, scope: Scope) -> Result<()> {
+        let wanted = self.restorable(snapshot, scope)?;
+        if snapshot.anchors.is_some() {
+            self.restore_anchored(wanted, scope);
+        } else {
+            self.restore_groups(wanted.into_iter().map(|(_, l)| l).collect(), scope);
         }
         Ok(())
     }
 
+    /// The snapshot's lines (with anchors, 0 without) after validation.
+    fn restorable(&self, snapshot: &CronSnapshot, scope: Scope) -> Result<Vec<(usize, Line)>> {
+        if let Some(anchors) = &snapshot.anchors {
+            let ordered = anchors.windows(2).all(|w| w[0] <= w[1]);
+            if anchors.len() != snapshot.lines.len() || !ordered {
+                return Err(Error::msg(BAD_ANCHORS));
+            }
+        }
+        let mut present: Vec<&str> = self
+            .lines
+            .iter()
+            .filter(|l| in_scope(l, scope))
+            .map(|l| l.text.as_str())
+            .collect();
+        let mut wanted = Vec::with_capacity(snapshot.lines.len());
+        for (index, text) in snapshot.lines.iter().enumerate() {
+            let (tag, form) = self
+                .ownership
+                .classify_form(text)
+                .filter(|(t, _)| scope.covers(t) && !text.contains(['\n', '\0']))
+                .ok_or_else(|| Error::msg(NOT_OWNED))?;
+            if form == Form::Retired {
+                match present.iter().position(|p| p == text) {
+                    Some(at) => _ = present.remove(at),
+                    None => continue,
+                }
+            } else if !self.ownership.restorable(text, &tag, form) {
+                return Err(Error::msg(UNKNOWN_SHAPE));
+            }
+            let anchor = snapshot.anchors.as_ref().map_or(0, |a| a[index]);
+            let line = Line {
+                text: text.clone(),
+                tag: Some(tag),
+            };
+            wanted.push((anchor, line));
+        }
+        Ok(wanted)
+    }
+
+    /// Line `i` of the snapshot goes before the `anchor`-th line outside
+    /// the scope (after the last one when there are fewer).
+    fn restore_anchored(&mut self, wanted: Vec<(usize, Line)>, scope: Scope) {
+        let others: Vec<Line> = std::mem::take(&mut self.lines)
+            .into_iter()
+            .filter(|l| !in_scope(l, scope))
+            .collect();
+        let mut wanted = wanted.into_iter().peekable();
+        for (index, other) in others.into_iter().enumerate() {
+            while let Some((_, line)) = wanted.next_if(|(anchor, _)| *anchor <= index) {
+                self.lines.push(line);
+            }
+            self.lines.push(other);
+        }
+        self.lines.extend(wanted.map(|(_, line)| line));
+    }
+
+    fn restore_groups(&mut self, wanted: Vec<Line>, scope: Scope) {
+        let mut groups: Vec<(Tag, Vec<Line>)> = Vec::new();
+        for line in wanted {
+            let Some(tag) = line.tag.clone() else {
+                continue;
+            };
+            match groups.iter_mut().find(|(t, _)| *t == tag) {
+                Some((_, group)) => group.push(line),
+                None => groups.push((tag, vec![line])),
+            }
+        }
+        self.lines.retain(|l| {
+            !l.tag
+                .as_ref()
+                .is_some_and(|t| scope.covers(t) && !groups.iter().any(|(g, _)| g == t))
+        });
+        for (tag, group) in groups {
+            let current = self.lines.iter().filter(|l| l.tag.as_ref() == Some(&tag));
+            let same = current
+                .map(|l| l.text.as_str())
+                .eq(group.iter().map(|l| l.text.as_str()));
+            if !same {
+                self.splice_group(&tag, group);
+            }
+        }
+    }
+
     /// Install this text as the crontab (`crontab FILE` with a private
-    /// temp file in the run directory).
+    /// temp file in the run directory). Writers use [`edit`](Crontab::edit).
     pub fn install(&self, ctx: &Ctx) -> Result<()> {
         let run = &ctx.paths.run;
         crate::host::service::prepare_dir(run)?;
@@ -417,11 +566,20 @@ pub fn available(ctx: &Ctx) -> bool {
     ctx.has("crontab")
 }
 
-/// The owned lines of a transaction scope, with whether cron was available.
+/// Whether `line` is owned within `scope`.
+fn in_scope(line: &Line, scope: Scope) -> bool {
+    line.tag.as_ref().is_some_and(|t| scope.covers(t))
+}
+
+/// The owned lines of a transaction scope, with whether cron was available
+/// (v2 journals: `cron_lines` + `cron_available`, no anchors).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CronSnapshot {
     pub available: bool,
     pub lines: Vec<String>,
+    /// For each line, how many lines outside the scope preceded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchors: Option<Vec<usize>>,
 }
 
 /// Snapshot the owned lines of `scope` (no `crontab` program: nothing).
@@ -429,10 +587,7 @@ pub fn snapshot(ctx: &Ctx, scope: Scope) -> Result<CronSnapshot> {
     if !available(ctx) {
         return Ok(CronSnapshot::default());
     }
-    Ok(CronSnapshot {
-        available: true,
-        lines: Crontab::read(ctx)?.snapshot(scope),
-    })
+    Ok(Crontab::read(ctx)?.snapshot(scope))
 }
 
 /// Restore a [`snapshot`]; foreign lines and other scopes are untouched.
@@ -443,9 +598,7 @@ pub fn restore(ctx: &Ctx, snapshot: &CronSnapshot, scope: Scope) -> Result<()> {
         }
         return Ok(());
     }
-    let mut tab = Crontab::read(ctx)?;
-    tab.restore(&snapshot.lines, scope)?;
-    tab.save(ctx).map(|_| ())
+    Crontab::edit(ctx, |tab| tab.restore(snapshot, scope))
 }
 
 #[cfg(test)]

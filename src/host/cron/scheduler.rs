@@ -3,11 +3,13 @@
 //!
 //! Changes from v2: one check for node and FRP (v2's two disagreed on unit
 //! names, and FRP's lacked `cronie`/`dcron`, H-8.1#17); the no-init check
-//! reads `/proc/*/comm` below `system_root` instead of running `pgrep`.
+//! reads `/proc/*/comm` below `system_root` instead of running `pgrep`; a
+//! side-effect-free [`scheduler_active`] for status reports.
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::host::init::InitSystem;
+use crate::host::{os, pkg};
 use crate::sys::exec::Cmd;
 use std::fs;
 use std::time::Duration;
@@ -21,25 +23,36 @@ const OPENRC_SCRIPTS: [&str; 4] = ["crond", "cronie", "dcron", "cron"];
 const DAEMON_NAMES: [&str; 4] = ["cron", "crond", "cronie", "dcron"];
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Install `crontab` when missing (through `ensure_package(ctx, command,
-/// package)`, i.e. `host::pkg`, which maps `cron` per distribution) and
-/// make sure a cron daemon runs, starting and enabling it when the init
-/// system can.
-pub fn ensure_available(
-    ctx: &Ctx,
-    init: InitSystem,
-    ensure_package: &dyn Fn(&Ctx, &str, &str) -> Result<()>,
-) -> Result<()> {
-    if !super::available(ctx) {
-        ensure_package(ctx, "crontab", "cron")?;
+/// Whether a cron daemon is running. A pure check (doctor, status): it
+/// never installs, starts or enables anything. systemd — a cron unit is
+/// active; OpenRC — a cron script reports started; no init — a cron
+/// process exists.
+pub fn scheduler_active(ctx: &Ctx, init: InitSystem) -> bool {
+    match init {
+        InitSystem::Systemd => SYSTEMD_UNITS
+            .into_iter()
+            .any(|unit| succeeds(ctx, "systemctl", &["is-active", "--quiet", unit])),
+        InitSystem::Openrc => OPENRC_SCRIPTS
+            .into_iter()
+            .any(|script| succeeds(ctx, "rc-service", &[script, "status"])),
+        InitSystem::None => cron_process(ctx),
     }
-    scheduler_running(ctx, init)
 }
 
-/// v2 `scheduler_ready`: systemd — a cron unit is active, else one can be
-/// `enable --now`ed; OpenRC — the first cron script that starts is added to
-/// the default runlevel; no init — a cron process exists.
-pub fn scheduler_running(ctx: &Ctx, init: InitSystem) -> Result<()> {
+/// Make sure scheduled jobs will run: install `crontab` when it is missing
+/// (`host::pkg`, which maps `cron` per distribution), then v2's
+/// `scheduler_ready`: systemd — a cron unit is active, else one is
+/// `enable --now`ed; OpenRC — the first cron script that starts is added
+/// to the default runlevel; no init — a cron process must exist.
+pub fn ensure_scheduler(ctx: &Ctx, init: InitSystem) -> Result<()> {
+    ensure_scheduler_as(ctx, init, os::is_root())
+}
+
+/// [`ensure_scheduler`] with the privilege fact injected (tests).
+pub fn ensure_scheduler_as(ctx: &Ctx, init: InitSystem, root: bool) -> Result<()> {
+    if !super::available(ctx) {
+        pkg::ensure_as(ctx, "crontab", "cron", root)?;
+    }
     let ready = match init {
         InitSystem::Systemd => systemd_cron(ctx),
         InitSystem::Openrc => openrc_cron(ctx)?,

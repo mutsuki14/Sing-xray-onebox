@@ -3,12 +3,14 @@
 //!
 //! Every Onebox service is a [`ServiceDef`]: program, arguments, ordering
 //! and the traits v2 kept in scattered `match name` blocks — pre-start
-//! command, restart-prevent status, FRP run/log/spec directories, how the
-//! supervisor recognizes the process (nginx master title included), legacy
-//! PID and log files. The traits of the known services live in one table
-//! ([`ServiceDef::new`]) that serves both the constructors and definitions
-//! reloaded from their spec JSON, so the supervisor and `onebox service …`
-//! see exactly what the installer wrote.
+//! command, runtime directories, restart-prevent status, FRP run/log/spec
+//! directories, how the supervisor recognizes the process (nginx master
+//! title included), legacy PID and log files, which configuration lock its
+//! start takes. The traits of the known services live in one table
+//! (`known.rs`) and nowhere else: a definition only comes from a
+//! constructor or from its persisted spec (both go through the table), and
+//! its fields are read-only, so a unit, an OpenRC script and the supervisor
+//! always see the same service.
 //!
 //! The spec JSON (`{spec_dir}/{name}.json`, 0600) keeps the v2 shape
 //! `{program, args, after, environment}`: v2 and v3 read each other's
@@ -18,9 +20,15 @@
 //! Changes from v2:
 //! - `After=`/`Wants=` (and OpenRC `depend()`) have no trailing space when a
 //!   service has no dependencies;
-//! - one open-files limit for every init: `LimitNOFILE=1048576` and
-//!   `rc_ulimit='-n 1048576'` (v2 OpenRC used 65535, E-8.1#12; a failing
-//!   `ulimit` under OpenRC only warns, the daemon still starts);
+//! - every daemon starts with the same open-files limit where the host
+//!   allows it: systemd `LimitNOFILE=1048576` (systemd clamps it), the
+//!   OpenRC `start_pre` raises the limit to 1048576 or, when the hard limit
+//!   cannot be raised (unprivileged containers), to the hard limit (v2's
+//!   `rc_ulimit='-n 65535'` differed from systemd, E-8.1#12; a fixed
+//!   `rc_ulimit` above the hard limit would fail as a whole), and the
+//!   supervisor does the same for the daemons it spawns (v2 set nothing);
+//! - nginx services create their temp-path parent (`RUN/nginx-{scope}`)
+//!   before every start (`/run` is tmpfs, F-8.1#2);
 //! - no `reload` action: units define no `ExecReload` (E-8.1#11);
 //! - removing a service tolerates units systemd never loaded and disabling
 //!   a unit that does not exist is a no-op (E-8.1#10);
@@ -28,6 +36,7 @@
 //! - specs are no longer inferred for v1 installs without spec files (v1 is
 //!   no longer supported), so a missing spec means "not configured".
 
+mod known;
 mod logs;
 mod manager;
 mod render;
@@ -35,7 +44,6 @@ mod render;
 pub use manager::{Services, WAIT_RUNNING};
 pub use render::{render_openrc, render_systemd, NOFILE_LIMIT};
 
-use crate::domain::protocol::Core;
 use crate::error::{Error, Result};
 use crate::host::init::InitSystem;
 use crate::paths::{Paths, SERVICE_ENV_KEYS};
@@ -54,7 +62,7 @@ pub const FRPS: &str = "onebox-frps";
 pub const FRP_WEB: &str = "onebox-frp-web";
 
 /// The environment variable naming the init system a unit was written for.
-pub const INIT_ENV: &str = "ONEBOX_INIT";
+pub use crate::host::init::ENV as INIT_ENV;
 /// systemd targets a service may be ordered after.
 pub const TARGETS: [&str; 2] = ["network-online.target", "nss-lookup.target"];
 /// Largest spec JSON accepted (v2 specs are ~1.5 KiB).
@@ -67,6 +75,26 @@ pub enum ServiceKind {
     /// A run-to-completion action at boot (systemd `Type=oneshot` with
     /// `RemainAfterExit`); the supervisor runs it synchronously.
     Oneshot,
+}
+
+/// The independent configuration a service or crontab line belongs to.
+/// Each has its own lock and transaction: the proxy node and the FRP
+/// server manager.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Scope {
+    Node,
+    Frp,
+}
+
+impl Scope {
+    /// The scope's configuration lock (`ROOT/.apply.lock`,
+    /// `/etc/.onebox-frp.lock`).
+    pub fn lock_path(self, paths: &Paths) -> PathBuf {
+        match self {
+            Scope::Node => paths.lock(),
+            Scope::Frp => paths.frp_lock(),
+        }
+    }
 }
 
 /// How the built-in supervisor recognizes the service's process, on top of
@@ -84,169 +112,129 @@ pub struct Identity {
     pub nginx_title: bool,
 }
 
+/// One service. Built by the constructors in `known.rs` (or
+/// [`ServiceDef::from_spec`]); read through the accessors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceDef {
-    pub name: String,
-    /// systemd `Description=`.
-    pub description: String,
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    /// Onebox services (`onebox-*`) or one of [`TARGETS`].
-    pub after: Vec<String>,
-    /// Also start after the host firewall services, which would otherwise
-    /// flush rules restored at boot.
-    pub after_firewall: bool,
-    pub kind: ServiceKind,
-    /// OpenRC `ebegin` text while a oneshot runs (default: description).
-    pub banner: Option<String>,
-    /// Command (argv) run before every start; its failure fails the start.
-    pub pre_start: Option<Vec<String>>,
-    /// Exit status after which the daemon must not be restarted (Xray 23 =
-    /// invalid configuration).
-    pub restart_prevent_status: Option<i32>,
-    /// Supervisor PID records and locks.
-    pub run_dir: PathBuf,
-    /// `{name}.log` (supervisor and OpenRC output) and `boot.log`.
-    pub log_dir: PathBuf,
-    /// Where `{name}.json` lives.
-    pub spec_dir: PathBuf,
-    pub identity: Identity,
-    /// PID files written by others (nginx `pid`, v1 FRP); read to find the
-    /// process, removed on stop, never written.
-    pub legacy_pid_files: Vec<PathBuf>,
-    /// Older log locations, consulted after `{log_dir}/{name}.log`.
-    pub log_files: Vec<PathBuf>,
-}
-
-/// The persisted service description (v2 shape).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceSpec {
-    pub program: String,
-    pub args: Vec<String>,
-    pub after: Vec<String>,
-    #[serde(default)]
-    pub environment: Vec<(String, String)>,
+    name: String,
+    description: String,
+    program: PathBuf,
+    args: Vec<String>,
+    after: Vec<String>,
+    after_firewall: bool,
+    kind: ServiceKind,
+    banner: Option<String>,
+    pre_start: Option<Vec<String>>,
+    runtime_dirs: Vec<PathBuf>,
+    restart_prevent_status: Option<i32>,
+    run_dir: PathBuf,
+    log_dir: PathBuf,
+    spec_dir: PathBuf,
+    identity: Identity,
+    legacy_pid_files: Vec<PathBuf>,
+    log_files: Vec<PathBuf>,
+    scope: Scope,
+    takes_lock: Option<Scope>,
 }
 
 impl ServiceDef {
-    /// A definition of `name` with the traits Onebox associates with it
-    /// (the single table of per-service knowledge).
-    pub fn new(
-        paths: &Paths,
-        name: &str,
-        program: impl Into<PathBuf>,
-        args: Vec<String>,
-        after: Vec<String>,
-    ) -> ServiceDef {
-        let mut def = ServiceDef {
-            name: name.to_owned(),
-            description: format!("Onebox {name}"),
-            program: program.into(),
-            args,
-            after,
-            after_firewall: false,
-            kind: ServiceKind::Daemon,
-            banner: None,
-            pre_start: None,
-            restart_prevent_status: None,
-            run_dir: paths.run.clone(),
-            log_dir: paths.log.clone(),
-            spec_dir: paths.services(),
-            identity: Identity::default(),
-            legacy_pid_files: Vec::new(),
-            log_files: Vec::new(),
-        };
-        apply_traits(&mut def, paths);
-        def
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    /// The traits of `name` without a command: where its spec, PID, lock and
-    /// log files are, for services that may not be configured (yet).
-    pub fn skeleton(paths: &Paths, name: &str) -> ServiceDef {
-        ServiceDef::new(paths, name, PathBuf::new(), Vec::new(), Vec::new())
+    /// systemd `Description=`.
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
-    /// `onebox-sing-box` / `onebox-xray`, after the website when it serves
-    /// the REALITY target.
-    pub fn core(paths: &Paths, core: Core, after_site: bool) -> ServiceDef {
-        let config = path_string(&paths.core_config(core));
-        let args = match core {
-            Core::Singbox => vec!["run", "--disable-color", "-c", config.as_str()],
-            Core::Xray => vec!["run", "-c", config.as_str()],
-        };
-        let after = if after_site {
-            vec![SITE.to_owned()]
-        } else {
-            vec![]
-        };
-        ServiceDef::new(
-            paths,
-            core.service(),
-            paths.core_bin(core),
-            owned(&args),
-            after,
-        )
+    pub fn program(&self) -> &Path {
+        &self.program
     }
 
-    /// The private nginx serving the own-domain website.
-    pub fn site(paths: &Paths, nginx: &Path) -> ServiceDef {
-        let args = nginx_args(&paths.site());
-        ServiceDef::new(paths, SITE, nginx, args, vec![])
+    pub fn args(&self) -> &[String] {
+        &self.args
     }
 
-    /// Boot-time restoration of firewall and hop rules (`onebox net-apply`).
-    pub fn network(paths: &Paths) -> ServiceDef {
-        let args = owned(&["net-apply"]);
-        ServiceDef::new(paths, NETWORK, &paths.executable, args, vec![])
+    /// Onebox services (`onebox-*`) or one of [`TARGETS`].
+    pub fn after(&self) -> &[String] {
+        &self.after
     }
 
-    /// The subscription worker (`onebox subscription serve`).
-    pub fn subscription(paths: &Paths) -> ServiceDef {
-        let args = owned(&["subscription", "serve"]);
-        ServiceDef::new(paths, SUBSCRIPTION, &paths.executable, args, vec![])
+    /// Also start after the host firewall services, which would otherwise
+    /// flush rules restored at boot.
+    pub fn after_firewall(&self) -> bool {
+        self.after_firewall
     }
 
-    /// The nginx front of the subscription worker.
-    pub fn subscription_web(paths: &Paths, nginx: &Path) -> ServiceDef {
-        let args = nginx_args(&paths.subscription());
-        let after = vec![SUBSCRIPTION.to_owned()];
-        ServiceDef::new(paths, SUBSCRIPTION_WEB, nginx, args, after)
+    pub fn kind(&self) -> ServiceKind {
+        self.kind
     }
 
-    /// The FRP server.
-    pub fn frps(paths: &Paths) -> ServiceDef {
-        let config = path_string(&paths.frp_root.join("frps.toml"));
-        let args = owned(&["-c", config.as_str()]);
-        ServiceDef::new(paths, FRPS, paths.frp_bin.join("frps"), args, vec![])
+    /// OpenRC `ebegin` text while a oneshot runs (default: description).
+    pub fn banner(&self) -> Option<&str> {
+        self.banner.as_deref()
     }
 
-    /// The nginx of FRP web mode.
-    pub fn frp_web(paths: &Paths, nginx: &Path) -> ServiceDef {
-        let args = nginx_args(&paths.frp_root);
-        ServiceDef::new(paths, FRP_WEB, nginx, args, vec![])
+    /// Command (argv) run before every start; its failure fails the start.
+    pub fn pre_start(&self) -> Option<&[String]> {
+        self.pre_start.as_deref()
     }
 
-    /// Rebuild a definition from its persisted spec (validated first).
-    pub fn from_spec(paths: &Paths, name: &str, spec: &ServiceSpec) -> Result<ServiceDef> {
-        validate_name(name)?;
-        spec.validate()?;
-        Ok(ServiceDef::new(
-            paths,
-            name,
-            &spec.program,
-            spec.args.clone(),
-            spec.after.clone(),
-        ))
+    /// Directories (0755) created before every start, before the pre-start
+    /// command: runtime state under the tmpfs `/run`.
+    pub fn runtime_dirs(&self) -> &[PathBuf] {
+        &self.runtime_dirs
     }
 
-    /// The spec persisted for this definition with `env`.
-    pub fn spec(&self, env: &[(String, String)]) -> ServiceSpec {
-        ServiceSpec {
-            program: path_string(&self.program),
-            args: self.args.clone(),
-            after: self.after.clone(),
-            environment: env.to_vec(),
-        }
+    /// Exit status after which the daemon must not be restarted (Xray 23 =
+    /// invalid configuration).
+    pub fn restart_prevent_status(&self) -> Option<i32> {
+        self.restart_prevent_status
+    }
+
+    /// Supervisor PID records and locks.
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    /// `{name}.log` (supervisor and OpenRC output) and `boot.log`.
+    pub fn log_dir(&self) -> &Path {
+        &self.log_dir
+    }
+
+    /// Where `{name}.json` lives.
+    pub fn spec_dir(&self) -> &Path {
+        &self.spec_dir
+    }
+
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// PID files written by others (nginx `pid`, v1 FRP); read to find the
+    /// process, removed on stop, never written.
+    pub fn legacy_pid_files(&self) -> &[PathBuf] {
+        &self.legacy_pid_files
+    }
+
+    /// Older log locations, consulted after `{log_dir}/{name}.log`.
+    pub fn log_files(&self) -> &[PathBuf] {
+        &self.log_files
+    }
+
+    /// The configuration this service belongs to: changes to it are
+    /// serialized by that scope's lock.
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+
+    /// The configuration lock the service's own start commands take
+    /// (`onebox-network` runs `onebox net-apply`: node; `onebox-frps`
+    /// runs `onebox frps net-apply`: FRP). A caller holding that lock must
+    /// not start or restart the service through systemd/OpenRC (the helper
+    /// would find the lock busy); see [`Services::start_with_lock`].
+    pub fn takes_lock(&self) -> Option<Scope> {
+        self.takes_lock
     }
 
     pub fn spec_path(&self) -> PathBuf {
@@ -270,8 +258,19 @@ impl ServiceDef {
             .collect()
     }
 
+    /// The spec persisted for this definition with `env`.
+    pub fn spec(&self, env: &[(String, String)]) -> ServiceSpec {
+        ServiceSpec {
+            program: path_string(&self.program),
+            args: self.args.clone(),
+            after: self.after.clone(),
+            environment: env.to_vec(),
+        }
+    }
+
     /// Every invariant a unit, script or spec relies on: a valid name, an
-    /// absolute program, no line breaks in any word, valid dependencies.
+    /// absolute program, no line breaks in any word, valid dependencies,
+    /// absolute runtime directories.
     pub fn validate(&self) -> Result<()> {
         validate_name(&self.name)?;
         validate_command(&path_string(&self.program), &self.args)?;
@@ -284,6 +283,13 @@ impl ServiceDef {
                 .ok_or_else(|| Error::msg("服务预启动命令为空"))?;
             validate_command(program, args)?;
         }
+        for dir in &self.runtime_dirs {
+            let text = path_string(dir);
+            if !dir.is_absolute() {
+                return Err(Error::msg("服务运行目录必须是绝对路径"));
+            }
+            reject_breaks(&text)?;
+        }
         for text in [&self.description, self.banner.as_deref().unwrap_or("")] {
             reject_breaks(text)?;
         }
@@ -291,103 +297,14 @@ impl ServiceDef {
     }
 }
 
-/// Per-service traits (see the module docs). Identity configs are taken
-/// from the definition's own `-c` argument so they always match how the
-/// process was started.
-fn apply_traits(def: &mut ServiceDef, paths: &Paths) {
-    let config = arg_after(&def.args, "-c").map(PathBuf::from);
-    match def.name.as_str() {
-        SING_BOX | XRAY => {
-            def.identity = Identity {
-                subcommand: def.args.first().cloned(),
-                config,
-                nginx_title: false,
-            };
-            let legacy = if def.name == SING_BOX {
-                "singbox.log"
-            } else {
-                "xray.log"
-            };
-            def.log_files = vec![paths.log.join(legacy)];
-            if def.name == XRAY {
-                def.restart_prevent_status = Some(23);
-            }
-        }
-        SITE => {
-            def.identity = nginx_identity(config);
-            def.legacy_pid_files = vec![paths.site().join("nginx.pid")];
-            def.log_files = vec![paths.site().join("error.log")];
-        }
-        SUBSCRIPTION_WEB => def.identity = nginx_identity(config),
-        NETWORK => {
-            def.kind = ServiceKind::Oneshot;
-            def.description = "Onebox network rule restoration".into();
-            def.banner = Some("Restoring Onebox network rules".into());
-            def.after_firewall = true;
-        }
-        FRPS => {
-            frp_dirs(def, paths);
-            let exe = path_string(&paths.executable);
-            def.pre_start = Some(owned(&[exe.as_str(), "frps", "net-apply"]));
-            def.identity.config = config;
-            def.legacy_pid_files = vec![paths.frp_run.join("frps.pid")];
-            def.log_files = vec![paths.frp_log.join("frps.log")];
-        }
-        FRP_WEB => {
-            frp_dirs(def, paths);
-            def.identity = nginx_identity(config);
-            def.legacy_pid_files = vec![paths.frp_root.join("nginx.pid")];
-            def.log_files = vec![
-                paths.frp_log.join("nginx.log"),
-                paths.frp_log.join("nginx-error.log"),
-                paths.frp_root.join("error.log"),
-            ];
-        }
-        _ => {}
-    }
-}
-
-fn frp_dirs(def: &mut ServiceDef, paths: &Paths) {
-    def.run_dir = paths.frp_run.clone();
-    def.log_dir = paths.frp_log.clone();
-    def.spec_dir = paths.frp_root.join("services");
-}
-
-fn nginx_identity(config: Option<PathBuf>) -> Identity {
-    Identity {
-        subcommand: None,
-        config,
-        nginx_title: true,
-    }
-}
-
-/// `-p {prefix} -c {prefix}/nginx.conf -g "daemon off;"` (foreground nginx).
-fn nginx_args(prefix: &Path) -> Vec<String> {
-    let config = path_string(&prefix.join("nginx.conf"));
-    let prefix = path_string(prefix);
-    owned(&[
-        "-p",
-        prefix.as_str(),
-        "-c",
-        config.as_str(),
-        "-g",
-        "daemon off;",
-    ])
-}
-
-/// The word following `flag` in `args`.
-pub(crate) fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    let index = args.iter().position(|a| a == flag)?;
-    args.get(index + 1).map(String::as_str)
-}
-
-fn owned(words: &[&str]) -> Vec<String> {
-    words.iter().map(|w| w.to_string()).collect()
-}
-
-/// Paths are validated UTF-8 at startup (`Paths::from_env`).
-fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+/// The persisted service description (v2 shape).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub after: Vec<String>,
+    #[serde(default)]
+    pub environment: Vec<(String, String)>,
 }
 
 impl ServiceSpec {
@@ -404,6 +321,26 @@ impl ServiceSpec {
         }
         validate_env(&self.environment)
     }
+}
+
+/// The parent of an nginx service's temp paths (`client_body`, `proxy`,
+/// `fastcgi`, `uwsgi`, `scgi`; nginx creates those leaves itself), v2's
+/// `nginx_runtime(scope)` layout: `RUN/nginx-{scope}` with `scope` ∈
+/// `site`, `subscription`, `frp`. The service creates it before every
+/// start; renderers of nginx configs must use this path.
+pub fn nginx_runtime_dir(paths: &Paths, scope: &str) -> PathBuf {
+    paths.run.join(format!("nginx-{scope}"))
+}
+
+/// The word following `flag` in `args`.
+pub(crate) fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let index = args.iter().position(|a| a == flag)?;
+    args.get(index + 1).map(String::as_str)
+}
+
+/// Paths are validated UTF-8 at startup (`Paths::from_env`).
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// Names: `onebox-` followed by `[A-Za-z0-9-]+`.
@@ -439,30 +376,25 @@ fn reject_breaks(text: &str) -> Result<()> {
     quote_unit(text).map(|_| ())
 }
 
+/// Whether `key` may be persisted into units, specs and cron lines.
+pub fn env_key_allowed(key: &str) -> bool {
+    SERVICE_ENV_KEYS.contains(&key) || key == INIT_ENV
+}
+
 /// The service environment: the allowlisted path variables (each at most
 /// once) and `ONEBOX_INIT` ∈ {none, systemd, openrc}.
 pub fn validate_env(env: &[(String, String)]) -> Result<()> {
     let mut seen = BTreeSet::new();
     for (key, value) in env {
-        let allowed = SERVICE_ENV_KEYS.contains(&key.as_str()) || key == INIT_ENV;
-        if !allowed || !seen.insert(key.as_str()) {
+        if !env_key_allowed(key) || !seen.insert(key.as_str()) {
             return Err(Error::msg("服务环境变量不在路径白名单或重复"));
         }
         reject_breaks(value)?;
-        if key == INIT_ENV && !matches!(value.as_str(), "none" | "systemd" | "openrc") {
+        if key == INIT_ENV && InitSystem::parse(value).is_none() {
             return Err(Error::msg("服务 init 环境值无效"));
         }
     }
     Ok(())
-}
-
-/// The `ONEBOX_INIT` spelling of an init system.
-pub fn init_value(init: InitSystem) -> &'static str {
-    match init {
-        InitSystem::Systemd => "systemd",
-        InitSystem::Openrc => "openrc",
-        InitSystem::None => "none",
-    }
 }
 
 /// The 14 variables persisted into units, specs and cron lines: the 13 path
@@ -470,7 +402,7 @@ pub fn init_value(init: InitSystem) -> &'static str {
 /// from the caller's environment.
 pub fn service_env(paths: &Paths, init: InitSystem) -> Vec<(String, String)> {
     let mut env = paths.service_env();
-    env.push((INIT_ENV.to_owned(), init_value(init).to_owned()));
+    env.push((INIT_ENV.to_owned(), init.id().to_owned()));
     env
 }
 
@@ -484,13 +416,24 @@ pub fn script_file(paths: &Paths, name: &str) -> PathBuf {
     paths.initd.join(name)
 }
 
-/// Create a runtime/log directory (0755: nginx workers traverse the run
-/// directory) unless it already exists; existing modes are left alone.
+/// Create a runtime/log directory and its missing ancestors (0755: nginx
+/// workers traverse the run directory) unless it already exists; existing
+/// modes are left alone. The directory itself must not be a symlink
+/// (ancestors such as `/var/run` may be).
 pub(crate) fn prepare_dir(path: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        _ => crate::sys::fs::ensure_dir(path, 0o755),
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
     }
+    let mut missing = vec![path];
+    missing.extend(
+        path.ancestors()
+            .skip(1)
+            .take_while(|p| !p.as_os_str().is_empty() && !p.is_dir()),
+    );
+    for dir in missing.into_iter().rev() {
+        crate::sys::fs::ensure_dir(dir, 0o755)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ Environment="ONEBOX_FRPS_WEB_VAR=/var/lib/onebox-frp"
 Environment="ONEBOX_FRPS_LOG_DIR=/var/log/onebox-frp"
 Environment="ONEBOX_FRPS_RUN_DIR=/run/onebox-frp"
 Environment="ONEBOX_INIT=systemd"
+ExecStartPre="/bin/mkdir" -p -m 0755 /run/onebox/nginx-frp
 ExecStart="/usr/sbin/nginx" "-p" "/etc/onebox-frp" "-c" "/etc/onebox-frp/nginx.conf" "-g" "daemon off;"
 Restart=on-failure
 RestartSec=5s

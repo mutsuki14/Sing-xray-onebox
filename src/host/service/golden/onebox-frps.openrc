@@ -22,6 +22,8 @@ error_log='/var/log/onebox-frp/onebox-frps.log'
 respawn_delay=5
 respawn_max=10
 respawn_period=120
-rc_ulimit='-n 1048576'
 depend() { want net; after net firewall dns; }
-start_pre() { '/usr/local/bin/onebox' frps net-apply; }
+start_pre() {
+  ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || :
+  '/usr/local/bin/onebox' frps net-apply
+}

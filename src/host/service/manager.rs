@@ -1,10 +1,23 @@
 //! [`Services`]: one interface over systemd, OpenRC and the built-in
 //! supervisor (no init), spec E §4.5.
+//!
+//! Locks. Starting a service is serialized with configuration changes of
+//! its [`Scope`] by the caller, which holds that scope's lock (G33): a
+//! boot-time `onebox service NAME start` then cannot interleave with an
+//! apply between its stop-old-services and start-cores stages and adopt a
+//! daemon still running the old configuration. Two services take a lock in
+//! their own start commands ([`ServiceDef::takes_lock`]): `onebox-network`
+//! (`onebox net-apply`, node lock) and `onebox-frps` (`onebox frps
+//! net-apply`, FRP lock). A caller holding that lock must not start or
+//! restart them through systemd or OpenRC — the helper would find the lock
+//! busy and fail (the apply engine therefore restores the rules itself and
+//! only writes and enables `onebox-network`); without an init system it
+//! hands the lock over with [`Services::start_with_lock`].
 
 use super::logs;
 use super::{
-    render_openrc, render_systemd, script_file, service_env, unit_file, validate_name, ServiceDef,
-    ServiceSpec, SPEC_MAX_BYTES,
+    render_openrc, render_systemd, script_file, service_env, unit_file, validate_name, Scope,
+    ServiceDef, ServiceSpec, SPEC_MAX_BYTES,
 };
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
@@ -13,6 +26,7 @@ use crate::host::init::{self, InitSystem};
 use crate::host::supervisor::Supervisor;
 use crate::sys::exec::{Cmd, Output};
 use crate::sys::fs::{atomic_write, check_owned, read_bounded, remove_file_if_exists};
+use crate::sys::lock::FileLock;
 use crate::ui::out;
 use std::fs;
 use std::path::Path;
@@ -152,26 +166,60 @@ impl<'a> Services<'a> {
         }
     }
 
+    /// The main process of `name` (a daemon's PID), `None` when it does not
+    /// run or is not configured. systemd: `MainPID` (0 = none); OpenRC: the
+    /// child supervise-daemon recorded, while it exists; no init: the
+    /// supervisor's verified record.
+    pub fn main_pid(&self, name: &str) -> Result<Option<u32>> {
+        validate_name(name)?;
+        match self.init {
+            InitSystem::Systemd => {
+                let out = self.query("systemctl", &["show", "-p", "MainPID", name])?;
+                if !out.ok() {
+                    return Err(command_error("systemctl", out));
+                }
+                let value = out.stdout.trim();
+                let value = value.strip_prefix("MainPID=").unwrap_or(value);
+                let pid: u32 = value
+                    .parse()
+                    .map_err(|_| Error::msg(format!("无法读取 {name} 的主进程")))?;
+                Ok((pid > 0).then_some(pid))
+            }
+            InitSystem::Openrc => Ok(self.openrc_child(name).filter(|pid| self.alive(*pid))),
+            InitSystem::None => match self.load(name) {
+                Ok((def, _)) => Ok(self.supervisor.find(&def).map(|f| f.record.pid)),
+                Err(_) if !is_file(&self.spec_path(name)) => Ok(None),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
     /// OpenRC may report a supervised service as started while its child is
     /// gone; trust a recorded child PID only while that process exists.
     fn openrc_child_alive(&self, name: &str) -> bool {
-        let file = self
-            .ctx
+        let file = self.openrc_child_file(name);
+        if !file.exists() {
+            return true;
+        }
+        self.openrc_child(name).is_some_and(|pid| self.alive(pid))
+    }
+
+    fn openrc_child_file(&self, name: &str) -> std::path::PathBuf {
+        self.ctx
             .paths
             .system("/run/openrc/options")
             .join(name)
-            .join("child_pid");
-        match fs::read_to_string(file) {
-            Ok(text) => text.trim().parse::<u32>().is_ok_and(|pid| {
-                pid > 1
-                    && crate::host::supervisor::identity::process_start(
-                        &self.ctx.paths.system_root,
-                        pid,
-                    )
-                    .is_some()
-            }),
-            Err(_) => true,
-        }
+            .join("child_pid")
+    }
+
+    /// The PID supervise-daemon recorded for `name`'s child.
+    fn openrc_child(&self, name: &str) -> Option<u32> {
+        let text = fs::read_to_string(self.openrc_child_file(name)).ok()?;
+        text.trim().parse::<u32>().ok().filter(|pid| *pid > 1)
+    }
+
+    fn alive(&self, pid: u32) -> bool {
+        crate::host::supervisor::identity::process_start(&self.ctx.paths.system_root, pid).is_some()
     }
 
     /// Whether `name` starts at boot. systemd: `is-enabled` exit 0 (codes
@@ -199,6 +247,8 @@ impl<'a> Services<'a> {
         }
     }
 
+    /// Start `name`. The caller holds the lock of the service's scope, except
+    /// for the lock the service takes itself (see the module docs).
     pub fn start(&self, name: &str) -> Result<()> {
         validate_name(name)?;
         match self.init {
@@ -209,6 +259,44 @@ impl<'a> Services<'a> {
                 self.supervisor.start(&def, &env)
             }
         }
+    }
+
+    /// [`start`](Services::start) while holding `held`. When `held` is the
+    /// lock the service's start commands take ([`ServiceDef::takes_lock`]),
+    /// the supervisor hands it to them; systemd and OpenRC cannot, so that
+    /// case is refused before anything runs.
+    pub fn start_with_lock(&self, name: &str, held: &FileLock) -> Result<()> {
+        validate_name(name)?;
+        if self.init != InitSystem::None {
+            self.refuse_held(name, held)?;
+            return self.start(name);
+        }
+        let (def, env) = self.load(name)?;
+        self.supervisor.start_with_lock(&def, &env, held)
+    }
+
+    /// [`restart`](Services::restart) with [`start_with_lock`]'s handover.
+    ///
+    /// [`start_with_lock`]: Services::start_with_lock
+    pub fn restart_with_lock(&self, name: &str, held: &FileLock) -> Result<()> {
+        validate_name(name)?;
+        if self.init != InitSystem::None {
+            self.refuse_held(name, held)?;
+            return self.restart(name);
+        }
+        let (def, env) = self.load(name)?;
+        self.supervisor.restart_with_lock(&def, &env, held)
+    }
+
+    /// Refuse when `held` is the lock `name`'s start takes itself.
+    fn refuse_held(&self, name: &str, held: &FileLock) -> Result<()> {
+        let taken = ServiceDef::skeleton(&self.ctx.paths, name).takes_lock();
+        if taken.is_some_and(|scope: Scope| held.path() == scope.lock_path(&self.ctx.paths)) {
+            return Err(Error::msg(format!(
+                "{name} 启动时会自行获取配置锁，持有该锁时不能通过 init 系统启动"
+            )));
+        }
+        Ok(())
     }
 
     /// Stop `name`; a service that is not installed is already stopped.
@@ -237,6 +325,7 @@ impl<'a> Services<'a> {
         }
     }
 
+    /// Restart `name`; the same lock rules as [`start`](Services::start).
     pub fn restart(&self, name: &str) -> Result<()> {
         validate_name(name)?;
         match self.init {
@@ -279,9 +368,8 @@ impl<'a> Services<'a> {
                 if !cron::available(self.ctx) {
                     return Ok(());
                 }
-                let mut tab = Crontab::read(self.ctx)?;
-                tab.remove(&Tag::boot(name)?);
-                tab.save(self.ctx).map(|_| ())
+                let tag = Tag::boot(name)?;
+                Crontab::edit(self.ctx, |tab| Ok(tab.remove(&tag))).map(|_| ())
             }
         }
     }
@@ -370,9 +458,7 @@ impl<'a> Services<'a> {
             &def.log_dir.join("boot.log"),
             &tag,
         )?;
-        let mut tab = Crontab::read(self.ctx)?;
-        tab.replace(&tag, &[line])?;
-        tab.save(self.ctx).map(|_| ())
+        Crontab::edit(self.ctx, |tab| tab.replace(&tag, &[line])).map(|_| ())
     }
 
     fn in_default_runlevel(&self, name: &str) -> Result<bool> {

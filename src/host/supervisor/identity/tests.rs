@@ -99,7 +99,7 @@ fn cores_need_run_and_their_exact_config() {
 fn services_without_a_config_need_exact_arguments() {
     let p = Paths::from_lookup(|_| None).unwrap();
     let def = ServiceDef::subscription(&p);
-    assert_eq!(def.name, SUBSCRIPTION);
+    assert_eq!(def.name(), SUBSCRIPTION);
     let exe = "/usr/local/bin/onebox";
     assert!(command_matches(
         &def,
@@ -144,11 +144,11 @@ fn every_nginx_service_is_recognized_by_its_master_title() {
             assert!(
                 command_matches(&def, &title(&format!("{prefix}{slash}"), tail)),
                 "{} {slash:?} {tail:?}",
-                def.name
+                def.name()
             );
         }
         let other_site = title("/srv/www", " -g daemon off;");
-        assert!(!command_matches(&def, &other_site), "{}", def.name);
+        assert!(!command_matches(&def, &other_site), "{}", def.name());
         let suffixed = vec![format!(
             "nginx: master process /usr/sbin/nginx -p {prefix} -c {conf}.other -g daemon off;"
         )
@@ -162,7 +162,7 @@ fn every_nginx_service_is_recognized_by_its_master_title() {
         assert!(!command_matches(&def, &[b"nginx: worker process".to_vec()]));
         // Before setproctitle the argv is still the real one.
         let mut words = vec!["/usr/sbin/nginx"];
-        words.extend(def.args.iter().map(String::as_str));
+        words.extend(def.args().iter().map(String::as_str));
         assert!(command_matches(&def, &argv(&words)));
     }
     // A title is only accepted for nginx services.

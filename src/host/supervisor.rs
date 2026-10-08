@@ -7,21 +7,30 @@
 //! (so a reused PID never matches), is not a zombie, runs the service's
 //! program and has the service's command line ([`identity`]). PID files
 //! written by others — nginx's own `pid` file, v1 FRP — are consulted after
-//! the record, adopted into a record when found live, and removed on stop.
+//! the record; a live process found through one gets a record of its own
+//! (the file stays: nginx keeps using it for `-s reload`), and stop removes
+//! them all.
 //!
 //! Start and stop of one service are serialized by `{run_dir}/{name}.lock`,
 //! so a boot-time `@reboot` start racing a manual one cannot spawn twice.
+//! Serializing a start with a configuration change of the same scope is the
+//! caller's job (it holds the scope lock, see [`Services::start`]).
+//!
+//! [`Services::start`]: crate::host::service::Services::start
 //!
 //! Changes from v2:
 //! - every nginx service is recognized by its master-process title, the
 //!   subscription front included (E-8.1#2: it was never seen as running);
 //! - daemons start with a cleared environment plus the fixed PATH and the
-//!   service variables (E-8.1#3: admin-shell secrets leaked into them);
+//!   service variables (E-8.1#3: admin-shell secrets leaked into them), and
+//!   with the open-files limit units give them (v2 left the caller's);
+//! - runtime directories are created before every start (F-8.1#2);
 //! - check-then-spawn holds a per-service lock (E-8.1#20);
 //! - liveness comes from `/proc` alone (no `kill(pid, 0)`), and stopping is
 //!   SIGTERM, then SIGKILL after a grace period, ESRCH meaning "gone";
 //! - a oneshot (the network restore) runs its own command synchronously
-//!   instead of calling back into the workflow.
+//!   instead of calling back into the workflow; a caller holding the lock
+//!   that command takes hands it over ([`Supervisor::start_with_lock`]).
 
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -29,12 +38,13 @@ pub mod identity;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::host::service::{prepare_dir, ServiceDef, ServiceKind};
+use crate::host::service::{prepare_dir, ServiceDef, ServiceKind, NOFILE_LIMIT};
 use crate::sys::exec::Cmd;
 use crate::sys::fs::{atomic_write, read_to_string_bounded, remove_file_if_exists};
 use crate::sys::lock::FileLock;
 use identity::{command_matches, executable_matches, process_argv, process_start};
 use serde::{Deserialize, Serialize};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -71,9 +81,20 @@ pub struct SystemSignaller;
 
 impl Signaller for SystemSignaller {
     fn signal(&self, pid: u32, signal: i32) -> Result<bool> {
-        crate::sys::process::send_signal(pid, signal)
-            .map_err(|e| Error::msg(format!("无法向进程 {pid} 发送信号: {e}")))
+        crate::sys::process::send_signal(pid, signal).map_err(|e| signal_error(pid, &e))
     }
+}
+
+/// `无法向进程 {pid} 发送信号: {reason}` with a Chinese reason.
+fn signal_error(pid: u32, error: &std::io::Error) -> Error {
+    let reason = match error.raw_os_error() {
+        Some(libc::EPERM) => "权限不足".to_owned(),
+        Some(libc::EINVAL) => "信号无效".to_owned(),
+        _ if error.kind() == std::io::ErrorKind::InvalidInput => "进程号无效".to_owned(),
+        Some(code) => format!("系统错误 {code}"),
+        None => "未知错误".to_owned(),
+    };
+    Error::msg(format!("无法向进程 {pid} 发送信号: {reason}"))
 }
 
 /// Timing of stops and of waiting for the per-service lock.
@@ -144,7 +165,7 @@ impl<'a> Supervisor<'a> {
         let root = self.system_root();
         record.pid >= 2
             && process_start(root, record.pid) == Some(record.start)
-            && executable_matches(root, record.pid, &def.program)
+            && executable_matches(root, record.pid, def.program())
             && process_argv(root, record.pid).is_some_and(|argv| command_matches(def, &argv))
     }
 
@@ -160,7 +181,21 @@ impl<'a> Supervisor<'a> {
     /// (the daemon gets nothing else besides the fixed PATH).
     pub fn start(&self, def: &ServiceDef, env: &[(String, String)]) -> Result<()> {
         let _lock = self.lock(def)?;
-        self.start_locked(def, env)
+        self.start_locked(def, env, None)
+    }
+
+    /// [`start`](Supervisor::start) while the caller holds `held`: when it
+    /// is the lock the service's helper commands take themselves
+    /// ([`ServiceDef::takes_lock`]), they inherit it (fd 198) instead of
+    /// finding it busy. Daemons never inherit a lock.
+    pub fn start_with_lock(
+        &self,
+        def: &ServiceDef,
+        env: &[(String, String)],
+        held: &FileLock,
+    ) -> Result<()> {
+        let _lock = self.lock(def)?;
+        self.start_locked(def, env, self.handover(def, held))
     }
 
     pub fn stop(&self, def: &ServiceDef) -> Result<()> {
@@ -171,32 +206,61 @@ impl<'a> Supervisor<'a> {
     pub fn restart(&self, def: &ServiceDef, env: &[(String, String)]) -> Result<()> {
         let _lock = self.lock(def)?;
         self.stop_locked(def)?;
-        self.start_locked(def, env)
+        self.start_locked(def, env, None)
     }
 
-    fn start_locked(&self, def: &ServiceDef, env: &[(String, String)]) -> Result<()> {
+    /// [`restart`](Supervisor::restart) with [`start_with_lock`]'s handover.
+    ///
+    /// [`start_with_lock`]: Supervisor::start_with_lock
+    pub fn restart_with_lock(
+        &self,
+        def: &ServiceDef,
+        env: &[(String, String)],
+        held: &FileLock,
+    ) -> Result<()> {
+        let _lock = self.lock(def)?;
+        self.stop_locked(def)?;
+        self.start_locked(def, env, self.handover(def, held))
+    }
+
+    /// The descriptor of `held` when it is the lock `def`'s helpers take.
+    fn handover(&self, def: &ServiceDef, held: &FileLock) -> Option<RawFd> {
+        let taken = def.takes_lock()?.lock_path(&self.ctx.paths);
+        (held.path() == taken).then(|| held.raw_fd())
+    }
+
+    fn start_locked(
+        &self,
+        def: &ServiceDef,
+        env: &[(String, String)],
+        lock_fd: Option<RawFd>,
+    ) -> Result<()> {
         def.validate()?;
         if let Some(found) = self.find(def) {
             return self.adopt(def, &found);
         }
-        if let Some(pre) = &def.pre_start {
-            self.run_to_completion(pre, env)?;
+        for dir in def.runtime_dirs() {
+            prepare_dir(dir)?;
         }
-        if def.kind == ServiceKind::Oneshot {
-            let argv: Vec<String> = std::iter::once(def.program.to_string_lossy().into_owned())
-                .chain(def.args.iter().cloned())
+        if let Some(pre) = def.pre_start() {
+            self.run_to_completion(pre, env, lock_fd)?;
+        }
+        if def.kind() == ServiceKind::Oneshot {
+            let argv: Vec<String> = std::iter::once(def.program().to_string_lossy().into_owned())
+                .chain(def.args().iter().cloned())
                 .collect();
-            return self.run_to_completion(&argv, env);
+            return self.run_to_completion(&argv, env, lock_fd);
         }
         self.spawn(def, env)
     }
 
     fn spawn(&self, def: &ServiceDef, env: &[(String, String)]) -> Result<()> {
-        prepare_dir(&def.run_dir)?;
-        prepare_dir(&def.log_dir)?;
-        let cmd = Cmd::new(def.program.to_string_lossy())
-            .args(&def.args)
-            .daemon_env(env);
+        prepare_dir(def.run_dir())?;
+        prepare_dir(def.log_dir())?;
+        let cmd = Cmd::new(def.program().to_string_lossy())
+            .args(def.args())
+            .daemon_env(env)
+            .nofile_limit(NOFILE_LIMIT);
         let pid = self.ctx.exec.spawn_detached(&cmd, &def.log_file())?;
         let start =
             process_start(self.system_root(), pid).ok_or_else(|| Error::msg(SPAWN_EXITED))?;
@@ -209,12 +273,12 @@ impl<'a> Supervisor<'a> {
         Ok(())
     }
 
-    /// A process found through a legacy PID file becomes our own record;
-    /// the legacy file has then been read for the last time.
+    /// A process found through a legacy PID file gets a record of its own.
+    /// The legacy file is kept: nginx maintains it for `-s reload` (stop
+    /// removes it, as v2 did).
     fn adopt(&self, def: &ServiceDef, found: &Found) -> Result<()> {
         if found.legacy {
             write_record(&def.pid_file(), &found.record)?;
-            remove_file_if_exists(&found.path)?;
         }
         Ok(())
     }
@@ -267,40 +331,40 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Run a helper command (pre-start, oneshot) with the service
-    /// environment; a non-zero exit is an error.
-    fn run_to_completion(&self, argv: &[String], env: &[(String, String)]) -> Result<()> {
+    /// environment (and the handed-over lock); a non-zero exit is an error.
+    fn run_to_completion(
+        &self,
+        argv: &[String],
+        env: &[(String, String)],
+        lock_fd: Option<RawFd>,
+    ) -> Result<()> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| Error::msg("服务命令为空"))?;
-        let cmd = Cmd::new(program)
+        let mut cmd = Cmd::new(program)
             .args(args)
             .daemon_env(env)
             .timeout(COMMAND_TIMEOUT);
+        if let Some(fd) = lock_fd {
+            cmd = cmd.inherit_lock(fd);
+        }
         self.ctx.check(&cmd).map(|_| ())
     }
 
     /// The per-service lock, waiting up to `lock_wait` for a concurrent
     /// start/stop of the same service to finish.
     fn lock(&self, def: &ServiceDef) -> Result<FileLock> {
-        prepare_dir(&def.run_dir)?;
-        let path = def.run_dir.join(format!("{}.lock", def.name));
-        let busy = format!("服务 {} 正由另一个操作启动或停止；稍后重试", def.name);
-        let deadline = Instant::now() + self.timing.lock_wait;
-        loop {
-            match FileLock::acquire(&path, &busy) {
-                Err(Error::Busy(_)) if Instant::now() < deadline => {
-                    std::thread::sleep(self.timing.poll);
-                }
-                other => return other,
-            }
-        }
+        prepare_dir(def.run_dir())?;
+        let path = def.run_dir().join(format!("{}.lock", def.name()));
+        let busy = format!("服务 {} 正由另一个操作启动或停止；稍后重试", def.name());
+        FileLock::acquire_waiting(&path, &busy, self.timing.lock_wait, self.timing.poll)
     }
 }
 
 /// The supervisor's record first, then the legacy files (flagged).
 fn pid_files(def: &ServiceDef) -> Vec<(PathBuf, bool)> {
     std::iter::once((def.pid_file(), false))
-        .chain(def.legacy_pid_files.iter().map(|p| (p.clone(), true)))
+        .chain(def.legacy_pid_files().iter().map(|p| (p.clone(), true)))
         .collect()
 }
 
