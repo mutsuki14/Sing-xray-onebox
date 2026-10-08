@@ -196,7 +196,7 @@ fn validation_keeps_every_v2_rule_and_message() {
         ),
         (
             entry(&|e| e["reality"]["reference_port"] = json!("x")),
-            "探测配置无效",
+            "REALITY 元数据无效",
         ),
     ];
     for (value, message) in cases {

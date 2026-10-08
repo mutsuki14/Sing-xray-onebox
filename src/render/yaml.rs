@@ -14,6 +14,9 @@
 //! Escaping: `"` `\` and the YAML-meaningful control and line-separator
 //! characters (C0, DEL, C1, U+2028/U+2029, U+FEFF, U+FFFE/U+FFFF) are
 //! escaped; all other characters are written as UTF-8.
+//!
+//! Changes from v2: new. v2 wrote the mihomo files as pretty JSON (valid
+//! YAML flow style, but unlike the configurations users edit by hand).
 
 use serde_json::{Map, Value};
 use std::fmt::Write;

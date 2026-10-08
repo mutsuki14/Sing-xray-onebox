@@ -13,7 +13,7 @@
 //!   address (C-8.1 #21);
 //! - the client core is chosen by one rule, `policy::client_core` (C-8.1 #18);
 //! - a `reality.reference_*` of the wrong type is rejected on load
-//!   (`探测配置无效: …`) instead of failing later at use; unknown keys inside
+//!   (`REALITY 元数据无效`) instead of failing later at use; unknown keys inside
 //!   `reality` are not kept.
 
 use super::spec::{InboundSpec, NodeSpec};
@@ -91,7 +91,9 @@ impl ProbeBundle {
     /// Validate an untyped bundle with v2's rules and messages, then type it.
     pub fn from_value(value: Value) -> Result<ProbeBundle> {
         check(&value)?;
-        serde_json::from_value(value).map_err(|e| Error::msg(format!("探测配置无效: {e}")))
+        // `check` accepted every typed field except `reality.reference_*`,
+        // so a typing failure can only come from those.
+        serde_json::from_value(value).map_err(|_| Error::msg("REALITY 元数据无效"))
     }
 
     /// v2's load rules applied to this bundle, plus the size cap of its
