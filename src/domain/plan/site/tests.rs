@@ -290,6 +290,34 @@ fn ipv6_subscription_address_needs_ipv6_sockets() {
 }
 
 #[test]
+fn subscription_family_rule_for_later_stages() {
+    const NO_V6: &str = "订阅地址为 IPv6，但当前系统无法监听 IPv6；请启用 IPv6 或使用 IPv4 地址";
+    let with_mode = |mode: SubscriptionMode| {
+        let mut cfg = reality();
+        cfg.subscription = Some(SubscriptionConfig { mode, port: 8448 });
+        cfg
+    };
+    let ip = |a: &str| SubscriptionMode::Ip {
+        address: a.parse().unwrap(),
+    };
+    let check =
+        |cfg: &NodeConfig, ipv6| check_subscription_family(cfg, ipv6).map_err(|e| e.to_string());
+    // A host that lost IPv6 after enabling (or a migrated v2 setting).
+    let v6 = with_mode(ip("2001:db8::7"));
+    assert_eq!(check(&v6, false), Err(NO_V6.to_owned()));
+    assert_eq!(check(&v6, true), Ok(()));
+    for ok in [
+        with_mode(ip("192.0.2.5")),
+        with_mode(ip("::ffff:192.0.2.5")),
+    ] {
+        assert_eq!(check(&ok, false), Ok(()));
+    }
+    // Behind nginx and without a subscription nothing is checked.
+    assert_eq!(check(&with_mode(SubscriptionMode::Site), false), Ok(()));
+    assert_eq!(check(&reality(), false), Ok(()));
+}
+
+#[test]
 fn default_address_order() {
     let mut cfg = reality();
     assert_eq!(default_subscription_address(&cfg), Some(IpAddr::V4(ADDR)));

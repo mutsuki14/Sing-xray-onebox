@@ -46,9 +46,9 @@ pub use node::{
     AddOptions,
 };
 pub use site::{
-    default_subscription_address, disable_site, disable_subscription, enable_site,
-    enable_subscription, site_description, site_https, site_template, site_theme, site_title,
-    SubscriptionChoice,
+    check_subscription_family, default_subscription_address, disable_site, disable_subscription,
+    enable_site, enable_subscription, site_description, site_https, site_template, site_theme,
+    site_title, SubscriptionChoice,
 };
 
 use super::config::*;
