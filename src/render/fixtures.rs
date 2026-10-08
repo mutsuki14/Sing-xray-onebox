@@ -9,7 +9,7 @@ use crate::domain::protocol::{Core, Protocol};
 use crate::paths::Paths;
 use std::path::{Path, PathBuf};
 
-pub(crate) use fixtures::{config, ip_subscription, standalone_subscription, with_site};
+pub(crate) use fixtures::{config, ip_subscription, with_site};
 
 /// `tests/golden` of this crate.
 pub(crate) fn golden_dir() -> PathBuf {

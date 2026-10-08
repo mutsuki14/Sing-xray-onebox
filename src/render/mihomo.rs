@@ -151,8 +151,9 @@ fn websocket(path: &str, host: Option<&str>) -> Value {
     v
 }
 
-fn proxies(spec: &NodeSpec) -> Result<(Vec<Value>, Vec<String>)> {
-    let nodes = super::nodes_for(spec, ClientFormat::Mihomo)?;
+/// Proxies and their names; `format` names the export in the "no node" error.
+fn proxies(spec: &NodeSpec, format: ClientFormat) -> Result<(Vec<Value>, Vec<String>)> {
+    let nodes = super::nodes_for(spec, format)?;
     let proxies = nodes
         .iter()
         .map(|ib| proxy(spec, ib))
@@ -162,14 +163,14 @@ fn proxies(spec: &NodeSpec) -> Result<(Vec<Value>, Vec<String>)> {
 
 /// Proxy-provider document: exactly `{"proxies": [...]}`.
 pub fn provider(spec: &NodeSpec) -> Result<Value> {
-    Ok(json!({"proxies": proxies(spec)?.0}))
+    Ok(json!({"proxies": proxies(spec, ClientFormat::Provider)?.0}))
 }
 
 /// Full mihomo configuration: rule mode with a select group over an
 /// url-test group, fake-ip DNS, local mixed port; the controller only on
 /// loopback and only with a secret.
 pub fn config(spec: &NodeSpec) -> Result<Value> {
-    let (proxies, names) = proxies(spec)?;
+    let (proxies, names) = proxies(spec, ClientFormat::Mihomo)?;
     let mut choices = vec![policy::MIHOMO_AUTO.to_owned()];
     choices.extend(names.iter().cloned());
     choices.push("DIRECT".to_owned());
