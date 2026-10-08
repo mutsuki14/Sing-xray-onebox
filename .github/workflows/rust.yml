@@ -1,0 +1,18 @@
+name: Rust migration
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --all-targets
+      - name: Build local review toolchain
+        run: |
+          toolchain_root=$(rustc --print sysroot)
+          tar -czf "$RUNNER_TEMP/rust-review.tar.gz" -C "$toolchain_root" bin lib -C "$HOME/.cargo" registry
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-review
+          path: ${{ runner.temp }}/rust-review.tar.gz
+          retention-days: 1
+

@@ -1,0 +1,21 @@
+[package]
+name = "onebox"
+version = "2.0.0"
+edition = "2021"
+license = "MIT"
+description = "Native Linux proxy, website and FRP manager"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+libc = "0.2"
+tar = "0.4"
+flate2 = "1"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+
