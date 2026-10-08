@@ -130,4 +130,6 @@ fn assign_guard(v: &mut fields::V2, config: &mut NodeConfig) -> Result<()> {
 }
 
 #[cfg(test)]
+pub(crate) mod fixtures;
+#[cfg(test)]
 mod tests;
