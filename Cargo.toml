@@ -1,9 +1,11 @@
 [package]
 name = "onebox"
-version = "2.0.1"
+version = "3.0.0"
 edition = "2021"
+rust-version = "1.97"
 license = "MIT"
-description = "Native Linux proxy, website and FRP manager"
+description = "sing-box / Xray proxy server installer and manager for Linux"
+repository = "https://github.com/mutsuki14/Sing-xray-onebox"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -13,9 +15,12 @@ base64 = "0.22"
 libc = "0.2"
 tar = "0.4"
 flate2 = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+qrcode = { version = "0.14", default-features = false }
+httparse = "1"
 
 [profile.release]
 lto = true
 strip = true
 codegen-units = 1
-
+panic = "abort"

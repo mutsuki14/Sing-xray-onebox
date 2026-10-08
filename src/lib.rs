@@ -1,44 +1,36 @@
+//! Onebox: sing-box / Xray proxy server installer and manager for Linux.
+//!
+//! Layering (no cycles): `sys` → `domain` → `state`/`render` → `host` →
+//! `cert`/`site`/`subscription` → `apply` → `backup`/`update` → `cli`.
+//! `frp`, `bbr`, `linktools` and `diag` depend on lower layers only.
+
+#[macro_use]
+pub mod error;
+
+pub mod apply;
 pub mod backup;
 pub mod bbr;
 pub mod cert;
 pub mod cli;
-pub mod context;
-pub mod diagnostics;
+pub mod ctx;
+pub mod diag;
+pub mod domain;
 pub mod frp;
-pub mod model;
-pub mod network;
-pub mod platform;
+pub mod host;
+pub mod linktools;
+pub mod paths;
 pub mod render;
-pub mod runtime;
 pub mod site;
 pub mod state;
 pub mod subscription;
-pub mod transaction;
+pub mod sys;
 pub mod ui;
 pub mod update;
-pub mod util;
-pub mod workflow;
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T> = std::result::Result<T, Error>;
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const REPOSITORY: &str = "mutsuki14/Sing-xray-onebox";
 
-#[derive(Debug)]
-pub struct ExitError {
-    pub code: i32,
-    pub message: String,
-}
-impl ExitError {
-    pub fn new(code: i32, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-}
-impl std::fmt::Display for ExitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-impl std::error::Error for ExitError {}
+pub use ctx::Ctx;
+pub use error::{Error, Result};
+
+/// Manager version; also the release tag (`v{VERSION}`) and bootstrap pin.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// GitHub repository used for self-update and release URLs.
+pub const REPOSITORY: &str = "mutsuki14/Sing-xray-onebox";
