@@ -1,18 +1,20 @@
 # Sing-Xray-Onebox
 
-**sing-box / Xray 多协议组合 · 交互式一键安装与管理脚本**
+**sing-box / Xray 多协议组合 · Rust 原生安装与管理工具**
 
-当前版本：**v1.7.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+当前版本：**v2.0.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
 
 适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、AnyTLS-REALITY、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
 服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），按协议支持情况自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
-分享链接、Base64 订阅与二维码。AnyTLS-REALITY 仅提供 sing-box 完整配置。
+分享链接、Base64 订阅与二维码。支持通过 HTTPS 发布按设备授权的远程订阅；AnyTLS-REALITY 仅提供 sing-box 完整配置。
+
+2.0 将协议配置、服务管理、证书、FRP、BBR、更新、恢复和客户端链路工具迁移到 Rust。`onebox.sh` 只负责检测 Linux 架构、下载固定版本的原生程序、校验 SHA-256 并启动；不再包含或调用旧版 Bash / Python 业务实现。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 ```
 
-安装完成后，随时输入 `onebox` 打开管理菜单。菜单按「部署与连接」「代理与网站配置」「运行与诊断」「性能与维护」分组，保留原有选项编号；FRP 管理仍为 **25**。
+安装完成后，输入 `onebox` 打开管理菜单。2.0 重新整理了主菜单：**10 订阅、11 网站、12 FRP、13 BBR、16 更新程序、21 性能与连通性**；协议选择编号与现有预设保持兼容。
 
 ---
 
@@ -25,39 +27,83 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
   - mihomo 完整 YAML（Clash Verge Rev / Mihomo Party / FlClash / ClashMi / Clash Meta for Android）
   - sing-box 完整 JSON（TUN 版与纯代理端口版，兼容 sing-box 1.12 ~ 1.14，适用于 SFA / SFI / SFM / GUI.for.SingBox）
   - Xray 客户端 JSON
-- **广泛的系统支持**：Debian / Ubuntu / CentOS / RHEL / Rocky / Alma / Oracle / Fedora / Amazon Linux / openEuler /
-  Alpine / Arch / openSUSE 等；systemd 与 OpenRC；amd64 / arm64 / armv7 / armv6 / 386 / s390x / riscv64 / loong64 等架构。
-  sing-box 优先使用 musl 静态构建，老旧 glibc 与 Alpine 均可运行。
-- **证书**：自签证书（客户端自动固定证书指纹，无需关闭校验即可安全连接）/ Let's Encrypt（HTTP 验证或 Cloudflare DNS 验证，acme.sh 自动续期）/ 自有证书。
+- **Linux 原生程序**：提供 amd64、arm64、32 位 x86（i586 及以上）、armv7 的 musl 静态构建；支持 systemd、OpenRC，以及无 init 环境的进程管理。其他 Linux 架构需自行源码构建，仍受上游代理内核的架构支持限制。
+- **证书**：自签证书（完整客户端配置固定证书信任）/ Let's Encrypt（HTTP 验证或 Cloudflare DNS 验证，acme.sh 自动续期）/ 自有证书。
 - **自有域名 REALITY 网站**：使用自己的域名一键生成可编辑的主页、申请 Let's Encrypt 证书并自动续期，普通浏览器与 REALITY 客户端共用公网入口。
 - **AnyTLS-REALITY**：sing-box 服务端与客户端支持 AnyTLS + REALITY，可选择外部握手目标或自有域名网站；与普通 AnyTLS 分开配置。
+- **HTTPS 远程订阅**：复用自建网站或独立域名入口，按设备创建、撤销、重置订阅链接；提供 Base64、mihomo 完整配置 / provider、sing-box 和 Xray 配置。
 - **管理与恢复**：只读安装预演、一键体检、证书状态、稳定/测试更新渠道、本机快照与手动恢复、静态网站模板和内容导入、本地脱敏诊断包。
 - **链路与性能**：真实客户端链路测试、Hysteria2 拥塞与接收窗口调优、REALITY 一致性检查，以及带连续失败阈值、恢复冷却期的客户端多入口回退。
 - **BBR 管理**：启用系统自带 TCP BBR，选择默认队列；集成 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 的标准版 / Max 版内核 Release，支持安装预览、指定版本与下载校验，保留旧内核。
 - **FRP 服务端**：独立管理官方 frps，支持控制域名、强制 TLS 与 token、HTTPS 应用域名 / 泛域名、证书申请与续期、TCP/UDP 转发范围、客户端配置导出和失败回滚。
 - **贴心细节**：自动检测端口占用、放行防火墙（ufw / firewalld / iptables，含甲骨文云默认规则）、Hysteria2 端口跳跃、BBR、
   屏蔽 BT 与回环/内网访问、配置写入前先经内核校验（失败不覆盖旧配置）、国内服务器 GitHub 加速。
-- **经过真实流量测试**：仓库自带端到端测试，覆盖 *协议 × 服务端内核 × 客户端* 的全部组合（TCP 与 UDP）。
+- **可重复验证**：Native CI 运行 Rust 单元测试、真实代理内核的协议与客户端矩阵、生命周期 / 迁移 / 故障恢复测试，以及四个发布架构的构建检查；通过后才生成正式发布资产。
 
 ## 快速开始
 
-需要 root 权限。
+安装及系统配置变更需要 root 权限；查看帮助、版本和客户端链路测试无需 root。原生程序下载需要 `curl`（强制 HTTPS 下载与重定向），以及 `sha256sum`、`shasum`、`openssl` 三者之一。
 
 ```bash
 # curl
 bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 
-# 或 wget
+# 或用 wget 获取入口（运行入口仍需安装 curl）
 bash <(wget -qO- https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 
-# Alpine 默认没有 bash 与 curl: 可先 apk add --no-cache bash curl, 或者下载后用 sh 运行 (脚本会自动安装 bash):
+# Alpine：先 apk add --no-cache curl；使用 POSIX sh，无需安装 Bash
 wget -O onebox.sh https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh && sh onebox.sh
 
 # 国内服务器 (GitHub 访问困难) 可设置加速前缀:
 GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 ```
 
-运行后选择 **1. 安装**，依次选择协议组合、伪装站点、证书方式与端口（直接回车即使用推荐的默认值），脚本会完成其余全部工作。
+运行后选择 **1. 安装**，依次选择协议组合、伪装站点、证书方式与端口。回车接受显示的默认值，EOF 取消操作。安装后 `/usr/local/bin/onebox` 是持久保存的原生程序，日常管理不再重新下载引导文件。
+
+### 预编译架构与源码构建
+
+| Linux 架构 | Release 资产 | Rust 目标 |
+|---|---|---|
+| x86_64 / amd64 | `onebox-linux-amd64-musl` | `x86_64-unknown-linux-musl` |
+| aarch64 / arm64 | `onebox-linux-arm64-musl` | `aarch64-unknown-linux-musl` |
+| i586 / i686 | `onebox-linux-386-musl` | `i586-unknown-linux-musl` |
+| ARMv7 | `onebox-linux-armv7-musl` | `armv7-unknown-linux-musleabihf` |
+
+引导固定下载 **v2.0.0** 的资产并验证同一 Release 的 `SHA256SUMS`，下载或校验失败即退出。没有预编译资产的架构（如 ARMv6、s390x、riscv64、loongarch64）不会自动选择不匹配的程序。可在支持 Rust 的 Linux 环境构建：
+
+```bash
+git clone https://github.com/mutsuki14/Sing-xray-onebox.git
+cd Sing-xray-onebox
+cargo build --release --locked
+./target/release/onebox --version
+sudo ./target/release/onebox
+
+# 已取得可信的本地程序：引导不联网、不下载
+ONEBOX_NATIVE_BIN=/absolute/path/onebox sh onebox.sh --version
+```
+
+源码构建需要 Rust / Cargo 和本机链接工具链。交叉编译与发布流程见 `.github/workflows/native-release.yml`；musl 构建减少对 glibc 的依赖，不代表所有发行版、内核版本和上游代理程序都兼容。
+
+### 从 1.x 迁移
+
+先在旧版保存备份，然后下载新入口执行 **`regen`**；已有协议、端口、UUID、密码、REALITY 密钥和网站内容沿用原状态。不要用 `install` 代替迁移，重装会生成新凭据。
+
+```bash
+# 仍在旧版时保存一份本机备份
+onebox backup before-rust
+
+# root 终端：更新管理程序并重新生成现有配置
+curl -fL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh -o onebox.sh
+sh onebox.sh regen
+onebox version
+onebox doctor
+```
+
+原生程序将 `/etc/onebox/onebox.conf` 作为旧格式数据读取，不执行其中的 Shell 代码；第一次成功保存时写入权限 `600` 的 `state.json`，并保留 `onebox.conf.pre-rust`。此后以 `state.json` 为准，直接修改旧文件不会生效。旧版 NUL 格式快照仍可通过 `onebox restore ID` 校验并恢复到原管理路径。
+
+FRP 保留独立的 `/etc/onebox-frp/` 状态，读取旧 `state.conf` 后在下一次成功配置时保存为 `state.json`；节点迁移不会重置 FRP token 或替换私有 CA。旧版客户端探测文件仍可交给原生 `probe` / `bench` / `failover` 使用，客户端不再需要 Python。
+
+迁移与配置应用使用持久化事务日志，失败会尝试恢复旧文件、服务状态和受管防火墙规则；若上次被强制终止或恢复未完成，执行 `onebox recover` 后再继续。发布资产暂不可下载时，请等待该版本 Native CI 与发布流程完成，或使用上述源码构建方式。
 
 ## 协议组合
 
@@ -94,15 +140,15 @@ AnyTLS-REALITY 可在自定义组合中选择，或安装后执行 `onebox add a
 > REALITY 建议使用 443 端口（Xray 会对非 443 端口给出警告）；两者都由 Xray 承载时，VLESS-XHTTP-Reality 默认与 Vision 共用 443 端口。
 > Xray 承载 REALITY 时会启用官方推荐的 SNI 过滤，防止服务器被他人当作伪装站点 CDN 的免费中转。
 >
-> **关于 Xray 版本**：脚本默认安装经过测试的 Xray 26.3.27。更新的 Xray（26.4 之后）REALITY 服务端要求客户端支持
+> **关于 Xray 版本**：程序默认安装 Xray 26.3.27。更新的 Xray（26.4 之后）REALITY 服务端要求客户端支持
 > X25519MLKEM768，会拒绝 sing-box 客户端，因此 `onebox update xray` 会先提示确认；也可用 `--xray-version latest` 显式指定。
 
-## AnyTLS-REALITY（1.7.0）
+## AnyTLS-REALITY
 
 `anytls` 使用普通 TLS，需要自签、ACME 或自备证书；新增的 `anytls-reality` 使用 REALITY 密钥、short ID、SNI 和握手目标，默认无需自备域名或证书。两者可同时安装，分别使用独立端口。AnyTLS-REALITY 沿用现有 REALITY 目标选择、密钥管理与自有域名建站功能。
 
 ```bash
-# 已安装：更新脚本后添加协议，再导出 sing-box 配置
+# 已安装：更新程序后添加协议，再导出 sing-box 配置
 onebox update-script
 onebox add anytls-reality
 onebox client singbox
@@ -121,12 +167,12 @@ onebox add anytls-reality --reality-site www.example.com --site-https on
 
 **AnyTLS-REALITY 不支持 mihomo / Xray，也不提供通用分享链接、Base64 节点订阅或二维码。** 不要把普通 `anytls://` 链接用于此协议。普通 AnyTLS 的分享与 mihomo 支持保持不变。兼容性依据：[sing-box AnyTLS](https://sing-box.sagernet.org/configuration/inbound/anytls/)、[sing-box TLS / REALITY](https://sing-box.sagernet.org/configuration/shared/tls/)、[mihomo AnyTLS](https://wiki.metacubex.one/en/config/proxies/anytls/)。
 
-选择自有域名网站时，脚本仍会为网站申请和续期证书；域名解析、端口与证书要求见下一节。
+选择自有域名网站时，程序仍会为网站申请和续期证书；域名解析、端口与证书要求见下一节。
 
 ## 使用自己的域名作为 REALITY 网站
 
-安装时、首次添加 REALITY 协议时，或执行 `onebox sni` 更换目标时，在 REALITY 目标站点菜单选择 **7. 自有域名一键建站**，输入域名和网站标题，再选择是否启用 **HTTPS 443 入口**（新建时默认开启）。
-脚本会建立一个可直接访问的主页，为该域名申请 Let's Encrypt 证书，并将 REALITY 的握手目标设为本机网站。
+安装时或执行 `onebox sni` 更换目标时，选择自有域名模式，输入域名和网站标题，再选择是否启用 **HTTPS 443 入口**（新建时默认开启）。也可使用下面的命令行参数。
+程序会建立一个可直接访问的主页，为该域名申请 Let's Encrypt 证书，并将 REALITY 的握手目标设为本机网站。
 开启 443 入口后，直接访问 `https://你的域名/`：如果 REALITY 已监听 TCP 443，则复用其网站回落；否则由独立 nginx 监听 443，并反代到本机网站的内部 HTTPS 端口。已有网站升级时保持原设置，可手动开启。
 已有节点切换此模式时保留 UUID 与 REALITY 密钥，客户端需要更新 SNI，或重新导入生成的配置。
 
@@ -134,7 +180,7 @@ onebox add anytls-reality --reality-site www.example.com --site-https on
 
 - 将域名的 A / AAAA 记录直接解析到此 VPS 的公网地址；使用 Cloudflare 等 DNS 服务时关闭该记录的 CDN 代理。配置了 AAAA 时，对应 IPv6 地址也必须可达。
 - 在云安全组中放行 **TCP 80** 和实际使用的 **REALITY TCP 端口**。TCP 80 用于网站访问和证书申请、自动续期，需持续可达。
-- 确保 TCP 80 未被其他程序占用。脚本使用独立 nginx 实例，不接管现有 nginx 网站；发现端口冲突会明确报错。
+- 确保 TCP 80 未被其他程序占用。程序使用独立 nginx 实例，不接管现有 nginx 网站；发现端口冲突会明确报错。
 - 开启 443 入口还需在云安全组放行 **TCP 443**。其他程序或非 REALITY 协议占用该端口时，请先释放端口或关闭此选项；UDP 443 可以继续使用。
 
 ```bash
@@ -169,14 +215,14 @@ bash onebox.sh install --preset 1 --reality-site www.example.com --site-https on
 | 开启网站 443 入口 | 已有 REALITY 443 时复用；否则 nginx 通过 HTTPS 反代内部网站，访问地址不带端口号 |
 | 浏览器访问 REALITY 公网端口 | REALITY 将普通 TLS 请求转给本机 nginx，呈现网站 |
 | 合法 REALITY 客户端 | 由相应 sing-box / Xray 核心处理代理流量 |
-| nginx 的 HTTPS 监听 | 仅监听 `127.0.0.1`；优先分配 8444，冲突时尝试 9444 等空闲端口，无需对公网开放 |
+| nginx 的内部 HTTPS 监听 | 仅监听 `127.0.0.1`；具体端口见 `onebox site info`，无需对公网开放 |
 
-网站地址优先使用监听 443 的 REALITY 入站；没有 REALITY 443 时，地址会包含实际端口，例如 `https://www.example.com:8443/`。
-脚本提供的本机 HTTPS 网站启用 TLS 1.3 和 HTTP/2；网站使用独立的 acme.sh 目录管理证书与续期任务。
+开启网站 443 入口时，网站地址为 `https://www.example.com/`；关闭该入口后使用实际 REALITY 端口，例如 `https://www.example.com:8443/`。
+程序提供的本机 HTTPS 网站启用 TLS 1.3 和 HTTP/2；网站使用独立的 acme.sh 目录管理证书与续期任务。
 
 默认主页位于 **`/var/lib/onebox-site/index.html`**，可直接编辑 HTML 替换内容；`onebox regen` 不会覆盖用户修改后的主页。
-其他代理协议使用 HTTP 验证证书时，启用网站会将验证迁移到网站目录，避免争用 80 端口；停用网站时恢复 standalone 验证。
-切换回外部 REALITY 目标，或删除最后一个 REALITY 协议时，脚本停止托管网站和其续期任务，但保留网页内容。
+其他代理协议使用 HTTP 验证证书时，启用网站会复用网站的验证目录，避免争用 80 端口。
+切换回外部 REALITY 目标，或删除最后一个 REALITY 协议时，程序停止托管网站和其续期任务，但保留网页内容。订阅正在复用网站时，须先关闭订阅或切换到独立入口，才能关闭网站或改变订阅所用的端口。
 执行 `onebox uninstall` 会删除托管网站及其管理文件，保留系统安装的 nginx 软件包。
 
 ## 客户端导入
@@ -195,6 +241,7 @@ bash onebox.sh install --preset 1 --reality-site www.example.com --site-https on
 ```bash
 onebox info                  # 节点信息 + 分享链接
 onebox client mihomo         # mihomo / Clash Meta 配置
+onebox client provider       # 仅含节点的 mihomo proxy-provider YAML
 onebox client singbox        # sing-box 配置 (TUN)
 onebox client singbox-notun  # sing-box 配置 (仅代理端口)
 onebox client xray           # Xray 配置
@@ -207,10 +254,62 @@ AnyTLS-REALITY 仅包含在 sing-box 完整配置中，不会加入 mihomo / Xra
 生成的 mihomo / sing-box 配置为本地控制面板 (127.0.0.1:9090) 设置了密钥（`onebox info` 中显示），DNS 仅监听本机。
 Stash 的部分字段名与 mihomo 不同（如证书指纹、Hysteria2 密码），Shadowrocket 建议直接导入分享链接或订阅。
 
-**自签证书说明**：选择自签证书时，脚本会把证书指纹写入客户端配置——mihomo 使用 `fingerprint`，Xray 使用 `pinnedPeerCertSha256`，
+**自签证书说明**：选择自签证书时，程序会把证书指纹写入客户端配置——mihomo 使用 `fingerprint`，Xray 使用 `pinnedPeerCertSha256`，
 sing-box 直接内嵌证书；分享链接同时附带 `allowInsecure=1`/`insecure=1` 与 `pcs` / `pinSHA256` / `hpkp` 指纹参数，兼顾新旧客户端。
 已知限制：mihomo 通过订阅链接导入 **TUIC + 自签证书** 时无法跳过验证（其链接解析器不支持），请改用 `mihomo.yaml`；
 mihomo 链接导入会忽略 Hysteria2 端口跳跃参数 `mport`。
+
+## HTTPS 远程订阅
+
+`onebox client sub` 输出的是本地 Base64 内容；2.0 新增的 **`onebox subscription`** 将客户端配置托管为可更新的 HTTPS URL。首次启用会创建设备 `default`，之后可为手机、电脑等分别创建链接。配置成功应用后会同步发布，失败时保留旧的可用版本。
+
+### 选择订阅入口
+
+```bash
+# 已启用自有域名 REALITY 网站：复用其证书、域名和公网端口
+onebox subscription enable --mode site
+
+# 没有自建站，或需要独立入口：先把 sub.example.com 直接解析到 VPS
+# 默认独立 HTTPS 端口为 8448，需在云安全组放行；CF Token 可由隐藏输入提供
+onebox subscription enable --mode standalone --domain sub.example.com --port 8448 --tls cf
+
+# 独立入口也支持 HTTP-01；TCP 80 必须空闲并持续对公网可达
+onebox subscription enable --mode standalone --domain sub.example.com --port 8448 --tls http
+
+# 自备公有可信证书，需覆盖订阅域名
+onebox subscription enable --mode standalone --domain sub.example.com --port 8448 \
+  --tls custom --cert /root/fullchain.pem --key /root/privkey.pem
+```
+
+独立入口检查 DNS、证书与端口，不接管已有服务；可用端口允许时可选择 `--port 443`。复用自建站时不增加公网端口，普通网页和 `/sub/…` 使用同一个 HTTPS 入口。订阅不通过 FRP 入口发布；FRP 配置继续单独导出。
+
+### 设备与导入格式
+
+```bash
+onebox subscription info                 # 查看设备 ID、状态和入口
+onebox subscription add phone            # 创建设备并显示其各格式 URL
+onebox subscription add laptop
+onebox subscription reset DEVICE_ID       # 换新令牌，旧链接立即失效
+onebox subscription revoke DEVICE_ID      # 撤销该设备的后续订阅下载
+onebox subscription publish              # 重新生成、校验并发布当前配置
+onebox subscription renew                # 续期订阅使用的证书
+onebox subscription disable              # 停止全部远程订阅访问
+```
+
+| URL 末段 | 返回内容 | 使用方式 |
+|---|---|---|
+| `base64` | Base64 节点链接 | 导入支持相应协议的客户端订阅 |
+| `mihomo` | 完整 mihomo YAML | 作为远程配置导入 |
+| `provider` | 仅含 `proxies` 的 YAML | 在已有 mihomo 配置的 `proxy-providers` 中引用 |
+| `singbox` | sing-box 完整 JSON，TUN 模式 | 作为远程配置导入；也输出 `sing-box://import-remote-profile` 导入链接 |
+| `singbox-notun` | sing-box 完整 JSON，仅本地代理端口 | 下载并交给 sing-box 使用 |
+| `xray` | Xray 客户端 JSON | 交给支持完整 Xray 配置的客户端 |
+
+链接形如 `https://域名[:端口]/sub/设备令牌/singbox`。令牌仅在创建或重置时显示，服务器保存其哈希；忘记链接应执行 `reset`，`info` 不会还原令牌。不要把链接、二维码或包含链接的截图公开。撤销订阅只能阻止后续下载，**不会撤销已下载的节点密码**；如需使旧节点配置失效，使用 `onebox reset` 轮换节点凭据后重新分发。
+
+每种格式只包含它支持的协议，没有可用节点的格式不会发布。**AnyTLS-REALITY 仍仅进入 `singbox` / `singbox-notun`**，不会因为使用远程订阅而获得 mihomo、Xray 或通用节点链接支持。混合部署时，Base64 和 mihomo 订阅会缺少不兼容节点。ShadowTLS 也应使用完整客户端配置。
+
+从 1.x 升级后，原有本地客户端文件仍可使用；远程订阅默认关闭，需自行启用并把设备 URL 添加到客户端。设备链接不替代内核版本要求，客户端是否支持自动刷新、TUN 或远程配置导入以该客户端能力为准。
 
 ## 管理命令
 
@@ -218,7 +317,8 @@ mihomo 链接导入会忽略 Hysteria2 端口跳跃参数 `mport`。
 onebox                     打开交互式管理菜单
 onebox install             安装 / 重装
 onebox info                查看节点信息与分享链接
-onebox client <类型>       输出客户端配置: mihomo | singbox | singbox-notun | xray | links | sub | qr
+onebox client <类型>       输出配置: mihomo | provider | singbox | singbox-notun | xray | links | sub | qr
+onebox subscription ...    HTTPS 订阅: enable | info | add | reset | revoke | publish | disable
 onebox add <协议>          添加协议            例: onebox add hysteria2
 onebox del <协议>          删除协议
 onebox port <协议> <端口>  修改端口            例: onebox port vless-reality 8443
@@ -230,10 +330,14 @@ onebox site [info|renew]    查看托管网站信息 / 强制续期网站证书
 onebox start | stop | restart | status
 onebox log [singbox|xray]  查看日志
 onebox update [singbox|xray]   更新内核
-onebox update-script       更新脚本
+onebox update-script       更新原生管理程序（保留旧命令名）
 onebox cert                证书管理 (更换 / 续期)
 onebox bbr                 BBR / BBRv3 管理菜单 (非交互时显示状态)
 onebox frps                FRP 服务端与域名管理
+onebox backup [标签]       保存节点、证书、网站、客户端与订阅快照
+onebox backups             列出快照
+onebox restore ID|latest   恢复快照
+onebox recover             恢复未完成事务
 onebox uninstall           卸载
 ```
 
@@ -241,7 +345,7 @@ onebox uninstall           卸载
 
 ## BBR / BBRv3 管理
 
-主菜单 **12** 或 `onebox bbr` 打开管理菜单。普通代理安装仍只尝试启用当前内核的 BBR；`--no-bbr` 可跳过。升级脚本、打开菜单和查看状态不会安装 Linux 内核。
+主菜单 **13** 或 `onebox bbr` 打开管理菜单。交互安装结束可选择启用当前内核的 BBR；`--no-bbr` 可跳过。无人值守安装后可显式执行 `onebox bbr enable`。升级程序、打开菜单和查看状态不会安装 Linux 内核。
 
 ```bash
 onebox bbr status                      # TCP 算法、默认/实际队列、模块与已装内核
@@ -259,10 +363,10 @@ onebox bbr install latest --max        # 预览 Max 实验版；安装仍需 --a
 
 | 功能 | 条件与行为 |
 |---|---|
-| 启用当前内核 BBR | 适用于提供 `tcp_bbr` 的系统；需要 `flock`（util-linux）。OpenVZ 不支持，其他容器受宿主机能力限制 |
+| 启用当前内核 BBR | 适用于提供 `tcp_bbr` 的系统；OpenVZ 不支持，其他容器受宿主机能力限制 |
 | 安装 BBRv3 Linux 内核 | Debian 12+ / Ubuntu 24.04+，x86_64 / aarch64，用户空间架构匹配；不支持容器、WSL、设备树 / U-Boot / 厂商引导链 |
 | 引导与空间检查 | 已有 GRUB 和可回退的当前内核、initrd、模块；EFI 必须确认 Secure Boot 关闭；`/boot` 至少空闲 512 MiB，根分区 2 GiB，临时目录容纳下载包并留 256 MiB |
-| 依赖 | `jq`、curl 或 wget、apt-get、dpkg、dpkg-deb、dpkg-query、sha256sum、update-grub、flock；缺失时提示手动安装 |
+| 依赖 | `curl`、apt-get、dpkg、dpkg-deb、dpkg-query、update-grub、df 及系统网络管理工具；校验、JSON 解析与锁由 Rust 实现 |
 | Release 选择 | 按 CPU 与标准/Max 类型过滤，排除草稿和预发布；在最近最多 500 项中找到首个包含匹配版本的分页，按版本号排序。更早版本可指定完整标签 |
 | 安装文件 | 仅 image + headers，校验 GitHub API 提供的 SHA-256、大小、URL、包名、架构和版本；不安装 linux-libc-dev 或调试包 |
 | 失败与重启 | apt 使用 `--no-remove`，不删除旧内核；安装失败、引导生成失败时停止并提示修复。不会自动重启，也不改 GRUB 默认启动项 |
@@ -281,7 +385,7 @@ BBR/队列配置保存到 `/etc/sysctl.d/99-onebox-bbr.conf`，应用失败恢�
 
 直接运行 `onebox frps install` 或 `onebox frps configure`，不附加参数，即可进入交互向导：**用途 → 域名 → 公网端口 → 网站证书 → 高级设置**；TCP/UDP 模式自动跳过网站证书步骤。回车保留默认值，`b` 返回上一步，`q` 取消，Ctrl+D 结束输入并安全退出。最后显示部署摘要，可确认部署、返回修改或取消；确认后才安装依赖、验证 DNS、申请证书并应用配置。
 
-向导会检查端口占用和已有代理的预留范围，并建议可用的候选端口；例如 443 不可用时建议 8443 或 9443。泛域名默认选择 Cloudflare DNS 验证；TCP 80 已被占用时，HTTP-01 不可选，需使用 DNS 验证或自备证书。Cloudflare Token 输入不回显，可使用环境变量提供的凭据；检测到已保存凭据时，可选择继续使用或更换 Token。DNS 记录仍需提前手动配置。
+向导会检查端口占用和已有代理的预留范围，并建议可用的候选端口；例如 443 不可用时建议 8443 或 9443。泛域名默认选择 Cloudflare DNS 验证；TCP 80 已被占用时，HTTP-01 不可选，需使用 DNS 验证或自备证书。Cloudflare Token 输入不回显，可使用环境变量提供的凭据；已有有效凭据会自动复用；也可使用环境变量提供新的 Token。DNS 记录仍需提前手动配置。
 
 | 模式 | 用途与公网入口 | 内部连接 |
 |---|---|---|
@@ -292,7 +396,7 @@ BBR/队列配置保存到 `/etc/sysctl.d/99-onebox-bbr.conf`，应用失败恢�
 
 ### 准备 DNS 与端口
 
-先在 DNS 服务商处手动添加记录，脚本会检查解析结果，但不会替你创建或修改 DNS 记录。
+先在 DNS 服务商处手动添加记录，程序会检查解析结果，但不会替你创建或修改 DNS 记录。
 
 | 记录示例 | 用途 | 指向 |
 |---|---|---|
@@ -400,11 +504,11 @@ onebox frps uninstall                     # 单独卸载 FRP
 | `--cert 文件 --key 文件` | 自备网站证书 fullchain 与未加密私钥 |
 | `--version 0.71.0\|latest` | 官方 frp 版本，最低支持 `0.71.0` |
 
-FRP 的状态、证书、防火墙台账、服务与续期任务独立管理；普通 `onebox uninstall` 保留 FRP 及所需管理命令，删除 FRP 请使用 `onebox frps uninstall`。防火墙仅清理本功能记录的规则，已有用户规则保留。安装、配置与更新使用临时事务备份，失败时尝试恢复旧文件、服务与防火墙；恢复未完成时保留备份并提示处理位置。**代理的 `onebox snapshot` 不包含 FRP**，FRP 当前没有公开的历史快照 / 手动恢复命令。
+FRP 的状态、证书、防火墙台账、服务与续期任务独立管理；普通 `onebox uninstall` 保留 FRP 及所需管理命令，删除 FRP 请使用 `onebox frps uninstall`。防火墙仅清理本功能记录的规则，已有用户规则保留。安装、配置与更新使用临时事务备份，失败时尝试恢复旧文件、服务与防火墙；恢复未完成时保留备份并提示处理位置。**代理的 `onebox backup` 不包含 FRP**，FRP 当前没有公开的历史快照 / 手动恢复命令。
 
 ## 无人值守安装
 
-正式安装前可先执行 `onebox plan` 或 `bash onebox.sh install --dry-run`，附带下面相同的安装选项。预演只读取当前环境，列出协议、建议端口、冲突及会涉及的服务/文件；不联网、不预留端口、不安装依赖，也不申请证书。自动端口、DNS、CA 和公网可达性仍需在实际安装时校验。
+正式安装前可执行 `onebox plan` 或 `onebox install --dry-run`，附带相同的安装选项。原生程序的预演只读取当前环境，不联网、不预留端口、不安装依赖，也不申请证书；通过 `onebox.sh` 首次运行时，引导仍需联网下载原生程序。自动端口、DNS、CA 和公网可达性仍需在实际安装时校验。
 
 ```bash
 # 预设 1, 全部默认值
@@ -430,7 +534,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `--reality-site <域名>` | 自有域名 REALITY 网站，自动建站、申请证书与续期；不能与 `--sni` / `--reality-dest` 同用 |
 | `--site-title <标题>` | 自动生成主页的标题（默认“山间手记”；已有主页不会被覆盖） |
 | `--site-https on\|off` | 自建网站的域名 443 入口，新建默认开启；已有网站可用 `onebox site https on` 开启 |
-| `--tls self\|acme\|cf` | 证书方式：自签 / ACME HTTP 验证 / ACME Cloudflare DNS 验证 |
+| `--tls self\|acme\|cf\|custom` | 代理证书方式：自签 / ACME HTTP / Cloudflare DNS / 自备；自备需 `--cert` 与 `--key` |
 | `--domain <域名>` | 证书域名 |
 | `--addr <IP或域名>` | 客户端连接地址（默认自动检测公网 IP） |
 | `--name <名称>` | 节点名称前缀 |
@@ -442,23 +546,27 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `--no-bbr` | 不开启 BBR |
 | `-y` | 不再询问，全部使用默认值 |
 
-环境变量：`GH_PROXY`（GitHub 加速前缀）、`ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN`（使用本地内核文件离线安装）。
+环境变量：`GH_PROXY`（HTTPS GitHub 下载加速前缀）、`ONEBOX_NATIVE_BIN`（引导使用指定的本地管理程序）、`ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN`（使用本地代理内核文件）。系统依赖、DNS 检查和 ACME 仍可能需要联网。
 
 ## 文件位置
 
 | 路径 | 内容 |
 |---|---|
-| `/etc/onebox/onebox.conf` | 脚本状态（端口、凭据等，权限 600） |
+| `/etc/onebox/state.json` | 原生状态（端口、凭据等，权限 600） |
+| `/etc/onebox/onebox.conf.pre-rust` | 首次成功迁移时保留的旧版状态副本 |
 | `/etc/onebox/sing-box.json`、`/etc/onebox/xray.json` | 服务端配置 |
 | `/etc/onebox/tls/` | 证书 |
-| `/etc/onebox/client/` | 客户端配置、分享链接、订阅 |
+| `/etc/onebox/client/` | 客户端配置、分享链接、本地 Base64 内容与探测配置 |
+| `/etc/onebox/subscription/` | HTTPS 订阅设置、设备令牌哈希、已发布客户端快照与独立入口证书 |
+| `/etc/onebox/backups/` | 手动节点快照 |
 | `/var/lib/onebox-site/index.html` | 自有域名网站主页，可直接编辑；具体管理路径见 `onebox site info` |
 | `/opt/onebox/bin/` | sing-box / xray 内核 |
 | `/etc/onebox-frp/` | 独立 FRP 状态、`frps.toml`、私有 CA / 服务端证书、网站证书、Nginx 配置与防火墙台账 |
 | `/opt/onebox-frp/frps` | 官方 FRP 服务端程序 |
 | `/var/lib/onebox-frp/`、`/var/log/onebox-frp/` | FRP 网站验证目录、运行数据与日志 |
 | `onebox-frps`、`onebox-frp-web` | FRP 控制服务与独立网站入口的系统服务名 |
-| `onebox-sing-box`、`onebox-xray` | 系统服务名 (systemd / OpenRC) |
+| `onebox-sing-box`、`onebox-xray` | 代理系统服务名 |
+| `onebox-subscription`、`onebox-subscription-web` | 订阅服务与独立 HTTPS 入口（启用时） |
 | `/usr/local/bin/onebox` | 管理命令 |
 
 ## 常见问题
@@ -466,39 +574,39 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 **安装成功但连不上？**
 1. 在云服务商控制台的安全组 / 防火墙中放行对应端口（TCP 与 UDP 分别放行，Hysteria2 / TUIC 使用 UDP；
    启用了 Hysteria2 端口跳跃时还需放行整个 UDP 端口范围；使用 ACME HTTP 验证时需放行 TCP 80，续期同样需要）。
-   本机防火墙（ufw / firewalld / iptables / nftables）由脚本自动放行，并在开机时由 `onebox-net` 服务自动恢复。
+   本机防火墙（ufw / firewalld / iptables / nftables）由程序自动放行，并在开机时由 `onebox-net` 服务自动恢复。
 2. `onebox status` 与 `onebox log` 检查服务状态。
-3. REALITY 连接失败时尝试更换伪装站点：`onebox sni`（或菜单 15，UUID 与密钥保持不变），站点需支持 TLS 1.3，且尽量与服务器地理位置接近。
+3. REALITY 连接失败时尝试更换伪装站点：`onebox sni`（或菜单 19，UUID 与密钥保持不变），站点需支持 TLS 1.3，且尽量与服务器地理位置接近。
 
-**REALITY 伪装站点怎么选？** 选择支持 TLS 1.3 / H2、非 CDN 回源、在国内可正常访问的大站，例如 `www.microsoft.com`、`www.apple.com`、`addons.mozilla.org`。脚本会自动检测所选站点是否支持 TLS 1.3。
-也可在目标菜单选择 7，使用自己的域名一键建站；准备要求与管理方式见上文“使用自己的域名作为 REALITY 网站”。
+**REALITY 伪装站点怎么选？** 选择支持 TLS 1.3 / H2、非 CDN 回源、在国内可正常访问的大站，例如 `www.microsoft.com`、`www.apple.com`、`addons.mozilla.org`。程序会自动检测所选站点是否支持 TLS 1.3。
+也可选择自有域名模式，一键建站；准备要求与管理方式见上文“使用自己的域名作为 REALITY 网站”。
 
 **国内 VPS 下载失败？** 设置 `GH_PROXY=https://ghfast.top/`（或其他可用的 GitHub 加速前缀）后重新运行。
 
 **纯 IPv6 VPS？** GitHub 不支持 IPv6，下载内核需要借助支持 IPv6 的 GitHub 加速前缀（如 `GH_PROXY=https://ghproxy.net/`）或先配置 WARP / NAT64。
-配置了 WARP 时，脚本会识别出 WARP 出口地址（不能用于入站连接），默认改用本机 IPv6 作为客户端连接地址。
+配置了 WARP 时，程序会识别出 WARP 出口地址（不能用于入站连接），默认改用本机 IPv6 作为客户端连接地址。
 
-**支持哪些老系统？** CentOS 7 与 Debian 10 已停止维护，脚本会自动把软件源切换到 vault.centos.org / archive.debian.org。
-sing-box 使用 musl 静态构建，不依赖系统 glibc 版本。
+**支持哪些系统？** 原生程序面向 Linux，管理依赖通过系统包管理器安装。请使用仍受支持的软件源和系统版本；2.0 不自动把旧发行版的软件源改为归档源。Onebox 的四个预编译包使用 musl 静态链接，上游代理内核和系统工具仍有各自的兼容要求。
 
 **SS-2022 / ShadowTLS / VMess 连接失败？** 这些协议对时间敏感：SS-2022 要求服务器与客户端时间误差在 30 秒以内，VMess 为 120 秒。
-脚本安装时会检测服务器时间偏差，请开启时间同步（`timedatectl set-ntp true` 或安装 chrony）。
+请确保服务器和客户端开启时间同步（`timedatectl set-ntp true` 或安装 chrony）。
 
-## 日常管理与故障恢复（1.3.0）
+## 日常管理与故障恢复
 
-| 需求 | 命令或菜单 |
+| 需求 | 命令 |
 |---|---|
-| 只读体检 | `onebox doctor`，菜单 17 |
-| 证书有效期、续期任务和最近结果 | `onebox cert status`，菜单 18 |
-| 本机备份与恢复 | `onebox backup 标签`、`onebox backups`、`onebox restore ID`，菜单 19 |
-| 本地脱敏诊断包 | `onebox support`，菜单 20 |
-| 检查更新、选择渠道 | `onebox update-check`、`onebox update-channel stable`，菜单 21 |
-| 安装前预演 | `onebox plan --preset 6`，菜单 22 |
-| 网站模板、标题、导入及恢复 | 菜单 16 → 网站内容管理 |
+| 检查核心配置、服务与证书临期 | `onebox doctor` |
+| 证书状态与续期 | `onebox cert status`、`onebox cert-renew proxy`、`onebox site renew` |
+| 本机备份与恢复 | `onebox backup 标签`、`onebox backups`、`onebox restore ID` |
+| 恢复中断的配置事务 | `onebox recover` |
+| 生成脱敏诊断文件 | `onebox support` |
+| 检查更新、选择渠道 | `onebox update-check`、`onebox update-channel stable` |
+| 安装前预演 | `onebox plan --preset 6` |
+| 网站内容管理 | `onebox site template`、`title`、`import`、`restore` |
 
-体检分别检查核心服务/配置、监听端口、DNS、证书、网站内部 HTTPS 和对外入口。本机探测成功不代表公网可达；云安全组和外部网络需要从另一台设备验证。返回码 `0` 表示通过，`1` 表示发现错误，`2` 表示只有提示或部分检查无法完成。命令不安装依赖、不改配置或服务，核心检查的临时文件单独隔离并清理。
+`doctor` 检查正在使用的核心配置、服务状态、代理/网站证书临期和未完成事务；发现配置或服务问题以非零状态退出。它不替代公网 DNS、云安全组和真实客户端连通性检查，可配合 `onebox reality-check` / `bench` 定位链路问题。
 
-证书面板会明确区分过期、临期、名称不匹配及续期结果未知。通过 `onebox cert-renew proxy` / `onebox site renew` 发起的续期会记录结果。新的网站定时任务使用 `onebox cert-renew site --cron`，只检查该域名、未到期不强制签发；旧任务在下次应用站点配置时迁移。外部工具或尚未接入记录的历史任务，其最近结果显示未知，发现 crontab 也不等同于任务已经成功执行。
+证书由各自的管理目录与续期任务维护，代理、网站、独立订阅和 FRP 分开处理。日常任务先检查是否需要续期；手动命令可重新申请或部署。查看 `onebox cert status`、`onebox site info`、`onebox frps info` 了解对应证书。
 
 ### 网站内容
 
@@ -510,70 +618,59 @@ onebox site import /root/my-static-site
 onebox site restore latest
 ```
 
-模板可选 `minimal`、`profile`、`docs`，配色可选 `forest`、`ocean`、`slate`。预览仅生成私有目录内的 HTML 文件，下载该文件即可查看，线上内容不会变化。导入目录需有 `index.html`，不执行其中的文件；拒绝符号链接、特殊文件、系统目录及递归导入。每次发布前备份完整原网站，失败恢复旧内容；当前 ACME 验证目录会保留。导入或手工改过的页面不会被“修改标题”自动覆盖，请编辑源网页后重新导入。内容备份位于 `/etc/onebox/site/content-backups/`，发布结果会显示备份 ID。
+模板可选 `minimal`、`profile`、`docs`，配色可选 `forest`、`ocean`、`slate`。预览仅生成私有目录内的 HTML 文件，下载该文件即可查看，线上内容不会变化。导入目录需有 `index.html`，不执行其中的文件；拒绝符号链接、特殊文件、系统目录及递归导入。每次发布前备份完整原网站，失败恢复旧内容；当前 ACME 验证目录会保留。导入或手工改过的页面不会被“修改标题”自动覆盖，请编辑源网页后重新导入。内容备份位于 `/etc/onebox/site/content-backups/`，可用 `onebox site restore latest` 恢复。
 
 ### 节点快照
 
-常规配置变更前和成功应用后自动保存快照，默认路径 `/etc/onebox/backups/`，保留最近 5 份。快照包含节点凭据、受管证书/私钥、客户端文件和当前网站内容，因此目录权限为 `700`、文件为 `600`；它与可以用于求助的诊断包用途不同。自动备份失败会明确警告，已有快照保留，配置操作仍可继续；手动恢复前的当前备份必须成功。
+`onebox backup 标签` 保存快照到 `/etc/onebox/backups/`，保留最近 5 份。快照包含节点状态、受管证书/私钥、网站内容、客户端文件和订阅设置，因此目录权限为 `700`、文件为 `600`。它含敏感凭据，不能作为公开诊断材料。FRP、代理内核二进制和操作系统不包含在节点快照中。
 
-恢复只支持同一脚本主版本及相同受管路径，会校验快照完整性、重新生成并校验核心配置，再恢复服务；失败尝试回滚。默认每份快照最多 64 MiB / 4096 个文件，可用 `ONEBOX_BACKUP_MAX_BYTES` 调整字节上限。不会备份内核程序或恢复系统软件；外部自定义证书保持引用，ACME 重新绑定可能需要联网和现有 DNS 凭据。它用于本机配置恢复，不是跨 VPS 迁移工具。
+恢复前校验完整性，成功备份当前状态后才应用目标快照；核心配置不通过或服务启动失败会触发事务回滚。兼容导入旧版的格式 1 快照，但旧快照须恢复到原管理路径。每份备份最多 64 MiB / 4096 个文件。配置事务的临时回滚副本不等于可长期选择的历史快照，需要保留版本时请主动执行 `backup`。
 
-### 诊断包
+恢复快照也会恢复其中的订阅设备列表：此前撤销的设备可能重新出现，请核对 `onebox subscription info`。该功能用于本机配置恢复，不是完整系统或跨 VPS 迁移工具。
 
-`onebox support` 在 `/etc/onebox/support/` 生成权限为 `600` 的压缩包，仅收集白名单系统/服务状态和体检结果，并进一步屏蔽已知凭据。不打包原始日志、配置、私钥、订阅或环境变量，也不自动上传。报告仍可能含域名、IP 和本机路径，分享前请自行查看。
+### 诊断文件
+
+`onebox support` 在 `/etc/onebox/support-时间戳.json` 生成权限为 `600` 的 JSON，记录程序/核心版本、系统信息、协议端口、服务状态和事务状态。不打包原始日志、节点凭据、域名、IP、私钥、订阅内容或环境变量，也不自动上传。
 
 ### 更新与发布
 
-`onebox update` 只更新 sing-box / Xray 内核（可指定版本，如 `onebox update singbox 1.14.2`；新内核不接受当前配置时自动恢复旧版本）。
-更新管理脚本和菜单功能请执行 `onebox update-script`（菜单 13），成功后用 `onebox version` 核验版本，再执行 `onebox` 打开新菜单；更新会重新生成配置，凭据不变。
-新版更新器会拒绝降级；下载内容与已安装脚本完全一致时跳过替换和配置应用，同版本号但内容有变化时仍可更新。
+`onebox update` 只更新 sing-box / Xray 内核，可指定版本，例如 `onebox update singbox 1.14.2`。新内核不接受配置或启动失败时尝试恢复旧版本。
 
-默认渠道为 `stable`，优先使用最新正式 GitHub Release 的版本标签；仓库还没有 Release 时会明确提示并回退默认分支。`testing` 跟随默认分支 `main`。API 限流、网络或服务器错误不会静默切换渠道。`onebox update-channel testing` 保存偏好，`onebox update-script testing` 只覆盖当次操作；`ONEBOX_SCRIPT_URL` 显式地址仍优先。菜单首页显示运行版本和渠道，`onebox update-check` 展示已安装/远端版本及发布摘要，且不替换文件。
-
-维护者推送与 `SCRIPT_VERSION` 一致的 `vX.Y.Z` 标签后，Release 工作流检查该提交属于默认分支，运行更新相关测试，再发布 `onebox.sh` 和 `SHA256SUMS`。客户端按标签获取同一份源码；下载 Release 资产时可用校验文件检查完整性。
-
-**旧版 1.0.0 更新脚本失败，或更新后菜单没有变化？** 早期仓库没有 `main` 分支，旧版下载地址曾因此返回 404。现在 `main` 已建立并设为默认分支，包含最新代码。
-若旧版仍更新失败，可在 VPS 的 root 终端执行下面的命令，显式从 `main` 更新，无需重装节点：
+`onebox update-script` 保留了旧命令名，2.0 中更新的是**原生管理程序**。下载时校验 Release 资产大小和 SHA-256，核验 ELF 与版本，之后原子替换并重新生成配置；失败恢复旧程序和配置。拒绝降级，相同内容跳过替换。更新后用 `onebox version` 核验，并重新打开菜单。
 
 ```bash
-ONEBOX_SCRIPT_URL=https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh onebox update-script
+onebox update-check
+onebox update-script
 onebox version
-onebox
+onebox update-channel stable
 ```
 
-非 root 用户可在上述更新命令前加 `sudo env`，并把 `onebox` 换成完整路径 `/usr/local/bin/onebox`。这只临时覆盖本次下载地址，升级后使用新脚本的正确默认地址。
-旧版若已替换文件但提示“配置重新生成失败”，当前菜单可能仍显示旧版本；退出菜单后用 `onebox version` 核验，并保留失败信息。
-如果仍无法更新，请提供 `onebox version` 和 `onebox update-script` 的完整输出，以便区分下载失败与配置应用失败。
+默认 `stable` 使用最新正式 GitHub Release；`testing` 对应名为 `testing` 的预发布资产，只有维护者实际发布该渠道后才能使用。**不再从 main 分支源码直接执行管理逻辑，也不在 Release 缺失时自动回退下载旧 Shell 脚本。** `onebox update-script testing` 仅选择本次渠道，`onebox update-channel testing` 保存偏好；旧环境变量 `ONEBOX_SCRIPT_URL` 不作为 Rust 更新源。旧版升级路径见前面的“从 1.x 迁移”。
 
-**使用已有证书（certbot 等）？** 选择“使用已有证书文件”时脚本直接引用原文件，续期后 sing-box 自动加载新证书；
-Xray 需要重启，可在 certbot 的续期钩子中加入 `onebox restart`（例如 `--deploy-hook "onebox restart"`）。
-不受公共 CA 信任的证书（如 Cloudflare 源证书）会被识别出来，直连客户端改为固定证书指纹。
+发布工作流仅为默认分支 `main` 的已通过 Native CI 的提交构建四个 musl 资产。检查构建与版本后，先上传草稿、下载复核 `SHA256SUMS`，再公开 Release；`BUILD-INFO.json` 记录源码 SHA、CI 与构建工具信息。`workflow_dispatch`、版本标签或成功的 Native CI 可触发检查，未通过 CI、主分支已变化或已有不匹配版本时不会发布。
 
-**安全相关的默认设置**：服务端拒绝通过代理访问内网、回环地址以及本机自身的公网地址（防止借代理访问 VPS 上只对防火墙开放的服务）；
-屏蔽 BT；Xray 不记录访问日志；日志目录权限 700；mihomo / sing-box 客户端控制接口带随机密钥；Cloudflare Token 输入不回显。
+**使用已有证书（certbot 等）？** 2.0 将校验后的证书和私钥复制到各自受管目录，保留源路径供后续部署。更新源文件后执行 `onebox cert-renew proxy`（网站用 `onebox site renew`，独立订阅用 `onebox subscription renew`），或配置相应的续期部署钩子。只重启核心不会重新复制外部证书。面向浏览器的网站和订阅需公有可信证书；代理自签证书通过完整客户端配置固定信任。
 
-**修改失败会不会把节点搞坏？** 不会。所有修改（添加 / 删除协议、改端口、换证书、重装等）都会先用内核校验新配置，
-校验通过后才替换；若新配置下服务无法启动，脚本会自动回滚到修改前的配置并以非零状态退出。
-更换证书时若申请失败、配置无法生效或中途按 Ctrl-C，证书文件、acme.sh 的域名配置与 Cloudflare 凭据、临时放行的 80 端口也会一并恢复。
+**修改失败如何恢复？** 应用过程先记录持久事务并校验新配置，失败尝试恢复旧配置、证书、程序、服务及受管防火墙规则。Ctrl+C / TERM 也进入取消与回滚流程；进程被强制杀死或系统断电后，保留的事务可用 `onebox recover` 继续恢复。若恢复仍失败，保留错误与事务目录，处理问题后再次运行，不要直接删除回滚文件。
 
-## 链路测试、调优与回退（1.4.0）
+## 链路测试、调优与回退
 
-菜单 **23** 提供探测配置导出和 REALITY 本机检查，菜单 **24** 提供调优。`onebox.sh` 内嵌客户端工具；日常安装不新增 Python 依赖，**运行探测/回退工具的客户端**需要 Bash 4+、Python 3.8+，以及对应的 sing-box / Xray 可执行文件。无需 root，不会启动系统服务。
+菜单 **21** 提供链路工具与调优入口。探测、测速和回退由 Rust 原生实现；客户端需要适配本机 Linux 架构的 `onebox`、`curl`、`openssl` 以及相应的 sing-box / Xray 可执行文件，无需 Bash / Python，也无需 root，不启动系统服务。
 
 ### 真实链路测试
 
-先在服务器导出，再将 `onebox.sh` 和导出的文件私密复制到实际使用代理的客户端。也可使用 `/etc/onebox/client/probe.json`，它随客户端配置一起生成。
+先在服务器导出，再将适配客户端架构的原生 `onebox` 和导出的文件私密复制到实际使用代理的 Linux 客户端。也可使用 `/etc/onebox/client/probe.json`，它随客户端配置一起生成。
 
 ```bash
 # 服务器：目标文件必须不存在，权限为 0600；包含客户端凭据，不含服务端私钥
 onebox probe export /root/probe.json
 
 # 客户端：查看 ID，再从真实客户端网络进行测试
-bash onebox.sh probe list probe.json
-bash onebox.sh bench probe.json --output bench-before.json
+./onebox probe list probe.json
+./onebox bench probe.json --output bench-before.json
 
 # 自选、允许你进行测试的端点；下载最多读取 4 MiB，上传 POST 4 MiB
-bash onebox.sh bench probe.json --entries vless-reality,hysteria2 \
+./onebox bench probe.json --entries vless-reality,hysteria2 \
   --download-url https://your-test.example/4MiB.bin \
   --upload-url https://your-test.example/upload --bytes 4194304 \
   --samples 5 --output bench-after.json
@@ -596,7 +693,7 @@ onebox tune resource balanced --apply        # 撤销接收窗口覆盖，保留
 onebox tune reset --apply                    # 恢复全部原生默认设置
 ```
 
-命令默认只预览，`--apply` 才备份并应用；菜单中的“自动/保守/实测”等选项直接应用。配置经过内核校验，失败由原有事务恢复。可用 `onebox backups` / `onebox restore ID` 回到调优前的精确状态。应用后需重新导入客户端配置/探测文件，再用同一客户端、端点和参数对比报告。
+命令默认只预览，`--apply` 才应用；菜单中的相应选项在确认后应用。配置经过内核校验，失败由事务恢复。需要长期保留调优前的状态时，先运行 `onebox backup before-tuning`，之后可用 `onebox restore ID` 恢复。应用后需重新导入客户端配置/探测文件，再用同一客户端、端点和参数对比报告。
 
 | 选项 | 实际改变 | 适用范围 |
 |---|---|---|
@@ -607,7 +704,7 @@ onebox tune reset --apply                    # 恢复全部原生默认设置
 | `low-memory` | 流/连接接收窗口 2 / 5 MiB；服务端并发流上限 64 | sing-box Hysteria2 ≥ 1.14；客户端窗口同时输出到 mihomo |
 | `throughput` | 流/连接接收窗口 16 / 40 MiB；服务端并发流上限 1024 | 同上；高时延/带宽链路需实测验证 |
 
-`--up` 和 `--down` 始终以**客户端视角**填写，范围 1–10000 整数 Mbps。请依据可用带宽并留余量；随意填大数可能拥塞。窗口是上限而非预分配量，高并发下仍可能增加内存占用。保持 QUIC 默认 MTU 探测和握手特征设置，不关闭私网拦截。系统 TCP BBR、UDP socket buffer 和 QUIC 拥塞控制是不同层面的设置，本功能仅报告系统参数，不修改 sysctl。
+`--up` 和 `--down` 始终以**客户端视角**填写，单位为 Mbps，需为大于 0 且不超过 100000 的数值。请依据可用带宽并留余量；随意填大数可能拥塞。窗口是上限而非预分配量，高并发下仍可能增加内存占用。保持 QUIC 默认 MTU 探测和握手特征设置，不关闭私网拦截。系统 TCP BBR、UDP socket buffer 和 QUIC 拥塞控制是不同层面的设置，本功能仅报告系统参数，不修改 sysctl。
 
 这些调优不作用于 TUIC 或 Xray Hysteria2 服务端；不支持的服务端组合会明确拒绝。Xray 客户端和分享链接不携带这些新增调优字段，需要完整 sing-box / mihomo 配置才能复现实测设置。原有未调优的 sing-box 客户端仍兼容 ≥ 1.12。
 
@@ -615,8 +712,8 @@ onebox tune reset --apply                    # 恢复全部原生默认设置
 
 ```bash
 onebox reality-check                           # 服务器：回环检查
-bash onebox.sh reality-check probe.json         # 客户端：真实路径检查
-bash onebox.sh reality-check probe.json --entries vless-reality \
+./onebox reality-check probe.json         # 客户端：真实路径检查
+./onebox reality-check probe.json --entries vless-reality \
   --url https://your-test.example/health --output reality-report.json
 ```
 
@@ -628,12 +725,12 @@ bash onebox.sh reality-check probe.json --entries vless-reality \
 
 ```bash
 # 一个服务器：默认选首个 TCP 入口为主、首个 UDP 传输入口为备
-bash onebox.sh failover probe.json
+./onebox failover probe.json
 
 # 不同服务器/IP：分别导出，然后在客户端合并（不复制服务端私钥）
-bash onebox.sh probe merge combined.json server-a.json server-b.json
-bash onebox.sh probe list combined.json
-bash onebox.sh failover combined.json \
+./onebox probe merge combined.json server-a.json server-b.json
+./onebox probe list combined.json
+./onebox failover combined.json \
   --entries n1-vless-reality,n2-hysteria2 \
   --port 2080 --interval 15 --failures 3 --recoveries 3 --cooldown 60
 ```
@@ -644,29 +741,36 @@ bash onebox.sh failover combined.json \
 
 同 IP 的多协议能应对部分协议/传输故障，不能应对整个 IP 不可达；IP 冗余需要合并实际不同服务器的配置。健康端点失效也会触发切换，请使用稳定的自有端点。合并文件含所有入口的客户端凭据，保持私密。
 
-## 测试
+## 开发与测试
 
-仓库自带的测试直接调用脚本的配置生成函数，在本机回环地址上运行真实的服务端与客户端：
-
-```bash
-python3 scripts/embed-runtime.py --check
-python3 -m unittest discover -s tests -p 'test_*.py' -v
-bash tests/performance.sh
-bash tests/bbr.sh                      # 临时目录与命令 mock，不安装/删除内核、不重启
-SB=/path/sing-box XR=/path/xray bash tests/client-runtime-e2e.sh
-```
-
-`lib/client_runtime.py` 是客户端工具源码，修改后运行 `python3 scripts/embed-runtime.py` 同步到单文件脚本；CI 检查两份代码一致。新增端到端用例覆盖带宽/窗口配置后的真实 Hysteria2、上传/下载、错误凭据、主入口中断与恢复；网站端到端用例包含 REALITY 一致性和错误 short ID 验证。
+运行 Rust 静态检查和单元测试，以及仅使用本地模拟文件的引导测试：
 
 ```bash
-# 端到端: 每个 协议 × 服务端内核 × 客户端 (sing-box / Xray / mihomo / 分享链接) 组合均验证 TCP 与 UDP 连通
-SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/e2e.sh
-
-# 生命周期: 真实执行 install / add / del / port / reset / addr / start / stop / uninstall (会修改系统, 仅在容器或 CI 中运行)
-ONEBOX_LIFECYCLE=1 SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/lifecycle.sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+bash tests/bootstrap.sh
 ```
 
-完整协议矩阵的测试目标只能经由代理服务端访问（服务端将测试专用的域名 / TEST-NET 地址改写到本机），因此绕过代理的“假通过”会被判为失败。客户端工具测试另有错误凭据拒绝和真实入口中断用例。
+真实协议测试使用官方 sing-box / Xray / mihomo；`tests/fetch_tools.py` 可按固定版本下载并校验测试工具。下列生命周期测试会运行服务、修改受控测试目录与网络状态，适合容器或 CI 环境：
+
+```bash
+cargo build --locked
+ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
+  ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray \
+  MH=/path/mihomo python3 tests/native_e2e.py
+
+sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
+  ONEBOX_TEST_SINGBOX=/path/sing-box python3 tests/native_lifecycle.py --require-full
+
+# 原生运行时、FRP、HTTPS 订阅等标记为 ignored 的真实进程测试
+ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
+  ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray \
+  ONEBOX_FRPS_BIN=/path/frps ONEBOX_FRPC_BIN=/path/frpc \
+  ONEBOX_NGINX_BIN=/path/nginx cargo test --lib --locked -- --include-ignored --test-threads=1
+```
+
+完整 CI 步骤见 `.github/workflows/ci.yml`。协议矩阵、错误凭据拒绝、客户端回退、迁移、失败注入与恢复分别测试；不能用配置生成成功代替真实连通性测试。测试状态以相应提交的 Native CI 结果为准。
 
 ## 免责声明
 
