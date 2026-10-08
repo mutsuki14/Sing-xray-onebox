@@ -143,7 +143,7 @@ fn v3_snapshot_of_the_v2_layout_equals_the_v2_journal() {
     let root = dir_.path();
     let paths = build_v2_layout(root);
     let dest = root.join("snap");
-    let taken = take(&v2_targets(root, &paths), &dest).unwrap();
+    let taken = take(&v2_targets(root, &paths), &dest, &v2_allow(root, &paths)).unwrap();
     let recorded = v2_snapshot(root);
     assert_eq!(taken, recorded, "slots, presence and digests match v2");
     assert_eq!(taken.entries.len(), 39);
@@ -191,7 +191,8 @@ fn round_trip_restores_owned_files_and_keeps_skipped_ones() {
     let paths = build_v2_layout(root);
     let targets = node_targets(&paths);
     let dest = root.join("snap");
-    let snapshot = take(&targets, &dest).unwrap();
+    let allow = node_allowlist(&paths);
+    let snapshot = take(&targets, &dest, &allow).unwrap();
     let etc = &paths.root;
     // A later generation changes, adds and removes files.
     fs::write(etc.join("tls/cert.pem"), b"NEW").unwrap();
@@ -203,7 +204,6 @@ fn round_trip_restores_owned_files_and_keeps_skipped_ones() {
     file(&paths.executable, 0o755, b"\x7fELF new");
     fs::write(etc.join("backups/keep"), b"backup-new").unwrap();
     fs::set_permissions(etc.join("client"), fs::Permissions::from_mode(0o700)).unwrap();
-    let allow = node_allowlist(&paths);
     restore(&snapshot, &dest, &allow).unwrap();
     restore(&snapshot, &dest, &allow).unwrap();
     assert_eq!(fs::read(etc.join("tls/cert.pem")).unwrap(), b"CERT");
@@ -241,9 +241,9 @@ fn a_file_is_restored_over_a_file_in_place() {
     let exe = root.join("bin/onebox");
     file(&exe, 0o755, b"old");
     let dest = root.join("snap");
-    let snapshot = take(std::slice::from_ref(&exe), &dest).unwrap();
-    file(&exe, 0o700, b"new-and-longer");
     let allow = Allowlist::exact(vec![exe.clone()]);
+    let snapshot = take(std::slice::from_ref(&exe), &dest, &allow).unwrap();
+    file(&exe, 0o700, b"new-and-longer");
     restore(&snapshot, &dest, &allow).unwrap();
     assert_eq!(fs::read(&exe).unwrap(), b"old");
     assert_eq!(mode_of(&exe), 0o755);
@@ -260,9 +260,9 @@ fn tampered_slots_are_rejected_before_live_files_change() {
     let root = dir_.path();
     let paths = build_v2_layout(root);
     let dest = root.join("snap");
-    let snapshot = take(&node_targets(&paths), &dest).unwrap();
-    fs::write(paths.state(), b"live-generation").unwrap();
     let allow = node_allowlist(&paths);
+    let snapshot = take(&node_targets(&paths), &dest, &allow).unwrap();
+    fs::write(paths.state(), b"live-generation").unwrap();
     let tampers: [fn(&Path); 4] = [
         |d| fs::write(d.join("item-0"), b"tampered").unwrap(),
         |d| {
@@ -293,8 +293,8 @@ fn allowlist_mismatches_are_rejected() {
     let root = dir_.path();
     let paths = build_v2_layout(root);
     let dest = root.join("snap");
-    let snapshot = take(&node_targets(&paths), &dest).unwrap();
     let allow = node_allowlist(&paths);
+    let snapshot = take(&node_targets(&paths), &dest, &allow).unwrap();
     let scope = "快照路径范围不合法";
     let cases: [(&str, SnapshotEdit); 8] = [
         ("foreign target", |s| {
@@ -350,9 +350,9 @@ fn v2_journal_needs_every_fixed_target_and_accepts_acme_deployments_by_pattern()
     let root = dir_.path();
     let paths = build_v2_layout(root);
     let dest = root.join("snap");
-    take(&v2_targets(root, &paths), &dest).unwrap();
-    let snapshot = v2_snapshot(root);
     let allow = v2_allow(root, &paths);
+    take(&v2_targets(root, &paths), &dest, &allow).unwrap();
+    let snapshot = v2_snapshot(root);
     // The deployment is retired and the legacy hook removed after the
     // snapshot: the allowlist does not depend on what exists now.
     fs::write(acme_deployment(root), b"retired").unwrap();
@@ -426,24 +426,41 @@ fn node_allowlist_patterns() {
         ("/r/etc/firewall-v1-migrated", Some("/r/etc")),
         ("/r/etc/.transaction", None),
         ("/r/etc/.apply.lock", None),
+        ("/r/etc/.self-update.json", None),
         ("/r/etc/backups", None),
         ("/r/etc/tls/cert.pem", None),
         ("/r/www", Some("/r")),
         ("/r/usr/onebox", Some("/r/usr")),
         ("/r/onebox-subscription-acme", Some("/r")),
         ("/r/bin/sing-box", Some("/r/bin")),
+        ("/r/bin/xray", Some("/r/bin")),
+        ("/r/bin/mihomo", None),
         ("/r/bin/.core-x", None),
         ("/r/systemd/onebox-xray.service", Some("/r/systemd")),
+        ("/r/systemd/onebox-network.service", Some("/r/systemd")),
         ("/r/systemd/onebox-net.service", Some("/r/systemd")),
+        ("/r/systemd/onebox-hop.service", Some("/r/systemd")),
+        // FRP has its own transaction: node journals never touch its units.
+        ("/r/systemd/onebox-frps.service", None),
+        ("/r/systemd/onebox-frp-web.service", None),
+        ("/r/initd/init.d/onebox-frps", None),
+        ("/r/initd/init.d/onebox-frp-web", None),
+        ("/r/systemd/onebox-bbr.service", None),
         ("/r/systemd/sshd.service", None),
         ("/r/systemd/onebox-.service", None),
         ("/r/systemd/onebox-x.y.service", None),
         ("/r/initd/init.d/onebox-xray", Some("/r/initd/init.d")),
+        ("/r/initd/init.d/onebox-hop", Some("/r/initd/init.d")),
         ("/r/initd/init.d/onebox-xray.service", None),
         (
             "/r/initd/local.d/onebox-net.start",
             Some("/r/initd/local.d"),
         ),
+        (
+            "/r/initd/local.d/onebox-hop.start",
+            Some("/r/initd/local.d"),
+        ),
+        ("/r/initd/local.d/onebox-xray.start", None),
         ("/r/initd/local.d/admin.start", None),
         ("/etc/passwd", None),
         ("relative/state.json", None),
@@ -455,15 +472,21 @@ fn node_allowlist_patterns() {
             "{path}"
         );
     }
+    // Every v2 slot and every v3 target is a node-owned path.
+    for target in node_targets(&paths) {
+        assert!(list.owned_root(&target).is_some(), "{}", target.display());
+    }
 }
 
 #[test]
 fn broad_or_overlapping_roots_are_refused() {
     let base = v2_paths(Path::new("/r"));
-    check_node_roots(&base).unwrap();
+    node_allowlist(&base).check_scope().unwrap();
+    v2_node_allowlist(&base).check_scope().unwrap();
     let apart = "网站目录和配置目录不能互相包含";
-    let cases: [(PathsEdit, &str); 5] = [
+    let cases: [(PathsEdit, &str); 6] = [
         (|p| p.root = "/etc".into(), "事务目录范围过大: /etc"),
+        (|p| p.systemd = "/etc".into(), "事务目录范围过大: /etc"),
         (|p| p.site_root = "/var".into(), "事务目录范围过大: /var"),
         (|p| p.systemd = "/".into(), "事务目录范围过大: /"),
         (|p| p.site_root = p.root.join("www"), apart),
@@ -472,7 +495,9 @@ fn broad_or_overlapping_roots_are_refused() {
     for (edit, expected) in cases {
         let mut paths = base.clone();
         edit(&mut paths);
-        assert_eq!(check_node_roots(&paths).unwrap_err().to_string(), expected);
+        for allow in [node_allowlist(&paths), v2_node_allowlist(&paths)] {
+            assert_eq!(allow.check_scope().unwrap_err().to_string(), expected);
+        }
         let dir_ = tmp();
         fs::create_dir(dir_.join("src")).unwrap();
         let err = validate(
@@ -491,8 +516,9 @@ fn symlinks_in_owned_trees_are_refused() {
     let root = dir_.path();
     let paths = build_v2_layout(root);
     // Inside a target: taking the snapshot fails.
+    let allow = node_allowlist(&paths);
     symlink("/etc/passwd", paths.clients().join("bad")).unwrap();
-    let err = take(&node_targets(&paths), &root.join("snap")).unwrap_err();
+    let err = take(&node_targets(&paths), &root.join("snap"), &allow).unwrap_err();
     assert!(err.to_string().contains("不允许符号链接"), "{err}");
     fs::remove_file(paths.clients().join("bad")).unwrap();
     // A target that is itself a symlink.
@@ -500,12 +526,14 @@ fn symlinks_in_owned_trees_are_refused() {
     dir(&link_target, 0o700);
     fs::rename(paths.clients(), root.join("client-moved")).unwrap();
     symlink(&link_target, paths.clients()).unwrap();
-    assert!(take(&node_targets(&paths), &root.join("snap2")).is_err());
+    let err = take(&node_targets(&paths), &root.join("snap2"), &allow).unwrap_err();
+    assert!(err.to_string().contains("不允许符号链接"), "{err}");
+    assert!(!root.join("snap2").exists(), "refused before writing");
     fs::remove_file(paths.clients()).unwrap();
     fs::rename(root.join("client-moved"), paths.clients()).unwrap();
     // At restore time, a symlinked live target or acme.sh directory.
     let dest = root.join("snap3");
-    take(&v2_targets(root, &paths), &dest).unwrap();
+    take(&v2_targets(root, &paths), &dest, &v2_allow(root, &paths)).unwrap();
     let snapshot = v2_snapshot(root);
     let ecc = acme_home(root).join("example.com_ecc");
     fs::rename(&ecc, root.join("ecc-moved")).unwrap();
@@ -539,15 +567,17 @@ fn size_limit_is_enforced_while_copying() {
         .unwrap()
         .set_len(MAX_BYTES + 1)
         .unwrap();
-    let err = take(&[root.join("data")], &root.join("snap")).unwrap_err();
+    let data = [root.join("data")];
+    let err = take(&data, &root.join("snap"), &Allowlist::exact(data.to_vec())).unwrap_err();
     assert!(err.to_string().ends_with(TOO_LARGE), "{err}");
     assert!(!root.join("snap/item-0/big").exists());
     // The budget covers all targets together.
     fs::write(&big, b"123456").unwrap();
     file(&root.join("data2/second"), 0o600, b"789012");
     let both = [root.join("data"), root.join("data2")];
-    take_within(&both, &root.join("snap2"), 12).unwrap();
-    let err = take_within(&both, &root.join("snap3"), 11).unwrap_err();
+    let allow = Allowlist::exact(both.to_vec());
+    take_within(&both, &root.join("snap2"), &allow, 12).unwrap();
+    let err = take_within(&both, &root.join("snap3"), &allow, 11).unwrap_err();
     assert!(err.to_string().ends_with(TOO_LARGE), "{err}");
 }
 
@@ -561,15 +591,113 @@ fn targets_must_be_clean_unique_and_narrow() {
         vec![a.join("../b")],
         vec![a.clone(), a.clone()],
     ] {
-        let err = take(&targets, &dest).unwrap_err().to_string();
+        let allow = Allowlist::exact(targets.clone());
+        let err = take(&targets, &dest, &allow).unwrap_err().to_string();
         assert!(err.starts_with("快照路径范围不合法"), "{err}");
     }
+    let etc = [PathBuf::from("/etc")];
     assert_eq!(
-        take(&[PathBuf::from("/etc")], &dest)
+        take(&etc, &dest, &Allowlist::exact(etc.to_vec()))
             .unwrap_err()
             .to_string(),
         "事务目录范围过大: /etc"
     );
+    assert!(!dest.exists(), "nothing written");
+}
+
+#[test]
+fn take_refuses_what_validate_would_refuse_before_writing() {
+    let dir_ = tmp();
+    let root = dir_.path();
+    let paths = build_v2_layout(root);
+    let dest = root.join("snap");
+    // A target outside the allowlist.
+    let mut foreign = node_targets(&paths);
+    foreign.push(paths.systemd.join("onebox-frps.service"));
+    let err = take(&foreign, &dest, &node_allowlist(&paths)).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "快照路径范围不合法: {}",
+            paths.systemd.join("onebox-frps.service").display()
+        )
+    );
+    // A partial snapshot of an exact allowlist.
+    let mut partial = v2_targets(root, &paths);
+    partial.remove(3);
+    let err = take(&partial, &dest, &v2_allow(root, &paths)).unwrap_err();
+    assert_eq!(err.to_string(), "快照缺少托管路径，拒绝部分恢复");
+    // A symlink between the owned root and a target.
+    let real = root.join("acme-real");
+    fs::rename(acme_home(root).join("example.com_ecc"), &real).unwrap();
+    symlink(&real, acme_home(root).join("example.com_ecc")).unwrap();
+    let err = take(&v2_targets(root, &paths), &dest, &v2_allow(root, &paths)).unwrap_err();
+    assert!(err.to_string().contains("不允许符号链接"), "{err}");
+    assert!(!dest.exists(), "nothing written");
+}
+
+#[test]
+fn take_refuses_layouts_whose_snapshots_could_never_be_restored() {
+    // v2 ran `safe_roots` before snapshotting; a snapshot `validate` will
+    // refuse would leave rollback and recovery stuck.
+    let cases: [(PathsEdit, &str); 3] = [
+        (
+            |p| p.site_root = p.root.join("www"),
+            "网站目录和配置目录不能互相包含",
+        ),
+        (|p| p.systemd = "/etc".into(), "事务目录范围过大: /etc"),
+        (|p| p.bin = "/usr".into(), "事务目录范围过大: /usr"),
+    ];
+    for (edit, expected) in cases {
+        let dir_ = tmp();
+        let root = dir_.path();
+        let mut paths = build_v2_layout(root);
+        edit(&mut paths);
+        let dest = root.join("snap");
+        let err = take(&node_targets(&paths), &dest, &node_allowlist(&paths)).unwrap_err();
+        assert_eq!(err.to_string(), expected);
+        assert!(!dest.exists(), "{expected}: nothing written");
+    }
+}
+
+#[test]
+fn take_needs_a_new_or_empty_destination() {
+    let dir_ = tmp();
+    let root = dir_.path();
+    let target = root.join("data");
+    file(&target.join("f"), 0o600, b"x");
+    let targets = [target.clone()];
+    let allow = Allowlist::exact(targets.to_vec());
+    // Leftovers of an earlier attempt are refused, never merged.
+    let used = root.join("used");
+    file(&used.join("item-0/stale"), 0o600, b"stale");
+    let refused = |dest: &Path| take(&targets, dest, &allow).unwrap_err().to_string();
+    assert_eq!(
+        refused(&used),
+        format!("快照目录必须为空: {}", used.display())
+    );
+    let plain = root.join("plain-file");
+    file(&plain, 0o600, b"");
+    assert_eq!(
+        refused(&plain),
+        format!("快照目录必须为空: {}", plain.display())
+    );
+    let link = root.join("link");
+    dir(&root.join("empty-target"), 0o700);
+    symlink(root.join("empty-target"), &link).unwrap();
+    assert_eq!(
+        refused(&link),
+        format!("快照目录必须为空: {}", link.display())
+    );
+    // The parent is not created.
+    assert!(take(&targets, &root.join("missing/snap"), &allow).is_err());
+    assert!(!root.join("missing").exists());
+    // An existing empty directory is used, with its mode made private.
+    let empty = root.join("empty");
+    dir(&empty, 0o755);
+    take(&targets, &empty, &allow).unwrap();
+    assert_eq!(mode_of(&empty), 0o700);
+    assert_eq!(fs::read(empty.join("item-0/f")).unwrap(), b"x");
 }
 
 #[test]

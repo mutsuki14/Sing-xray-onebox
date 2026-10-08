@@ -4,7 +4,7 @@
 //! (`item-{i}`), the skip rule and the tree digest are identical to v2, so
 //! journals written by v2 are validated and restored by v3.
 //!
-//! A snapshot is taken into a private directory: every present target is
+//! A snapshot is taken into a new private directory: every present target is
 //! copied (modes kept, symlinks and special files refused) into `item-{i}`
 //! and digested; absent targets are recorded as absent. Restoring first
 //! validates everything — allowlist, slots, digests — and only then
@@ -25,6 +25,10 @@
 //!   (plus the target's own name), so taking and restoring a slot apply the
 //!   same rule wherever the journal directory lives;
 //! - slot names must be `item-{n}` and unique;
+//! - [`take`] checks its targets against the allowlist the snapshot will be
+//!   validated with (v2 ran `safe_roots` first; a snapshot that can never be
+//!   restored is refused before anything is copied) and refuses a non-empty
+//!   destination, so leftovers are never restored;
 //! - a regular file restored over a regular file is replaced atomically
 //!   (v2 deleted it first, so a crash could leave the manager missing).
 
@@ -33,7 +37,7 @@ mod digest;
 
 pub use allowlist::{
     acme_homes, node_allowlist, subscription_acme_dir, v2_fixed_targets, v2_node_allowlist,
-    v2_node_allowlist_with, Allowlist, NameRule, TargetRule, DEFAULT_ACME_HOME,
+    v2_node_allowlist_with, Allowlist, TargetRule, DEFAULT_ACME_HOME,
 };
 pub use digest::{digest_tree, MAX_FILE_BYTES};
 
@@ -42,13 +46,12 @@ use crate::paths::Paths;
 use crate::sys::fs::{
     atomic_write, check_owned, copy_file, copy_tree, ensure_dir, remove_tree_contents, CopyLimits,
 };
-use allowlist::{check_not_broad, is_clean_absolute};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Total size cap of one snapshot (v2).
@@ -134,31 +137,64 @@ fn present(path: &Path) -> Result<bool> {
     }
 }
 
-fn check_targets(targets: &[PathBuf]) -> Result<()> {
+/// What [`validate`] will require of a snapshot of `targets`, checked
+/// before anything is copied: the allowlist's scope is sane, every target
+/// is accepted once and has no symlink below its owned root, and every
+/// required target is included. Whatever `take` accepts, `validate` accepts.
+fn check_targets(targets: &[PathBuf], allow: &Allowlist) -> Result<()> {
+    allow.check_scope()?;
     let mut seen = BTreeSet::new();
     for target in targets {
-        ensure!(
-            is_clean_absolute(target) && seen.insert(target),
-            "快照路径范围不合法: {}",
-            target.display()
-        );
-        check_not_broad(target)?;
+        let root = allow
+            .owned_root(target)
+            .filter(|_| seen.insert(target.as_path()))
+            .ok_or_else(|| Error::msg(format!("快照路径范围不合法: {}", target.display())))?;
+        check_owned(&root, target)?;
     }
-    Ok(())
+    allow.check_complete(&seen)
 }
 
-/// Snapshot `targets` into `dest` (created 0700): `dest/item-{i}` for every
-/// present target, `dest/snapshot.json` (0600) describing them. Fails on
-/// symlinks or special files in a target and when all copies together
-/// exceed [`MAX_BYTES`]; the caller removes `dest` on error.
-pub fn take(targets: &[PathBuf], dest: &Path) -> Result<Snapshot> {
-    take_within(targets, dest, MAX_BYTES)
+/// Create `dest` (0700, its parent must exist), or accept an existing empty
+/// real directory: leftovers of an earlier attempt must never be digested
+/// into a new snapshot and restored later.
+fn prepare_dest(dest: &Path) -> Result<()> {
+    let not_empty = || Error::msg(format!("快照目录必须为空: {}", dest.display()));
+    match fs::DirBuilder::new().mode(0o700).create(dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            let meta = fs::symlink_metadata(dest).map_err(|e| Error::io(dest, e))?;
+            if !meta.is_dir() {
+                return Err(not_empty());
+            }
+            let mut entries = fs::read_dir(dest).map_err(|e| Error::io(dest, e))?;
+            if entries.next().is_some() {
+                return Err(not_empty());
+            }
+        }
+        Err(e) => return Err(Error::io(dest, e)),
+    }
+    ensure_dir(dest, 0o700)
+}
+
+/// Snapshot `targets` into `dest`: `dest/item-{i}` for every present
+/// target, `dest/snapshot.json` (0600) describing them. `targets` must
+/// satisfy `allow` (the allowlist the snapshot will be validated against)
+/// and `dest` must be absent or empty; both are checked before anything is
+/// written. Fails on symlinks or special files in a target and when all
+/// copies together exceed [`MAX_BYTES`]; the caller removes `dest` on error.
+pub fn take(targets: &[PathBuf], dest: &Path, allow: &Allowlist) -> Result<Snapshot> {
+    take_within(targets, dest, allow, MAX_BYTES)
 }
 
 /// [`take`] with a total size budget of `max_bytes`.
-fn take_within(targets: &[PathBuf], dest: &Path, max_bytes: u64) -> Result<Snapshot> {
-    check_targets(targets)?;
-    ensure_dir(dest, 0o700)?;
+fn take_within(
+    targets: &[PathBuf],
+    dest: &Path,
+    allow: &Allowlist,
+    max_bytes: u64,
+) -> Result<Snapshot> {
+    check_targets(targets, allow)?;
+    prepare_dest(dest)?;
     let mut used = 0u64;
     let mut entries = Vec::with_capacity(targets.len());
     for (i, target) in targets.iter().enumerate() {
@@ -281,13 +317,6 @@ pub fn node_targets(paths: &Paths) -> Vec<PathBuf> {
     let mut targets = v2_fixed_targets(paths);
     targets.push(paths.state_v2_backup());
     targets
-}
-
-/// The configured node roots are usable for snapshots (v2 `safe_roots`):
-/// none is `/` or a system directory, and the site root and `ROOT` do not
-/// contain each other.
-pub fn check_node_roots(paths: &Paths) -> Result<()> {
-    node_allowlist(paths).check_scope()
 }
 
 #[cfg(test)]

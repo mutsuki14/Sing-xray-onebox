@@ -9,8 +9,14 @@
 //!   acme.sh deployment files v2 snapshotted on hosts that came from v1
 //!   (E-8.1#5: those paths are validated by pattern, never recomputed);
 //! - written by v3: the journal records its own target list and every target
-//!   must match one of the owned-root patterns of [`node_allowlist`], so a
-//!   newer v3 adding a path cannot make an older one refuse its journal.
+//!   must be accepted by [`node_allowlist`] (any plain `ROOT` child, exactly
+//!   the node-owned paths elsewhere), so a v3 adding or dropping a `ROOT`
+//!   item cannot make another v3 refuse its journal, while no journal can
+//!   direct a write to a path the node does not own (E §5.8).
+//!
+//! [`take`](super::take) checks its targets against the same allowlist that
+//! later validates the snapshot, so a snapshot that was taken can always be
+//! restored.
 
 use crate::error::{Error, Result};
 use crate::paths::Paths;
@@ -55,39 +61,18 @@ const LEGACY_HOOKS: [&str; 2] = ["onebox-net", "onebox-hop"];
 /// The acme.sh home v2 used when `ACME_HOME` was unset.
 pub const DEFAULT_ACME_HOME: &str = "/root/.acme.sh";
 
-/// How the file name of a [`TargetRule::Child`] must look.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NameRule {
-    /// `[A-Za-z0-9][A-Za-z0-9._-]*`, except `backups` (user backups are
-    /// never part of a snapshot). Hidden names are refused: they are locks,
-    /// journals and staging directories.
-    Plain,
-    /// `onebox-[A-Za-z0-9-]+` followed by `suffix` (unit files, init
-    /// scripts, `local.d` hooks).
-    Service { suffix: &'static str },
-}
-
-impl NameRule {
-    fn accepts(self, name: &str) -> bool {
-        match self {
-            NameRule::Plain => {
-                name != "backups"
-                    && name
-                        .bytes()
-                        .next()
-                        .is_some_and(|b| b.is_ascii_alphanumeric())
-                    && name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            }
-            NameRule::Service { suffix } => name
-                .strip_suffix(suffix)
-                .and_then(|stem| stem.strip_prefix("onebox-"))
-                .is_some_and(|rest| {
-                    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                }),
-        }
-    }
+/// `[A-Za-z0-9][A-Za-z0-9._-]*`, except `backups` (user backups are never
+/// part of a snapshot). Hidden names are refused: they are locks, journals
+/// and staging directories.
+fn plain_name(name: &str) -> bool {
+    name != "backups"
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
 /// One way a target may be accepted.
@@ -95,8 +80,8 @@ impl NameRule {
 pub enum TargetRule {
     /// Exactly this path; symlink checks start at its parent.
     Exact(PathBuf),
-    /// A direct child of `dir` whose name satisfies `names`.
-    Child { dir: PathBuf, names: NameRule },
+    /// A direct child of `dir` with a plain name (see [`plain_name`]).
+    Child { dir: PathBuf },
     /// `{home}/{domain}_ecc/{domain}.conf` (a retired acme.sh deployment);
     /// symlink checks start at `home`.
     AcmeDeployment { home: PathBuf },
@@ -107,9 +92,9 @@ impl TargetRule {
     fn owned_root(&self, target: &Path) -> Option<PathBuf> {
         match self {
             TargetRule::Exact(path) => (path == target).then(|| parent(target)).flatten(),
-            TargetRule::Child { dir, names } => {
+            TargetRule::Child { dir } => {
                 let name = target.file_name()?.to_str()?;
-                (target.parent() == Some(dir.as_path()) && names.accepts(name)).then(|| dir.clone())
+                (target.parent() == Some(dir.as_path()) && plain_name(name)).then(|| dir.clone())
             }
             TargetRule::AcmeDeployment { home } => {
                 let rel = target.strip_prefix(home).ok()?;
@@ -131,7 +116,7 @@ impl TargetRule {
     fn scope(&self) -> &Path {
         match self {
             TargetRule::Exact(path) => path,
-            TargetRule::Child { dir, .. } => dir,
+            TargetRule::Child { dir } => dir,
             TargetRule::AcmeDeployment { home } => home,
         }
     }
@@ -228,7 +213,7 @@ impl Allowlist {
 }
 
 /// `事务目录范围过大` unless `path` is narrower than a system directory.
-pub(super) fn check_not_broad(path: &Path) -> Result<()> {
+fn check_not_broad(path: &Path) -> Result<()> {
     if path.parent().is_none() || BROAD_ROOTS.iter().any(|root| path == Path::new(root)) {
         return Err(Error::msg(format!("事务目录范围过大: {}", path.display())));
     }
@@ -236,7 +221,7 @@ pub(super) fn check_not_broad(path: &Path) -> Result<()> {
 }
 
 /// Absolute, without `.`/`..` and not the root directory itself.
-pub(super) fn is_clean_absolute(path: &Path) -> bool {
+fn is_clean_absolute(path: &Path) -> bool {
     path.is_absolute()
         && path.parent().is_some()
         && path
@@ -366,29 +351,25 @@ pub fn v2_node_allowlist_with(paths: &Paths, acme_homes: &[PathBuf]) -> Allowlis
     guard_node_roots(list, paths)
 }
 
-/// The owned-root patterns v3 node journals are validated against: plain
-/// children of `ROOT` and of the core directory, the site root, the
-/// executable, the subscription ACME webroot, and `onebox-*` unit files,
-/// init scripts and `local.d` hooks.
+/// What v3 node journals are validated against: any plain child of `ROOT`
+/// (ROOT belongs to the node as a whole), plus exactly the node-owned paths
+/// outside it — the site root, the executable, the subscription ACME
+/// webroot, the two core binaries, and the unit files, init scripts and
+/// `local.d` hooks of the node services and the v1 boot hooks (the
+/// non-`ROOT` part of [`v2_fixed_targets`]). Other `onebox-*` units (FRP
+/// has its own transaction) and other files in the core directory can
+/// therefore never be overwritten or deleted by a node journal. A path v3
+/// adds outside `ROOT` must be added here, and names are never removed, so
+/// that newer managers keep accepting older journals.
 pub fn node_allowlist(paths: &Paths) -> Allowlist {
-    let child = |dir: &Path, names| TargetRule::Child {
-        dir: dir.to_path_buf(),
-        names,
-    };
-    let list = Allowlist::default()
-        .with_rule(child(&paths.root, NameRule::Plain))
-        .with_rule(TargetRule::Exact(paths.site_root.clone()))
-        .with_rule(TargetRule::Exact(paths.executable.clone()))
-        .with_rule(TargetRule::Exact(subscription_acme_dir(paths)))
-        .with_rule(child(&paths.bin, NameRule::Plain))
-        .with_rule(child(
-            &paths.systemd,
-            NameRule::Service { suffix: ".service" },
-        ))
-        .with_rule(child(&paths.initd, NameRule::Service { suffix: "" }))
-        .with_rule(child(
-            &local_d(paths),
-            NameRule::Service { suffix: ".start" },
-        ));
+    let outside_root = v2_fixed_targets(paths)
+        .into_iter()
+        .filter(|t| t.parent() != Some(paths.root.as_path()));
+    let list = outside_root.fold(
+        Allowlist::default().with_rule(TargetRule::Child {
+            dir: paths.root.clone(),
+        }),
+        |list, target| list.with_rule(TargetRule::Exact(target)),
+    );
     guard_node_roots(list, paths)
 }

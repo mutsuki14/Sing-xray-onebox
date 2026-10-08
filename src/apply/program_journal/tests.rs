@@ -50,10 +50,14 @@ impl Fixture {
         let (name, work) = create_work_dir(paths).unwrap();
         file(&work.join(OLD_FILE), 0o700, OLD);
         file(&work.join(NEW_FILE), 0o755, NEW);
-        let snapshot = paths
-            .state()
-            .exists()
-            .then(|| take(&node_targets(paths), &work.join(CONFIG_DIR)).unwrap());
+        let snapshot = paths.state().exists().then(|| {
+            take(
+                &node_targets(paths),
+                &work.join(CONFIG_DIR),
+                &node_allowlist(paths),
+            )
+            .unwrap()
+        });
         let mut journal =
             ProgramJournal::new(name, Some(sha256_hex(OLD)), sha256_hex(NEW), snapshot);
         journal.version = version;
@@ -313,7 +317,12 @@ fn version_one_records_are_validated_against_the_v2_allowlist() {
     // A v2 updater snapshots exactly v2's fixed targets.
     let (name, work) = create_work_dir(&paths).unwrap();
     file(&work.join(OLD_FILE), 0o700, OLD);
-    let snapshot = take(&v2_fixed_targets(&paths), &work.join(CONFIG_DIR)).unwrap();
+    let snapshot = take(
+        &v2_fixed_targets(&paths),
+        &work.join(CONFIG_DIR),
+        &v2_node_allowlist(&paths),
+    )
+    .unwrap();
     let mut v2 = ProgramJournal::new(name, Some(sha256_hex(OLD)), sha256_hex(NEW), Some(snapshot));
     v2.version = V2_VERSION;
     v2.validate(&paths).unwrap();

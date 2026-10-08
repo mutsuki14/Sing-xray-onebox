@@ -111,7 +111,9 @@ fn reads_a_journal_written_by_v2() {
     assert_eq!(journal.allowlist(&paths), v2_node_allowlist(&paths));
     let mut targets = v2_fixed_targets(&paths);
     targets.push(acme_deployment(root));
-    take(&targets, &files_dir(&paths)).unwrap();
+    let allow = v2_node_allowlist_with(&paths, &[acme_home(root)]);
+    fs::create_dir(dir(&paths)).unwrap();
+    take(&targets, &files_dir(&paths), &allow).unwrap();
     let mut recorded = journal.snapshot().clone();
     let deployment = recorded
         .entries
@@ -120,7 +122,6 @@ fn reads_a_journal_written_by_v2() {
         .unwrap();
     // The deployment file embeds the capture root, so its digest differs.
     deployment.sha256 = snapshot::digest_tree(&acme_deployment(root)).unwrap();
-    let allow = v2_node_allowlist_with(&paths, &[acme_home(root)]);
     snapshot::validate(&recorded, &files_dir(&paths), &allow).unwrap();
 }
 
