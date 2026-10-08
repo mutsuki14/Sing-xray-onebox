@@ -38,7 +38,20 @@ pub struct TestUrl {
     port: u16,
 }
 
+/// Default health URL of every tool (v2): an HTTPS endpoint answering 204.
+pub const DEFAULT_HEALTH_URL: &str = "https://www.gstatic.com/generate_204";
+
 impl TestUrl {
+    /// [`DEFAULT_HEALTH_URL`], already validated.
+    pub fn default_health() -> TestUrl {
+        TestUrl {
+            text: DEFAULT_HEALTH_URL.to_owned(),
+            scheme: Scheme::Https,
+            host: "www.gstatic.com".to_owned(),
+            port: 443,
+        }
+    }
+
     pub fn parse(url: &str) -> Result<TestUrl> {
         ensure!(
             !url.bytes().any(|b| b <= b' ' || b == 0x7f || b == b'#' || b == b'\\'),
@@ -191,5 +204,9 @@ mod tests {
             );
             assert_eq!(url.to_string(), text);
         }
+        assert_eq!(
+            TestUrl::default_health(),
+            TestUrl::parse(DEFAULT_HEALTH_URL).unwrap()
+        );
     }
 }
