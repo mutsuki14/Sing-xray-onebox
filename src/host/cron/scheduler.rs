@@ -1,6 +1,9 @@
 //! Making sure scheduled jobs will actually run: the `crontab` program and
-//! a running cron daemon (one check for node and FRP; v2 had two that
-//! disagreed on unit names).
+//! a running cron daemon.
+//!
+//! Changes from v2: one check for node and FRP (v2's two disagreed on unit
+//! names, and FRP's lacked `cronie`/`dcron`, H-8.1#17); the no-init check
+//! reads `/proc/*/comm` below `system_root` instead of running `pgrep`.
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};

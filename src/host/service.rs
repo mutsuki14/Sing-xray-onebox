@@ -160,6 +160,12 @@ impl ServiceDef {
         def
     }
 
+    /// The traits of `name` without a command: where its spec, PID, lock and
+    /// log files are, for services that may not be configured (yet).
+    pub fn skeleton(paths: &Paths, name: &str) -> ServiceDef {
+        ServiceDef::new(paths, name, PathBuf::new(), Vec::new(), Vec::new())
+    }
+
     /// `onebox-sing-box` / `onebox-xray`, after the website when it serves
     /// the REALITY target.
     pub fn core(paths: &Paths, core: Core, after_site: bool) -> ServiceDef {

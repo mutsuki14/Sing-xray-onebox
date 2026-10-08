@@ -2,7 +2,7 @@ use super::*;
 use crate::domain::protocol::Core;
 use crate::host::cron::testing::{fake_crontab, text};
 use crate::host::supervisor::fixture::FakeProc;
-use crate::host::supervisor::{StopPolicy, Supervisor};
+use crate::host::supervisor::{Supervisor, Timing};
 use crate::sys::exec::{FakeExec, Output, FAKE_PID_BASE};
 use crate::sys::fs::TempDir;
 use std::os::unix::fs::PermissionsExt;
@@ -26,7 +26,7 @@ impl Fixture {
     }
 
     fn services(&self, init: InitSystem) -> Services<'_> {
-        let policy = StopPolicy {
+        let policy = Timing {
             term_grace: Duration::from_millis(20),
             kill_grace: Duration::from_millis(20),
             poll: Duration::from_millis(5),

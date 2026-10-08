@@ -72,7 +72,7 @@ impl Fixture {
             sent: Mutex::new(Vec::new()),
             ignored: ignored.to_vec(),
         });
-        let policy = StopPolicy {
+        let policy = Timing {
             term_grace: Duration::from_millis(30),
             kill_grace: Duration::from_millis(30),
             poll: Duration::from_millis(5),
@@ -408,6 +408,15 @@ fn visible_proc() -> bool {
     own == Some(std::process::id())
 }
 
+/// Stops a real test daemon even when an assertion fails.
+struct KillOnDrop<'a>(&'a Supervisor<'a>, &'a ServiceDef);
+
+impl Drop for KillOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.stop(self.1);
+    }
+}
+
 /// A context executing real programs, with `system_root` = `/`.
 fn real_ctx(dir: &TempDir) -> Ctx {
     let mut paths = crate::paths::Paths::isolated(dir.path());
@@ -440,6 +449,7 @@ fn real_daemons_are_started_identified_and_stopped() {
     let sup = Supervisor::new(&ctx);
     let env = service_env(&ctx.paths, InitSystem::None);
     sup.start(&def, &env).unwrap();
+    let _cleanup = KillOnDrop(&sup, &def);
     let found = sup.find(&def).expect("the real process is identified");
     assert!(found.record.pid >= 2);
     let environ = fs::read(format!("/proc/{}/environ", found.record.pid)).unwrap();
@@ -491,6 +501,7 @@ fn real_nginx_is_recognized_by_its_title() {
     let sup = Supervisor::new(&ctx);
     sup.start(&def, &service_env(&ctx.paths, InitSystem::None))
         .unwrap();
+    let _cleanup = KillOnDrop(&sup, &def);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut titled = false;
     while Instant::now() < deadline && !titled {

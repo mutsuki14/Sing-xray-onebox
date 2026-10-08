@@ -78,7 +78,7 @@ impl Signaller for SystemSignaller {
 
 /// Timing of stops and of waiting for the per-service lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StopPolicy {
+pub struct Timing {
     /// After SIGTERM, before SIGKILL.
     pub term_grace: Duration,
     /// After SIGKILL, before giving up.
@@ -88,9 +88,9 @@ pub struct StopPolicy {
     pub lock_wait: Duration,
 }
 
-impl Default for StopPolicy {
+impl Default for Timing {
     fn default() -> Self {
-        StopPolicy {
+        Timing {
             term_grace: Duration::from_secs(5),
             kill_grace: Duration::from_secs(5),
             poll: Duration::from_millis(100),
@@ -103,19 +103,19 @@ impl Default for StopPolicy {
 pub struct Supervisor<'a> {
     ctx: &'a Ctx,
     signals: Arc<dyn Signaller>,
-    policy: StopPolicy,
+    timing: Timing,
 }
 
 impl<'a> Supervisor<'a> {
     pub fn new(ctx: &'a Ctx) -> Self {
-        Self::with(ctx, Arc::new(SystemSignaller), StopPolicy::default())
+        Self::with(ctx, Arc::new(SystemSignaller), Timing::default())
     }
 
-    pub fn with(ctx: &'a Ctx, signals: Arc<dyn Signaller>, policy: StopPolicy) -> Self {
+    pub fn with(ctx: &'a Ctx, signals: Arc<dyn Signaller>, timing: Timing) -> Self {
         Supervisor {
             ctx,
             signals,
-            policy,
+            timing,
         }
     }
 
@@ -235,8 +235,8 @@ impl<'a> Supervisor<'a> {
     /// matches (exited, zombie, or PID reused).
     fn terminate(&self, record: &PidRecord) -> Result<()> {
         let steps = [
-            (libc::SIGTERM, self.policy.term_grace),
-            (libc::SIGKILL, self.policy.kill_grace),
+            (libc::SIGTERM, self.timing.term_grace),
+            (libc::SIGKILL, self.timing.kill_grace),
         ];
         for (signal, grace) in steps {
             if self.gone(record) || !self.signals.signal(record.pid, signal)? {
@@ -262,7 +262,7 @@ impl<'a> Supervisor<'a> {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(self.policy.poll);
+            std::thread::sleep(self.timing.poll);
         }
     }
 
@@ -285,11 +285,11 @@ impl<'a> Supervisor<'a> {
         prepare_dir(&def.run_dir)?;
         let path = def.run_dir.join(format!("{}.lock", def.name));
         let busy = format!("服务 {} 正由另一个操作启动或停止；稍后重试", def.name);
-        let deadline = Instant::now() + self.policy.lock_wait;
+        let deadline = Instant::now() + self.timing.lock_wait;
         loop {
             match FileLock::acquire(&path, &busy) {
                 Err(Error::Busy(_)) if Instant::now() < deadline => {
-                    std::thread::sleep(self.policy.poll);
+                    std::thread::sleep(self.timing.poll);
                 }
                 other => return other,
             }

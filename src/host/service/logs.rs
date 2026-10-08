@@ -1,5 +1,9 @@
 //! Log files of services without journald: lookup in v2 order and an
-//! in-process `tail` (v2 shelled out to `tail -n 200 --`).
+//! in-process `tail`.
+//!
+//! Changes from v2: no `tail -n 200 --` child process; only the last 1 MiB
+//! is read, and a symlinked log file is skipped during lookup and refused
+//! when opened.
 
 use crate::error::{Error, Result};
 use std::fs::{self, OpenOptions};

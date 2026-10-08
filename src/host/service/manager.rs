@@ -105,7 +105,7 @@ impl<'a> Services<'a> {
     /// The definition and environment persisted for `name`.
     pub fn load(&self, name: &str) -> Result<(ServiceDef, Vec<(String, String)>)> {
         validate_name(name)?;
-        let skeleton = ServiceDef::new(&self.ctx.paths, name, "/", vec![], vec![]);
+        let skeleton = ServiceDef::skeleton(&self.ctx.paths, name);
         let path = skeleton.spec_path();
         check_spec_path(&path)?;
         let bytes = read_bounded(&path, SPEC_MAX_BYTES).map_err(|e| match e {
@@ -337,7 +337,7 @@ impl<'a> Services<'a> {
             let cmd = Cmd::new("journalctl").args(args).timeout(QUERY_TIMEOUT);
             return self.ctx.check(&cmd);
         }
-        let def = ServiceDef::new(&self.ctx.paths, name, "/", vec![], vec![]);
+        let def = ServiceDef::skeleton(&self.ctx.paths, name);
         let path = logs::find(&def.log_candidates()).ok_or_else(|| Error::msg(NO_LOG))?;
         logs::tail(&path, lines)
     }
@@ -384,7 +384,7 @@ impl<'a> Services<'a> {
     }
 
     fn spec_path(&self, name: &str) -> std::path::PathBuf {
-        ServiceDef::new(&self.ctx.paths, name, "/", vec![], vec![]).spec_path()
+        ServiceDef::skeleton(&self.ctx.paths, name).spec_path()
     }
 
     fn run(&self, program: &str, args: &[&str], timeout: Duration) -> Result<Output> {
