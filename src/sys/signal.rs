@@ -2,30 +2,51 @@
 //! for SIGINT/SIGTERM/SIGHUP, and a guard that blocks those signals during
 //! critical sections (binary swaps, sysctl changes).
 //!
-//! The flag is the only global mutable state in the crate. Handlers only
-//! store the signal number (async-signal-safe); long operations poll
-//! [`check`] at safe points (between apply stages) and unwind with
-//! `Error::Cancelled`, so rollback runs instead of dying mid-write.
-//! Handlers are installed without `SA_RESTART`, so a blocking prompt read
-//! returns `EINTR` and the prompter can cancel promptly.
+//! The flag (plus the reference count of who needs the handlers) is the only
+//! global mutable state in the crate. Handlers only update the atomic flag
+//! (async-signal-safe); long operations poll [`check`] at safe points
+//! (between apply stages) and unwind with `Error::Cancelled`, so rollback
+//! runs instead of dying mid-write. Handlers are installed without
+//! `SA_RESTART`, so a blocking prompt read returns `EINTR` and the prompter
+//! can cancel promptly. `sys::exec` holds a [`WaitScope`] while waiting for
+//! children in their own process group and forwards new signals to them.
 //!
 //! Changes from v2: one flag and one scope type shared by apply, update and
 //! BBR (v2 had per-module guards); cancellation surfaces as
 //! `Error::Cancelled`, so it keeps exit code 130 through rollback wrappers
-//! (B-9.1#16).
+//! (B-9.1#16); handler installation is reference-counted, so scopes held by
+//! different threads may end in any order.
 
 use crate::error::{Error, Result};
 use std::io;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// The signals Onebox treats as "cancel the current operation".
 pub const CANCEL_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
-/// Last cancellation signal received while a [`SignalScope`] was active (0 = none).
-static PENDING: AtomicI32 = AtomicI32::new(0);
+/// The signal flag, packed into one atomic so the handler stays a single
+/// lock-free update:
+/// - bits 0..8: the pending signal (0 = none), reset by [`clear`];
+/// - bits 8..16: the last signal received (never reset);
+/// - bits 16..32: how many signals were received (wrapping), so a waiter can
+///   tell a new signal from one recorded before it started.
+static STATE: AtomicU32 = AtomicU32::new(0);
+const PENDING_MASK: u32 = 0xff;
+const LAST_SHIFT: u32 = 8;
+const COUNT_SHIFT: u32 = 16;
 
 extern "C" fn record(sig: libc::c_int) {
-    PENDING.store(sig, Ordering::SeqCst);
+    let sig = (sig as u32) & PENDING_MASK;
+    let mut current = STATE.load(Ordering::SeqCst);
+    loop {
+        let count = (current >> COUNT_SHIFT).wrapping_add(1);
+        let next = (count << COUNT_SHIFT) | (sig << LAST_SHIFT) | sig;
+        match STATE.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 /// Address of [`record`] in the form `sigaction` expects.
@@ -42,17 +63,35 @@ pub fn reset_interrupt_disposition() {
     }
 }
 
-/// The signal received while a scope was active, if any.
+/// The signal received while handlers were installed, if not yet cleared.
 pub fn pending() -> Option<i32> {
-    match PENDING.load(Ordering::SeqCst) {
+    match STATE.load(Ordering::SeqCst) & PENDING_MASK {
         0 => None,
-        n => Some(n),
+        n => Some(n as i32),
     }
 }
 
-/// Forget a recorded signal (after it has been handled).
+/// Forget a recorded signal (after it has been handled). The receive
+/// counter is kept, so waiters still notice that a signal arrived.
 pub fn clear() {
-    PENDING.store(0, Ordering::SeqCst);
+    STATE.fetch_and(!PENDING_MASK, Ordering::SeqCst);
+}
+
+/// A reading of the receive counter; compare two readings to detect a
+/// signal that arrived in between, even if it was cleared meanwhile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Received {
+    pub count: u16,
+    /// The last signal received (0 = none yet).
+    pub last: i32,
+}
+
+pub fn received() -> Received {
+    let state = STATE.load(Ordering::SeqCst);
+    Received {
+        count: (state >> COUNT_SHIFT) as u16,
+        last: ((state >> LAST_SHIFT) & PENDING_MASK) as i32,
+    }
 }
 
 /// `Err(Cancelled)` (exit 130) when a cancellation signal is pending.
@@ -63,37 +102,119 @@ pub fn check() -> Result<()> {
     }
 }
 
-/// Installs recording handlers for INT/TERM/HUP; the previous dispositions
-/// are restored on drop. Scopes nest (inner drop restores the outer
-/// handler). Installing does not clear an already pending signal, so an
-/// outer operation's cancellation is not lost.
-pub struct SignalScope {
+/// Who currently needs the recording handlers. They are installed when the
+/// first holder appears and the previous dispositions are restored when the
+/// last one leaves, so holders on different threads may come and go in any
+/// order. (This bookkeeping and [`STATE`] are the crate's only global state.)
+struct Installed {
+    owners: usize,
+    waiters: usize,
     previous: Vec<(libc::c_int, libc::sigaction)>,
 }
 
-impl SignalScope {
-    pub fn install() -> Result<SignalScope> {
-        let mut scope = SignalScope {
-            previous: Vec::with_capacity(CANCEL_SIGNALS.len()),
-        };
-        for sig in CANCEL_SIGNALS {
-            // On failure `scope` drops and restores what was installed so far.
-            let old = set_handler(sig, record_address(), 0)
-                .map_err(|e| Error::msg(format!("无法安装信号处理器: {e}")))?;
-            scope.previous.push((sig, old));
-        }
-        Ok(scope)
-    }
+static INSTALLED: Mutex<Installed> = Mutex::new(Installed {
+    owners: 0,
+    waiters: 0,
+    previous: Vec::new(),
+});
+
+fn installed() -> MutexGuard<'static, Installed> {
+    INSTALLED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-impl Drop for SignalScope {
-    fn drop(&mut self) {
+impl Installed {
+    fn holders(&self) -> usize {
+        self.owners + self.waiters
+    }
+
+    /// Install the handlers unless a holder already did.
+    fn install(&mut self) -> Result<()> {
+        if self.holders() > 0 {
+            return Ok(());
+        }
+        for sig in CANCEL_SIGNALS {
+            match set_handler(sig, record_address(), 0) {
+                Ok(old) => self.previous.push((sig, old)),
+                Err(e) => {
+                    self.restore();
+                    return Err(Error::msg(format!("无法安装信号处理器: {e}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore the saved dispositions once nobody holds the handlers.
+    fn release(&mut self) {
+        if self.holders() == 0 {
+            self.restore();
+        }
+    }
+
+    fn restore(&mut self) {
         for (sig, old) in self.previous.drain(..).rev() {
             // SAFETY: restoring a sigaction previously returned by the kernel.
             unsafe {
                 libc::sigaction(sig, &old, std::ptr::null_mut());
             }
         }
+    }
+}
+
+/// Installs recording handlers for INT/TERM/HUP for an operation that polls
+/// [`check`] at safe points (the scope's *owner*); the previous dispositions
+/// are restored when the last holder drops. Scopes nest. Installing does not
+/// clear an already pending signal, so an outer operation's cancellation is
+/// not lost.
+pub struct SignalScope {
+    _private: (),
+}
+
+impl SignalScope {
+    pub fn install() -> Result<SignalScope> {
+        let mut state = installed();
+        state.install()?;
+        state.owners += 1;
+        Ok(SignalScope { _private: () })
+    }
+}
+
+impl Drop for SignalScope {
+    fn drop(&mut self) {
+        let mut state = installed();
+        state.owners -= 1;
+        state.release();
+    }
+}
+
+/// Recording handlers held while waiting for a child that cannot see the
+/// terminal's signals (it runs in its own process group): the waiter
+/// forwards new signals to the child. [`WaitScope::owned`] tells whether a
+/// [`SignalScope`] owner was active — then that owner turns the signal into
+/// a cancellation; otherwise the waiter must do so itself.
+pub struct WaitScope {
+    owned: bool,
+}
+
+impl WaitScope {
+    pub fn acquire() -> Result<WaitScope> {
+        let mut state = installed();
+        let owned = state.owners > 0;
+        state.install()?;
+        state.waiters += 1;
+        Ok(WaitScope { owned })
+    }
+
+    pub fn owned(&self) -> bool {
+        self.owned
+    }
+}
+
+impl Drop for WaitScope {
+    fn drop(&mut self) {
+        let mut state = installed();
+        state.waiters -= 1;
+        state.release();
     }
 }
 
@@ -105,7 +226,7 @@ fn set_handler(
     flags: libc::c_int,
 ) -> io::Result<libc::sigaction> {
     // SAFETY: sigaction structs are plain data, zero-initialised then filled;
-    // `record` only performs an atomic store, which is async-signal-safe.
+    // `record` only performs atomic operations, which are async-signal-safe.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = handler;
@@ -213,11 +334,53 @@ mod tests {
     #[test]
     fn nested_scopes_restore_outer_handler() {
         let _g = guard();
-        let _outer = SignalScope::install().unwrap();
+        let before = current_handler(libc::SIGTERM);
         {
-            let _inner = SignalScope::install().unwrap();
+            let _outer = SignalScope::install().unwrap();
+            {
+                let _inner = SignalScope::install().unwrap();
+            }
+            assert_eq!(current_handler(libc::SIGTERM), record_address());
         }
-        assert_eq!(current_handler(libc::SIGTERM), record_address());
+        assert_eq!(current_handler(libc::SIGTERM), before);
+    }
+
+    #[test]
+    fn holders_may_drop_in_any_order() {
+        let _g = guard();
+        let before = current_handler(libc::SIGINT);
+        let waiter = WaitScope::acquire().unwrap();
+        assert!(!waiter.owned(), "no owner yet");
+        let owner = SignalScope::install().unwrap();
+        assert!(WaitScope::acquire().unwrap().owned());
+        drop(waiter);
+        assert_eq!(
+            current_handler(libc::SIGINT),
+            record_address(),
+            "the owner still needs the handler"
+        );
+        drop(owner);
+        assert_eq!(current_handler(libc::SIGINT), before);
+    }
+
+    #[test]
+    fn receive_counter_survives_clear() {
+        let _g = guard();
+        let _scope = SignalScope::install().unwrap();
+        let start = received();
+        unsafe {
+            libc::raise(libc::SIGTERM);
+        }
+        clear();
+        let now = received();
+        assert_eq!(pending(), None);
+        assert_ne!(now.count, start.count, "a waiter still sees the signal");
+        assert_eq!(now.last, libc::SIGTERM);
+        unsafe {
+            libc::raise(libc::SIGTERM);
+        }
+        assert_ne!(received().count, now.count, "repeated signals are new");
+        clear();
     }
 
     #[test]

@@ -2,29 +2,32 @@
 //! [`FakeExec`].
 //!
 //! Rules (fixes v2 E-8.1#3): children always start with an empty signal mask;
-//! commands built with [`Cmd::daemon_env`] get a cleared environment, a fixed
-//! PATH and only the explicitly passed variables, so admin-shell secrets such
-//! as `CF_Token` never leak into long-running services.
+//! detached daemons must be built with [`Cmd::daemon_env`] (cleared
+//! environment, fixed PATH, only the explicitly passed variables), so
+//! admin-shell secrets such as `CF_Token` never leak into long-running
+//! services — both [`SystemExec`] and [`FakeExec`] refuse a daemon without it.
 //!
 //! Changes from v2: spawn failures name the program (`未找到程序 nginx`
-//! instead of a bare `No such file or directory`); signal deaths report
-//! 128 + signal instead of a flat 128; commands may carry a timeout, which
-//! kills the whole process group; `which` also searches [`SAFE_PATH`]
+//! instead of a bare `No such file or directory`) or the missing working
+//! directory; signal deaths report 128 + signal instead of a flat 128;
+//! commands may carry a timeout that bounds the whole run (including output
+//! held open by background grandchildren) and kills the whole process group;
+//! supervised children ([`Exec::spawn`]) run in their own session and are
+//! killed with their group when dropped; `which` also searches [`SAFE_PATH`]
 //! because cron and sudo often run us without the sbin directories.
 
 mod fake;
+mod proc;
+mod system;
 
-pub use fake::{FakeExec, Rule, FAKE_PID_BASE};
+pub use fake::{FakeExec, FakeLife, Rule, FAKE_PID_BASE};
+pub use system::SystemExec;
 
 use crate::error::{Error, Result};
-use std::io::{self, Read, Write};
 use std::os::fd::RawFd;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The fd number used to hand the node lock to a child (`regen` during
 /// self-update). Compatible with v2.
@@ -34,11 +37,8 @@ pub const INHERITED_LOCK_ENV: &str = "ONEBOX_INHERITED_LOCK_FD";
 pub const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 /// Exit code reported when a command exceeded its timeout (like timeout(1)).
 pub const TIMEOUT_EXIT: i32 = 124;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// After killing a timed-out group, how long to wait for its pipes to close
-/// (a daemon in another session could keep them open forever).
-const DRAIN_GRACE: Duration = Duration::from_secs(1);
+/// Error for a detached daemon started without [`Cmd::daemon_env`].
+pub const DAEMON_ENV_REQUIRED: &str = "后台进程必须使用隔离环境（Cmd::daemon_env）";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Stdin {
@@ -105,9 +105,12 @@ impl Cmd {
         self.stdin = Stdin::Inherit;
         self
     }
-    /// Kill the command (its whole process group) after `timeout`; the
-    /// output then has code 124. Timed commands run in their own process
-    /// group, so they must not read from the terminal.
+    /// Bound the whole run by `timeout`: when it expires the command's
+    /// process group is killed and the output has code 124; when the command
+    /// exits in time but background processes it left in its group still
+    /// hold its output pipes at the deadline, they are killed. Timed
+    /// commands run in their own process group, so they must not read from
+    /// the terminal; a terminal Ctrl+C is forwarded to them.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -170,90 +173,58 @@ impl Output {
 }
 
 pub trait Exec: Send + Sync {
-    /// Run to completion. Errors only when the program cannot be started.
+    /// Run to completion. Errors only when the program cannot be started,
+    /// or when a cancellation signal interrupted a timed command while no
+    /// `SignalScope` owner was active (`Error::Cancelled`, exit 130).
     fn run(&self, cmd: &Cmd) -> Result<Output>;
-    /// Start a detached daemon (`setsid`, stdin null, stdout+stderr appended to
-    /// `log` opened with O_NOFOLLOW, mode 0600). Returns the PID.
+    /// Start a supervised child in its own session (so its whole process
+    /// group can be signalled) and return a handle to poll, wait for and
+    /// kill it. Output is captured (the last 1 MiB per stream) unless
+    /// `cmd.stream`. Dropping the handle terminates and reaps the group.
+    /// The child does not see the terminal's Ctrl+C: callers that wait for
+    /// it hold a `SignalScope` and kill it when cancelled.
+    fn spawn(&self, cmd: &Cmd) -> Result<Box<dyn RunningChild>>;
+    /// Start a detached daemon (`setsid`, cwd `/` unless set, stdin null,
+    /// stdout+stderr appended to `log` opened with O_NOFOLLOW, mode 0600).
+    /// `cmd` must use [`Cmd::daemon_env`]. Returns the PID.
     fn spawn_detached(&self, cmd: &Cmd, log: &Path) -> Result<u32>;
     /// Resolve a program name through PATH (absolute names are checked as-is).
     fn which(&self, program: &str) -> Option<PathBuf>;
 }
 
-/// The real implementation.
-pub struct SystemExec;
+/// A child started by [`Exec::spawn`]. Results are cached: once an
+/// [`Output`] was returned, later calls return the same one. A `timeout` on
+/// the `Cmd` is enforced whenever the child is polled (code 124).
+pub trait RunningChild: Send {
+    fn pid(&self) -> u32;
+    /// The output if the child has exited (it is then reaped), else `None`.
+    fn try_wait(&mut self) -> Result<Option<Output>>;
+    /// Like `try_wait`, waiting up to `limit` for the child to exit.
+    fn wait_timeout(&mut self, limit: Duration) -> Result<Option<Output>>;
+    /// Send `signal` to the child's whole process group (no-op once reaped).
+    fn kill_group(&mut self, signal: i32) -> Result<()>;
+    /// SIGTERM the group, wait up to `grace`, then SIGKILL it; reap.
+    fn terminate(&mut self, grace: Duration) -> Result<Output>;
+}
 
-impl Exec for SystemExec {
-    fn run(&self, cmd: &Cmd) -> Result<Output> {
-        let lock_fd = match cmd.inherit_lock_fd {
-            Some(fd) if fd < 0 => return Err(Error::msg("配置锁描述符无效")),
-            other => other,
-        };
-        let mut command = base_command(cmd);
-        command.stdin(match cmd.stdin {
-            Stdin::Null => Stdio::null(),
-            Stdin::Inherit => Stdio::inherit(),
-            Stdin::Bytes(_) => Stdio::piped(),
-        });
-        if cmd.stream {
-            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-        } else {
-            command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        }
-        let setup = ChildSetup {
-            new_group: cmd.timeout.is_some(),
-            new_session: false,
-            lock_fd,
-        };
-        setup.install(&mut command);
-        let mut child = command.spawn().map_err(|e| spawn_error(&cmd.program, &e))?;
-        if let Stdin::Bytes(bytes) = &cmd.stdin {
-            feed_stdin(&mut child, bytes.clone());
-        }
-        let stdout = Capture::start(child.stdout.take());
-        let stderr = Capture::start(child.stderr.take());
-        let waited = wait_child(&mut child, cmd.timeout)
-            .map_err(|e| Error::io(PathBuf::from(&cmd.program), e))?;
-        Ok(match (waited, cmd.timeout) {
-            (Some(status), _) => Output {
-                code: exit_code(status),
-                stdout: stdout.collect(None),
-                stderr: stderr.collect(None),
-            },
-            (None, limit) => Output {
-                code: TIMEOUT_EXIT,
-                stdout: stdout.collect(Some(DRAIN_GRACE)),
-                stderr: format!("命令超时（{} 秒）", format_secs(limit.unwrap_or_default())),
-            },
-        })
+/// Preconditions of [`Exec::spawn_detached`], shared by every implementation
+/// so tests with [`FakeExec`] catch the same mistakes as production.
+pub fn check_detached(cmd: &Cmd) -> Result<()> {
+    if cmd.inherit_lock_fd.is_some() {
+        return Err(Error::msg("后台进程不能继承配置锁"));
     }
+    if !cmd.clear_env {
+        return Err(Error::msg(DAEMON_ENV_REQUIRED));
+    }
+    Ok(())
+}
 
-    fn spawn_detached(&self, cmd: &Cmd, log: &Path) -> Result<u32> {
-        if cmd.inherit_lock_fd.is_some() {
-            return Err(Error::msg("后台进程不能继承配置锁"));
-        }
-        let log_file = open_log(log)?;
-        let stderr = log_file.try_clone().map_err(|e| Error::io(log, e))?;
-        let mut command = base_command(cmd);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(stderr));
-        let setup = ChildSetup {
-            new_group: false,
-            new_session: true,
-            lock_fd: None,
-        };
-        setup.install(&mut command);
-        // The Child handle is dropped without waiting: the daemon lives on in
-        // its own session; the init system or our supervisor tracks its PID.
-        let child = command.spawn().map_err(|e| spawn_error(&cmd.program, &e))?;
-        Ok(child.id())
+/// Preconditions of [`Exec::spawn`].
+pub fn check_spawn(cmd: &Cmd) -> Result<()> {
+    if cmd.inherit_lock_fd.is_some() {
+        return Err(Error::msg("子进程不能继承配置锁"));
     }
-
-    fn which(&self, program: &str) -> Option<PathBuf> {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        which_in(program, &path)
-    }
+    Ok(())
 }
 
 /// `which` against an explicit PATH value, then [`SAFE_PATH`]. Relative
@@ -276,234 +247,6 @@ pub fn which_in(program: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
 
 fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-/// The PATH the child will see: its own `PATH` entry, else ours unless the
-/// environment is cleared.
-fn child_path(cmd: &Cmd) -> std::ffi::OsString {
-    match cmd.env.iter().rev().find(|(k, _)| k == "PATH") {
-        Some((_, v)) => v.into(),
-        None if cmd.clear_env => std::ffi::OsString::new(),
-        None => std::env::var_os("PATH").unwrap_or_default(),
-    }
-}
-
-fn base_command(cmd: &Cmd) -> Command {
-    // Bare names are resolved like `which` (PATH, then SAFE_PATH) so a
-    // program that `which` reports as present can also be run under cron's
-    // minimal PATH. argv[0] stays the name the caller used.
-    let resolved = (!cmd.program.contains('/'))
-        .then(|| which_in(&cmd.program, &child_path(cmd)))
-        .flatten();
-    let mut command = match &resolved {
-        Some(path) => {
-            let mut c = Command::new(path);
-            c.arg0(&cmd.program);
-            c
-        }
-        None => Command::new(&cmd.program),
-    };
-    command.args(&cmd.args);
-    if cmd.clear_env {
-        command.env_clear();
-    }
-    command.envs(cmd.env.iter().map(|(k, v)| (k, v)));
-    if cmd.inherit_lock_fd.is_some() {
-        command.env(INHERITED_LOCK_ENV, INHERITED_LOCK_FD.to_string());
-    }
-    if let Some(dir) = &cmd.cwd {
-        command.current_dir(dir);
-    }
-    command
-}
-
-/// What the child does between fork and exec. Everything here must be
-/// async-signal-safe: plain syscalls, no allocation, no locks.
-#[derive(Clone, Copy)]
-struct ChildSetup {
-    /// Own process group so a timeout can kill the whole tree.
-    new_group: bool,
-    /// Own session (detached daemons).
-    new_session: bool,
-    /// Descriptor to expose as [`INHERITED_LOCK_FD`] without CLOEXEC.
-    lock_fd: Option<RawFd>,
-}
-
-impl ChildSetup {
-    fn install(self, command: &mut Command) {
-        // SAFETY: the closure only performs async-signal-safe syscalls
-        // (pthread_sigmask, setpgid, setsid, dup2, fcntl) and constructs
-        // io::Error from raw errno values, which does not allocate.
-        unsafe {
-            command.pre_exec(move || self.apply());
-        }
-    }
-
-    fn apply(self) -> io::Result<()> {
-        reset_signal_mask()?;
-        // SAFETY: plain syscalls on our own process / valid descriptor numbers.
-        unsafe {
-            if self.new_group && libc::setpgid(0, 0) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if self.new_session && libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if let Some(fd) = self.lock_fd {
-                if fd != INHERITED_LOCK_FD && libc::dup2(fd, INHERITED_LOCK_FD) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let flags = libc::fcntl(INHERITED_LOCK_FD, libc::F_GETFD);
-                if flags < 0
-                    || libc::fcntl(INHERITED_LOCK_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Unblock every signal: parents block INT/TERM/HUP during critical
-/// sections and the mask survives exec, which would make daemons unkillable.
-fn reset_signal_mask() -> io::Result<()> {
-    // SAFETY: sigset_t is plain data initialised by sigemptyset before use.
-    unsafe {
-        let mut mask: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut mask);
-        let rc = libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
-        if rc != 0 {
-            return Err(io::Error::from_raw_os_error(rc));
-        }
-    }
-    Ok(())
-}
-
-fn spawn_error(program: &str, e: &io::Error) -> Error {
-    match e.kind() {
-        io::ErrorKind::NotFound => Error::msg(format!("未找到程序 {program}")),
-        io::ErrorKind::PermissionDenied => Error::msg(format!("无法执行 {program}: 权限不足")),
-        _ => Error::msg(format!("无法执行 {program}: {e}")),
-    }
-}
-
-fn exit_code(status: ExitStatus) -> i32 {
-    status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
-}
-
-fn format_secs(d: Duration) -> String {
-    if d.subsec_millis() == 0 {
-        d.as_secs().to_string()
-    } else {
-        format!("{:.1}", d.as_secs_f64())
-    }
-}
-
-/// Write stdin from a thread so a child that fills its stdout pipe before
-/// reading all input cannot deadlock us. Write errors (EPIPE when the child
-/// exits early) are irrelevant: the exit status tells the story.
-fn feed_stdin(child: &mut Child, bytes: Vec<u8>) {
-    if let Some(mut pipe) = child.stdin.take() {
-        std::thread::spawn(move || {
-            let _ = pipe.write_all(&bytes);
-        });
-    }
-}
-
-/// A pipe drained by a background thread.
-struct Capture(Option<mpsc::Receiver<Vec<u8>>>);
-
-impl Capture {
-    fn start<R: Read + Send + 'static>(pipe: Option<R>) -> Capture {
-        Capture(pipe.map(|mut pipe| {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = pipe.read_to_end(&mut buf);
-                let _ = tx.send(buf);
-            });
-            rx
-        }))
-    }
-
-    /// The captured text (lossy UTF-8); `limit` bounds the wait for EOF.
-    fn collect(self, limit: Option<Duration>) -> String {
-        let Some(rx) = self.0 else {
-            return String::new();
-        };
-        let bytes = match limit {
-            None => rx.recv().unwrap_or_default(),
-            Some(limit) => rx.recv_timeout(limit).unwrap_or_default(),
-        };
-        String::from_utf8_lossy(&bytes).into_owned()
-    }
-}
-
-/// Wait for the child. `Ok(None)` means the timeout expired and the child's
-/// process group was killed and reaped. A signal that arrives while waiting
-/// (recorded by `sys::signal`) is forwarded once to the child's group, which
-/// otherwise would not see a terminal Ctrl+C.
-fn wait_child(child: &mut Child, timeout: Option<Duration>) -> io::Result<Option<ExitStatus>> {
-    let Some(limit) = timeout else {
-        return child.wait().map(Some);
-    };
-    let deadline = Instant::now() + limit;
-    let pgid = child.id() as libc::pid_t;
-    let signal_at_start = crate::sys::signal::pending();
-    let mut forwarded = false;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            kill_group(pgid, libc::SIGKILL);
-            child.wait()?;
-            return Ok(None);
-        }
-        if let Some(sig) = crate::sys::signal::pending() {
-            if !forwarded && Some(sig) != signal_at_start {
-                kill_group(pgid, sig);
-                forwarded = true;
-            }
-        }
-        std::thread::sleep(POLL_INTERVAL.min(deadline - now));
-    }
-}
-
-fn kill_group(pgid: libc::pid_t, sig: libc::c_int) {
-    // SAFETY: kill(2) with a negative pid targets the process group the child
-    // created in pre_exec; it is not reaped yet, so the id cannot be reused.
-    unsafe {
-        libc::kill(-pgid, sig);
-    }
-}
-
-/// Open (create) a daemon log: parent created 0700 when missing, the file
-/// itself 0600, append-only, never through a symlink.
-fn open_log(log: &Path) -> Result<std::fs::File> {
-    if let Some(parent) = log.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if !parent.exists() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)
-                .map_err(|e| Error::io(parent, e))?;
-        }
-    }
-    std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(log)
-        .map_err(|e| match e.raw_os_error() {
-            Some(libc::ELOOP) => Error::msg(format!("不允许符号链接: {}", log.display())),
-            _ => Error::io(log, e),
-        })
 }
 
 #[cfg(test)]
