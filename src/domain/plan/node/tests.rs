@@ -174,6 +174,31 @@ fn add_explicit_port_and_certificate_errors() {
 }
 
 #[test]
+fn foreign_socket_in_a_dropped_hop_range_is_busy() {
+    let mut hopped = preset1();
+    hopped.hy2.hop = Some(PortRange {
+        start: 20000,
+        end: 30000,
+    });
+    let mut unhopped = hopped.clone();
+    unhopped.hy2.hop = None;
+    let foreign = FnProbe(|p, t| p == 20005 && t == Transport::Udp);
+    let probing = PlanEnv {
+        probe: &foreign,
+        previous: Some(&hopped),
+        ..env()
+    };
+    let opts = AddOptions {
+        port: Some(20005),
+        ..AddOptions::default()
+    };
+    let tcp = add(&unhopped, Anytls, &opts, &probing, &mut SeqRandom(1)).unwrap();
+    assert_eq!(tcp.inbound(Anytls).unwrap().port, 20005, "AnyTLS is TCP");
+    let e = add(&unhopped, Shadowsocks, &opts, &probing, &mut SeqRandom(1)).unwrap_err();
+    assert_eq!(e.to_string(), "shadowsocks 端口不可用: 20005");
+}
+
+#[test]
 fn remove_rules() {
     let p1 = preset1();
     assert_eq!(remove(&p1, Trojan).unwrap_err().to_string(), "协议未启用");

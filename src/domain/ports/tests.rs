@@ -457,6 +457,38 @@ fn probe_and_previous_generation() {
 }
 
 #[test]
+fn listeners_without_sockets_never_excuse_probed_ports() {
+    let plan = PortPlan::of(&config(&[(VlessReality, 443, SB)]), &[]);
+    // The previous generation hopped 20000–30000 (an nft REDIRECT, no socket).
+    let mut hopped = config(&[(Hysteria2, 25000, SB)]);
+    hopped.hy2.hop = hop(20000, 30000);
+    let prev = PortPlan::of(&hopped, &[]);
+    let foreign = FnProbe(|port, t| port == 20005 && t == Transport::Udp);
+    let tuic = Owner::Inbound(Tuic);
+    assert!(!plan.is_free(20005, Transport::Udp, &tuic, &foreign, Some(&prev)));
+    // Auto-allocation skips a foreign socket inside the old range as well.
+    let busy = FnProbe(|port, t| {
+        t == Transport::Udp && (defaults::COMMON_PORTS.contains(&port) || port == 20000)
+    });
+    assert_eq!(plan.allocate(Tuic, SB, &busy, Some(&prev)).unwrap(), 20001);
+    // The Hysteria2 socket itself is still ours.
+    let own = FnProbe(|port, _| port == 25000);
+    let hy2 = Owner::Inbound(Hysteria2);
+    assert!(plan.is_free(25000, Transport::Udp, &hy2, &own, Some(&prev)));
+
+    // The proxy's HTTP-01 responder runs only during issuance.
+    let mut issued = config(&[(Trojan, 443, SB)]);
+    acme(&mut issued, AcmeMethod::Http01);
+    let prev = PortPlan::of(&issued, &[]);
+    let busy80 = FnProbe(|port, t| port == 80 && t == Transport::Tcp);
+    let vmess = Owner::Inbound(VmessWs);
+    assert!(!plan.is_free(80, Transport::Tcp, &vmess, &busy80, Some(&prev)));
+    // The site's nginx holds 80 and is stopped by the apply: not foreign.
+    let prev = PortPlan::of(&with_site(preset1(), "www.example.com", false), &[]);
+    assert!(plan.is_free(80, Transport::Tcp, &vmess, &busy80, Some(&prev)));
+}
+
+#[test]
 fn firewall_ports_are_public_and_merged() {
     let p1 = PortPlan::of(&preset1(), &[]);
     assert_eq!(

@@ -68,11 +68,20 @@ impl Owner {
         )
     }
 
-    /// The apply engine stops this listener (cores, site nginx, subscription
-    /// nginx) before the new generation starts, so its socket is not foreign.
-    /// The subscription port is excluded: the IP-mode worker keeps running.
+    /// A process of the node binds this listener while the node runs. The
+    /// hop range is a netfilter REDIRECT and the proxy's HTTP-01 responder
+    /// only runs during issuance, so a live socket inside either belongs to
+    /// someone else. FRP sockets belong to the independent FRP server.
+    fn holds_socket(&self) -> bool {
+        !matches!(self, Owner::Hy2Hop | Owner::AcmeHttp80 | Owner::Frp(_))
+    }
+
+    /// The apply engine stops this listener's process (cores, site nginx,
+    /// subscription nginx) before the new generation starts, so its socket is
+    /// not foreign. The subscription port is excluded: the IP-mode worker
+    /// keeps running.
     fn released_by_apply(&self) -> bool {
-        !matches!(self, Owner::SubscriptionPort | Owner::Frp(_))
+        self.holds_socket() && *self != Owner::SubscriptionPort
     }
 }
 
@@ -397,11 +406,17 @@ fn probed_in_use(
         .any(|t| probe.in_use(port, t) && !held_by_previous(previous, owner, port, t))
 }
 
+/// A live socket on `port` is ours when the previous generation had a
+/// socket-holding listener there that is either the same owner or stopped by
+/// the apply. Listeners without a socket (hop range, HTTP-01 responder) never
+/// excuse a probed socket.
 fn held_by_previous(previous: Option<&PortPlan>, owner: &Owner, port: u16, t: Transport) -> bool {
     previous.is_some_and(|prev| {
-        prev.listeners
-            .iter()
-            .any(|l| l.covers(port, t) && (l.owner == *owner || l.owner.released_by_apply()))
+        prev.listeners.iter().any(|l| {
+            l.covers(port, t)
+                && l.owner.holds_socket()
+                && (l.owner == *owner || l.owner.released_by_apply())
+        })
     })
 }
 
