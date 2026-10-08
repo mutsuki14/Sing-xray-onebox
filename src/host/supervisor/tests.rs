@@ -2,7 +2,7 @@ use super::fixture::FakeProc;
 use super::*;
 use crate::domain::protocol::Core;
 use crate::host::init::InitSystem;
-use crate::host::service::{service_env, ServiceDef};
+use crate::host::service::{service_env, ServiceDef, NOFILE_LIMIT};
 use crate::sys::exec::{FakeExec, Output, FAKE_PID_BASE, SAFE_PATH};
 use crate::sys::fs::TempDir;
 use std::fs;
@@ -110,6 +110,11 @@ fn start_spawns_an_isolated_daemon_and_records_its_identity() {
     assert!(cmd.clear_env, "daemons never inherit the admin shell");
     assert_eq!(cmd.env[0], ("PATH".to_owned(), SAFE_PATH.to_owned()));
     assert_eq!(cmd.env[1..], f.env()[..]);
+    assert_eq!(
+        cmd.nofile,
+        Some(NOFILE_LIMIT),
+        "the units' open-files limit"
+    );
     assert_eq!(log, &f.ctx.paths.log.join("onebox-sing-box.log"));
 
     let pid_file = def.pid_file();
@@ -347,6 +352,75 @@ fn a_oneshot_runs_synchronously_without_a_record() {
 }
 
 #[test]
+fn runtime_directories_exist_before_the_daemon_starts() {
+    let f = Fixture::new();
+    let nginx = f.ctx.paths.bin.join("nginx");
+    fs::create_dir_all(&f.ctx.paths.bin).unwrap();
+    fs::write(&nginx, b"nginx").unwrap();
+    let def = ServiceDef::frp_web(&f.ctx.paths, &nginx);
+    let runtime = f.ctx.paths.run.join("nginx-frp");
+    assert_eq!(def.runtime_dirs(), std::slice::from_ref(&runtime));
+    let (sup, _) = f.supervisor(&[]);
+    // The spawn finds no process: the start fails, the directory is there.
+    assert!(sup.start(&def, &f.env()).is_err());
+    assert_eq!(f.exec.spawned().len(), 1);
+    for dir in [&f.ctx.paths.run, &runtime] {
+        let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "{}", dir.display());
+    }
+}
+
+#[test]
+fn helpers_inherit_only_the_lock_they_take() {
+    let f = Fixture::new();
+    let exe = f.ctx.paths.executable.to_string_lossy().into_owned();
+    f.exec.on(&exe, &[], Output::success(""));
+    let (sup, _) = f.supervisor(&[]);
+    let node = FileLock::acquire(&f.ctx.paths.lock(), "busy").unwrap();
+    let frp = FileLock::acquire(&f.ctx.paths.frp_lock(), "busy").unwrap();
+
+    let network = ServiceDef::network(&f.ctx.paths);
+    sup.start_with_lock(&network, &f.env(), &node).unwrap();
+    sup.start_with_lock(&network, &f.env(), &frp).unwrap();
+    sup.start(&network, &f.env()).unwrap();
+    let inherited: Vec<_> = f.exec.calls().iter().map(|c| c.inherit_lock_fd).collect();
+    assert_eq!(inherited, [Some(node.raw_fd()), None, None]);
+
+    // The FRP pre-start gets the FRP lock; the daemon never gets one.
+    f.exec.clear_history();
+    let frps = ServiceDef::frps(&f.ctx.paths);
+    fs::create_dir_all(&f.ctx.paths.frp_bin).unwrap();
+    fs::write(frps.program(), b"frps").unwrap();
+    f.run(&frps, FAKE_PID_BASE, 5);
+    sup.restart_with_lock(&frps, &f.env(), &frp).unwrap();
+    let calls = f.exec.calls();
+    assert_eq!(calls[0].display(), format!("{exe} frps net-apply"));
+    assert_eq!(calls[0].inherit_lock_fd, Some(frp.raw_fd()));
+    assert_eq!(calls[1].inherit_lock_fd, None);
+}
+
+#[test]
+fn signal_errors_are_reported_in_chinese() {
+    let text = |e: std::io::Error| signal_error(42, &e).to_string();
+    assert_eq!(
+        text(std::io::Error::from_raw_os_error(libc::EPERM)),
+        "无法向进程 42 发送信号: 权限不足"
+    );
+    assert_eq!(
+        text(std::io::Error::from_raw_os_error(libc::EINVAL)),
+        "无法向进程 42 发送信号: 信号无效"
+    );
+    assert_eq!(
+        text(std::io::ErrorKind::InvalidInput.into()),
+        "无法向进程 42 发送信号: 进程号无效"
+    );
+    assert_eq!(
+        SystemSignaller.signal(1, 0).unwrap_err().to_string(),
+        "无法向进程 1 发送信号: 进程号无效"
+    );
+}
+
+#[test]
 fn restart_stops_the_old_process_and_spawns_a_new_one() {
     let f = Fixture::new();
     let def = f.core();
@@ -458,6 +532,17 @@ fn real_daemons_are_started_identified_and_stopped() {
     let environ = String::from_utf8_lossy(&environ);
     assert!(environ.contains("ONEBOX_INIT=none") && environ.contains(SAFE_PATH));
     assert!(!environ.contains("CARGO"), "cleared environment: {environ}");
+    // The open-files limit of the units, or the hard limit when lower.
+    let limits = fs::read_to_string(format!("/proc/{}/limits", found.record.pid)).unwrap();
+    let row = limits
+        .lines()
+        .find(|l| l.starts_with("Max open files"))
+        .unwrap();
+    let values: Vec<u64> = row
+        .split_whitespace()
+        .filter_map(|w| w.parse().ok())
+        .collect();
+    assert_eq!(values[0], NOFILE_LIMIT.min(values[1]), "{row}");
 
     let other = ServiceDef::new(
         &ctx.paths,

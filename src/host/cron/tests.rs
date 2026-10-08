@@ -480,7 +480,9 @@ fn restore_refuses_foreign_or_out_of_scope_lines_and_bad_anchors() {
         lines::frp_renew(),
         format!("{renew}\n* * * * * y"),
     ] {
-        let err = t.restore(&snap(&[bad.clone()]), Scope::Node).unwrap_err();
+        let err = t
+            .restore(&snap(std::slice::from_ref(&bad)), Scope::Node)
+            .unwrap_err();
         assert_eq!(err.to_string(), NOT_OWNED, "{bad:?}");
     }
     let boot = lines::boot("onebox-xray");
@@ -508,7 +510,7 @@ fn retired_jobs_are_kept_while_present_but_never_reinstalled() {
     let original = format!("a\n{retired}\nb\n");
     let t0 = tab(&original);
     let node = t0.snapshot(Scope::Node);
-    assert_eq!(node.lines, [retired.clone()]);
+    assert_eq!(node.lines, std::slice::from_ref(&retired));
     // Still there: untouched.
     let mut t = t0.clone();
     t.restore(&node, Scope::Node).unwrap();

@@ -487,3 +487,37 @@ fn supervised_output_keeps_the_tail() {
     assert_eq!(out.stdout.len(), 1 << 20);
     assert!(out.stdout.ends_with("aaaEND\n"));
 }
+
+#[test]
+fn open_files_limit_goes_as_high_as_the_host_allows() {
+    let limits = |cmd: Cmd| -> (u64, u64) {
+        let out = run(&cmd.args(["-c", "echo $(ulimit -Sn) $(ulimit -Hn)"]));
+        let mut words = out.stdout.split_whitespace().map(|w| w.parse().unwrap());
+        (words.next().unwrap(), words.next().unwrap())
+    };
+    let (soft, hard) = limits(Cmd::new("/bin/sh"));
+    // At or below the hard limit: the soft limit is raised, the hard kept.
+    if soft < hard {
+        let wanted = hard.min(soft + 64);
+        let got = limits(Cmd::new("/bin/sh").nofile_limit(wanted));
+        assert_eq!(got, (wanted, hard));
+    }
+    // Above the hard limit: raised when privileged, else the hard limit.
+    let (got_soft, got_hard) = limits(Cmd::new("/bin/sh").nofile_limit(hard + 1));
+    assert!(
+        got_hard >= hard && got_soft == got_hard.min(hard + 1),
+        "{got_soft} {got_hard}"
+    );
+    // A soft limit already high enough is not lowered.
+    assert_eq!(limits(Cmd::new("/bin/sh").nofile_limit(1)), (soft, hard));
+
+    // Detached daemons get it too.
+    let dir = TempDir::new("exec-nofile").unwrap();
+    let log = dir.join("d.log");
+    let pid = SystemExec
+        .spawn_detached(&daemon("echo $(ulimit -Sn)").nofile_limit(hard + 1), &log)
+        .unwrap();
+    reap(pid);
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(text.trim().parse::<u64>().unwrap(), got_soft);
+}
