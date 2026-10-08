@@ -410,6 +410,11 @@ pub fn check_config_with(ctx: &Ctx, core: Core, binary: &Path, config: &Path) ->
     let config_arg = config.to_string_lossy();
     let cmd = match core {
         Core::Singbox => {
+            // The run root stays traversable (0755, as v2 created it) for
+            // other users of it such as nginx workers; only `check` is private.
+            if !ctx.paths.run.exists() {
+                sysfs::ensure_dir(&ctx.paths.run, 0o755)?;
+            }
             let dir = ctx.paths.run.join("check");
             sysfs::ensure_dir(&dir, 0o700)?;
             Cmd::new(program).args(["check", "-D", &dir.to_string_lossy(), "-c", &config_arg])

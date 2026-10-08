@@ -802,6 +802,11 @@ fn check_config_commands_and_errors() {
     );
     let mode = std::fs::metadata(&check_dir).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o700);
+    let run_mode = std::fs::metadata(&f.ctx.paths.run)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(run_mode & 0o777, 0o755, "run root stays traversable");
     assert!(f
         .exec
         .calls()
