@@ -237,6 +237,7 @@ fn ufw_argv_golden() {
     assert_eq!(
         exec.history(),
         [
+            "ufw status numbered",
             "ufw allow 20000:40000/udp comment onebox-proxy-0123456789abcdef",
             "ufw status numbered",
             "ufw status numbered",
@@ -248,6 +249,89 @@ fn ufw_argv_golden() {
         ufw::numbered_matches(status, "onebox-proxy-other"),
         Vec::<u32>::new()
     );
+}
+
+#[test]
+fn ufw_status_lines_are_parsed() {
+    let line =
+        "[10] 443/tcp (v6)               ALLOW IN    Anywhere (v6)              # onebox-proxy-01";
+    assert_eq!(
+        ufw::parse_line(line),
+        Some(ufw::Listed {
+            number: 10,
+            to: "443/tcp",
+            action: "ALLOW",
+            from: "Anywhere",
+            comment: Some("onebox-proxy-01"),
+        })
+    );
+    let limited =
+        ufw::parse_line("[ 3] 22/tcp                     LIMIT IN    203.0.113.0/24").unwrap();
+    assert_eq!(
+        (limited.action, limited.from, limited.comment),
+        ("LIMIT", "203.0.113.0/24", None)
+    );
+    for junk in [
+        "Status: active",
+        "",
+        "     To   Action   From",
+        "[x] 1/tcp ALLOW IN Anywhere",
+    ] {
+        assert_eq!(ufw::parse_line(junk), None, "{junk:?}");
+    }
+}
+
+#[test]
+fn ufw_never_rewrites_administrator_rules() {
+    let (_dir, ctx, exec) = setup();
+    let status = "Status: active\n\
+[ 1] 443/tcp                    ALLOW IN    Anywhere\n\
+[ 2] 8443/tcp                   DENY IN     Anywhere\n\
+[ 3] 80/tcp                     ALLOW IN    Anywhere                   # onebox-acme-1111111111111111\n\
+[ 4] 9443/tcp                   ALLOW IN    198.51.100.7\n";
+    exec.on("ufw", &["status", "numbered"], Output::success(status))
+        .on("ufw", &["allow"], Output::success("Rule added\n"));
+    assert!(
+        !Ufw.create(&ctx, &rule(Proto::Tcp, 443, 443)).unwrap(),
+        "admin allow"
+    );
+    assert!(
+        !Ufw.create(&ctx, &rule(Proto::Tcp, 8443, 8443)).unwrap(),
+        "admin deny kept"
+    );
+    assert!(
+        Ufw.create(&ctx, &rule(Proto::Tcp, 80, 80)).unwrap(),
+        "another owner's rule"
+    );
+    assert!(
+        Ufw.create(&ctx, &rule(Proto::Tcp, 9443, 9443)).unwrap(),
+        "source-limited admin rule differs"
+    );
+    let allows: Vec<String> = exec
+        .history()
+        .into_iter()
+        .filter(|c| c.contains("allow"))
+        .collect();
+    assert_eq!(
+        allows,
+        [
+            "ufw allow 80/tcp comment onebox-proxy-0123456789abcdef",
+            "ufw allow 9443/tcp comment onebox-proxy-0123456789abcdef",
+        ]
+    );
+}
+
+#[test]
+fn inactive_ufw_cannot_confirm_removal() {
+    let (_dir, ctx, exec) = setup();
+    exec.on(
+        "ufw",
+        &["status", "numbered"],
+        Output::success("Status: inactive\n"),
+    );
+    let err = Ufw.remove(&ctx, &rule(Proto::Tcp, 443, 443)).unwrap_err();
+    assert!(err.to_string().starts_with("ufw 未启用"));
+    assert_eq!(exec.history(), ["ufw status numbered"]);
 }
 
 #[test]

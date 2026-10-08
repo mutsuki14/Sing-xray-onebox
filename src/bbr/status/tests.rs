@@ -180,3 +180,24 @@ fn a_plain_sysctl_conf_is_reported_as_loaded_last() {
     );
     assert!(conflicts(&Fixture::new().ctx).is_empty());
 }
+
+/// Collects the status of the real host (read-only); run with `--ignored`.
+#[test]
+#[ignore]
+fn real_host_status_is_read_only() {
+    let dir = crate::sys::fs::TempDir::new("bbr-real").unwrap();
+    let mut paths = crate::paths::Paths::isolated(dir.path());
+    paths.system_root = PathBuf::from("/");
+    let ctx = Ctx {
+        paths,
+        exec: std::sync::Arc::new(crate::sys::exec::SystemExec),
+        ui: std::sync::Arc::new(crate::ui::ScriptedPrompter::new(Vec::<String>::new())),
+    };
+    let report = collect(&ctx);
+    println!("{}", render(&report));
+    for notice in conflict_notices(&report.conflicts) {
+        println!("{notice}");
+    }
+    assert!(report.kernel.is_some());
+    assert!(!ctx.paths.bbr_dir.exists());
+}

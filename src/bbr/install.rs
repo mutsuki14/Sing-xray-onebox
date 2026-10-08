@@ -26,6 +26,7 @@ use super::net::Fetcher;
 use super::preflight::{self, missing_kernel_file};
 use super::release::{kernel_name, release_tags, tag_url, Arch, Asset, Manifest};
 use super::{lock, Session, REPO};
+use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::exec::{Cmd, Output};
 use crate::sys::fs::{atomic_write, sha256_file, sweep_stale, TempDir};
@@ -57,7 +58,19 @@ pub(super) fn install(session: &Session<'_>, req: &InstallRequest) -> Result<()>
                 .unwrap_or("Actions-bbr-v3 内核仅支持 x86_64 / aarch64"),
         )
     })?;
-    let manifest = resolve(session.fetcher, ctx, req, arch)?;
+    let manifest = match (
+        resolve(session.fetcher, ctx, req, arch),
+        report.first_failure(),
+    ) {
+        (Ok(manifest), _) => manifest,
+        (Err(e), None) => return Err(e),
+        // The host itself is the more useful answer than a release error.
+        (Err(e), Some(failure)) => {
+            out::warn(format!("无法获取 Release 信息: {e}"));
+            out::data(&format!("安装检查:\n{}", report.render()))?;
+            return Err(Error::msg(failure));
+        }
+    };
     out::data(&plan_text(&manifest, req.max))?;
     out::data(&format!("安装检查:\n{}", report.render()))?;
     if let Some(failure) = report.first_failure() {
@@ -70,12 +83,7 @@ pub(super) fn install(session: &Session<'_>, req: &InstallRequest) -> Result<()>
 }
 
 /// Resolve `latest`, validate the tag, then fetch and check the manifest.
-fn resolve(
-    fetcher: &dyn Fetcher,
-    ctx: &crate::ctx::Ctx,
-    req: &InstallRequest,
-    arch: Arch,
-) -> Result<Manifest> {
+fn resolve(fetcher: &dyn Fetcher, ctx: &Ctx, req: &InstallRequest, arch: Arch) -> Result<Manifest> {
     let tag = if req.desired == "latest" {
         let mut fetch = |url: &str| fetcher.json(ctx, url);
         release_tags(arch, req.max, &mut fetch)?
@@ -112,10 +120,12 @@ pub fn plan_text(manifest: &Manifest, max: bool) -> String {
 fn apply(session: &Session<'_>, manifest: &Manifest, arch: Arch) -> Result<()> {
     let ctx = session.ctx;
     let _lock = lock(ctx)?;
+    // Staging directories are only created under this lock, so any that
+    // exist now were left by an interrupted install.
     let _ = sweep_stale(
         &ctx.paths.bbr_dir,
         &format!("onebox-{STAGING_LABEL}-"),
-        Duration::from_secs(24 * 3600),
+        Duration::ZERO,
     );
     let work = TempDir::new_in(&ctx.paths.bbr_dir, STAGING_LABEL)?;
     let needed = manifest.total().div_ceil(1024) + STAGING_SLACK_KIB;
@@ -166,7 +176,7 @@ fn confirm(session: &Session<'_>, tag: &str) -> Result<()> {
 
 /// Size, then SHA-256 (dpkg-deb never sees unverified bytes), then the
 /// package's own Package/Version/Architecture fields.
-pub fn verify_package(ctx: &crate::ctx::Ctx, file: &Path, asset: &Asset, arch: Arch) -> Result<()> {
+pub fn verify_package(ctx: &Ctx, file: &Path, asset: &Asset, arch: Arch) -> Result<()> {
     let regular =
         std::fs::symlink_metadata(file).is_ok_and(|m| m.is_file() && m.len() == asset.size);
     if !regular {
@@ -214,7 +224,7 @@ pub struct Planned {
 }
 
 /// `apt-get --simulate`; `--no-remove` makes apt refuse any removal.
-fn simulate(ctx: &crate::ctx::Ctx, packages: &[PathBuf]) -> Result<Vec<Planned>> {
+fn simulate(ctx: &Ctx, packages: &[PathBuf]) -> Result<Vec<Planned>> {
     require_pair(packages)?;
     let cmd = apt(
         &[
@@ -354,7 +364,7 @@ pub fn grub_has_kernel(grub: &str, kernel: &str) -> bool {
 /// Run apt/dpkg with inherited output in its own session (the terminal's
 /// Ctrl+C cannot reach dpkg); our own INT/TERM/HUP only print a notice
 /// while it runs.
-fn run_protected(ctx: &crate::ctx::Ctx, cmd: Cmd) -> Result<Output> {
+fn run_protected(ctx: &Ctx, cmd: Cmd) -> Result<Output> {
     let _scope = signal::SignalScope::install()?;
     let mut child = ctx.exec.spawn(&cmd.stream())?;
     let mut warned = false;
@@ -382,7 +392,7 @@ pub fn record_text(manifest: &Manifest) -> String {
         .collect()
 }
 
-fn write_record(ctx: &crate::ctx::Ctx, manifest: &Manifest) {
+fn write_record(ctx: &Ctx, manifest: &Manifest) {
     let path = ctx.paths.bbr_dir.join(RECORD);
     if let Err(e) = atomic_write(&path, record_text(manifest).as_bytes(), 0o600) {
         out::warn(format!("安装成功，但未能保存下载校验记录: {e}"));

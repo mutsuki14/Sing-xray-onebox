@@ -325,6 +325,29 @@ fn preview_on_an_ineligible_host_lists_failures_and_fails() {
 }
 
 #[test]
+fn an_ineligible_host_wins_over_release_errors() {
+    let f = Fixture::new();
+    f.eligible();
+    f.host().virtualized = true;
+    *f.github.pages.lock().unwrap() =
+        vec![serde_json::json!({"message": "API rate limit exceeded"})];
+    let err = f
+        .session()
+        .run(crate::bbr::Action::Install(request(false)))
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "容器/WSL 共享宿主机内核，不能在此安装 BBRv3 内核"
+    );
+    f.host().virtualized = false;
+    let err = f
+        .session()
+        .run(crate::bbr::Action::Install(request(false)))
+        .unwrap_err();
+    assert!(err.to_string().contains("API rate limit exceeded"), "{err}");
+}
+
+#[test]
 fn user_tags_are_validated_before_any_request() {
     let f = Fixture::new();
     f.eligible();
@@ -351,9 +374,13 @@ fn full_install_downloads_verifies_simulates_confirms_and_records() {
     f.ui.set_assume_yes(false);
     f.ui.set_interactive(true);
     f.ui.push("y");
+    let leftover = f.ctx.paths.bbr_dir.join("onebox-download-0123456789abcdef");
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("partial.deb"), b"x").unwrap();
     f.session()
         .run(crate::bbr::Action::Install(request(true)))
         .unwrap();
+    assert!(!leftover.exists(), "interrupted staging swept");
     assert_eq!(
         f.ui.prompts(),
         ["安装 x86_64-7.2.8？请确认有 VPS 控制台与快照，安装后需手动重启"]
