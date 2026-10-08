@@ -1,4 +1,6 @@
-//! Atomic publication of the client directory (`ROOT/client`).
+//! Atomic directory publication: [`replace_dir`] for any published tree
+//! (subscription snapshot and site content reuse it; its messages name no
+//! particular directory) and [`write_clients`] for `ROOT/client`.
 //!
 //! Everything is rendered in memory first; only then is a private stage
 //! directory written and swapped with the live one in a single
@@ -6,9 +8,9 @@
 //! credentials or a half-written file, and a render error leaves the old
 //! directory byte-identical. The swapped-out old directory is removed.
 //!
-//! Resulting layout: directory 0700, files 0600; formats the current
-//! protocols do not support disappear (the directory is replaced as a whole,
-//! including files a user put there).
+//! Resulting layout: directory 0700, files 0600; for the client directory,
+//! formats the current protocols do not support disappear (the directory is
+//! replaced as a whole, including files a user put there).
 //!
 //! Changes from v2: stale stage directories left by crashed runs are swept
 //! first, and a failed cleanup is reported as a warning (v2 ignored it and
@@ -82,7 +84,7 @@ pub fn replace_dir(target: &Path, files: &[(String, Vec<u8>)]) -> Result<Publish
         (Ok(()), Ok(_)) => Ok(published),
         (Ok(()), Err(e)) => {
             published.warnings.push(format!(
-                "旧目录 {} 清理失败（含旧凭据，请手动删除）: {e}",
+                "被替换的旧目录 {} 清理失败（可能含旧凭据，请手动删除）: {e}",
                 stage.display()
             ));
             Ok(published)
@@ -122,7 +124,7 @@ fn check_target(target: &Path) -> Result<()> {
         Ok(m) if m.file_type().is_symlink() => {
             bail!("不允许符号链接: {}", target.display())
         }
-        Ok(m) if !m.is_dir() => bail!("客户端目录路径不是目录: {}", target.display()),
+        Ok(m) if !m.is_dir() => bail!("发布目标不是目录: {}", target.display()),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(Error::io(target, e)),
@@ -168,12 +170,15 @@ fn swap(stage: &Path, target: &Path) -> Result<()> {
     } else {
         fs::rename(stage, target)
     };
-    result.map_err(|e| {
-        Error::msg(format!(
-            "无法原子替换客户端目录，原目录保持不变: {}",
-            Error::io(target, e)
-        ))
-    })
+    result.map_err(|e| swap_error(target, e))
+}
+
+fn swap_error(target: &Path, e: std::io::Error) -> Error {
+    Error::msg(format!(
+        "无法原子替换目录 {}，原目录保持不变: {}",
+        target.display(),
+        Error::from(e)
+    ))
 }
 
 #[cfg(test)]

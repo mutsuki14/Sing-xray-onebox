@@ -71,7 +71,7 @@ fn refuses_symlinks_files_and_bad_names_without_side_effects() {
     let file = tmp.join("plain");
     fs::write(&file, "x").unwrap();
     let err = replace_dir(&file, &files(&["x"])).unwrap_err().to_string();
-    assert!(err.starts_with("客户端目录路径不是目录"), "{err}");
+    assert_eq!(err, format!("发布目标不是目录: {}", file.display()));
     let target = tmp.join("out");
     for bad in ["", ".", "..", "a/b", "nul\0"] {
         let err = replace_dir(&target, &files(&[bad]))
@@ -85,6 +85,24 @@ fn refuses_symlinks_files_and_bad_names_without_side_effects() {
     assert_eq!(err, "发布文件名重复: a");
     assert_eq!(listing(tmp.path()), ["client", "plain", "real"]);
     assert!(listing(&real).is_empty());
+}
+
+#[test]
+fn messages_name_the_target_not_the_client_directory() {
+    let tmp = TempDir::new("publish").unwrap();
+    let site = tmp.join("site-content");
+    replace_dir(&site, &files(&["index.html"])).unwrap();
+    replace_dir(&site, &files(&["about.html"])).unwrap();
+    assert_eq!(listing(&site), ["about.html"]);
+    assert_eq!(listing(tmp.path()), ["site-content"]);
+    let denied = std::io::Error::from(ErrorKind::PermissionDenied);
+    assert_eq!(
+        swap_error(&site, denied).to_string(),
+        format!(
+            "无法原子替换目录 {}，原目录保持不变: 权限不足",
+            site.display()
+        )
+    );
 }
 
 #[test]
