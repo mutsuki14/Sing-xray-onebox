@@ -39,19 +39,21 @@ onebox frps plan --mode web --domain frp.example.com --web-domain app.example.co
 onebox frps install --mode web --domain frp.example.com --web-domain app.example.com --tls http
 
 # 避开已占用的 80 / 443：Cloudflare DNS 证书 + 8443
-CF_Token='DNS API Token' onebox frps install --mode web \
+# （Token 先隐藏输入并导出；不导出时程序会在交互终端中隐藏询问）
+read -rs CF_Token && export CF_Token
+onebox frps install --mode web \
   --domain frp.example.com --web-domain app.example.com \
   --tls cf --https-port 8443 --redirect-port 0
 
 # 泛域名：需要 Cloudflare DNS 或自备泛域证书（HTTP-01 不支持）
-CF_Token='DNS API Token' onebox frps install --mode web \
+onebox frps install --mode web \
   --domain frp.example.com --subdomain-host apps.example.com --tls cf
 
 # TCP / UDP 转发模式
 onebox frps install --mode tcp --domain frp.example.com --allow-ports 45000-45100
 ```
 
-整个转发范围会为 FRP 预留并按 TCP / UDP 放行；之后配置代理节点时会自动避开。网站模式不预留转发范围。
+避免把 Cloudflare Token 直接写在命令行（会进入 shell 历史）。整个转发范围会为 FRP 预留并按 TCP / UDP 放行；之后配置代理节点时会自动避开。网站模式不预留转发范围。
 
 ## 导出客户端配置
 
@@ -79,7 +81,9 @@ frpc -c frpc.toml
 | frpc ↔ frps 控制连接 | 私有 CA（约 10 年）签发的服务端证书（397 天） | 每日 03:17 检查，变化时才重启 frps |
 | 浏览器访问的网站 | Let's Encrypt（`http` / `cf`）或自备证书（`custom`） | 每日检查，更新后重载 nginx；HTTP-01 需保持 80 可达 |
 
-自备网站证书不自动续期：更新源文件后执行 `onebox frps configure --tls custom --cert 文件 --key 文件`。泛域名的自备证书需同时覆盖根域和 `*.根域`。私有 CA 临近到期时会明确报错，需要人工轮换 CA 并重新分发客户端。
+自备网站证书不自动续期：更新源文件后执行 `onebox frps configure --tls custom --cert 文件 --key 文件`。泛域名的自备证书需同时覆盖根域和 `*.根域`。
+
+私有 CA 剩余不足 30 天时，`renew`、`configure`、`update` 和 `rotate-token` 都会报错停止。目前没有轮换 CA 的命令：先用 `onebox frps info` 记下当前设置，执行 `onebox frps uninstall` 后重新安装（生成新 CA 与 token），再重新导出并分发所有客户端。<!-- TODO: verify CA expiry handling and the absence of a rotate-CA command once the FRP module (C4) is final -->
 
 ## 管理命令
 

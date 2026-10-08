@@ -8,9 +8,9 @@
 |---|---|
 | 系统 | Linux；systemd、OpenRC 或无 init 环境（容器）。可用 `ONEBOX_INIT=systemd\|openrc\|none` 强制指定 |
 | 架构 | 预编译：`amd64`、`arm64`、`386`（i586 及以上）、`armv7`。其他架构需源码构建，并受上游内核支持限制 |
-| 权限 | 安装和修改配置需要 root；`help`、`version`、`plan` 和客户端链路工具不需要 |
+| 权限 | 安装和修改配置需要 root；`help`、`version` 和客户端链路工具不需要。未安装时 `plan` 无需 root；已安装后需要 root 读取状态 |
 | 依赖 | `openssl`、`curl`、`iproute2` 缺失时通过 apt-get / dnf / yum / apk / pacman / zypper 自动安装；网站、独立订阅和 FRP 网站模式另需 nginx（同样自动安装） |
-| 网络 | 下载内核需访问 GitHub；受限网络设置 `GH_PROXY` |
+| 网络 | 下载程序与代理内核需访问 GitHub；受限网络设置 `GH_PROXY`（见下文[环境变量](#环境变量)中的信任说明） |
 
 | 架构 | Release 资产 | Rust 目标 |
 |---|---|---|
@@ -53,8 +53,9 @@ onebox install --protocols vless-reality,hysteria2 \
   --port vless-reality=443 --port hysteria2=8443 \
   --sni www.apple.com --hy2-hop 20000-40000 -y
 
-# CDN 组合 + Cloudflare DNS 证书
-CF_Token='DNS API Token' onebox install --preset 5 --tls cf --domain v.example.com -y
+# CDN 组合 + Cloudflare DNS 证书：Token 隐藏输入后导出，避免写进 shell 历史
+read -rs CF_Token && export CF_Token
+onebox install --preset 5 --tls cf --domain v.example.com -y
 
 # 自有域名 REALITY 网站
 onebox install --preset 1 --reality-site www.example.com --site-title '我的手记' -y
@@ -90,7 +91,7 @@ onebox install --preset 1 -y --force
 | `--xray-version 版本\|latest` | 固定 Xray 版本，默认 `26.3.27` |
 | `--no-bbr` | 安装结束后不询问启用 BBR |
 | `--force` | 允许 `-y` 覆盖已有安装 |
-| `--json` | 仅 `plan`：输出 JSON |
+| `--json` | 仅 `plan` / `install --dry-run`：输出 JSON |
 | `--dry-run` | 仅 `install`：等同 `plan` |
 | `-y` / `--yes` | 无人值守 |
 
@@ -100,10 +101,10 @@ onebox install --preset 1 -y --force
 
 | 变量 | 作用 |
 |---|---|
-| `GH_PROXY` | GitHub 下载加速前缀，必须为 `https://`；校验信息仍以 GitHub 官方元数据为准 |
+| `GH_PROXY` | GitHub 下载加速前缀，必须为 `https://`。引导脚本的 `SHA256SUMS` 与程序都经该前缀下载，镜像可同时替换二者，请只使用可信镜像；安装后 Onebox 下载代理内核、FRP、BBRv3 系统内核包和程序更新时，校验值直接从 GitHub 获取（api.github.com 元数据；缺少摘要时为直接从 github.com 下载的校验文件），前缀只传输文件内容 <!-- TODO: verify self-update SHA256SUMS fallback is fetched directly, not via GH_PROXY --> |
 | `ONEBOX_NATIVE_BIN` | 引导脚本直接运行该本地程序，不联网 |
 | `ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN` | 使用本地内核文件代替下载 <!-- TODO: verify still supported in v3 --> |
-| `CF_Token`、`CF_Account_ID` | Cloudflare DNS 验证凭据；交互时也可隐藏输入 |
+| `CF_Token`、`CF_Account_ID` | Cloudflare DNS 验证凭据；交互时也可隐藏输入。避免把 Token 直接写在命令行（会进入 shell 历史），可用 `read -rs CF_Token && export CF_Token` |
 | `ONEBOX_AUTO=1` | 等同 `-y` |
 | `ONEBOX_INIT` | 强制 init 类型：`systemd`、`openrc`、`none` |
 | `NO_COLOR` | 关闭彩色输出 |
@@ -146,7 +147,7 @@ onebox cert renew proxy                          # 立即强制续期（自备�
 ```
 
 - 证书由 acme.sh 3.1.6 申请（程序固定其 SHA-256）；Cloudflare 凭据只传给 acme.sh，并以 0600 权限保存供续期使用。
-- 每天 04:17 的一个计划任务（`onebox renew --cron`）检查代理、网站和订阅证书，30 天内到期才续期，续期后只重启或重载相关服务。<!-- TODO: verify `onebox renew` output/flags -->
+- 每天 04:17 的一个计划任务（`onebox renew --cron`）检查代理、网站和订阅证书，30 天内到期才续期。代理或网站证书续期时执行一次完整配置事务（代理内核与网站会短暂重启）；独立 HTTPS 订阅证书续期只重载订阅入口。<!-- TODO: verify `onebox renew` output/flags and the restart scope of each renewal -->
 - 面向浏览器的网站和 HTTPS 订阅必须使用公有可信证书，不能自签。
 - 更新了自备证书的源文件后执行 `onebox cert renew proxy`（网站用 `onebox site renew`）重新部署。
 

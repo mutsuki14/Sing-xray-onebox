@@ -80,6 +80,8 @@ onebox site restore latest
 
 其他代理协议使用 HTTP-01 证书时，会复用网站在 80 端口上的验证目录，不会争用端口。
 
+每日计划任务在证书 30 天内到期时自动续期。网站证书续期（包括 `site` 模式订阅所用的证书）执行一次完整配置事务，代理内核与网站会短暂重启。<!-- TODO: verify restart scope of site renewal -->
+
 ## 关闭与卸载
 
 - 切换回外部 REALITY 目标、执行 `site disable`，或删除最后一个 REALITY 协议时，程序停止托管网站及其续期，**网页内容保留**。

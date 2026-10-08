@@ -24,7 +24,7 @@
 
 ### 下载失败 / GitHub 无法访问
 
-设置 HTTPS 加速前缀后重试：`GH_PROXY=https://ghfast.top/`（或其他可用前缀）。纯 IPv6 主机无法直连 GitHub，需要支持 IPv6 的加速前缀，或先配置 WARP / NAT64。发布资产暂时下载不到时，可等待发布流程完成，或[源码构建](../README.md#快速开始)。
+设置 HTTPS 加速前缀后重试：`GH_PROXY=https://ghfast.top/`（或其他可用前缀）。引导脚本的校验文件和程序都经前缀下载，镜像可以同时替换二者，请只使用可信前缀。纯 IPv6 主机无法直连 GitHub，需要支持 IPv6 的加速前缀，或先配置 WARP / NAT64。发布资产暂时下载不到时，可等待发布流程完成，或[源码构建](../README.md#快速开始)。
 
 ### 纯 IPv6 或配置了 WARP
 

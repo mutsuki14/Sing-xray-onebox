@@ -22,13 +22,14 @@ onebox bbr enable fq_codel     # 也支持 fq_pie、cake，取决于内核
 ```bash
 onebox bbr releases                      # 当前 CPU 架构可用的标准版 Release
 onebox bbr install                       # 预览最新标准版，不安装（无需 root）
+onebox bbr install --dry-run             # 同上：不带 --apply 时默认即为预览
 onebox bbr install latest --apply        # 安装，执行前再次确认（需要 root）
 onebox bbr install x86_64-7.2.8 --apply  # 指定标签，以 releases 的实际输出为准
 onebox bbr releases --max
 onebox bbr install latest --max          # 预览 Max 实验版；安装同样需要 --apply
 ```
 
-无人值守安装必须同时给出 `--apply -y`。预览需要联网查询 Release，但不安装依赖、不修改 sysctl 或引导。
+无人值守安装必须同时给出 `--apply -y`。不带 `--apply` 时 `bbr install` 只预览，`--dry-run` 与之等价（便于与其他命令保持一致）<!-- TODO: verify bbr install --dry-run is accepted and equals the default preview -->。预览需要联网查询 Release，但不安装依赖、不修改 sysctl 或引导。
 
 ### 安装前检查
 
@@ -59,7 +60,7 @@ onebox bbr install latest --max          # 预览 Max 实验版；安装同样�
 - 新内核无法启动时，从控制台 GRUB 的 Advanced options 选择保留的旧内核；修复引导前不要清理旧内核包。
 - 校验只保证下载完整，不能替代对上游构建者的信任。
 - **Max 版**更激进地探测带宽，仅用于自有链路的吞吐实验，可能增加延迟、丢包和带宽争抢，不保证更快。上游的极限 sysctl 参数、测速软件、模块黑名单和快捷命令不会被应用。
-- 卸载 Onebox 不会卸载 Linux 内核。
+- 卸载 Onebox 不会卸载已安装的 Linux 系统内核。
 
 ## 菜单
 

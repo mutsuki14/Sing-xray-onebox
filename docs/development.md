@@ -79,9 +79,9 @@ shellcheck -s sh onebox.sh                 # 引导脚本
 真实工具的固定版本：sing-box 1.14.2、Xray 26.3.27、mihomo 1.19.32、frp 0.71.0，nginx 从发行版包中解出（不启动系统服务）。
 
 ```bash
-# 真实内核校验（被 #[ignore] 标记的测试）
+# 真实内核校验：只运行名称含 real_core 的 #[ignore] 测试
 ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray ONEBOX_TEST_MIHOMO=/path/mihomo \
-  cargo test --locked -- --include-ignored
+  cargo test --locked real_core -- --include-ignored
 
 # 黑盒测试
 cargo build --locked
@@ -92,7 +92,9 @@ sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" ONEBOX_TEST_SINGBOX=/path
   python3 tests/native_lifecycle.py --require-full
 ```
 
-<!-- TODO: verify script names and flags of the ported Python suites -->
+<!-- TODO: verify script names and flags of the ported Python suites, and the exact test-name filter (`real_core`) of the real-core checks -->
+
+不要不加过滤地运行 `cargo test -- --include-ignored`：其他 `#[ignore]` 测试（订阅、FRP 的端到端测试）会启动真实的 nginx、frps / frpc 并在本机监听端口（订阅测试使用 TCP 80 / 443，需要 root），还需要 `ONEBOX_NGINX_BIN`、`ONEBOX_FRPS_BIN`、`ONEBOX_FRPC_BIN` 等变量，只适合在容器或 CI 中运行。<!-- TODO: verify the ignored end-to-end tests and their env vars once ported -->
 
 生命周期测试会运行服务、修改测试目录和网络状态，适合在容器或 CI 中运行。生成配置成功不能代替真实连通性测试。
 

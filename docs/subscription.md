@@ -10,7 +10,7 @@
 | `site` | `https://www.example.com/sub/令牌/格式` | 已启用[自有域名网站](website.md) | 复用网站的域名、证书和公网端口，不增加端口 |
 | `standalone` | `https://sub.example.com:8448/sub/令牌/格式` | 解析到本机的独立域名 + 证书 | 独立 HTTPS 入口，默认端口 8448 |
 
-首次启用时，已有自建网站默认 `site`，否则默认 `ip`。可在菜单 **4) 远程订阅** 中选择，或用命令指定。
+首次启用时，已有自有域名网站默认 `site`，否则默认 `ip`。可在菜单 **4) 远程订阅** 中选择，或用命令指定。
 
 > **安全提示**：`ip` 模式使用 HTTP 明文，链路上的第三方可以看到订阅令牌和其中的节点凭据。令牌只做访问授权，不能为 HTTP 加密。需要加密传输时请用 `site` 或 `standalone`。
 
@@ -48,7 +48,7 @@ onebox subscription add phone         # 新建设备，显示各格式 URL
 onebox subscription reset 设备ID       # 换新令牌，旧链接立即失效
 onebox subscription revoke 设备ID      # 撤销设备
 onebox subscription publish           # 立即重新生成并发布
-onebox subscription renew             # 续期 HTTPS 订阅证书（ip 模式无需）
+onebox subscription renew             # 续期 HTTPS 订阅证书（site 模式即续期网站证书；ip 模式无需）
 onebox subscription disable           # 停止全部订阅访问
 ```
 
@@ -75,4 +75,4 @@ URL 末段决定返回内容：
 - 客户端要求 HTTPS 时请用域名入口；IPv6 地址的订阅在只有 IPv4 的网络中无法访问。
 - 恢复节点快照会同时恢复其中的设备列表，之前撤销的设备可能重新出现，恢复后请检查 `onebox subscription info`。
 - 订阅正在复用网站时，需先关闭订阅或切换到其他模式，才能关闭网站。
-- HTTPS 证书由每日计划任务自动续期，续期只重载订阅入口，不重启代理内核。
+- HTTPS 证书由每日计划任务自动续期。`standalone` 模式续期只重载独立订阅入口，不重启代理内核；`site` 模式使用网站证书，随网站证书续期（会执行一次完整配置事务，见 [website.md](website.md)）。<!-- TODO: verify -->

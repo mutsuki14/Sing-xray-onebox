@@ -103,7 +103,7 @@ onebox uninstall           # 卸载代理节点
 onebox frps uninstall      # 单独卸载 FRP
 ```
 
-卸载前确认，并自动保存 `before-uninstall` 快照。删除代理服务、内核、服务端与客户端配置、订阅、受管防火墙规则与计划任务。**保留**：网站内容、节点快照、FRP（独立管理）、系统安装的 nginx 软件包，以及安装的 Linux 内核。<!-- TODO: verify exact list of what uninstall removes and keeps -->
+卸载前确认，并自动保存 `before-uninstall` 快照。删除代理服务、代理内核（sing-box / Xray）、服务端与客户端配置、订阅、受管防火墙规则与计划任务。**保留**：网站内容、节点快照、FRP（独立管理）、系统安装的 nginx 软件包，以及通过 `onebox bbr` 安装的 Linux 系统内核。<!-- TODO: verify exact list of what uninstall removes and keeps -->
 
 ## 文件位置
 

@@ -22,7 +22,7 @@ onebox tune reset --apply                       # 恢复全部默认
 | `hy2 auto` | 服务端要求客户端使用 BBR，不指定固定带宽 | sing-box 承载的 Hysteria2 |
 | `hy2 conservative` | 同上，并使用保守 BBR 档位 | sing-box 服务端/客户端 ≥ 1.14；mihomo ≥ 1.19.32 |
 | `hy2 measured` | 指定上传 / 下载带宽，使用 Hysteria 带宽控制 | sing-box 服务端；sing-box / mihomo 客户端 |
-| `resource balanced` | 不覆盖内核的接收窗口与并发默认值 | 默认 |
+| `resource balanced` | 不覆盖 sing-box 的 QUIC 接收窗口与并发流默认值 | 默认 |
 | `resource low-memory` | 流 / 连接接收窗口 2 / 5 MiB，服务端并发流上限 64 | sing-box Hysteria2 ≥ 1.14 |
 | `resource throughput` | 流 / 连接接收窗口 16 / 40 MiB，服务端并发流上限 1024 | 同上；高延迟高带宽链路需实测 |
 

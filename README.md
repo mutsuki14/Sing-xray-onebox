@@ -27,21 +27,24 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 其他方式：
 
 ```bash
-# 国内服务器（GitHub 访问困难）：设置 HTTPS 加速前缀
+# 国内服务器（GitHub 访问困难）：经 HTTPS 镜像前缀下载。引导脚本、校验文件和程序
+# 都由镜像提供，镜像可以同时替换它们：使用镜像即信任镜像，请只用可信镜像
 GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 
 # Alpine 等无 Bash 的系统（先 apk add curl）：引导脚本是 POSIX sh
 curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh -o onebox.sh && sh onebox.sh
 
-# 离线：使用已取得的可信程序，引导脚本不联网、不下载
-ONEBOX_NATIVE_BIN=/root/onebox-linux-amd64-musl sh onebox.sh
+# 离线：先把 onebox.sh、程序和同一 Release 的 SHA256SUMS（从 GitHub Release 页面直接取得）放到当前目录，
+# 自行校验并赋予执行权限，再交给引导脚本（它不校验 ONEBOX_NATIVE_BIN）
+grep ' onebox-linux-amd64-musl$' SHA256SUMS | sha256sum -c - && chmod 700 onebox-linux-amd64-musl \
+  && ONEBOX_NATIVE_BIN=./onebox-linux-amd64-musl sh onebox.sh
 
 # 源码构建（其他 CPU 架构）
 git clone https://github.com/mutsuki14/Sing-xray-onebox.git && cd Sing-xray-onebox
 cargo build --release --locked && sudo ./target/release/onebox
 ```
 
-首次运行选择 **1) 安装**。安装后程序固定在 `/usr/local/bin/onebox`，以后直接执行 `onebox` 打开菜单。引导脚本只下载与自身版本一致的 Release 资产，并用同一 Release 的 `SHA256SUMS` 校验<!-- TODO: verify launcher still pins its own version -->；无人值守安装见 [docs/install.md](docs/install.md)。
+首次运行选择 **1) 安装**。安装后程序固定在 `/usr/local/bin/onebox`，以后直接执行 `onebox` 打开菜单。引导脚本只下载与自身版本一致的 Release 资产，并用同一 Release 的 `SHA256SUMS` 校验（使用 `GH_PROXY` 时校验文件同样经镜像下载）<!-- TODO: verify launcher still pins its own version -->；`ONEBOX_NATIVE_BIN` 指定的本地程序按原样运行，引导脚本不做任何校验。无人值守安装见 [docs/install.md](docs/install.md)。
 
 ## 交互菜单
 
@@ -144,8 +147,8 @@ Onebox 3.0.0 · sing-box 1.14.2 · Xray 26.3.27
 |---|---|
 | [安装与部署](docs/install.md) | 无人值守安装、预设、端口、证书、REALITY 目标 |
 | [客户端导入](docs/clients.md) | 各客户端导入方式、导出格式、二维码、AnyTLS-REALITY |
-| [远程订阅](docs/subscription.md) | IP / 自建站 / 独立域名三种入口、设备管理 |
-| [自有域名网站](docs/website.md) | 自建 REALITY 网站、模板、内容导入与恢复 |
+| [远程订阅](docs/subscription.md) | IP / 自有域名网站 / 独立域名三种入口、设备管理 |
+| [自有域名网站](docs/website.md) | 自有域名网站作为 REALITY 目标、模板、内容导入与恢复 |
 | [FRP 服务端](docs/frp.md) | 网站模式、TCP/UDP 模式、客户端导出 |
 | [BBR / BBRv3](docs/bbr.md) | 启用 BBR、安装 BBRv3 内核及风险 |
 | [性能与链路测试](docs/performance.md) | Hysteria2 调优、测速、多入口回退、REALITY 检查 |
@@ -159,13 +162,13 @@ Onebox 3.0.0 · sing-box 1.14.2 · Xray 26.3.27
 v3 可原地升级 v2.x：协议、端口、UUID、密码、REALITY 密钥、证书、网站内容、订阅设备链接和 FRP 配置全部保留，安装路径和服务名不变。
 
 ```bash
-onebox backup before-v3        # 可选：先保存一份快照
+onebox backup before-v3        # 可选：用于在 v3 内恢复节点状态，不能回到 v2
 onebox update-script           # v2 内置的程序更新：下载、校验 3.x，替换后自动 regen
 onebox version                 # 应显示 3.0.0
 onebox doctor
 ```
 
-也可以用引导脚本完成同样的迁移：`curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh -o onebox.sh && sh onebox.sh regen`。**不要用 `install` 代替迁移**，重装会生成新凭据。迁移失败会自动回滚并保留 v2；首次保存时原 v2 状态另存为 `/etc/onebox/state.v2.json`。
+也可以用引导脚本完成同样的迁移：`curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh -o onebox.sh && sh onebox.sh regen`。**不要用 `install` 代替迁移**，重装会生成新凭据。迁移失败会自动回滚并保留 v2；迁移成功后没有受支持的降级方式，需要退路请在升级前做 VPS 磁盘快照（详见 [upgrade-v2.md](docs/upgrade-v2.md#回退)）。首次保存时原 v2 状态另存为 `/etc/onebox/state.v2.json`。
 
 1.x（`/etc/onebox/onebox.conf`）不能直接升级，程序会提示先经 v2.0.1 迁移：
 
