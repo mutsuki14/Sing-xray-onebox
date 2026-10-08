@@ -165,10 +165,14 @@ fn version_pins() {
     assert_eq!(version_pin(Some("latest")).unwrap(), None);
     assert_eq!(version_pin(Some(" ")).unwrap(), None);
     assert_eq!(version_pin(Some("1.12.0")).unwrap(), Some("1.12.0".into()));
-    assert_eq!(
-        version_pin(Some("1.0;x")).unwrap_err().to_string(),
-        "内核版本无效: 1.0;x"
-    );
+    // Only versions host::cores can download become pins (v2 stored
+    // `--singbox-version beta` and failed later).
+    for bad in ["1.0;x", "beta", "LATEST", "1.12.0+x"] {
+        assert_eq!(
+            version_pin(Some(bad)).unwrap_err().to_string(),
+            format!("内核版本无效: {bad}")
+        );
+    }
 }
 
 #[test]

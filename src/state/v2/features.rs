@@ -460,10 +460,21 @@ impl V2<'_> {
     /// only repeat the "更换指定版本" hint on every apply. It is kept when it
     /// matches the installed version or nothing is recorded as installed
     /// (the next install of that core honors it).
+    ///
+    /// v2 stored `--singbox-version`/`--xray-version` as given, so a pin
+    /// may be no version at all (`beta`, `LATEST`, `1.12.0+x`). Such a pin
+    /// is dropped: `host::cores` could never download it, and keeping it
+    /// would fail prepare-cores on every apply.
     fn pin(&mut self, key: &str, core: Core, installed: Option<&str>) -> Option<String> {
-        let raw = self.version(key)?;
-        let pin = without_v(&raw);
+        let pin = without_v(self.nonempty(key)?);
         if pin == "latest" || pin.is_empty() {
+            return None;
+        }
+        if !valid_version(pin) {
+            self.warn(format!(
+                "v2 固定的 {} 版本 {pin} 无效，已取消固定",
+                core.title()
+            ));
             return None;
         }
         match installed {

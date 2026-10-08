@@ -114,22 +114,18 @@ impl Wanted {
     }
 }
 
-/// Strip one leading `v` and validate: 1–79 chars of `[A-Za-z0-9._-]`,
-/// starting alphanumeric, with at least one digit (v2 rule plus the start).
+/// Strip one leading `v` and validate with the one version grammar
+/// ([`version_valid`]: 1–64 chars of `[A-Za-z0-9._-]`, starting
+/// alphanumeric, with at least one digit).
 pub fn normalize_version(raw: &str) -> Result<String> {
     let v = raw.strip_prefix('v').unwrap_or(raw);
     ensure!(version_valid(v), "版本格式无效: {raw}");
     Ok(v.to_owned())
 }
 
-pub fn version_valid(v: &str) -> bool {
-    !v.is_empty()
-        && v.len() < 80
-        && v.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && v.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
-        && v.bytes().any(|b| b.is_ascii_digit())
-}
+/// `domain::validate::valid_version`, the grammar `NodeConfig::validate`
+/// also enforces for recorded versions and pins.
+pub use crate::domain::validate::valid_version as version_valid;
 
 /// Where a resolved core comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -425,16 +421,18 @@ pub fn ensure_installed_with(
     core: Core,
     versions: &CoreVersions,
 ) -> Result<String> {
-    let wish = wished_version(env, core, versions)?;
+    let wish = wished_version(env, core, versions);
     sweep_leftovers(&ctx.paths.bin);
     let live = ctx.paths.core_bin(core);
     if let Some(current) = current_version(ctx, core, &live)? {
-        match pin_hint(core, &current, wish.as_ref()) {
-            Some(hint) => out::warn(hint),
+        match keep_notice(core, &current, &wish) {
+            Some(warning) => out::warn(warning),
             None => out::info(format!("{} {current} 已安装", core.title())),
         }
         return Ok(current);
     }
+    // Only a download needs the wish to be valid.
+    let wish = wish?;
     // Installing a missing core, `latest` means "any version": like v2 a
     // failed lookup may still fall back (only `onebox update` is strict).
     let wanted = match &wish {
@@ -449,6 +447,17 @@ pub fn ensure_installed_with(
     sysfs::fsync_dir(&ctx.paths.bin).map_err(|e| Error::io(&ctx.paths.bin, e))?;
     out::ok(format!("已安装 {} {}", core.title(), resolved.version));
     Ok(resolved.version)
+}
+
+/// The warning for a working core that is kept: [`pin_hint`] when it
+/// differs from an exact wish; a malformed wish (pin or environment) only
+/// warns, because nothing has to be downloaded (v2 printed its hint and
+/// went on). `None`: the core satisfies the wish.
+pub fn keep_notice(core: Core, current: &str, wish: &Result<Option<Wanted>>) -> Option<String> {
+    match wish {
+        Ok(wish) => pin_hint(core, current, wish.as_ref()),
+        Err(e) => Some(format!("{e}；已保留已安装的 {} {current}", core.title())),
+    }
 }
 
 /// v2's hint when a working core differs from the exact version wished

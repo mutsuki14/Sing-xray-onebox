@@ -408,7 +408,7 @@ fn every_v2_e2e_matrix_state_migrates() {
 #[test]
 fn core_pins_survive_only_when_they_match_the_installed_core() {
     // (installed SB_VERSION, SB_VERSION_WANT, migrated pin, warning)
-    let cases: [(&str, &str, Option<&str>, Option<&str>); 7] = [
+    let cases: [(&str, &str, Option<&str>, Option<&str>); 12] = [
         ("1.12.0", "1.12.0", Some("1.12.0"), None),
         ("1.12.0", "v1.12.0", Some("1.12.0"), None),
         ("", "1.12.0", Some("1.12.0"), None),
@@ -426,6 +426,33 @@ fn core_pins_survive_only_when_they_match_the_installed_core() {
             None,
             Some("v2 固定的 sing-box 版本 1.12.0 与已安装 v1.14.2 不一致，已取消固定"),
         ),
+        // v2 stored `--singbox-version` as given: pins host::cores could
+        // never resolve are dropped even with nothing recorded as installed.
+        (
+            "",
+            "beta",
+            None,
+            Some("v2 固定的 sing-box 版本 beta 无效，已取消固定"),
+        ),
+        (
+            "",
+            "1.12.0+x",
+            None,
+            Some("v2 固定的 sing-box 版本 1.12.0+x 无效，已取消固定"),
+        ),
+        (
+            "",
+            "LATEST",
+            None,
+            Some("v2 固定的 sing-box 版本 LATEST 无效，已取消固定"),
+        ),
+        (
+            "1.14.2",
+            "v_1",
+            None,
+            Some("v2 固定的 sing-box 版本 _1 无效，已取消固定"),
+        ),
+        ("", "v", None, None),
     ];
     for (installed, wanted, pin, warning) in cases {
         let values = with(

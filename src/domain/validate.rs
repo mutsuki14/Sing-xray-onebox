@@ -319,12 +319,21 @@ pub fn valid_label(s: &str) -> bool {
     !s.trim().is_empty() && s.chars().count() <= MAX_LABEL_CHARS && valid_text(s)
 }
 
-/// Core version or pin: `1.12.0`, `v26.3.27`, `1.13.0-beta.1`.
+/// Core version or pin: `1.12.0`, `v26.3.27`, `1.13.0-beta.1`. 1–64 chars
+/// of `[A-Za-z0-9._-]`, starting alphanumeric, with at least one digit.
+///
+/// The one version grammar: `host::cores` resolves and downloads exactly
+/// what passes here (its `normalize_version` strips one leading `v` first),
+/// so a stored pin can never fail later in prepare-cores. Words such as
+/// `beta`/`LATEST` and build metadata (`1.12.0+x`, never a release tag of
+/// either core) are refused.
 pub fn valid_version(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
+        && s.starts_with(|c: char| c.is_ascii_alphanumeric())
         && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && s.bytes().any(|b| b.is_ascii_digit())
 }
 
 /// `ip/prefix` with a prefix that fits the address family.

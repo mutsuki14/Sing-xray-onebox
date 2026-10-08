@@ -364,10 +364,16 @@ fn helpers() {
     assert!(!valid_cidr("2001:db8::1/129"));
     assert!(!valid_cidr("203.0.113.10"));
     assert!(!valid_cidr("host/24"));
-    assert!(valid_version("v26.3.27"));
-    assert!(valid_version("1.13.0-beta.1"));
-    assert!(!valid_version(""));
-    assert!(!valid_version("1;rm"));
+    // One grammar with host::cores (G2): what validates can be downloaded.
+    for good in ["v26.3.27", "1.13.0-beta.1", "26.3.27", "1_2"] {
+        assert!(valid_version(good), "{good}");
+    }
+    let long = "1".repeat(65);
+    for bad in [
+        "", "1;rm", "beta", "LATEST", "latest", "1.12.0+x", "_1", ".1", "-1", "v", &long,
+    ] {
+        assert!(!valid_version(bad), "{bad}");
+    }
     assert!(valid_label("山间手记"));
     assert!(!valid_label(""));
     assert_eq!(check_schema(3).map_err(|e| e.to_string()), Ok(()));

@@ -175,13 +175,16 @@ fn wanted_versions() {
         (Some("v"), Err("版本格式无效: v")),
         (Some("v.1"), Err("版本格式无效: v.1")),
         (Some("beta"), Err("版本格式无效: beta")),
+        (Some("LATEST"), Err("版本格式无效: LATEST")),
+        (Some("1.12.0+x"), Err("版本格式无效: 1.12.0+x")),
         (Some("-1"), Err("版本格式无效: -1")),
     ];
     for (input, want) in cases {
         let got = Wanted::parse(input).map_err(|e| e.to_string());
         assert_eq!(got, want.map_err(str::to_owned), "{input:?}");
     }
-    assert!(!version_valid(&"1".repeat(80)));
+    assert!(!version_valid(&"1".repeat(65)));
+    assert!(version_valid(&"1".repeat(64)));
     assert!(Wanted::Default.satisfied_by("1.0"));
     assert!(Wanted::Latest.satisfied_by("1.0"));
     assert!(Wanted::Exact("1.0".into()).satisfied_by("1.0"));

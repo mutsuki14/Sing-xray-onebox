@@ -260,10 +260,55 @@ fn ensure_installed_replaces_a_broken_binary_and_refuses_odd_paths() {
         err.to_string(),
         format!("内核路径不是普通文件: {}", live.display())
     );
+    // A missing core needs a valid wish: there is nothing to keep.
+    std::fs::remove_dir(&live).unwrap();
+    f.exec.clear_history();
     let bad_pin = CoreVersions {
         xray_pin: Some("bad pin".into()),
         ..CoreVersions::default()
     };
     let err = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &bad_pin).unwrap_err();
     assert_eq!(err.to_string(), "版本格式无效: bad pin");
+    assert!(f.curl_urls().is_empty());
+}
+
+#[test]
+fn a_malformed_wish_only_warns_while_the_core_works() {
+    // v2 stored `--singbox-version` as given; v2 then only printed its
+    // hint. A working core is kept and the apply goes on.
+    let f = fixture();
+    f.serve();
+    let live = live_singbox(&f, "1.14.2");
+    for pin in ["beta", "LATEST", "1.12.0+x"] {
+        let versions = CoreVersions {
+            singbox_pin: Some(pin.into()),
+            ..CoreVersions::default()
+        };
+        let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &versions).unwrap();
+        assert_eq!(v, "1.14.2", "{pin}");
+    }
+    let env = |k: &str| (k == "ONEBOX_SINGBOX_VERSION").then(|| "beta".to_owned());
+    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default()).unwrap();
+    assert_eq!(v, "1.14.2");
+    assert_eq!(std::fs::read(&live).unwrap(), fake_elf("old"), "untouched");
+    assert!(f.curl_urls().is_empty());
+}
+
+#[test]
+fn keep_notice_wording() {
+    let bad = Wanted::parse(Some("beta")).map(Some);
+    assert_eq!(
+        keep_notice(Core::Singbox, "1.14.2", &bad).as_deref(),
+        Some("版本格式无效: beta；已保留已安装的 sing-box 1.14.2")
+    );
+    let exact = Ok(Some(Wanted::Exact("1.12.0".into())));
+    assert_eq!(
+        keep_notice(Core::Singbox, "1.14.2", &exact),
+        pin_hint(
+            Core::Singbox,
+            "1.14.2",
+            Some(&Wanted::Exact("1.12.0".into()))
+        )
+    );
+    assert_eq!(keep_notice(Core::Xray, "26.3.27", &Ok(None)), None);
 }
