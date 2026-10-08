@@ -2,13 +2,24 @@
 //!
 //! Every transfer is `curl --proto =https --proto-redir =https --tlsv1.2
 //! -fLsS` (HTTPS only, also across redirects), into a temp file next to the
-//! destination that is renamed into place only after the size cap and
-//! non-emptiness checks; partial files are removed on every error.
+//! destination that is renamed into place only after the size cap, the
+//! non-emptiness check and, for verified downloads, the hash check; partial
+//! or unverified files are removed on every error.
 //!
-//! Proxy policy: `GH_PROXY` (an `https://` prefix, no whitespace) applies
-//! only to payload downloads from `https://github.com/` when the caller
-//! asks for it; API metadata always goes directly to api.github.com, so the
-//! digests that authenticate payloads never pass through the proxy.
+//! Proxy policy (`GH_PROXY`: an `https://` prefix, no whitespace), one rule
+//! for every caller:
+//! - API metadata (api.github.com) and release checksum files
+//!   (`SHA256SUMS`, `.dgst`) always go direct. They authenticate payloads;
+//!   for assets the API has no digest for (older releases) the checksum
+//!   file is the only trust anchor, so a mirror must never be able to swap
+//!   it together with the payload.
+//! - release payloads from `https://github.com/` may use the proxy: their
+//!   size and SHA-256 are known from direct sources before the download
+//!   ([`download_asset`]).
+//! - files whose SHA-256 is pinned in the code may also be fetched from
+//!   `https://raw.githubusercontent.com/` through the proxy
+//!   ([`download_pinned`]).
+//!
 //! `GH_TOKEN`, when set, authenticates API requests (higher rate limits);
 //! it is handed to curl on stdin, never on the command line.
 //!
@@ -20,19 +31,32 @@
 //!   300 s that failed on slow links; every download has a byte cap
 //!   (`--max-filesize` plus a check of the result).
 //! - TLS 1.2 minimum; 15 s connect timeout.
-//! - checksum files are payloads too and may use `GH_PROXY` (G-8.1#7); the
-//!   API digest is preferred and a release `SHA256SUMS`/`.dgst` is the
-//!   fallback when the API has none (G-8.1#6).
+//! - one verification chain for every release download
+//!   ([`download_asset`]): the API digest is preferred and a release
+//!   `SHA256SUMS`/`.dgst` is the fallback when the API has none (G-8.1#6);
+//!   the checksum file must match its metadata size, and the payload is
+//!   fetched only once its expected hash is known.
+//! - release lists ([`github_releases`]) share the API transport, token and
+//!   rate-limit handling.
+//! - hash-pinned files may use `GH_PROXY` for raw.githubusercontent.com
+//!   (v2 never proxied them).
 //! - temp files use the shared `.onebox-tmp-` prefix so crash leftovers are
 //!   swept (E-8.1#16).
 //! - API requests send `Accept`/`X-GitHub-Api-Version` and optional
 //!   `GH_TOKEN`; rate-limit failures say how to raise the limit.
 
+mod asset;
 mod release;
 #[cfg(test)]
 pub(crate) mod testing;
 
-pub use release::{check_elf, checksum_for, is_elf, verify_file, Asset, Release, Which};
+pub use asset::{
+    download_asset, download_asset_with, download_pinned, download_pinned_with, release_checksums,
+    release_checksums_with, ChecksumMatch,
+};
+pub use release::{
+    check_elf, checksum_for, is_elf, verify_file, Asset, Release, ReleasePage, Which,
+};
 
 use crate::ctx::Ctx;
 use crate::error::{Context, Error, Result};
@@ -46,8 +70,15 @@ use std::time::Duration;
 pub const API_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// Cap for checksum files (`SHA256SUMS`, `.dgst`).
 pub const CHECKSUM_MAX_BYTES: u64 = 1024 * 1024;
+/// GitHub's largest page size for list endpoints.
+pub const MAX_PER_PAGE: u32 = 100;
 const GITHUB: &str = "https://github.com/";
+const RAW_GITHUB: &str = "https://raw.githubusercontent.com/";
 const API: &str = "https://api.github.com/";
+const API_HEADERS: [&str; 2] = [
+    "Accept: application/vnd.github+json",
+    "X-GitHub-Api-Version: 2022-11-28",
+];
 /// Throughput floor used to derive `--max-time` from the size cap.
 const MIN_RATE: u64 = 32 * 1024;
 /// curl aborts a transfer slower than this many bytes/s for `STALL_SECS`.
@@ -56,6 +87,30 @@ const STALL_SECS: u64 = 60;
 const MIN_MAX_TIME: u64 = 120;
 const MAX_MAX_TIME: u64 = 2 * 60 * 60;
 const RETRIES: u64 = 2;
+
+/// Which URLs `GH_PROXY` may front for one transfer (module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// Never proxied: API metadata and checksum files.
+    Direct,
+    /// github.com release payloads verified against direct metadata.
+    Payload,
+    /// Files verified against a SHA-256 pinned in the code.
+    Pinned,
+}
+
+impl Route {
+    fn proxiable(self, url: &str) -> bool {
+        match self {
+            Route::Direct => false,
+            Route::Payload => url.starts_with(GITHUB),
+            Route::Pinned => url.starts_with(GITHUB) || url.starts_with(RAW_GITHUB),
+        }
+    }
+}
+
+/// Inspects the downloaded temp file before it is renamed into place.
+type Check<'a> = &'a dyn Fn(&Path) -> Result<()>;
 
 /// One curl transfer into `dest`.
 struct Transfer<'a> {
@@ -68,10 +123,12 @@ struct Transfer<'a> {
     headers: &'a [&'a str],
     /// curl config read from stdin (secret headers).
     config: Option<String>,
+    check: Option<Check<'a>>,
 }
 
 /// Download `url` to `dest` (replaced atomically) and return its size.
-/// `use_proxy` routes github.com payloads through `GH_PROXY`.
+/// `use_proxy` routes github.com payloads through `GH_PROXY`; prefer
+/// [`download_asset`] / [`download_pinned`], which also verify the file.
 pub fn download(ctx: &Ctx, url: &str, dest: &Path, max_bytes: u64, use_proxy: bool) -> Result<u64> {
     download_with(ctx, &process_env, url, dest, max_bytes, use_proxy)
 }
@@ -85,7 +142,25 @@ pub fn download_with(
     max_bytes: u64,
     use_proxy: bool,
 ) -> Result<u64> {
-    let target = proxied(url, env("GH_PROXY").as_deref(), use_proxy)?;
+    let route = if use_proxy {
+        Route::Payload
+    } else {
+        Route::Direct
+    };
+    fetch_to(ctx, env, url, dest, max_bytes, route, None)
+}
+
+/// The shared download path: proxy routing, transfer, optional check.
+fn fetch_to(
+    ctx: &Ctx,
+    env: EnvLookup,
+    url: &str,
+    dest: &Path,
+    max_bytes: u64,
+    route: Route,
+    check: Option<Check>,
+) -> Result<u64> {
+    let target = route_target(url, env("GH_PROXY").as_deref(), route)?;
     transfer(
         ctx,
         &Transfer {
@@ -95,6 +170,7 @@ pub fn download_with(
             max_bytes,
             headers: &[],
             config: None,
+            check,
         },
     )
 }
@@ -112,26 +188,48 @@ pub fn github_release_with(
     which: &Which,
 ) -> Result<Release> {
     let url = release_url(repo, which)?;
+    let body = api_get(ctx, env, repo, &url)?;
+    Release::parse(&body).with_context(|| format!("{repo} 发行信息无效"))
+}
+
+/// One page (1-based) of `repo`'s releases, newest first
+/// (`/releases?per_page=N&page=P`, at most [`MAX_PER_PAGE`] per page).
+pub fn github_releases(ctx: &Ctx, repo: &str, page: u32, per_page: u32) -> Result<ReleasePage> {
+    github_releases_with(ctx, &process_env, repo, page, per_page)
+}
+
+/// [`github_releases`] with an injected environment lookup.
+pub fn github_releases_with(
+    ctx: &Ctx,
+    env: EnvLookup,
+    repo: &str,
+    page: u32,
+    per_page: u32,
+) -> Result<ReleasePage> {
+    let url = releases_url(repo, page, per_page)?;
+    let body = api_get(ctx, env, repo, &url)?;
+    Release::parse_list(&body).with_context(|| format!("{repo} 发行列表无效"))
+}
+
+/// GET an API URL (direct, API headers, optional token) into memory.
+fn api_get(ctx: &Ctx, env: EnvLookup, repo: &str, url: &str) -> Result<Vec<u8>> {
     let config = env("GH_TOKEN").map(|t| token_config(&t)).transpose()?;
     let dir = TempDir::new("github-api")?;
-    let dest = dir.join("release.json");
+    let dest = dir.join("response.json");
     let fetched = transfer(
         ctx,
         &Transfer {
-            url: &url,
-            target: url.clone(),
+            url,
+            target: url.to_owned(),
             dest: &dest,
             max_bytes: API_MAX_BYTES,
-            headers: &[
-                "Accept: application/vnd.github+json",
-                "X-GitHub-Api-Version: 2022-11-28",
-            ],
+            headers: &API_HEADERS,
             config,
+            check: None,
         },
     );
     fetched.map_err(|e| api_error(e, repo))?;
-    Release::parse(&fs::read_bounded(&dest, API_MAX_BYTES)?)
-        .with_context(|| format!("{repo} 发行信息无效"))
+    fs::read_bounded(&dest, API_MAX_BYTES)
 }
 
 /// `https://api.github.com/repos/{repo}/releases/{latest|tags/TAG}`.
@@ -144,6 +242,18 @@ pub fn release_url(repo: &str, which: &Which) -> Result<String> {
             format!("{API}repos/{repo}/releases/tags/{tag}")
         }
     })
+}
+
+/// `https://api.github.com/repos/{repo}/releases?per_page=N&page=P`.
+pub fn releases_url(repo: &str, page: u32, per_page: u32) -> Result<String> {
+    ensure!(valid_repo(repo), "GitHub 仓库名无效: {repo}");
+    ensure!(
+        page >= 1 && (1..=MAX_PER_PAGE).contains(&per_page),
+        "发行列表分页参数无效"
+    );
+    Ok(format!(
+        "{API}repos/{repo}/releases?per_page={per_page}&page={page}"
+    ))
 }
 
 fn valid_segment(s: &str) -> bool {
@@ -184,10 +294,18 @@ pub fn check_https(url: &str) -> Result<()> {
 /// `use_proxy`; everything else unchanged. A bad `GH_PROXY` is an error only
 /// when it would be used.
 pub fn proxied(url: &str, gh_proxy: Option<&str>, use_proxy: bool) -> Result<String> {
+    let route = if use_proxy {
+        Route::Payload
+    } else {
+        Route::Direct
+    };
+    route_target(url, gh_proxy, route)
+}
+
+fn route_target(url: &str, gh_proxy: Option<&str>, route: Route) -> Result<String> {
     check_https(url)?;
-    let proxy = gh_proxy.filter(|p| !p.is_empty());
-    match proxy {
-        Some(proxy) if use_proxy && url.starts_with(GITHUB) => {
+    match gh_proxy.filter(|p| !p.is_empty()) {
+        Some(proxy) if route.proxiable(url) => {
             check_https(proxy).map_err(|_| Error::msg("GH_PROXY 必须为 HTTPS 地址"))?;
             let sep = if proxy.ends_with('/') { "" } else { "/" };
             Ok(format!("{proxy}{sep}{url}"))
@@ -331,6 +449,9 @@ fn finish(tmp: &Path, t: &Transfer) -> Result<u64> {
         t.max_bytes,
         t.url
     );
+    if let Some(check) = t.check {
+        check(tmp)?;
+    }
     // Durable before it becomes visible under the final name.
     std::fs::File::open(tmp)
         .and_then(|f| f.sync_all())

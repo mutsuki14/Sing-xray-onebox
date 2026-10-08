@@ -20,7 +20,6 @@
 //! - the downloaded binary must report the release's version.
 //! - Xray zips are read in-process (no `unzip` package); only the core
 //!   binary is extracted from either package.
-//! - checksum files may come through `GH_PROXY` like the payload.
 //! - `check_config` errors carry the core's own message (ANSI colors and
 //!   Xray's banner removed).
 //! - staging directories are `onebox-core-*` temp dirs removed on drop;
@@ -312,12 +311,8 @@ fn fetch_binary(
     ensure!(asset.size <= PACKAGE_MAX, "内核包过大: {}", asset.name);
     let package = work.join(&asset.name);
     out::info(format!("正在下载 {}…", asset.name));
-    fetch::download_with(ctx, env, &asset.url, &package, asset.size, true)?;
-    let checksums = match asset.sha256()? {
-        Some(_) => None,
-        None => checksum_text(ctx, env, core, release, &asset.name, work)?,
-    };
-    fetch::verify_file(&package, asset, checksums.as_deref())?;
+    let sums = |n: &str| is_checksum_file(core, &asset.name, n);
+    fetch::download_asset_with(ctx, env, repo(core), release, asset, &package, &sums)?;
     match core {
         Core::Singbox => extract_tar_gz(&package, core.binary(), out, BINARY_MAX)?,
         Core::Xray => extract_zip(&package, core.binary(), out, BINARY_MAX)?,
@@ -325,30 +320,14 @@ fn fetch_binary(
     Ok(())
 }
 
-/// The release's checksum file for `name`, if it publishes one (Xray:
-/// `{name}.dgst`; sing-box: `*checksums*` or `sha256sums.txt`).
-fn checksum_text(
-    ctx: &Ctx,
-    env: EnvLookup,
-    core: Core,
-    release: &Release,
-    name: &str,
-    work: &TempDir,
-) -> Result<Option<String>> {
-    let asset = release.assets.iter().find(|a| match core {
-        Core::Xray => a.name == format!("{name}.dgst"),
-        Core::Singbox => a.name.contains("checksums") || a.name == "sha256sums.txt",
-    });
-    let Some(asset) = asset else {
-        return Ok(None);
-    };
-    asset.check_url(repo(core), &release.tag)?;
-    let path = work.join(format!("{}.sums", asset.name));
-    fetch::download_with(ctx, env, &asset.url, &path, fetch::CHECKSUM_MAX_BYTES, true)?;
-    Ok(Some(sysfs::read_to_string_bounded(
-        &path,
-        fetch::CHECKSUM_MAX_BYTES,
-    )?))
+/// The release file holding the checksum of package `name` when the API
+/// has no digest (Xray: `{name}.dgst`; sing-box: `*checksums*` or
+/// `sha256sums.txt`).
+fn is_checksum_file(core: Core, name: &str, candidate: &str) -> bool {
+    match core {
+        Core::Xray => candidate.strip_suffix(".dgst") == Some(name),
+        Core::Singbox => candidate.contains("checksums") || candidate == "sha256sums.txt",
+    }
 }
 
 /// ELF check, probe the version, then move into `{staging}/{binary}`.

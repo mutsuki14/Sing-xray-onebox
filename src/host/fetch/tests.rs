@@ -527,6 +527,72 @@ fn github_api_errors() {
     );
 }
 
+const BBR_REPO: &str = "byJoey/Actions-bbr-v3";
+const BBR_PAGE: &str =
+    "https://api.github.com/repos/byJoey/Actions-bbr-v3/releases?per_page=100&page=2";
+
+#[test]
+fn release_lists_skip_untrustworthy_entries() {
+    let (_d, ctx, exec) = setup();
+    let page = r#"[
+        {"tag_name":"x86_64-7.2.8","draft":false,"prerelease":false,"assets":[]},
+        {"tag_name":"x86_64-7.2.7","draft":false,"prerelease":false,
+         "assets":[{"name":"../evil","browser_download_url":"u","size":1}]},
+        {"tag_name":"arm64-7.2.8","assets":[]},
+        {"name":"no tag"},
+        42
+    ]"#;
+    serve(&exec, routes([(BBR_PAGE, Reply::body(page))]));
+    let env = env_with(&[("GH_PROXY", "https://ghproxy.example"), ("GH_TOKEN", "t0k")]);
+    let list = github_releases_with(&ctx, &env, BBR_REPO, 2, MAX_PER_PAGE).unwrap();
+    let tags: Vec<&str> = list.releases.iter().map(|r| r.tag.as_str()).collect();
+    assert_eq!(tags, ["x86_64-7.2.8", "arm64-7.2.8"]);
+    assert!(
+        list.releases[1].draft && list.releases[1].prerelease,
+        "fail safe"
+    );
+    assert_eq!(list.entries, 5);
+    assert!(list.is_last(MAX_PER_PAGE) && !list.is_last(5));
+    let cmd = &exec.calls()[0];
+    assert_eq!(url_arg(cmd), BBR_PAGE, "direct, never GH_PROXY");
+    assert!(cmd
+        .display()
+        .contains("-H Accept: application/vnd.github+json"));
+    assert!(cmd.display().contains("--config -"), "token on stdin");
+}
+
+#[test]
+fn release_list_errors_and_urls() {
+    let (_d, ctx, exec) = setup();
+    let first = "https://api.github.com/repos/o/r/releases?per_page=30&page=1";
+    serve(
+        &exec,
+        vec![
+            (first.into(), Reply::body(r#"{"message":"Not Found"}"#)),
+            (
+                "https://api.github.com/repos/o/r/releases?per_page=30&page=2".into(),
+                Reply::http(429),
+            ),
+        ],
+    );
+    let err = github_releases_with(&ctx, &no_env, "o/r", 1, 30).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("o/r 发行列表无效: 响应不是发行数组: "),
+        "{err}"
+    );
+    let err = github_releases_with(&ctx, &no_env, "o/r", 2, 30).unwrap_err();
+    assert!(err.to_string().contains("可设置 GH_TOKEN 后重试"), "{err}");
+    assert_eq!(releases_url("o/r", 3, 100).unwrap(), {
+        "https://api.github.com/repos/o/r/releases?per_page=100&page=3"
+    });
+    for (repo, page, per_page) in [("o/r", 0, 10), ("o/r", 1, 0), ("o/r", 1, 101)] {
+        let err = releases_url(repo, page, per_page).unwrap_err();
+        assert_eq!(err.to_string(), "发行列表分页参数无效");
+    }
+    assert!(releases_url("../x", 1, 10).is_err());
+}
+
 /// Real curl against github.com (run with `cargo test -- --ignored`).
 #[test]
 #[ignore = "needs network access to github.com"]

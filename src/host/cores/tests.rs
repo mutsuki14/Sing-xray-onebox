@@ -473,7 +473,52 @@ fn xray_checksum_file_fallback() {
     let resolved = resolve_with(&f.ctx, &no_env, Core::Xray, None).unwrap();
     let path = download_with(&f.ctx, &no_env, &resolved, &staging).unwrap();
     assert_eq!(std::fs::read(path).unwrap(), fake_elf("xray"));
-    assert!(f.curl_urls()[2].ends_with("Xray-linux-64.zip.dgst"));
+    let dl = |n: &str| Asset::expected_url(repo(Core::Xray), "v26.3.27", n);
+    assert_eq!(
+        f.curl_urls(),
+        [
+            format!("{XR_API}/tags/v26.3.27"),
+            dl("Xray-linux-64.zip.dgst"),
+            dl("Xray-linux-64.zip"),
+        ],
+        "checksum before the package"
+    );
+}
+
+/// Pinning an Xray release without API digests while GH_PROXY is set: the
+/// `.dgst` (the only trust anchor) never goes through the proxy.
+#[test]
+fn xray_checksum_file_bypasses_gh_proxy() {
+    let mut f = fixture();
+    let zip = xray_zip(&TempDir::new("zip").unwrap(), &fake_elf("xray"));
+    let dgst = format!("SHA2-256= {}\n", sha256_hex(&zip));
+    serve_xray_dgst(&mut f, Some(dgst.clone()));
+    let dl = |n: &str| Asset::expected_url(repo(Core::Xray), "v26.3.27", n);
+    let via = |n: &str| format!("https://proxy.example/{}", dl(n));
+    // What a malicious mirror would serve: a trojan with a matching .dgst.
+    let trojan = xray_zip(&TempDir::new("zip").unwrap(), &fake_elf("trojan"));
+    let forged = format!("SHA2-256= {}\n", sha256_hex(&trojan));
+    f.route(via("Xray-linux-64.zip.dgst"), Reply::body(forged))
+        .route(via("Xray-linux-64.zip"), Reply::body(zip));
+    f.serve();
+    let staging = f.staging();
+    versions(&f.exec, vec![(staging.clone(), xray_says("26.3.27"))]);
+    let env = |k: &str| (k == "GH_PROXY").then(|| "https://proxy.example".to_owned());
+    let resolved = resolve_with(&f.ctx, &env, Core::Xray, None).unwrap();
+    let path = download_with(&f.ctx, &env, &resolved, &staging).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), fake_elf("xray"));
+    assert_eq!(
+        f.curl_urls(),
+        [
+            format!("{XR_API}/tags/v26.3.27"),
+            dl("Xray-linux-64.zip.dgst"),
+            via("Xray-linux-64.zip"),
+        ]
+    );
+    assert!(f
+        .curl_urls()
+        .iter()
+        .all(|u| !u.ends_with(".dgst") || !u.contains("proxy")));
 }
 
 #[test]

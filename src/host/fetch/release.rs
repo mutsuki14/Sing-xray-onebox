@@ -42,6 +42,24 @@ pub struct Release {
     pub assets: Vec<Asset>,
 }
 
+/// One page of a repository's release list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleasePage {
+    /// Entries that passed the same validation as a single release, in API
+    /// order (newest first); malformed entries are left out because they
+    /// can never be trusted.
+    pub releases: Vec<Release>,
+    /// How many entries the API returned, valid or not.
+    pub entries: usize,
+}
+
+impl ReleasePage {
+    /// Fewer entries than requested: there is no further page.
+    pub fn is_last(&self, per_page: u32) -> bool {
+        self.entries < per_page as usize
+    }
+}
+
 #[derive(Deserialize)]
 struct RawRelease {
     tag_name: Option<String>,
@@ -64,6 +82,23 @@ impl Release {
     pub fn parse(json: &[u8]) -> Result<Release> {
         let raw: RawRelease =
             serde_json::from_slice(json).map_err(|e| Error::msg(format!("发行信息无效: {e}")))?;
+        Release::from_raw(raw)
+    }
+
+    /// Parse a `/releases?per_page=…` response (a JSON array).
+    pub fn parse_list(json: &[u8]) -> Result<ReleasePage> {
+        let raw: Vec<serde_json::Value> = serde_json::from_slice(json)
+            .map_err(|e| Error::msg(format!("响应不是发行数组: {e}")))?;
+        let entries = raw.len();
+        let releases = raw
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<RawRelease>(v).ok())
+            .filter_map(|r| Release::from_raw(r).ok())
+            .collect();
+        Ok(ReleasePage { releases, entries })
+    }
+
+    fn from_raw(raw: RawRelease) -> Result<Release> {
         let tag = raw
             .tag_name
             .filter(|t| !t.is_empty())
@@ -201,15 +236,7 @@ fn checksum_line<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 /// Verify a downloaded file: exact size, then SHA-256 from the API digest
 /// or (fallback, G-8.1#6) from `checksums` (the release's checksum file).
 pub fn verify_file(path: &Path, asset: &Asset, checksums: Option<&str>) -> Result<()> {
-    let size = std::fs::symlink_metadata(path)
-        .map_err(|e| Error::io(path, e))?
-        .len();
-    if size != asset.size {
-        return Err(Error::msg(format!(
-            "{} 大小与发行元信息不符（应为 {} 字节，实际 {size} 字节）",
-            asset.name, asset.size
-        )));
-    }
+    check_size(path, asset)?;
     let expected = match asset.sha256()? {
         Some(hex) => hex,
         None => checksums
@@ -224,6 +251,21 @@ pub fn verify_file(path: &Path, asset: &Asset, checksums: Option<&str>) -> Resul
         )));
     }
     Ok(())
+}
+
+/// The file has exactly the size the metadata announced.
+pub(crate) fn check_size(path: &Path, asset: &Asset) -> Result<()> {
+    let size = std::fs::symlink_metadata(path)
+        .map_err(|e| Error::io(path, e))?
+        .len();
+    if size == asset.size {
+        Ok(())
+    } else {
+        Err(Error::msg(format!(
+            "{} 大小与发行元信息不符（应为 {} 字节，实际 {size} 字节）",
+            asset.name, asset.size
+        )))
+    }
 }
 
 /// ELF magic plus a minimal header length (v2 rule).
