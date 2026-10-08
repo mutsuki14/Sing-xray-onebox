@@ -153,19 +153,8 @@ pub fn download_paced_with(
         env("GH_PROXY").as_deref(),
         Route::payload_if(use_proxy),
     )?;
-    transfer(
-        ctx,
-        &Transfer {
-            url,
-            target,
-            dest,
-            max_bytes,
-            headers: &[],
-            config: None,
-            check: None,
-            pace,
-        },
-    )
+    let file = Transfer::file(url, target, dest, max_bytes);
+    transfer(ctx, &Transfer { pace, ..file })
 }
 
 /// The shared verified-download path: proxy routing, transfer, check.
@@ -179,19 +168,8 @@ fn fetch_to(
     check: Option<Check>,
 ) -> Result<u64> {
     let target = route_target(url, env("GH_PROXY").as_deref(), route)?;
-    transfer(
-        ctx,
-        &Transfer {
-            url,
-            target,
-            dest,
-            max_bytes,
-            headers: &[],
-            config: None,
-            check,
-            pace: Pace::Bounded,
-        },
-    )
+    let file = Transfer::file(url, target, dest, max_bytes);
+    transfer(ctx, &Transfer { check, ..file })
 }
 
 /// Release metadata of `repo` (`owner/name`) from api.github.com.
@@ -257,20 +235,13 @@ fn api_get(ctx: &Ctx, env: EnvLookup, repo: &str, url: &str) -> Result<Vec<u8>> 
     let config = env("GH_TOKEN").map(|t| token_config(&t)).transpose()?;
     let dir = TempDir::new("github-api")?;
     let dest = dir.join("response.json");
-    let fetched = transfer(
-        ctx,
-        &Transfer {
-            url,
-            target: url.to_owned(),
-            dest: &dest,
-            max_bytes: API_MAX_BYTES,
-            headers: &API_HEADERS,
-            config,
-            check: None,
-            pace: Pace::Bounded,
-        },
-    );
-    fetched.map_err(|e| api_error(e, repo))?;
+    let file = Transfer::file(url, url.to_owned(), &dest, API_MAX_BYTES);
+    let request = Transfer {
+        headers: &API_HEADERS,
+        config,
+        ..file
+    };
+    transfer(ctx, &request).map_err(|e| api_error(e, repo))?;
     fs::read_bounded(&dest, API_MAX_BYTES)
 }
 

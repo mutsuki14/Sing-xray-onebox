@@ -57,6 +57,23 @@ pub(super) struct Transfer<'a> {
     pub pace: Pace,
 }
 
+impl<'a> Transfer<'a> {
+    /// A plain file download of `target` (standing for `url`): no headers,
+    /// no stdin config, no content check, [`Pace::Bounded`].
+    pub fn file(url: &'a str, target: String, dest: &'a Path, max_bytes: u64) -> Transfer<'a> {
+        Transfer {
+            url,
+            target,
+            dest,
+            max_bytes,
+            headers: &[],
+            config: None,
+            check: None,
+            pace: Pace::Bounded,
+        }
+    }
+}
+
 /// `--max-time` for a [`Pace::Bounded`] transfer of at most `max_bytes`.
 pub fn max_time(max_bytes: u64) -> Duration {
     let secs = 60 + max_bytes / MIN_RATE;
