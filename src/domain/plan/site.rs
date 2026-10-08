@@ -1,5 +1,10 @@
 //! Planners for the own-domain website and the remote subscription endpoint
 //! (spec F §2.1, G §2.3).
+//!
+//! Changes from v2: an ip-mode subscription on an IPv6 address is refused
+//! while planning when the host cannot listen on IPv6 (v2 found out only
+//! when rendering the nginx config, G32), and without IPv6 the default
+//! address prefers a detected IPv4 address over an IPv6 connection address.
 
 use super::*;
 use crate::domain::protocol::Transport;
@@ -114,10 +119,14 @@ pub fn enable_subscription(
     let (mode, port) = match choice {
         SubscriptionChoice::Ip { address } => {
             let address = address
-                .or_else(|| default_subscription_address(cfg))
+                .or_else(|| listenable_default_address(cfg, env.ipv6))
                 .ok_or("没有可用的服务器 IP，请用 --address 指定 IPv4 或 IPv6 地址")?
                 .to_canonical();
             check_subscription_ip(&address)?;
+            ensure!(
+                env.ipv6 || address.is_ipv4(),
+                "订阅地址为 IPv6，但当前系统无法监听 IPv6；请启用 IPv6 或使用 IPv4 地址"
+            );
             (SubscriptionMode::Ip { address }, default_port)
         }
         SubscriptionChoice::Site => {
@@ -170,6 +179,24 @@ pub fn default_subscription_address(cfg: &NodeConfig) -> Option<IpAddr> {
     .flatten()
     .map(|ip| ip.to_canonical())
     .find(|ip| check_subscription_ip(ip).is_ok())
+}
+
+/// [`default_subscription_address`], but without IPv6 sockets an IPv4
+/// candidate wins over an earlier IPv6 one (the worker could not listen on
+/// the IPv6 address). Falls back to the plain default, which the caller
+/// then rejects with the IPv6 message.
+fn listenable_default_address(cfg: &NodeConfig, ipv6: bool) -> Option<IpAddr> {
+    let first = default_subscription_address(cfg)?;
+    if ipv6 || first.is_ipv4() {
+        return Some(first);
+    }
+    let server = &cfg.server;
+    [server.addr.ip(), server.ipv4.map(IpAddr::V4)]
+        .into_iter()
+        .flatten()
+        .map(|ip| ip.to_canonical())
+        .find(|ip| ip.is_ipv4() && check_subscription_ip(ip).is_ok())
+        .or(Some(first))
 }
 
 #[cfg(test)]

@@ -244,6 +244,52 @@ fn subscription_ports() {
 }
 
 #[test]
+fn ipv6_subscription_address_needs_ipv6_sockets() {
+    const NO_V6: &str = "订阅地址为 IPv6，但当前系统无法监听 IPv6；请启用 IPv6 或使用 IPv4 地址";
+    let no_v6 = PlanEnv::offline(false, 0);
+    let v6 = SubscriptionChoice::Ip {
+        address: Some("2001:db8::7".parse().unwrap()),
+    };
+    let e = enable_subscription(&reality(), &v6, None, &no_v6).unwrap_err();
+    assert_eq!(e.to_string(), NO_V6);
+    let ok = enable_subscription(&reality(), &v6, None, &env()).unwrap();
+    assert!(matches!(
+        ok.subscription.unwrap().mode,
+        SubscriptionMode::Ip { address } if address.is_ipv6()
+    ));
+    // An IPv4-mapped address is IPv4 after canonicalization.
+    let mapped = SubscriptionChoice::Ip {
+        address: Some("::ffff:192.0.2.5".parse().unwrap()),
+    };
+    enable_subscription(&reality(), &mapped, None, &no_v6).unwrap();
+
+    // The default prefers a detected IPv4 when IPv6 cannot listen ...
+    let mut dual = reality();
+    dual.server.addr = Host::Ip("2001:db8::10".parse().unwrap());
+    dual.server.ipv6 = Some("2001:db8::10".parse().unwrap());
+    let auto = SubscriptionChoice::Ip { address: None };
+    let next = enable_subscription(&dual, &auto, None, &no_v6).unwrap();
+    assert_eq!(
+        next.subscription.unwrap().mode,
+        SubscriptionMode::Ip {
+            address: IpAddr::V4(ADDR)
+        }
+    );
+    // ... keeps the IPv6 connection address when it can ...
+    let next = enable_subscription(&dual, &auto, None, &env()).unwrap();
+    assert_eq!(
+        next.subscription.unwrap().mode,
+        SubscriptionMode::Ip {
+            address: "2001:db8::10".parse().unwrap()
+        }
+    );
+    // ... and refuses an IPv6-only node without IPv6 sockets.
+    dual.server.ipv4 = None;
+    let e = enable_subscription(&dual, &auto, None, &no_v6).unwrap_err();
+    assert_eq!(e.to_string(), NO_V6);
+}
+
+#[test]
 fn default_address_order() {
     let mut cfg = reality();
     assert_eq!(default_subscription_address(&cfg), Some(IpAddr::V4(ADDR)));
