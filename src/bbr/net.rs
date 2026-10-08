@@ -12,6 +12,16 @@
 //! HTTP status and message (rate limits were an opaque "invalid response");
 //! the wget fallback is gone (wget does not enforce HTTPS on redirects,
 //! E-8.1#7).
+//!
+//! TODO(merge B2+B3): this adapter duplicates `host::fetch` (WP-B2a), which
+//! was built in parallel; GH_PROXY validation, timeouts and fsync-before-
+//! rename already differ. When both are merged, keep the [`Fetcher`] trait
+//! (BBR tests stay network-free) but make `CurlFetcher` a thin wrapper:
+//! `json` over `host::fetch::github_releases_with` / the release-by-tag
+//! call, `download` over `host::fetch::download(ctx, url, dest, size,
+//! use_proxy = true)`; move BBR's slow-link policy (low-speed limit and
+//! progress bar instead of a hard `--max-time`) into `host::fetch` as an
+//! option, then delete the curl argv and `parse_api_response` here.
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
