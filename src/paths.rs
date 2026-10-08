@@ -177,6 +177,25 @@ impl Paths {
     pub fn subscription(&self) -> PathBuf {
         self.root.join("subscription")
     }
+    /// Subscription devices (token hashes): `ROOT/subscription/devices.json`.
+    pub fn devices(&self) -> PathBuf {
+        self.subscription().join("devices.json")
+    }
+    /// The snapshot the subscription worker serves (v2 name and shape):
+    /// `ROOT/subscription/published.json`.
+    pub fn published(&self) -> PathBuf {
+        self.subscription().join("published.json")
+    }
+    /// The subscription worker's unix socket behind nginx (site and
+    /// standalone modes): `RUN/subscription.sock`.
+    pub fn subscription_socket(&self) -> PathBuf {
+        self.run.join("subscription.sock")
+    }
+    /// HTTP-01 webroot of the standalone subscription: a sibling of the site
+    /// root (`/var/lib/onebox-subscription-acme` by default, v2 layout).
+    pub fn subscription_acme(&self) -> PathBuf {
+        self.site_root.with_file_name("onebox-subscription-acme")
+    }
     pub fn services(&self) -> PathBuf {
         self.root.join("services")
     }
@@ -212,10 +231,48 @@ mod tests {
             PathBuf::from("/etc/onebox/xray.json")
         );
         assert_eq!(p.frp_lock(), PathBuf::from("/etc/.onebox-frp.lock"));
+        let derived = [
+            (p.subscription_acme(), "/var/lib/onebox-subscription-acme"),
+            (p.subscription_socket(), "/run/onebox/subscription.sock"),
+            (p.devices(), "/etc/onebox/subscription/devices.json"),
+            (p.published(), "/etc/onebox/subscription/published.json"),
+        ];
+        for (got, want) in derived {
+            assert_eq!(got, PathBuf::from(want));
+        }
         assert_eq!(p.service_env().len(), 13);
         assert_eq!(
             p.system("/etc/os-release"),
             PathBuf::from("/etc/os-release")
+        );
+    }
+
+    #[test]
+    fn subscription_paths_follow_overrides() {
+        let p = Paths::from_lookup(|k| match k {
+            "ONEBOX_SITE_ROOT" => Some(PathBuf::from("/srv/www/site")),
+            "ONEBOX_RUN_DIR" => Some(PathBuf::from("/tmp/run")),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            p.subscription_acme(),
+            PathBuf::from("/srv/www/onebox-subscription-acme")
+        );
+        assert_eq!(
+            p.subscription_socket(),
+            PathBuf::from("/tmp/run/subscription.sock")
+        );
+        let isolated = Paths::isolated(Path::new("/t"));
+        assert_eq!(
+            isolated.subscription_acme(),
+            PathBuf::from("/t/onebox-subscription-acme")
+        );
+        // A site root of "/" has no file name: the sibling is still absolute.
+        let top = Paths::from_lookup(|k| (k == "ONEBOX_SITE_ROOT").then(|| PathBuf::from("/")));
+        assert_eq!(
+            top.unwrap().subscription_acme(),
+            PathBuf::from("/onebox-subscription-acme")
         );
     }
 
