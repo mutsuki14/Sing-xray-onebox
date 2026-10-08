@@ -38,7 +38,8 @@ pub trait Prompter: Send + Sync {
     /// y/n. Under `-y` returns true (v2 parity); see `confirm_danger` for the exception.
     fn confirm(&self, prompt: &str, default: bool) -> Result<bool>;
     /// Numbered single choice over `items` (1-based display); returns the 0-based index.
-    /// When `back` is true a `0) 返回` entry is offered and returns `None`.
+    /// When `back` is true a `0) 返回` entry is offered and returns `None`; with
+    /// `default` = [`BACK`] it is also what Enter (and `-y`) picks.
     fn select(
         &self,
         title: &str,
@@ -59,6 +60,9 @@ pub const NO_TERMINAL: &str = "当前没有交互终端，请通过参数提供�
 pub const UNATTENDED_SECRET: &str = "无人值守模式请通过环境变量提供凭据";
 /// Error when an unattended selection's default is out of range.
 pub const BAD_DEFAULT: &str = "默认选项无效";
+/// A [`Prompter::select`] default that makes `0) 返回` the default choice
+/// (menus whose Enter leaves, like v2's `[默认: 0]`); needs `back`.
+pub const BACK: usize = usize::MAX;
 
 /// `select_many` defaults must index `items` (a caller bug otherwise; the
 /// result would be used to index the same list).
@@ -142,10 +146,13 @@ pub fn format_menu(title: &str, items: &[String], back: bool) -> String {
     lines.join("\n")
 }
 
-/// `"请选择 [默认: N]: "` (1-based), without a bracket when there is no valid default.
-pub fn select_prompt(count: usize, default: usize) -> String {
+/// `"请选择 [默认: N]: "` (1-based; `0` for [`BACK`] with `back`), without a
+/// bracket when there is no valid default.
+pub fn select_prompt(count: usize, default: usize, back: bool) -> String {
     if default < count {
         format!("请选择 [默认: {}]: ", default + 1)
+    } else if back && default == BACK {
+        "请选择 [默认: 0]: ".to_string()
     } else {
         "请选择: ".to_string()
     }
@@ -165,7 +172,10 @@ pub fn parse_select(
 ) -> Option<Option<usize>> {
     let answer = answer.trim();
     if answer.is_empty() {
-        return (default < count).then_some(Some(default));
+        if default < count {
+            return Some(Some(default));
+        }
+        return (back && default == BACK).then_some(None);
     }
     match answer.parse::<usize>().ok()? {
         0 if back => Some(None),
@@ -239,8 +249,10 @@ mod tests {
         assert_eq!(input_prompt("域名", ""), "域名: ");
         assert_eq!(confirm_prompt("继续？", true), "继续？ [Y/n]: ");
         assert_eq!(confirm_prompt("删除？", false), "删除？ [y/N]: ");
-        assert_eq!(select_prompt(3, 0), "请选择 [默认: 1]: ");
-        assert_eq!(select_prompt(3, 7), "请选择: ");
+        assert_eq!(select_prompt(3, 0, false), "请选择 [默认: 1]: ");
+        assert_eq!(select_prompt(3, 7, true), "请选择: ");
+        assert_eq!(select_prompt(3, BACK, true), "请选择 [默认: 0]: ");
+        assert_eq!(select_prompt(3, BACK, false), "请选择: ");
         assert_eq!(select_hint(5, false), "请输入 1–5");
         assert_eq!(select_hint(5, true), "请输入 0–5");
         assert_eq!(
@@ -306,6 +318,9 @@ mod tests {
             None,
             "invalid default needs input"
         );
+        assert_eq!(parse_select("", 3, BACK, true), Some(None), "Enter = back");
+        assert_eq!(parse_select("", 3, BACK, false), None);
+        assert_eq!(parse_select("2", 3, BACK, true), Some(Some(1)));
     }
 
     #[test]

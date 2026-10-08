@@ -2,14 +2,16 @@
 //! global addresses (`ip -j address`), public IP detection.
 //!
 //! Changes from v2: the /proc tables are read under `Paths::system_root` so
-//! tests use fixtures; one `ipv6_available` (v2 had two different ones);
-//! detected public addresses must match the requested family.
+//! tests use fixtures; one `ipv6_available` (v2 had two different ones: a
+//! `[::1]` bind test for listeners and nginx, /proc flags for ip6tables and
+//! hop tables, which could disagree, F-8.1#25); detected public addresses
+//! must match the requested family.
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::exec::Cmd;
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv6Addr, TcpListener, UdpSocket};
+use std::net::{IpAddr, TcpListener, UdpSocket};
 use std::path::Path;
 use std::time::Duration;
 
@@ -63,9 +65,16 @@ pub fn table_has_port(text: &str, port: u16, require_listen: bool) -> bool {
     })
 }
 
-/// Whether the host can use IPv6 at all (binding the loopback works).
-pub fn ipv6_available() -> bool {
-    TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok()
+/// Whether the host uses IPv6: the stack exists (`/proc/net/if_inet6`) and
+/// is not switched off globally (`net.ipv6.conf.all.disable_ipv6` is not
+/// `1`; an unreadable flag counts as enabled), read under `system_root`.
+/// The one answer for the `::` listener default, nginx `listen [::]`,
+/// ip6tables rules and ip6 hop tables, so they never disagree.
+pub fn ipv6_available(system_root: &Path) -> bool {
+    system_root.join("proc/net/if_inet6").exists()
+        && std::fs::read_to_string(system_root.join("proc/sys/net/ipv6/conf/all/disable_ipv6"))
+            .map(|s| s.trim() != "1")
+            .unwrap_or(true)
 }
 
 /// The host's global unicast addresses as sorted, unique `ip/32` and
@@ -253,7 +262,18 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_probe_does_not_panic() {
-        let _ = ipv6_available();
+    fn ipv6_follows_the_proc_flags_under_the_system_root() {
+        let dir = TempDir::new("net-v6").unwrap();
+        assert!(!ipv6_available(dir.path()), "no IPv6 stack");
+        let inet6 = dir.join("proc/net/if_inet6");
+        std::fs::create_dir_all(inet6.parent().unwrap()).unwrap();
+        std::fs::write(&inet6, "").unwrap();
+        assert!(ipv6_available(dir.path()), "unreadable flag = enabled");
+        let flag = dir.join("proc/sys/net/ipv6/conf/all/disable_ipv6");
+        std::fs::create_dir_all(flag.parent().unwrap()).unwrap();
+        std::fs::write(&flag, "0\n").unwrap();
+        assert!(ipv6_available(dir.path()));
+        std::fs::write(&flag, "1\n").unwrap();
+        assert!(!ipv6_available(dir.path()), "disabled globally");
     }
 }

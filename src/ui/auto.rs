@@ -1,7 +1,7 @@
 //! Non-interactive prompter: `-y` answers every question with its default;
 //! without `-y` (and without a terminal) every question fails with a hint.
 
-use super::{check_many_defaults, Prompter, BAD_DEFAULT, NO_TERMINAL, UNATTENDED_SECRET};
+use super::{check_many_defaults, Prompter, BACK, BAD_DEFAULT, NO_TERMINAL, UNATTENDED_SECRET};
 use crate::error::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,11 +56,13 @@ impl Prompter for AutoPrompter {
         _title: &str,
         items: &[String],
         default: usize,
-        _back: bool,
+        back: bool,
     ) -> Result<Option<usize>> {
         self.require_yes()?;
         if default < items.len() {
             Ok(Some(default))
+        } else if back && default == BACK {
+            Ok(None)
         } else {
             Err(Error::msg(BAD_DEFAULT))
         }
@@ -100,6 +102,8 @@ mod tests {
         assert_eq!(ui.input("名称", "onebox").unwrap(), "onebox");
         assert!(ui.confirm("删除？", false).unwrap());
         assert_eq!(ui.select("t", &items(), 1, true).unwrap(), Some(1));
+        assert_eq!(ui.select("t", &items(), BACK, true).unwrap(), None);
+        assert!(ui.select("t", &items(), BACK, false).is_err());
         assert_eq!(
             ui.select("t", &items(), 2, false).unwrap_err().to_string(),
             BAD_DEFAULT
