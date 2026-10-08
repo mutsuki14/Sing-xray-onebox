@@ -117,13 +117,9 @@ impl StateStore {
         };
         let hash = StateHash::of(&bytes);
         let doc: Value = serde_json::from_slice(&bytes).context("state.json 无效")?;
-        let object = doc.as_object().ok_or("state.json 格式无法识别")?;
-        let (config, origin) = if object.contains_key("values") {
-            migrate_v2(paths, bytes, rng)?
-        } else if let Some(schema) = object.get("schema") {
-            (parse_v3(schema, doc.clone())?, Origin::V3)
-        } else {
-            bail!("state.json 格式无法识别");
+        let (config, origin) = match detect(&doc)? {
+            Format::V2 => migrate_v2(paths, bytes, rng)?,
+            Format::V3(schema) => (parse_v3(schema, doc)?, Origin::V3),
         };
         Ok(Some(Loaded {
             config,
@@ -172,11 +168,27 @@ fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-fn parse_v3(schema: &Value, doc: Value) -> Result<NodeConfig> {
-    let schema = schema
+enum Format {
+    /// `{"values":{…}}`
+    V2,
+    /// `{"schema":N,…}`
+    V3(u32),
+}
+
+fn detect(doc: &Value) -> Result<Format> {
+    let object = doc.as_object().ok_or("state.json 格式无法识别")?;
+    if object.contains_key("values") {
+        return Ok(Format::V2);
+    }
+    let schema = object.get("schema").ok_or("state.json 格式无法识别")?;
+    schema
         .as_u64()
         .and_then(|n| u32::try_from(n).ok())
-        .ok_or("state.json 的 schema 无效")?;
+        .map(Format::V3)
+        .ok_or_else(|| "state.json 的 schema 无效".into())
+}
+
+fn parse_v3(schema: u32, doc: Value) -> Result<NodeConfig> {
     check_schema(schema)?;
     let config: NodeConfig = serde_json::from_value(doc).context("state.json 无效")?;
     config.validate().context("state.json 校验失败")?;
