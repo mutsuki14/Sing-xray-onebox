@@ -232,10 +232,10 @@ fn client_outbounds_pin_by_leaf_hash() {
         .tls
         .as_ref()
         .unwrap()
+        .pinned_material()
+        .unwrap()
+        .unwrap()
         .pin()
-        .unwrap()
-        .unwrap()
-        .leaf_pin()
         .to_owned();
     for p in [VlessWs, VmessWs, Hysteria2] {
         let v = outbound(&s, s.require(p).unwrap()).unwrap();

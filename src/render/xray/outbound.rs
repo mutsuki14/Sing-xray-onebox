@@ -152,8 +152,8 @@ fn reality(spec: &NodeSpec) -> Result<Value> {
 fn certificate(tls: &TlsSpec, p: Protocol) -> Result<Value> {
     let mut settings = json!({"serverName": tls.server_name, "alpn": cert_alpn(p),
         "fingerprint": policy::FINGERPRINT});
-    if let Some(material) = tls.pin()? {
-        settings.set("pinnedPeerCertSha256", material.leaf_pin());
+    if let Some(material) = tls.pinned_material()? {
+        settings.set("pinnedPeerCertSha256", material.pin());
     }
     Ok(json!({"security": "tls", "tlsSettings": settings}))
 }

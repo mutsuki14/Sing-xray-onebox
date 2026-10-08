@@ -125,7 +125,7 @@ fn reality(r: &RealitySpec) -> Value {
 /// then trusts exactly it); never `insecure`.
 fn certificate(tls: &TlsSpec, p: Protocol) -> Result<Value> {
     let mut v = json!({"enabled": true, "server_name": tls.server_name});
-    if let Some(material) = tls.pin()? {
+    if let Some(material) = tls.pinned_material()? {
         v.set("certificate", json!(material.pems()));
     }
     let alpn = cert_alpn(p);

@@ -102,7 +102,7 @@ pub enum CertTrust {
 
 impl TlsSpec {
     /// The pinned material; `None` for publicly trusted certificates.
-    pub fn pin(&self) -> Result<Option<&TlsMaterial>> {
+    pub fn pinned_material(&self) -> Result<Option<&TlsMaterial>> {
         match &self.trust {
             CertTrust::Public => Ok(None),
             CertTrust::Pinned(material) => Ok(Some(material)),
@@ -259,7 +259,7 @@ impl NodeSpec {
     pub fn load(cfg: &NodeConfig, paths: &Paths) -> Result<NodeSpec> {
         let pinned = cfg.needs_cert() && cfg.tls.as_ref().is_some_and(|t| t.pinned);
         let material = if pinned {
-            Some(TlsMaterial::load(&paths.tls().join(CERT_FILE))?)
+            Some(TlsMaterial::deployed(paths)?)
         } else {
             None
         };

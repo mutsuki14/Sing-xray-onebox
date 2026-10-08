@@ -84,10 +84,10 @@ fn pinned_links_carry_pins_per_client_convention() {
         .tls
         .as_ref()
         .unwrap()
+        .pinned_material()
+        .unwrap()
+        .unwrap()
         .pin()
-        .unwrap()
-        .unwrap()
-        .leaf_pin()
         .to_owned();
     let ws = link_of(&s, VlessWs);
     assert!(
@@ -157,10 +157,10 @@ fn vmess_links_are_base64_json_with_raw_values() {
         .tls
         .as_ref()
         .unwrap()
+        .pinned_material()
+        .unwrap()
+        .unwrap()
         .pin()
-        .unwrap()
-        .unwrap()
-        .leaf_pin()
         .to_owned();
     let port = s.require(VmessWs).unwrap().port.to_string();
     assert_eq!(v["port"], port.as_str());

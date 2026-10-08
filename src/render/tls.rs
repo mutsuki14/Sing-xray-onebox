@@ -1,5 +1,5 @@
 //! Certificate material for client exports: the `CERTIFICATE` blocks of the
-//! deployed proxy certificate and the SHA-256 pin of its leaf.
+//! deployed proxy certificate and the proxy pin.
 //!
 //! Only certificates are ever extracted: a private key concatenated into
 //! `cert.pem` (a common mistake) is skipped and can never reach a client.
@@ -13,10 +13,19 @@
 //! - malformed base64 gets a Chinese message instead of the raw decoder text.
 //!
 //! Kept from v2 (C-8.1 #14): the pin is the SHA-256 of the *first*
-//! certificate's DER. The certificate stage deploys the leaf first (it is
-//! the certificate matching the key), so the first block is the leaf.
+//! certificate's DER, and [`TlsMaterial::pin`] is its only definition.
+//! Contract with the certificate stage and renewal (ARCH §5 cert, G9):
+//! - `ROOT/tls/cert.pem` is deployed with the key-matching leaf as its first
+//!   block, written as [`TlsMaterial::with_leaf_first`] +
+//!   [`TlsMaterial::to_pem`] (TLS servers need this order anyway: they send
+//!   the file's first certificate as their own);
+//! - the proxy certificate identity is computed only as
+//!   `TlsMaterial::deployed(paths)?.pin()`, never by other code, so the
+//!   identity renewal compares is the one clients pin.
 
+use super::spec::CERT_FILE;
 use crate::error::{Error, Result};
+use crate::paths::Paths;
 use crate::sys::fs::{read_to_string_bounded, sha256_hex};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -31,19 +40,20 @@ const MAX_PEM_BYTES: u64 = 1024 * 1024;
 /// DER encodings of X.509 certificates start with a SEQUENCE tag.
 const DER_SEQUENCE: u8 = 0x30;
 
-/// Parsed certificate chain. Invariant: at least one certificate.
+/// Parsed certificate chain. Invariant: at least one certificate, and
+/// `digests[i]` is the SHA-256 of the DER of `pems[i]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TlsMaterial {
     pems: Vec<String>,
-    leaf_pin: String,
+    digests: Vec<String>,
 }
 
 impl TlsMaterial {
-    /// Parse every `CERTIFICATE` block of a PEM file; other blocks and text
-    /// are ignored.
+    /// Parse every `CERTIFICATE` block of a PEM file, in file order; other
+    /// blocks and text are ignored.
     pub fn from_pem(text: &str) -> Result<TlsMaterial> {
         let mut pems = Vec::new();
-        let mut leaf_pin = None;
+        let mut digests = Vec::new();
         let mut rest = text;
         while let Some(start) = rest.find(BEGIN) {
             let body = &rest[start + BEGIN.len()..];
@@ -54,22 +64,25 @@ impl TlsMaterial {
                 .chars()
                 .filter(|c| !c.is_ascii_whitespace())
                 .collect();
-            let der = decode_der(&encoded)?;
-            leaf_pin.get_or_insert_with(|| sha256_hex(&der));
+            digests.push(sha256_hex(&decode_der(&encoded)?));
             pems.push(canonical_pem(&encoded));
             rest = &body[finish + END.len()..];
         }
-        match leaf_pin {
-            Some(leaf_pin) => Ok(TlsMaterial { pems, leaf_pin }),
-            None => Err(Error::msg(
-                "TLS 证书文件未包含 CERTIFICATE，拒绝导出未验证配置",
-            )),
-        }
+        ensure!(
+            !pems.is_empty(),
+            "TLS 证书文件未包含 CERTIFICATE，拒绝导出未验证配置"
+        );
+        Ok(TlsMaterial { pems, digests })
     }
 
-    /// Read and parse a deployed certificate file (regular file, no symlink).
+    /// Read and parse a certificate file (regular file, no symlink).
     pub fn load(path: &Path) -> Result<TlsMaterial> {
         Self::from_pem(&read_to_string_bounded(path, MAX_PEM_BYTES)?)
+    }
+
+    /// The deployed proxy certificate, `ROOT/tls/cert.pem`.
+    pub fn deployed(paths: &Paths) -> Result<TlsMaterial> {
+        Self::load(&paths.tls().join(CERT_FILE))
     }
 
     /// Every certificate block, canonical PEM, each ending in `"\n"`.
@@ -77,9 +90,34 @@ impl TlsMaterial {
         &self.pems
     }
 
-    /// Lowercase hex SHA-256 of the first certificate's DER.
-    pub fn leaf_pin(&self) -> &str {
-        &self.leaf_pin
+    /// The proxy pin: lowercase hex SHA-256 of the first certificate's DER.
+    /// The single definition of the proxy certificate identity: clients pin
+    /// it (Xray `pinnedPeerCertSha256`, mihomo `fingerprint`, link
+    /// `pcs` / `pinSHA256` / `hpkp`) and renewal compares it. It is the
+    /// leaf's because deployment puts the leaf first (module docs).
+    pub fn pin(&self) -> &str {
+        &self.digests[0]
+    }
+
+    /// The same chain with block `index` (the key-matching leaf, found by
+    /// the certificate stage) moved to the front; the other blocks keep
+    /// their order.
+    pub fn with_leaf_first(mut self, index: usize) -> Result<TlsMaterial> {
+        ensure!(
+            index < self.pems.len(),
+            "证书链只有 {} 个证书，没有第 {} 个",
+            self.pems.len(),
+            index + 1
+        );
+        self.pems[..=index].rotate_right(1);
+        self.digests[..=index].rotate_right(1);
+        Ok(self)
+    }
+
+    /// The chain as one PEM file (canonical blocks, file order): what the
+    /// certificate stage writes to `ROOT/tls/cert.pem`.
+    pub fn to_pem(&self) -> String {
+        self.pems.concat()
     }
 }
 
@@ -124,7 +162,41 @@ mod tests {
         assert_eq!(m.pems().len(), 2);
         assert_eq!(m.pems()[0], block(TINY));
         assert!(m.pems().iter().all(|p| !p.contains("SECRET")));
-        assert_eq!(m.leaf_pin(), sha256_hex(&[0x30, 0x03, 0x02, 0x01, 0x01]));
+        assert_eq!(m.pin(), sha256_hex(&[0x30, 0x03, 0x02, 0x01, 0x01]));
+        assert_eq!(m.to_pem(), format!("{}{}", block(TINY), block(second)));
+    }
+
+    #[test]
+    fn a_reordered_chain_deploys_with_the_pin_of_its_leaf() {
+        let deployed = crate::render::fixtures::material("chain");
+        let [leaf, ca] = deployed.pems() else {
+            panic!("the test chain is leaf + CA");
+        };
+        // A custom chain given CA first pins the CA until the leaf moves up.
+        let given = TlsMaterial::from_pem(&format!("{ca}{leaf}")).unwrap();
+        assert_ne!(given.pin(), deployed.pin());
+        let fixed = given.with_leaf_first(1).unwrap();
+        assert_eq!(fixed.pin(), deployed.pin());
+        assert_eq!(fixed.to_pem(), format!("{leaf}{ca}"));
+        assert_eq!(TlsMaterial::from_pem(&fixed.to_pem()).unwrap(), fixed);
+        // Moving the first block is a no-op; a missing block is an error.
+        assert_eq!(fixed.clone().with_leaf_first(0).unwrap(), fixed);
+        let err = fixed.with_leaf_first(2).unwrap_err().to_string();
+        assert_eq!(err, "证书链只有 2 个证书，没有第 3 个");
+    }
+
+    #[test]
+    fn rotation_keeps_the_order_of_the_other_blocks() {
+        let blocks: Vec<String> = ["MAMCAQE=", "MAMCAQI=", "MAMCAQM="]
+            .iter()
+            .map(|b| block(b))
+            .collect();
+        let m = TlsMaterial::from_pem(&blocks.concat()).unwrap();
+        let third_pin = sha256_hex(&[0x30, 0x03, 0x02, 0x01, 0x03]);
+        let moved = m.with_leaf_first(2).unwrap();
+        let expected = [&blocks[2], &blocks[0], &blocks[1]];
+        assert!(moved.pems().iter().eq(expected));
+        assert_eq!(moved.pin(), third_pin);
     }
 
     #[test]
@@ -167,6 +239,14 @@ mod tests {
         let path = dir.join("cert.pem");
         std::fs::write(&path, block(TINY)).unwrap();
         assert_eq!(TlsMaterial::load(&path).unwrap().pems().len(), 1);
+        let paths = Paths::isolated(dir.path());
+        assert!(TlsMaterial::deployed(&paths).is_err());
+        std::fs::create_dir_all(paths.tls()).unwrap();
+        std::fs::copy(&path, paths.tls().join(CERT_FILE)).unwrap();
+        assert_eq!(
+            TlsMaterial::deployed(&paths).unwrap(),
+            TlsMaterial::load(&path).unwrap()
+        );
         let link = dir.join("link.pem");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(TlsMaterial::load(&link).is_err());

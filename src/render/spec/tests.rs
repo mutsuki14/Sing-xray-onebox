@@ -63,14 +63,14 @@ fn certificate_trust_follows_pinning_and_material() {
     assert_eq!(tls.cert_path, "/onebox-test/etc/tls/cert.pem");
     assert_eq!(tls.key_path, "/onebox-test/etc/tls/key.pem");
     assert_eq!(
-        tls.pin().unwrap().unwrap().leaf_pin(),
-        material("selfsigned").leaf_pin()
+        tls.pinned_material().unwrap().unwrap().pin(),
+        material("selfsigned").pin()
     );
 
     let unloaded = NodeSpec::new(&cfg, &paths(), None).unwrap().tls.unwrap();
     assert_eq!(unloaded.trust, CertTrust::PinnedUnloaded);
     assert!(unloaded.pinned());
-    let err = unloaded.pin().unwrap_err().to_string();
+    let err = unloaded.pinned_material().unwrap_err().to_string();
     assert_eq!(err, "固定证书的客户端配置缺少证书指纹");
 
     let mut acme = cfg.clone();
@@ -84,7 +84,7 @@ fn certificate_trust_follows_pinning_and_material() {
     let public = spec(&acme).tls.unwrap();
     assert_eq!(public.trust, CertTrust::Public);
     assert_eq!(public.server_name, "proxy.example.com");
-    assert!(public.pin().unwrap().is_none());
+    assert!(public.pinned_material().unwrap().is_none());
     assert!(spec(&config(&[(Shadowsocks, 8388, SB)])).tls.is_none());
 }
 

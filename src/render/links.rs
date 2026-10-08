@@ -128,8 +128,8 @@ fn tuic_query(spec: &NodeSpec) -> Result<String> {
 
 fn anytls_query(spec: &NodeSpec) -> Result<String> {
     let tls = spec.tls()?;
-    let trust = match tls.pin()? {
-        Some(m) => format!("&insecure=1&hpkp={}", m.leaf_pin()),
+    let trust = match tls.pinned_material()? {
+        Some(m) => format!("&insecure=1&hpkp={}", m.pin()),
         None => String::new(),
     };
     Ok(format!("/?sni={}{trust}", url_encode(&tls.server_name)))
@@ -147,8 +147,8 @@ fn reality_query(spec: &NodeSpec) -> Result<String> {
 
 /// Pin parameters of VLESS-WS / Trojan links (empty when publicly trusted).
 fn pin_query(tls: &TlsSpec) -> Result<String> {
-    Ok(match tls.pin()? {
-        Some(m) => format!("&allowInsecure=1&insecure=1&pcs={}", m.leaf_pin()),
+    Ok(match tls.pinned_material()? {
+        Some(m) => format!("&allowInsecure=1&insecure=1&pcs={}", m.pin()),
         None => String::new(),
     })
 }
@@ -156,8 +156,8 @@ fn pin_query(tls: &TlsSpec) -> Result<String> {
 fn hysteria2_query(spec: &NodeSpec) -> Result<String> {
     let tls = spec.tls()?;
     let mut query = format!("/?sni={}&alpn=h3", url_encode(&tls.server_name));
-    if let Some(m) = tls.pin()? {
-        query.push_str(&format!("&insecure=1&pinSHA256={}", m.leaf_pin()));
+    if let Some(m) = tls.pinned_material()? {
+        query.push_str(&format!("&insecure=1&pinSHA256={}", m.pin()));
     }
     if let Some(password) = &spec.hy2.obfs_password {
         query.push_str(&format!(
@@ -194,9 +194,9 @@ fn vmess(spec: &NodeSpec, ib: &InboundSpec) -> Result<String> {
         "host": spec.vmess.ws_host.as_deref().unwrap_or(""), "path": spec.creds.vmess_path,
         "tls": security, "sni": sni, "alpn": alpn, "fp": fp,
     });
-    if let Some(material) = tls.map(TlsSpec::pin).transpose()?.flatten() {
+    if let Some(material) = tls.map(TlsSpec::pinned_material).transpose()?.flatten() {
         config.set("insecure", "1");
-        config.set("pcs", material.leaf_pin());
+        config.set("pcs", material.pin());
     }
     Ok(format!(
         "vmess://{}",

@@ -135,9 +135,9 @@ fn reality(spec: &NodeSpec) -> Result<Value> {
 fn certificate(tls: &TlsSpec, key: &str) -> Result<Value> {
     let mut v = json!({});
     v.set(key, tls.server_name.as_str());
-    if let Some(material) = tls.pin()? {
+    if let Some(material) = tls.pinned_material()? {
         v.set("skip-cert-verify", true);
-        v.set("fingerprint", material.leaf_pin());
+        v.set("fingerprint", material.pin());
     }
     Ok(v)
 }

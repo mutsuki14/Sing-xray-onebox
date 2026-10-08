@@ -55,10 +55,10 @@ fn pinned_certificates_use_the_leaf_fingerprint() {
         .tls
         .as_ref()
         .unwrap()
+        .pinned_material()
+        .unwrap()
+        .unwrap()
         .pin()
-        .unwrap()
-        .unwrap()
-        .leaf_pin()
         .to_owned();
     let table = [
         (VlessWs, "servername"),
