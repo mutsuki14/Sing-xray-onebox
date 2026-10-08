@@ -1,9 +1,12 @@
-//! Semantic-version precedence (semver 2.0.0 §11) for program versions:
-//! `MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`, an optional leading `v`.
+//! Semantic-version precedence (semver 2.0.0 §11) for program and core
+//! versions: `MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`, an optional leading
+//! `v`. Pure (no I/O), so planners in `domain`/`state` and the host-side
+//! update and self-install code share one ordering.
 //!
 //! Changes from v2: v2 only compared versions for equality, so it could
-//! not tell an upgrade from a downgrade; the self-install (and later the
-//! update checks) order versions with this type.
+//! not tell an upgrade from a downgrade; the self-install
+//! (`host::selfexe`), the self-update downgrade refusal and the core-update
+//! downgrade policy order versions with this type.
 
 use std::cmp::Ordering;
 

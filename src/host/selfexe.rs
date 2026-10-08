@@ -22,9 +22,9 @@
 //!   trusted system paths (v2 refused a symlink anywhere in the path, which
 //!   broke distributions with a linked `/usr/local`).
 
-mod semver;
-
-pub use semver::Semver;
+/// Re-exported for callers that found it here first; the type lives in
+/// the pure `domain::version`.
+pub use crate::domain::version::Semver;
 
 use crate::ctx::Ctx;
 use crate::error::{Context, Error, Result};

@@ -10,6 +10,7 @@ pub mod ports;
 pub mod presets;
 pub mod protocol;
 pub mod validate;
+pub mod version;
 
 #[cfg(test)]
 pub(crate) mod fixtures;
