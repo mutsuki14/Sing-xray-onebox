@@ -331,6 +331,10 @@ fn finish(tmp: &Path, t: &Transfer) -> Result<u64> {
         t.max_bytes,
         t.url
     );
+    // Durable before it becomes visible under the final name.
+    std::fs::File::open(tmp)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| Error::io(tmp, e))?;
     std::fs::rename(tmp, t.dest).map_err(|e| Error::io(t.dest, e))?;
     if let Some(parent) = t.dest.parent() {
         fs::fsync_dir(parent).map_err(|e| Error::io(parent, e))?;

@@ -140,12 +140,12 @@ pub fn ensure(ctx: &Ctx, command: &str, package: &str) -> Result<()> {
     ensure_as(ctx, command, package, os::is_root())
 }
 
-/// [`ensure`] with the privilege fact injected (callers' tests).
+/// [`ensure()`] with the privilege fact injected (callers' tests).
 pub fn ensure_as(ctx: &Ctx, command: &str, package: &str, root: bool) -> Result<()> {
     ensure_with(ctx, command, package, root, &APT_REFRESHED)
 }
 
-/// [`ensure`] with the privilege fact and the apt-refresh memo injected.
+/// [`ensure()`] with the privilege fact and the apt-refresh memo injected.
 pub fn ensure_with(
     ctx: &Ctx,
     command: &str,
