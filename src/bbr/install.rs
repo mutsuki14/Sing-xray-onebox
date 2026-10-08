@@ -361,22 +361,35 @@ pub fn grub_has_kernel(grub: &str, kernel: &str) -> bool {
     })
 }
 
+/// Printed (once) when INT/TERM/HUP arrives while apt/dpkg runs.
+pub const INSTALL_NOTICE: &str = "正在安装内核，中断 apt/dpkg 可能导致系统无法启动；请等待安装完成";
+
 /// Run apt/dpkg with inherited output in its own session (the terminal's
 /// Ctrl+C cannot reach dpkg); our own INT/TERM/HUP only print a notice
-/// while it runs.
+/// while it runs and are forgotten afterwards, so they cancel nothing.
 fn run_protected(ctx: &Ctx, cmd: Cmd) -> Result<Output> {
+    run_protected_with(ctx, cmd, Duration::from_millis(500), &mut |m| out::warn(m))
+}
+
+/// [`run_protected`] with the poll interval and the notice sink injected.
+fn run_protected_with(
+    ctx: &Ctx,
+    cmd: Cmd,
+    poll: Duration,
+    notify: &mut dyn FnMut(&str),
+) -> Result<Output> {
     let _scope = signal::SignalScope::install()?;
     let mut child = ctx.exec.spawn(&cmd.stream())?;
     let mut warned = false;
     loop {
-        if let Some(out) = child.wait_timeout(Duration::from_millis(500))? {
+        if let Some(out) = child.wait_timeout(poll)? {
             signal::clear();
             return Ok(out);
         }
         if signal::pending().is_some() {
             signal::clear();
             if !warned {
-                out::warn("正在安装内核，中断 apt/dpkg 可能导致系统无法启动；请等待安装完成");
+                notify(INSTALL_NOTICE);
                 warned = true;
             }
         }
