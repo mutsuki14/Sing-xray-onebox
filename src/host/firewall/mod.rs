@@ -214,7 +214,8 @@ pub trait Backend {
     fn create(&self, ctx: &Ctx, rule: &Rule) -> Result<bool>;
     /// Whether `rule` is live, always queried from the firewall itself.
     fn exists(&self, ctx: &Ctx, rule: &Rule) -> Result<bool>;
-    /// Remove `rule`; an absent rule is fine.
+    /// Remove `rule`; an absent rule is fine, and so is a firewalld port an
+    /// administrator range has absorbed (left open, see `Firewalld::release`).
     fn remove(&self, ctx: &Ctx, rule: &Rule) -> Result<()>;
 }
 

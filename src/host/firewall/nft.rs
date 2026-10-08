@@ -22,7 +22,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// One base chain hooked on `input`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Nft {
     pub family: String,
     pub table: String,
