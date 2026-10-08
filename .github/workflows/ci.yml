@@ -41,11 +41,17 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --all-targets --locked
       - run: cargo test --doc --locked
+      # The script checks below also run when a Rust step failed.
       - name: Install busybox so the launcher is also tested with ash (Alpine)
+        if: ${{ !cancelled() }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends busybox
       - name: Launcher and shell scripts
+        if: ${{ !cancelled() }}
+        env:
+          # shellcheck aborts when printing the Chinese messages under a non-UTF-8 locale.
+          LC_ALL: C.UTF-8
         run: |
           set -euo pipefail
           sh -n onebox.sh
@@ -53,6 +59,7 @@ jobs:
           shellcheck -S warning onebox.sh scripts/check-version.sh tests/bootstrap.sh
           bash tests/bootstrap.sh
       - name: Python test helpers and tool manifest
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           python3 tests/fetch_tools.py --check
