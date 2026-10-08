@@ -73,11 +73,11 @@ wait_tcp() {
 }
 
 # 同时绑定临时套接字分配互不重复的回环端口；只在真正启动夹具前释放。
-read -r HTTP_PORT TARGET_TLS_PORT SB_PORT XR_PORT GUARD_PORT SB_SOCKS XR_SOCKS TARGET_HTTP_PORT < <(
+read -r HTTP_PORT TARGET_TLS_PORT SB_PORT XR_PORT GUARD_PORT SB_SOCKS XR_SOCKS TARGET_HTTP_PORT ANYTLS_PORT ANYTLS_SOCKS < <(
 	python3 - <<'PY'
 import socket
 sockets = []
-for _ in range(8):
+for _ in range(10):
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     sockets.append(s)
@@ -108,17 +108,18 @@ cp "$WORK/pki/site.key" "$REALITY_SITE_DIR/key.pem"
 chmod 600 "$REALITY_SITE_DIR/key.pem"
 
 setup_state() {
-	local core=$1 port=$2
+	local core=$1 port=$2 protocol=${3:-vless-reality}
 	reset_state
-	PROTOCOLS=vless-reality
-	pset CORE vless-reality "$core"
-	pset PORT vless-reality "$port"
+	PROTOCOLS=$protocol
+	pset CORE "$protocol" "$core"
+	pset PORT "$protocol" "$port"
 	SERVER_ADDR=127.0.0.1 SERVER_IPV4=127.0.0.1 SERVER_IPV6="" LISTEN_ADDR=127.0.0.1
 	REALITY_SITE_ENABLED=1 REALITY_SITE_DOMAIN=test.example REALITY_SITE_PORT=$TARGET_TLS_PORT
 	REALITY_SITE_TITLE=$SITE_MARKER REALITY_SNI=test.example REALITY_DEST="127.0.0.1:$TARGET_TLS_PORT"
 	REALITY_GUARD_PORT=$GUARD_PORT
 	BLOCK_PRIVATE=1 BLOCK_BT=1 NODE_NAME=site-e2e
 	UUID=$(gen_uuid)
+	PASSWORD=$(rand_str 20)
 	gen_reality_keypair || fatal "生成 REALITY 密钥"
 	REALITY_SHORT_ID=$(rand_hex 8)
 }
@@ -187,18 +188,19 @@ wrong_sni_rejected() {
 }
 
 run_round() {
-	local core=$1 port=$2 socks=$3 dir="$WORK/$1"
+	local core=$1 port=$2 socks=$3 protocol=${4:-vless-reality} dir label
+	dir="$WORK/$core-$protocol" label="$core/$protocol"
 	mkdir -p "$dir"
-	setup_state "$core" "$port"
+	setup_state "$core" "$port" "$protocol"
 	if [ "$core" = singbox ]; then
 		gen_singbox_server >"$dir/server-raw.json"
 		# 唯一测试域名的白名单只用于证明认证代理链路；生产私网规则全部保留。
-		jq '.route.rules = [{"inbound":["vless-reality-in"],"domain":["allowed.site-e2e.test"],"action":"route","outbound":"direct","override_address":"127.0.0.1"}] + .route.rules' \
+		jq --arg tag "$protocol-in" '.route.rules = [{"inbound":[$tag],"domain":["allowed.site-e2e.test"],"action":"route","outbound":"direct","override_address":"127.0.0.1"}] + .route.rules' \
 			"$dir/server-raw.json" >"$dir/server.json" || fatal 'sing-box 测试配置'
 		"$SB" check -c "$dir/server.json" >"$dir/server-check.log" 2>&1 || fatal 'sing-box 服务端配置检查'
 		start_bg "$dir/server.log" "$SB" run -c "$dir/server.json"
 		cat >"$dir/client.json" <<EOF
-{"log":{"level":"warn"},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":$socks}],"outbounds":[$(sbc_outbound vless-reality)],"route":{"final":$(json_str "$(node_name vless-reality)")}}
+{"log":{"level":"warn"},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":$socks}],"outbounds":[$(sbc_outbound "$protocol")],"route":{"final":$(json_str "$(node_name "$protocol")")}}
 EOF
 		start_bg "$dir/client.log" "$SB" run -c "$dir/client.json"
 	else
@@ -214,13 +216,13 @@ EOF
 EOF
 		start_bg "$dir/client.log" "$XR" run -c "$dir/client.json"
 	fi
-	wait_tcp "$port" && wait_tcp "$socks" || fatal "$core 服务端或客户端未监听"
-	check "$core 公网 REALITY 入口提供受信网站页面" browser_get "$port" "$dir/browser.html"
-	check "$core 公网 REALITY 入口支持 TLS 1.3 / h2" browser_h2 "$port" "$dir/h2.log"
-	check "$core 认证客户端仍可代理访问测试目标" authenticated_get "$socks"
-	check "$core 认证客户端仍禁止直接访问 loopback" private_rejected "$socks" "$dir/private.txt"
+	wait_tcp "$port" && wait_tcp "$socks" || fatal "$label 服务端或客户端未监听"
+	check "$label 公网 REALITY 入口提供受信网站页面" browser_get "$port" "$dir/browser.html"
+	check "$label 公网 REALITY 入口支持 TLS 1.3 / h2" browser_h2 "$port" "$dir/h2.log"
+	check "$label 认证客户端仍可代理访问测试目标" authenticated_get "$socks"
+	check "$label 认证客户端仍禁止直接访问 loopback" private_rejected "$socks" "$dir/private.txt"
 	gen_probe_bundle local >"$dir/probe.json"
-	check "$core REALITY 一致性、正确认证、错误 short ID 检查" \
+	check "$label REALITY 一致性、正确认证、错误 short ID 检查" \
 		_client_runtime reality "$dir/probe.json" --scope server-local --singbox "$SB" --xray "$XR" \
 		--ca "$WORK/pki/ca.pem" --url "http://allowed.site-e2e.test:$TARGET_HTTP_PORT/" --timeout 3
 	if [ "$core" = xray ]; then
@@ -231,5 +233,6 @@ EOF
 
 run_round singbox "$SB_PORT" "$SB_SOCKS"
 run_round xray "$XR_PORT" "$XR_SOCKS"
+run_round singbox "$ANYTLS_PORT" "$ANYTLS_SOCKS" anytls-reality
 printf '\n站点端到端测试：通过 %s 项，失败 %s 项\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

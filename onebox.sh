@@ -46,7 +46,7 @@ umask 022
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="1.6.1"
+readonly SCRIPT_VERSION="1.7.0"
 readonly SCRIPT_REPO="mutsuki14/Sing-xray-onebox"
 readonly SCRIPT_RAW_URL="${ONEBOX_SCRIPT_URL:-https://raw.githubusercontent.com/${SCRIPT_REPO}/main/onebox.sh}"
 
@@ -75,7 +75,7 @@ XR_VERSION_WANT="${ONEBOX_XRAY_VERSION:-}"
 XR_VERSION_WANT="${XR_VERSION_WANT#v}"
 
 # 全部协议 (顺序即菜单顺序)
-readonly ALL_PROTOCOLS="vless-reality vless-xhttp vless-grpc vless-ws vmess-ws trojan shadowsocks hysteria2 tuic anytls shadowtls"
+readonly ALL_PROTOCOLS="vless-reality vless-xhttp vless-grpc vless-ws vmess-ws trojan shadowsocks hysteria2 tuic anytls shadowtls anytls-reality"
 
 # 运行参数 (可由命令行 / 环境变量覆盖)
 AUTO_YES="${ONEBOX_AUTO:-0}"      # 1 = 全部使用默认值, 不再询问
@@ -808,6 +808,7 @@ proto_title() {
 	hysteria2) echo "Hysteria2" ;;
 	tuic) echo "TUIC-v5" ;;
 	anytls) echo "AnyTLS" ;;
+	anytls-reality) echo "AnyTLS-REALITY" ;;
 	shadowtls) echo "ShadowTLS-v3" ;;
 	*) echo "$1" ;;
 	esac
@@ -825,6 +826,7 @@ proto_desc() {
 	hysteria2) echo "QUIC/UDP, 暴力加速, 弱网首选 (Xray 承载为实验性)" ;;
 	tuic) echo "QUIC/UDP, 低延迟" ;;
 	anytls) echo "TLS 流量填充, 抗 TLS-in-TLS 识别" ;;
+	anytls-reality) echo "AnyTLS + REALITY, 无需自备证书, 仅 sing-box 客户端" ;;
 	shadowtls) echo "借用大站 TLS 握手, 包裹 SS-2022" ;;
 	esac
 }
@@ -834,7 +836,7 @@ proto_cores() {
 	case "$1" in
 	vless-xhttp) echo "xray" ;;
 	hysteria2) echo "singbox xray" ;;
-	tuic | anytls | shadowtls) echo "singbox" ;;
+	tuic | anytls | anytls-reality | shadowtls) echo "singbox" ;;
 	*) echo "singbox xray" ;;
 	esac
 }
@@ -852,7 +854,7 @@ proto_net() {
 	esac
 }
 
-proto_uses_reality() { case "$1" in vless-reality | vless-xhttp | vless-grpc) return 0 ;; *) return 1 ;; esac; }
+proto_uses_reality() { case "$1" in vless-reality | vless-xhttp | vless-grpc | anytls-reality) return 0 ;; *) return 1 ;; esac; }
 
 # 是否需要 TLS 证书
 proto_needs_cert() {
@@ -877,10 +879,10 @@ vmess_tls_enabled() {
 proto_client_ok() {
 	local p=$1 c=$2
 	case "$c" in
-	link) [ "$p" != shadowtls ] ;;
-	mihomo) return 0 ;;
+	link) case "$p" in shadowtls | anytls-reality) return 1 ;; *) return 0 ;; esac ;;
+	mihomo) [ "$p" != anytls-reality ] ;;
 	singbox) [ "$p" != vless-xhttp ] ;;
-	xray) case "$p" in tuic | anytls | shadowtls) return 1 ;; *) return 0 ;; esac ;;
+	xray) case "$p" in tuic | anytls | anytls-reality | shadowtls) return 1 ;; *) return 0 ;; esac ;;
 	*) return 1 ;;
 	esac
 }
@@ -3410,15 +3412,17 @@ sb_inbound() {
       "tls": %s
     }' "$listen" "$port" "$(json_str "$UUID")" "$(json_str "$PASSWORD")" "$(_sb_cert_tls '["h3"]')"
 		;;
-	anytls)
+	anytls | anytls-reality)
+		local anytls_tls
+		if [ "$p" = anytls-reality ]; then anytls_tls=$(_sb_reality_tls); else anytls_tls=$(_sb_cert_tls); fi
 		printf '    {
       "type": "anytls",
-      "tag": "anytls-in",
+      "tag": "%s-in",
       "listen": %s,
       "listen_port": %s,
       "users": [{ "name": "onebox", "password": %s }],
       "tls": %s
-    }' "$listen" "$port" "$(json_str "$PASSWORD")" "$(_sb_cert_tls)"
+    }' "$p" "$listen" "$port" "$(json_str "$PASSWORD")" "$anytls_tls"
 		;;
 	shadowtls)
 		local st_dest=${SHADOWTLS_DEST:-${SHADOWTLS_SNI}:443}
@@ -3573,6 +3577,7 @@ readonly XR_SNIFFING='"sniffing": { "enabled": true, "destOverride": ["http", "t
 
 xr_inbound() {
 	local p=$1 port listen
+	proto_supports_core "$p" xray || return 1
 	port=$(pget PORT "$p")
 	listen=$(xr_listen)
 	case "$p" in
@@ -3859,6 +3864,8 @@ _insecure_q() {
 
 link_of() {
 	local p=$1 port host name sni q fp
+	# AnyTLS 通用 URI 的解析器可能忽略 REALITY 参数，必须使用完整 sing-box JSON。
+	proto_client_ok "$p" link || return 1
 	port=$(pget PORT "$p")
 	host=$(uri_host)
 	name=$(urlencode "$(node_name "$p")")
@@ -3972,6 +3979,7 @@ _mh_ws_opts() {
 
 mh_proxy() {
 	local p=$1 port
+	proto_client_ok "$p" mihomo || return 1
 	port=$(pget PORT "$p")
 	printf '  - name: %s\n' "$(yq "$(node_name "$p")")"
 	printf '    server: %s\n    port: %s\n' "$(yq "$SERVER_ADDR")" "$port"
@@ -4057,6 +4065,7 @@ gen_mihomo() {
 		proto_client_ok "$p" mihomo || continue
 		names+=("$(node_name "$p")")
 	done
+	[ ${#names[@]} -gt 0 ] || return 1
 	cat <<EOF
 # Sing-Xray-Onebox 生成的 mihomo (Clash Meta) 配置
 # 适用: Clash Verge Rev / Mihomo Party / FlClash / ClashMi / Clash Meta for Android 等
@@ -4257,6 +4266,9 @@ sbc_outbound() {
 	anytls)
 		printf '    { "type": "anytls", "tag": %s, %s, "password": %s, "tls": %s }' "$tag" "$srv" "$(json_str "$PASSWORD")" "$(_sbc_tls_cert)"
 		;;
+	anytls-reality)
+		printf '    { "type": "anytls", "tag": %s, %s, "password": %s, "tls": %s }' "$tag" "$srv" "$(json_str "$PASSWORD")" "$(_sbc_reality)"
+		;;
 	shadowtls)
 		printf '    { "type": "shadowsocks", "tag": %s, "method": "2022-blake3-aes-128-gcm", "password": %s, "udp_over_tcp": { "enabled": true, "version": 2 }, "detour": %s },\n' \
 			"$tag" "$(json_str "$SHADOWTLS_SS_PASSWORD")" "$(json_str "$(node_name "$p")-tls")"
@@ -4358,6 +4370,7 @@ _xrc_tls() {
 
 xrc_outbound() {
 	local p=$1 tag=$2 port addr
+	proto_client_ok "$p" xray || return 1
 	port=$(pget PORT "$p")
 	addr=$(json_str "$SERVER_ADDR")
 	case "$p" in
@@ -4455,15 +4468,19 @@ EOF
 # ---------------------------------------------------------------------------
 write_client_files() {
 	mkdir -p "$CLIENT_DIR" && chmod 700 "$CLIENT_DIR" || return 1
-	local tmp p f failed=0 has_sb=0 has_xr=0
+	local tmp p f failed=0 has_sb=0 has_xr=0 has_mh=0 has_link=0
 	tmp=$(mktemp -d "$CLIENT_DIR/.new.XXXXXX") || return 1
 	for p in $PROTOCOLS; do
 		proto_client_ok "$p" singbox && has_sb=1
 		proto_client_ok "$p" xray && has_xr=1
+		proto_client_ok "$p" mihomo && has_mh=1
+		proto_client_ok "$p" link && has_link=1
 	done
-	gen_links >"$tmp/links.txt" || failed=1
-	b64 <"$tmp/links.txt" >"$tmp/sub.txt" || failed=1
-	gen_mihomo >"$tmp/mihomo.yaml" || failed=1
+	if [ "$has_link" = 1 ]; then
+		gen_links >"$tmp/links.txt" || failed=1
+		b64 <"$tmp/links.txt" >"$tmp/sub.txt" || failed=1
+	fi
+	if [ "$has_mh" = 1 ]; then gen_mihomo >"$tmp/mihomo.yaml" || failed=1; fi
 	gen_probe_bundle >"$tmp/probe.json" || failed=1
 	if [ "$has_sb" = 1 ]; then
 		gen_singbox_client tun >"$tmp/sing-box.json" || failed=1
@@ -4662,7 +4679,7 @@ pick_guard_port() {
 default_port_for() {
 	local p=$1 cand port i
 	case "$p" in
-	vless-reality | hysteria2 | anytls | trojan | shadowtls) cand="443 8443 2053 2083 2087 2096" ;;
+	vless-reality | hysteria2 | anytls | anytls-reality | trojan | shadowtls) cand="443 8443 2053 2083 2087 2096" ;;
 	vless-xhttp) xr_can_share_port vless-xhttp vless-reality && cand=$(pget PORT vless-reality) ;;
 	vless-ws) cand="2053 2083 2087 2096 8443 443" ;;
 	vmess-ws) if vmess_tls_enabled; then cand="2096 2087 2083 8443"; else cand="8080 8880 2052 2082 2086 2095"; fi ;;
@@ -5509,7 +5526,10 @@ require_installed() {
 }
 
 show_qr() {
-	local p
+	local p has_link=0
+	proto_enabled anytls-reality && warn "AnyTLS-REALITY 不提供通用二维码，请使用 onebox client singbox 导出完整配置"
+	for p in $PROTOCOLS; do proto_client_ok "$p" link && has_link=1; done
+	[ "$has_link" = 1 ] || { warn "当前协议组合没有可生成二维码的分享链接"; return 1; }
 	if ! has qrencode; then
 		ensure_cmds qrencode >/dev/null 2>&1 || {
 			warn "未能安装 qrencode, 无法显示二维码"
@@ -5554,6 +5574,7 @@ show_info() {
 	proto_enabled hysteria2 && [ -n "$HY2_HOP" ] && echo "  Hy2 端口跳跃: ${HY2_HOP}"
 	proto_enabled shadowtls && echo "  ShadowTLS  : 握手站点=${SHADOWTLS_SNI}  (仅 sing-box / mihomo 客户端支持)"
 	proto_enabled vless-xhttp && echo "  提示: XHTTP 仅 Xray 内核客户端 (v2rayN/v2rayNG 等) 与新版 mihomo 支持, sing-box 客户端不支持"
+	proto_enabled anytls-reality && echo "  提示: AnyTLS-REALITY 仅导出 sing-box 完整配置 (内核 >= 1.12.0，含 uTLS)，不加入通用链接、订阅、二维码、mihomo 或 Xray"
 
 	title "分享链接 (v2rayN / v2rayNG / NekoBox / Shadowrocket / Hiddify / Karing)"
 	if [ -s "$CLIENT_DIR/links.txt" ]; then
@@ -5562,13 +5583,13 @@ show_info() {
 		echo "  (无)"
 	fi
 	title "客户端配置文件"
-	echo "  订阅 (Base64)     : ${CLIENT_DIR}/sub.txt"
-	echo "  mihomo / Clash    : ${CLIENT_DIR}/mihomo.yaml"
+	[ -s "$CLIENT_DIR/sub.txt" ] && echo "  订阅 (Base64)     : ${CLIENT_DIR}/sub.txt"
+	[ -f "$CLIENT_DIR/mihomo.yaml" ] && echo "  mihomo / Clash    : ${CLIENT_DIR}/mihomo.yaml"
 	[ -f "$CLIENT_DIR/sing-box.json" ] && echo "  sing-box (TUN)    : ${CLIENT_DIR}/sing-box.json"
 	[ -f "$CLIENT_DIR/sing-box-notun.json" ] && echo "  sing-box (代理端口): ${CLIENT_DIR}/sing-box-notun.json"
 	[ -f "$CLIENT_DIR/xray.json" ] && echo "  Xray              : ${CLIENT_DIR}/xray.json"
 	echo "  mihomo / sing-box 本地控制面板 (127.0.0.1:9090) 密钥: $(mh_secret)"
-	echo "  mihomo 需要内核 >= $(mh_min_version) (请使用客户端最新版)"
+	[ -f "$CLIENT_DIR/mihomo.yaml" ] && echo "  mihomo 需要内核 >= $(mh_min_version) (请使用客户端最新版)"
 	echo "  查看: onebox client mihomo | singbox | singbox-notun | xray | sub | links"
 }
 
@@ -5583,22 +5604,33 @@ show_client() {
 		echo "  5) 分享链接"
 		echo "  6) Base64 订阅内容"
 		echo "  7) 二维码"
-		local n
-		ask_num n "请选择" 1 1 7 || return 0
+		local n default=1
+		[ -f "$CLIENT_DIR/mihomo.yaml" ] || default=2
+		ask_num n "请选择" "$default" 1 7 || return 0
 		case "$n" in 1) which=mihomo ;; 2) which=singbox ;; 3) which=singbox-notun ;; 4) which=xray ;; 5) which=links ;; 6) which=sub ;; 7) which=qr ;; esac
 	fi
 	case "$which" in
-	mihomo | clash) cat "$CLIENT_DIR/mihomo.yaml" ;;
+	mihomo | clash | xray | links | link | sub)
+		proto_enabled anytls-reality && warn "此格式不包含 AnyTLS-REALITY；请使用 onebox client singbox 导出该协议的完整配置"
+		;;
+	esac
+	case "$which" in
+	mihomo | clash)
+		if [ -f "$CLIENT_DIR/mihomo.yaml" ]; then cat "$CLIENT_DIR/mihomo.yaml"; else warn "当前协议组合中没有 mihomo 客户端支持的协议"; return 1; fi
+		;;
 	singbox | sing-box | singbox-notun | sing-box-notun)
 		local f="$CLIENT_DIR/sing-box.json"
 		case "$which" in *notun) f="$CLIENT_DIR/sing-box-notun.json" ;; esac
-		if [ -f "$f" ]; then cat "$f"; else warn "当前协议组合中没有 sing-box 客户端支持的协议"; fi
+		if [ -f "$f" ]; then cat "$f"; else warn "当前协议组合中没有 sing-box 客户端支持的协议"; return 1; fi
 		;;
 	xray)
-		if [ -f "$CLIENT_DIR/xray.json" ]; then cat "$CLIENT_DIR/xray.json"; else warn "当前协议组合中没有 Xray 客户端支持的协议"; fi
+		if [ -f "$CLIENT_DIR/xray.json" ]; then cat "$CLIENT_DIR/xray.json"; else warn "当前协议组合中没有 Xray 客户端支持的协议"; return 1; fi
 		;;
-	links | link) cat "$CLIENT_DIR/links.txt" ;;
-	sub) cat "$CLIENT_DIR/sub.txt" && echo ;;
+	links | link | sub)
+		local f="$CLIENT_DIR/links.txt"
+		[ "$which" = sub ] && f="$CLIENT_DIR/sub.txt"
+		if [ -s "$f" ]; then cat "$f"; [ "$which" != sub ] || echo; else warn "当前协议组合没有通用分享链接或 Base64 订阅，请导出完整客户端配置"; return 1; fi
+		;;
 	qr) show_qr ;;
 	*) die "未知类型: ${which} (可选: mihomo singbox singbox-notun xray links sub qr)" ;;
 	esac
@@ -5732,7 +5764,11 @@ do_add_protocol() {
 	fi
 	apply_or_die
 	info "已添加 $(proto_title "$p")"
-	link_of "$p" 2>/dev/null
+	if proto_client_ok "$p" link; then
+		link_of "$p"
+	else
+		info "请使用 onebox client singbox 导出完整客户端配置；此协议不提供通用分享链接或二维码"
+	fi
 }
 
 do_del_protocol() {
@@ -6308,6 +6344,7 @@ install 选项 (用于无人值守安装):
 示例:
   bash onebox.sh install --preset 1 -y
   bash onebox.sh install --protocols vless-reality,hysteria2,anytls --core singbox -y
+  bash onebox.sh install --protocols anytls-reality --core singbox -y
   CF_Token=xxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.com -y
 EOF
 }
