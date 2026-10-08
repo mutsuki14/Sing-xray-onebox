@@ -8,7 +8,8 @@
 //!
 //! Changes from v2: failures carry the meaningful tail of the core's output
 //! (ANSI colors, info logs and Xray's banner removed); a check is bounded
-//! by a 60 s timeout; `doctor` no longer creates `{run}/check`.
+//! by a 60 s timeout; `doctor` no longer creates `{run}/check`; a sing-box
+//! check cannot be built without a work dir.
 
 use crate::ctx::Ctx;
 use crate::domain::protocol::Core;
@@ -26,13 +27,14 @@ pub fn check_config(ctx: &Ctx, core: Core, config: &Path) -> Result<()> {
 }
 
 /// Validate `config` with `binary` (e.g. a staged update candidate), work
-/// dir `{run}/check` (created 0700; the run root 0755 when missing).
+/// dir `{run}/check` (created 0700 for sing-box; the run root 0755 when
+/// missing). Xray takes no work dir, so nothing is created for it.
 pub fn check_config_with(ctx: &Ctx, core: Core, binary: &Path, config: &Path) -> Result<()> {
     let workdir = match core {
-        Core::Singbox => Some(run_check_dir(ctx)?),
-        Core::Xray => None,
+        Core::Singbox => run_check_dir(ctx)?,
+        Core::Xray => check_dir(ctx),
     };
-    run_check(ctx, core, binary, config, workdir.as_deref())
+    run_check(ctx, core, binary, config, &workdir)
 }
 
 /// Validate `config` with the installed core binary, using the existing
@@ -40,7 +42,11 @@ pub fn check_config_with(ctx: &Ctx, core: Core, binary: &Path, config: &Path) ->
 /// under the run root (doctor passes a private `TempDir`).
 pub fn check_config_in(ctx: &Ctx, core: Core, config: &Path, workdir: &Path) -> Result<()> {
     ensure!(workdir.is_dir(), "校验工作目录无效: {}", workdir.display());
-    run_check(ctx, core, &ctx.paths.core_bin(core), config, Some(workdir))
+    run_check(ctx, core, &ctx.paths.core_bin(core), config, workdir)
+}
+
+fn check_dir(ctx: &Ctx) -> PathBuf {
+    ctx.paths.run.join("check")
 }
 
 /// `{run}/check`, created on demand.
@@ -50,31 +56,27 @@ fn run_check_dir(ctx: &Ctx) -> Result<PathBuf> {
     if !ctx.paths.run.exists() {
         sysfs::ensure_dir(&ctx.paths.run, 0o755)?;
     }
-    let dir = ctx.paths.run.join("check");
+    let dir = check_dir(ctx);
     sysfs::ensure_dir(&dir, 0o700)?;
     Ok(dir)
 }
 
-fn check_cmd(core: Core, binary: &Path, config: &Path, workdir: Option<&Path>) -> Cmd {
+/// The check command. sing-box always gets `-D workdir`: without it, it
+/// would use (and write into) the process's working directory, the side
+/// effect D-8.1#30 removed. Xray ignores `workdir`.
+fn check_cmd(core: Core, binary: &Path, config: &Path, workdir: &Path) -> Cmd {
     let program = binary.to_string_lossy();
     let config = config.to_string_lossy().into_owned();
-    let cmd = match (core, workdir) {
-        (Core::Singbox, Some(dir)) => {
-            Cmd::new(program).args(["check", "-D", &dir.to_string_lossy(), "-c", &config])
+    let cmd = match core {
+        Core::Singbox => {
+            Cmd::new(program).args(["check", "-D", &workdir.to_string_lossy(), "-c", &config])
         }
-        (Core::Singbox, None) => Cmd::new(program).args(["check", "-c", &config]),
-        (Core::Xray, _) => Cmd::new(program).args(["run", "-test", "-c", &config]),
+        Core::Xray => Cmd::new(program).args(["run", "-test", "-c", &config]),
     };
     cmd.timeout(CHECK_TIMEOUT)
 }
 
-fn run_check(
-    ctx: &Ctx,
-    core: Core,
-    binary: &Path,
-    config: &Path,
-    workdir: Option<&Path>,
-) -> Result<()> {
+fn run_check(ctx: &Ctx, core: Core, binary: &Path, config: &Path, workdir: &Path) -> Result<()> {
     let result = ctx.run(&check_cmd(core, binary, config, workdir))?;
     if result.ok() {
         return Ok(());

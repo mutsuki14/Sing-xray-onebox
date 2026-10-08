@@ -133,6 +133,21 @@ fn check_config_in_uses_the_callers_dir_and_creates_nothing() {
 }
 
 #[test]
+fn sing_box_checks_always_name_a_work_dir() {
+    // There is no way to build a sing-box check without `-D`: it would
+    // otherwise write into the process's working directory (D-8.1#30).
+    let (bin, config, work) = (Path::new("/b"), Path::new("/c.json"), Path::new("/w"));
+    let singbox = check_cmd(Core::Singbox, bin, config, work);
+    assert_eq!(singbox.args, ["check", "-D", "/w", "-c", "/c.json"]);
+    let xray = check_cmd(Core::Xray, bin, config, work);
+    assert_eq!(
+        xray.args,
+        ["run", "-test", "-c", "/c.json"],
+        "Xray ignores it"
+    );
+}
+
+#[test]
 fn check_summary_keeps_the_tail() {
     let text: String = (1..=20).map(|i| format!("line {i}\n")).collect();
     assert_eq!(
