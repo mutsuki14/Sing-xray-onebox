@@ -432,11 +432,13 @@ impl V2<'_> {
     }
 
     pub(super) fn versions(&mut self) -> CoreVersions {
+        let singbox = self.version("SB_VERSION");
+        let xray = self.version("XR_VERSION");
         CoreVersions {
-            singbox: self.version("SB_VERSION"),
-            xray: self.version("XR_VERSION"),
-            singbox_pin: self.pin("SB_VERSION_WANT"),
-            xray_pin: self.pin("XR_VERSION_WANT"),
+            singbox_pin: self.pin("SB_VERSION_WANT", Core::Singbox, singbox.as_deref()),
+            xray_pin: self.pin("XR_VERSION_WANT", Core::Xray, xray.as_deref()),
+            singbox,
+            xray,
         }
     }
 
@@ -450,9 +452,30 @@ impl V2<'_> {
         }
     }
 
-    /// `*_VERSION_WANT`: `latest` means no pin.
-    fn pin(&mut self, key: &str) -> Option<String> {
-        self.version(key).filter(|v| v != "latest")
+    /// `*_VERSION_WANT` (one leading `v` stripped, as v2 did before using
+    /// it); `latest` means no pin.
+    ///
+    /// v2 persisted the pin forever while `onebox update` ignored it, so a
+    /// pin that differs from the installed core is stale: keeping it would
+    /// only repeat the "更换指定版本" hint on every apply. It is kept when it
+    /// matches the installed version or nothing is recorded as installed
+    /// (the next install of that core honors it).
+    fn pin(&mut self, key: &str, core: Core, installed: Option<&str>) -> Option<String> {
+        let raw = self.version(key)?;
+        let pin = without_v(&raw);
+        if pin == "latest" || pin.is_empty() {
+            return None;
+        }
+        match installed {
+            Some(current) if without_v(current) != pin => {
+                self.warn(format!(
+                    "v2 固定的 {} 版本 {pin} 与已安装 {current} 不一致，已取消固定",
+                    core.title()
+                ));
+                None
+            }
+            _ => Some(pin.to_owned()),
+        }
     }
 
     pub(super) fn report_unknown_keys(&mut self) {
@@ -466,6 +489,12 @@ impl V2<'_> {
             self.warn(format!("已忽略未知的 v2 字段: {}", unknown.join(", ")));
         }
     }
+}
+
+/// A version without one leading `v` (`v1.12.0` and `1.12.0` are the same
+/// release for v2 and for `host::cores`).
+fn without_v(version: &str) -> &str {
+    version.strip_prefix('v').unwrap_or(version)
 }
 
 /// `cert.pem` / `key.pem` in a v2 deployment directory.

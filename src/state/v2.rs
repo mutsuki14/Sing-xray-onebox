@@ -30,7 +30,11 @@
 //!   v3 default) and kept otherwise, so the handshake target v2 used is
 //!   preserved exactly;
 //! - `ACME_METHOD` `standalone`, `http` and empty all mean HTTP-01;
-//! - `*_VERSION_WANT=latest` means no pin.
+//! - `*_VERSION_WANT=latest` means no pin; a pin that differs from the
+//!   installed `SB_VERSION`/`XR_VERSION` is dropped with a warning (v2's
+//!   `onebox update` ignored pins, so such a pin is stale and honoring it
+//!   would downgrade the core during the upgrade, G2); it is kept when it
+//!   matches or that core has no recorded version.
 
 mod features;
 mod fields;

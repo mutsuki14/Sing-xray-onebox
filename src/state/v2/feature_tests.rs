@@ -404,3 +404,60 @@ fn every_v2_e2e_matrix_state_migrates() {
         }
     }
 }
+
+#[test]
+fn core_pins_survive_only_when_they_match_the_installed_core() {
+    // (installed SB_VERSION, SB_VERSION_WANT, migrated pin, warning)
+    let cases: [(&str, &str, Option<&str>, Option<&str>); 7] = [
+        ("1.12.0", "1.12.0", Some("1.12.0"), None),
+        ("1.12.0", "v1.12.0", Some("1.12.0"), None),
+        ("", "1.12.0", Some("1.12.0"), None),
+        ("1.14.2", "latest", None, None),
+        ("1.14.2", "", None, None),
+        (
+            "1.14.2",
+            "1.12.0",
+            None,
+            Some("v2 固定的 sing-box 版本 1.12.0 与已安装 1.14.2 不一致，已取消固定"),
+        ),
+        (
+            "v1.14.2",
+            "v1.12.0",
+            None,
+            Some("v2 固定的 sing-box 版本 1.12.0 与已安装 v1.14.2 不一致，已取消固定"),
+        ),
+    ];
+    for (installed, wanted, pin, warning) in cases {
+        let values = with(
+            preset1(),
+            &[("SB_VERSION", installed), ("SB_VERSION_WANT", wanted)],
+        );
+        let m = run(&values).unwrap();
+        let case = format!("installed {installed:?}, wanted {wanted:?}");
+        assert_eq!(m.config.versions.singbox_pin.as_deref(), pin, "{case}");
+        let installed = (!installed.is_empty()).then_some(installed);
+        assert_eq!(m.config.versions.singbox.as_deref(), installed, "{case}");
+        let want: Vec<&str> = warning.into_iter().collect();
+        assert_eq!(m.warnings, want, "{case}");
+    }
+}
+
+#[test]
+fn xray_pin_is_checked_against_the_xray_version() {
+    let values = with(
+        preset1(),
+        &[
+            ("XR_VERSION", "26.3.27"),
+            ("XR_VERSION_WANT", "25.1.1"),
+            ("SB_VERSION_WANT", "1.12.0"),
+        ],
+    );
+    let m = run(&values).unwrap();
+    let v = &m.config.versions;
+    assert_eq!(v.xray_pin, None);
+    assert_eq!(v.singbox_pin.as_deref(), Some("1.12.0"), "sing-box matches");
+    assert_eq!(
+        m.warnings,
+        ["v2 固定的 Xray 版本 25.1.1 与已安装 26.3.27 不一致，已取消固定"]
+    );
+}
