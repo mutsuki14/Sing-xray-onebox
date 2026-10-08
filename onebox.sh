@@ -4,6 +4,7 @@
 #   sh onebox.sh [command] [options...]      arguments are passed through verbatim
 #   ONEBOX_NATIVE_BIN=./onebox sh onebox.sh  run a local build offline (no download, no PATH search)
 #   GH_PROXY=https://mirror.example/         fetch the release assets through an HTTPS mirror prefix
+#                                            (the mirror also serves SHA256SUMS, so it must be trusted like GitHub)
 #
 # The pinned release binary is fetched over HTTPS only, must match a uniquely
 # listed SHA256SUMS entry and report exactly SCRIPT_VERSION before it runs.
@@ -112,10 +113,12 @@ sums=$work/SHA256SUMS
 fetch "$base/SHA256SUMS" "$sums" "$MAX_SUMS_BYTES" ||
     fail "无法下载 v$SCRIPT_VERSION 的校验文件 SHA256SUMS；请检查网络或 GH_PROXY、确认该版本已发布，或用 ONEBOX_NATIVE_BIN 运行本地程序。"
 [ "$(file_size "$sums")" -le "$MAX_SUMS_BYTES" ] || fail '校验文件 SHA256SUMS 异常大，已停止。'
+# Printable ASCII only: awks disagree on whether \r, \v and \f split fields
+# (busybox does), so a CRLF or otherwise odd line must fail with every awk.
 expected=$(awk -v name="$asset" '
     $2 == name {
         count++
-        if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9A-Fa-f]/) bad = 1
+        if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9A-Fa-f]/ || $0 ~ /[^ -~]/) bad = 1
         hash = $1
     }
     END { if (count != 1 || bad) exit 1; print tolower(hash) }

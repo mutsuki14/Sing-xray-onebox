@@ -4,7 +4,8 @@
 #
 #   bash tests/bootstrap.sh
 #   ONEBOX_BOOTSTRAP_TEST_PATH=FILE           test another launcher file
-#   ONEBOX_BOOTSTRAP_TEST_SHELLS="dash bash"  shells to run it with (default: sh bash dash busybox, if present)
+#   ONEBOX_BOOTSTRAP_TEST_SHELLS="dash bash"  shells to run it with, each one required (default: sh bash dash
+#                                             busybox, those present); busybox uses only its applets, like Alpine
 #   ONEBOX_BOOTSTRAP_QUICK=1                  skip the 30-second watchdog case
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -24,7 +25,9 @@ die() {
     exit 1
 }
 
-# --- Static header contract (1.x/2.x updaters and the release check rely on it) ---
+# --- Static header ---
+# 1.x updaters validate the line-2 marker; scripts/check-version.sh relies on
+# the exact SCRIPT_VERSION line.
 [[ $(sed -n 1p "$LAUNCHER") == '#!/bin/sh' ]] || die 'line 1 must be #!/bin/sh'
 sed -n 2p "$LAUNCHER" | grep -q '^# Sing-Xray-Onebox: ' || die 'line 2 must carry the Sing-Xray-Onebox marker'
 VERSION=$(sed -n 's/^readonly SCRIPT_VERSION="\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' "$LAUNCHER")
@@ -38,13 +41,16 @@ BASE_URL="https://github.com/$REPO/releases/download/v$VERSION"
 # --- Fixtures ---
 REAL_SHA256SUM=$(command -v sha256sum) || die 'sha256sum is required to run this test'
 mkdir -p "$WORK/sys" "$WORK/assets" "$WORK/tmp" "$WORK/home" "$WORK/cwd/sub" "$WORK/cwd/empty"
-# Real tools the launcher and fakes may use; hashers and curl are deliberately absent.
-for tool in awk cat chmod cp mkdir mktemp rm sleep tr truncate wc; do
+# Real tools the launcher and fakes may use; hashers and curl are deliberately
+# absent. SYS is the directory of the shell under test (busybox: its applets).
+TOOLS=(awk cat chmod cp mkdir mktemp rm sleep tr truncate wc)
+for tool in "${TOOLS[@]}"; do
     path=$(command -v "$tool") || die "$tool is required to run this test"
     ln -s "$path" "$WORK/sys/$tool"
 done
+SYS=$WORK/sys
 fake() { mkdir -p "$WORK/fake/$1"; cat > "$WORK/fake/$1/$1"; chmod 755 "$WORK/fake/$1/$1"; }
-fake_path() { local dirs='' name; for name; do dirs+="$WORK/fake/$name:"; done; printf '%s%s' "$dirs" "$WORK/sys"; }
+fake_path() { local dirs='' name; for name; do dirs+="$WORK/fake/$name:"; done; printf '%s%s' "$dirs" "$SYS"; }
 
 fake uname <<'EOF'
 #!/bin/sh
@@ -153,8 +159,9 @@ for arch in amd64 arm64 386 armv7; do
     printf '%s  onebox-linux-%s-musl\n' "${HASH[$arch]}" "$arch"
 done > "$WORK/assets/SHA256SUMS"
 
+# PATH depends on the shell under test: launch() and the signal cases add it.
 BASE_ENV=(
-    "PATH=$(fake_path uname curl sha256sum)" "HOME=$WORK/home" "TMPDIR=$WORK/tmp" "FIXTURES=$WORK"
+    "HOME=$WORK/home" "TMPDIR=$WORK/tmp" "FIXTURES=$WORK"
     "MOCK_OS=Linux" "MOCK_ARCH=x86_64" "MOCK_ASSETS=$WORK/assets" "MOCK_NATIVE_VERSION=$VERSION"
     "REAL_SHA256SUM=$REAL_SHA256SUM"
 )
@@ -162,7 +169,8 @@ printf '%s\0' "${BASE_ENV[@]}" > "$WORK/base.env"
 
 # --- Helpers ---
 SH=()
-# launch [VAR=value...] -- [args...]: run the launcher with a clean environment.
+# launch [VAR=value...] -- [args...]: run the launcher with a clean environment
+# (later assignments win, so PATH=... replaces DEFAULT_PATH).
 # LAUNCH_CWD and LAUNCH_STDIN (a file, or "closed") adjust the invocation.
 launch() {
     local -a vars=()
@@ -170,10 +178,10 @@ launch() {
     [[ $# -gt 0 ]] && shift
     set +e
     if [[ ${LAUNCH_STDIN:-} == closed ]]; then
-        (cd "${LAUNCH_CWD:-$WORK}" && exec env -i "${BASE_ENV[@]}" "${vars[@]}" "${SH[@]}" "$LAUNCHER" "$@") \
+        (cd "${LAUNCH_CWD:-$WORK}" && exec env -i "$DEFAULT_PATH" "${BASE_ENV[@]}" "${vars[@]}" "${SH[@]}" "$LAUNCHER" "$@") \
             > "$WORK/stdout" 2> "$WORK/stderr" <&-
     else
-        (cd "${LAUNCH_CWD:-$WORK}" && exec env -i "${BASE_ENV[@]}" "${vars[@]}" "${SH[@]}" "$LAUNCHER" "$@") \
+        (cd "${LAUNCH_CWD:-$WORK}" && exec env -i "$DEFAULT_PATH" "${BASE_ENV[@]}" "${vars[@]}" "${SH[@]}" "$LAUNCHER" "$@") \
             > "$WORK/stdout" 2> "$WORK/stderr" < "${LAUNCH_STDIN:-/dev/null}"
     fi
     STATUS=$?
@@ -406,6 +414,10 @@ run_cases() {
         [relative-name]="${HASH[amd64]}  ./$AMD64"
         [malformed-duplicate]="$GOOD_SUMS"$'\n'"${HASH[amd64]:0:10}  $AMD64"
         [crlf]="${HASH[amd64]}  $AMD64"$'\r'
+        [tab-separator]="${HASH[amd64]}"$'\t'"$AMD64"
+        [vertical-tab]="${HASH[amd64]}  $AMD64"$'\v'
+        [form-feed]="${HASH[amd64]}  $AMD64"$'\f'
+        [non-ascii]="${HASH[amd64]}  $AMD64"$'\xc2\xa0'
         [empty]=''
     )
     local name file
@@ -497,38 +509,70 @@ run_cases() {
 }
 
 # --- Shells under test ---
-declare -a SHELL_SPECS=()
+# busybox also supplies every tool (an Alpine userland: its awk, for example,
+# splits fields on \r), other shells use the host tools. An explicitly listed
+# shell that cannot be tested is an error; a default one is skipped with a note.
+CASE=shell-selection
+declare -a SHELL_SPECS=() SHELL_SYS=()
 declare -A SEEN=()
 read -ra wanted <<< "${ONEBOX_BOOTSTRAP_TEST_SHELLS:-sh bash dash busybox}"
+unusable() {
+    [[ -z ${ONEBOX_BOOTSTRAP_TEST_SHELLS:-} ]] || die "$*"
+    printf 'bootstrap: skipping %s\n' "$*" >&2
+}
 for name in "${wanted[@]}"; do
-    path=$(command -v "$name") || continue
+    path=$(command -v "$name") || { unusable "$name: not found"; continue; }
     real=$(readlink -f "$path")
     [[ -z ${SEEN[$real]:-} ]] || continue
     SEEN[$real]=1
     if [[ $(basename "$real") == busybox ]]; then
-        "$path" sh -c : 2>/dev/null || continue
-        SHELL_SPECS+=("$path sh")
+        # Call the binary itself: as /bin/sh (Alpine) it would run "sh" as a script.
+        "$real" sh -c : 2>/dev/null || { unusable "$real: no sh applet"; continue; }
+        # A standalone busybox shell runs its own applets before PATH, so the
+        # fake uname, curl and hashers could not be injected.
+        if env -i PATH="$WORK/cwd/empty" "$real" sh -c 'command -v uname' >/dev/null 2>&1; then
+            unusable "$real: its shell prefers applets to PATH (standalone build)"
+            continue
+        fi
+        applets=$("$real" --list) || die "$real --list failed"
+        sys=$WORK/sys-busybox-${#SEEN[@]}
+        mkdir "$sys"
+        for tool in "${TOOLS[@]}"; do
+            grep -qx -- "$tool" <<< "$applets" || { unusable "$real: no $tool applet"; continue 2; }
+            ln -s "$real" "$sys/$tool"
+        done
+        SHELL_SPECS+=("$real sh")
+        SHELL_SYS+=("$sys")
     else
         SHELL_SPECS+=("$path")
+        SHELL_SYS+=("$WORK/sys")
     fi
 done
 [[ ${#SHELL_SPECS[@]} -gt 0 ]] || die 'no shell to test with'
 
-for spec in "${SHELL_SPECS[@]}"; do
-    read -ra SH <<< "$spec"
-    SHELL_NAME=$spec
+SIGNAL_ARGS=()
+for i in "${!SHELL_SPECS[@]}"; do
+    read -ra SH <<< "${SHELL_SPECS[i]}"
+    SHELL_NAME=${SHELL_SPECS[i]}
+    SYS=${SHELL_SYS[i]}
+    DEFAULT_PATH="PATH=$(fake_path uname curl sha256sum)"
+    SIGNAL_ARGS+=("${DEFAULT_PATH#PATH=}" "${SHELL_SPECS[i]}")
     run_cases
-    printf 'bootstrap [%s]: offline, architectures, proxy, tools, manifest, size, version and stdin cases passed\n' "$spec"
+    tools=host
+    [[ $SYS == "$WORK/sys" ]] || tools=busybox
+    printf 'bootstrap [%s, %s tools]: offline, architectures, proxy, tools, manifest, size, version and stdin cases passed\n' \
+        "$SHELL_NAME" "$tools"
 done
 
 # --- Signals: forwarding (INT becomes TERM), exit codes, watchdog, cleanup ---
 SHELL_NAME=all
 CASE=signals
-python3 - "$LAUNCHER" "$WORK" "${ONEBOX_BOOTSTRAP_QUICK:-0}" "${SHELL_SPECS[@]}" <<'PY'
+python3 - "$LAUNCHER" "$WORK" "${ONEBOX_BOOTSTRAP_QUICK:-0}" "${SIGNAL_ARGS[@]}" <<'PY'
 import itertools, os, pathlib, signal, subprocess, sys, threading, time
 
 launcher, work, quick = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3] == '1'
-shells = [spec.split(' ') for spec in sys.argv[4:]]
+# (PATH for this shell, shell command) pairs.
+shells = [(path, spec.split(' ')) for path, spec in zip(sys.argv[4::2], sys.argv[5::2])]
 base = dict(item.split('=', 1) for item in (work / 'base.env').read_text().split('\0') if item)
 serial = itertools.count()
 
@@ -546,12 +590,13 @@ def drain(stream, sink):
     sink.append(stream.read())
 
 
-def run(shell, name, wait, sig, code, signalled, timeout=10.0, min_elapsed=0.0):
+def run(target, name, wait, sig, code, signalled, timeout=10.0, min_elapsed=0.0):
     """Start the launcher, signal it once its child is ready, check the outcome."""
+    path, shell = target
     label = f'[{" ".join(shell)}] {name}'
     fixtures = work / 'signal' / str(next(serial))
     (fixtures / 'tmp').mkdir(parents=True)
-    env = dict(base, FIXTURES=str(fixtures), TMPDIR=str(fixtures / 'tmp'), MOCK_WAIT=wait)
+    env = dict(base, PATH=path, FIXTURES=str(fixtures), TMPDIR=str(fixtures / 'tmp'), MOCK_WAIT=wait)
     ready = fixtures / ('fetch-ready' if wait == 'fetch' else 'ready')
     proc = subprocess.Popen([*shell, launcher], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True)
@@ -612,23 +657,23 @@ CASES = [
     ('hup-while-downloading', 'fetch', signal.SIGHUP, 129, 'HUP'),
 ]
 failures = []
-for shell in shells:
+for target in shells:
     for case in CASES:
         try:
-            run(shell, *case)
+            run(target, *case)
         except Failure as error:
             failures.append(str(error))
 
 if not quick:
     # The watchdog kills a child that ignores the forwarded signal after 30 s;
     # run every shell at once so the suite pays the wait only once.
-    def slow(shell):
+    def slow(target):
         try:
-            run(shell, 'watchdog-kills-unresponsive-child', 'ignore', signal.SIGTERM, 143, None,
+            run(target, 'watchdog-kills-unresponsive-child', 'ignore', signal.SIGTERM, 143, None,
                 timeout=45, min_elapsed=29)
         except Failure as error:
             failures.append(str(error))
-    threads = [threading.Thread(target=slow, args=(shell,)) for shell in shells]
+    threads = [threading.Thread(target=slow, args=(target,)) for target in shells]
     for thread in threads:
         thread.start()
     for thread in threads:
