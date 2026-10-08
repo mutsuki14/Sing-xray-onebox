@@ -75,7 +75,10 @@ pub fn failover(
         .collect::<Result<Vec<ProxySlot>>>()?;
     let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
     let health = |i: usize| {
-        let endpoint = proxies[i].get().endpoint().clone();
+        let Some(slot) = proxies.get(i) else {
+            return false;
+        };
+        let endpoint = slot.get().endpoint().clone();
         let req = HttpRequest {
             url: &opts.common.url,
             route: Route::Proxy(&endpoint),
@@ -86,7 +89,10 @@ pub fn failover(
         };
         safe_measure(ctx, &req, cancel).ok()
     };
-    let restart = |i: usize| launcher.launch(entries[i]);
+    let restart = |i: usize| match entries.get(i) {
+        Some(entry) => launcher.launch(entry),
+        None => Err(Error::msg("入口不存在")),
+    };
     let svc = server::Service {
         ids: &ids,
         proxies: &proxies,

@@ -168,14 +168,42 @@ pub fn run_command(core: Core, binary: &Path, work: &Path) -> Result<Cmd> {
     })
 }
 
-/// Every credential-like string of the entry (plus the SOCKS token), so
-/// core messages can be shown without them.
+/// Whether an outbound key holds a credential (UUIDs, passwords, REALITY
+/// keys and short IDs, obfuscation and auth secrets) in either core's
+/// schema; other values (types, tags, names) stay readable in messages.
+fn secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key == "id"
+        || [
+            "uuid", "pass", "key", "short", "auth", "psk", "token", "secret",
+        ]
+        .iter()
+        .any(|part| key.contains(part))
+}
+
+/// Every credential of the entry (plus the SOCKS token), so core messages
+/// can be shown without them.
 fn secrets(entry: &ProbeEntry, token: &str) -> Vec<String> {
+    fn collect(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) if !s.is_empty() => out.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| collect(v, out)),
+            Value::Object(map) => map.values().for_each(|v| collect(v, out)),
+            _ => {}
+        }
+    }
     fn walk(value: &Value, out: &mut Vec<String>) {
         match value {
-            Value::String(s) if s.len() >= 4 => out.push(s.clone()),
             Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
-            Value::Object(map) => map.values().for_each(|v| walk(v, out)),
+            Value::Object(map) => {
+                for (key, v) in map {
+                    if secret_key(key) {
+                        collect(v, out);
+                    } else {
+                        walk(v, out);
+                    }
+                }
+            }
             _ => {}
         }
     }

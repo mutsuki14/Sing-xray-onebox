@@ -147,6 +147,42 @@ fn core_messages_are_shown_without_credentials() {
         redacted_detail(&long, &secrets).chars().count(),
         DETAIL_CHARS
     );
+    // Types and tags are not credentials and stay readable.
+    let kinds = Output::failure(1, "outbounds[0] (vless, tag proxy): unknown field");
+    assert_eq!(
+        redacted_detail(&kinds, &secrets),
+        "outbounds[0] (vless, tag proxy): unknown field"
+    );
+}
+
+#[test]
+fn credential_keys_of_both_schemas_are_collected() {
+    let mut e = entry("x", Core::Xray, Transport::Tcp);
+    e.outbounds = vec![
+        json!({"protocol": "vless", "tag": "proxy",
+        "settings": {"vnext": [{"address": "203.0.113.10",
+            "users": [{"id": "uuid-value", "encryption": "none"}]}]},
+        "streamSettings": {"realitySettings": {"publicKey": "pk", "shortId": "sid",
+            "serverName": "www.example.com"}}}),
+        json!({"type": "hysteria2", "tag": "hy", "password": "pw",
+            "obfs": {"type": "salamander", "password": "obfs-pw"},
+            "tls": {"reality": {"short_id": ["a1", "b2"]}}}),
+    ];
+    let mut found = secrets(&e, "tok");
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "a1",
+            "b2",
+            "obfs-pw",
+            "pk",
+            "pw",
+            "sid",
+            "tok",
+            "uuid-value"
+        ]
+    );
 }
 
 /// Reads the port and token of the config named by a check command.
