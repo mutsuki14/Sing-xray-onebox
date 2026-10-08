@@ -204,6 +204,44 @@ fn unusable_nft_falls_back_to_iptables() {
 }
 
 #[test]
+fn an_unrecordable_nft_table_is_removed_and_not_retried_with_iptables() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("nft").provide("iptables");
+    let ledger = ledger_path(&ctx);
+    let token = Arc::new(Mutex::new(String::new()));
+    let seen = Arc::clone(&token);
+    exec.on_fn(
+        |c| c.program == "nft" && c.args.first().is_some_and(|a| a == "-f"),
+        move |c| {
+            let script = std::fs::read_to_string(&c.args[1]).unwrap();
+            let name = script.split_whitespace().nth(2).unwrap().to_string();
+            *seen.lock().unwrap() = name;
+            // The ledger cannot be written any more.
+            std::fs::create_dir_all(&ledger).unwrap();
+            Ok(Output::success(""))
+        },
+    );
+    let listing = Arc::clone(&token);
+    exec.on_fn(
+        |c| c.program == "nft" && c.args.starts_with(&["-j".into(), "list".into()]),
+        move |_| {
+            Ok(Output::success(tables_json(
+                &listing.lock().unwrap(),
+                &["ip"],
+            )))
+        },
+    )
+    .on("nft", &["delete", "table"], Output::success(""));
+    assert!(apply(&ctx, range(20000, 21000), 443).is_err());
+    let history = exec.history();
+    assert_eq!(
+        history.last().unwrap(),
+        &format!("nft delete table ip {}", token.lock().unwrap())
+    );
+    assert!(history.iter().all(|c| !c.starts_with("iptables")));
+}
+
+#[test]
 fn hopping_needs_some_backend() {
     let (_dir, ctx, _exec) = setup();
     assert_eq!(

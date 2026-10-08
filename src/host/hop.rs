@@ -67,14 +67,14 @@ pub fn apply(ctx: &Ctx, range: PortRange, target: u16) -> Result<()> {
     let path = ledger_path(ctx);
     let _lock = lock(&path)?;
     clear_locked(ctx, &path)?;
+    let binaries = iptables_binaries(ctx);
     if ctx.has("nft") {
-        match install_nft(ctx, &path, range, target) {
-            Ok(()) => return Ok(()),
-            Err(e) if iptables_binaries(ctx).is_empty() => return Err(e),
+        match load_nft(ctx, range, target) {
+            Ok(hop) => return record(ctx, &path, &mut Vec::new(), hop),
+            Err(e) if binaries.is_empty() => return Err(e),
             Err(e) => out::warn(format!("nft 无法加载端口跳跃规则，改用 iptables: {e}")),
         }
     }
-    let binaries = iptables_binaries(ctx);
     if binaries.is_empty() {
         return Err(Error::msg("端口跳跃需要 nft 或 iptables/ip6tables"));
     }
@@ -88,13 +88,22 @@ pub fn apply(ctx: &Ctx, range: PortRange, target: u16) -> Result<()> {
             token: format!("onebox-hop-{}", crate::sys::rand::hex(8)?),
         };
         ctx.check(&iptables_cmd(&hop, "-A"))?;
-        hops.push(hop.clone());
-        if let Err(e) = save(&path, &hops) {
-            let _ = remove(ctx, &hop);
-            return Err(e);
-        }
+        record(ctx, &path, &mut hops, hop)?;
     }
     Ok(())
+}
+
+/// Append an installed hop and save at once; if saving fails the hop is
+/// taken out again so nothing unrecorded stays behind.
+fn record(ctx: &Ctx, path: &Path, hops: &mut Vec<Hop>, hop: Hop) -> Result<()> {
+    hops.push(hop);
+    let Err(e) = save(path, hops) else {
+        return Ok(());
+    };
+    if let Some(hop) = hops.pop() {
+        let _ = remove(ctx, &hop);
+    }
+    Err(e)
 }
 
 /// Remove every recorded hop. Hops are removed in order and the ledger is
@@ -141,7 +150,8 @@ pub fn nft_script(families: &[&str], token: &str, range: PortRange, target: u16)
         .collect()
 }
 
-fn install_nft(ctx: &Ctx, path: &Path, range: PortRange, target: u16) -> Result<()> {
+/// Load the hop table with `nft -f` (atomic: all families or nothing).
+fn load_nft(ctx: &Ctx, range: PortRange, target: u16) -> Result<Hop> {
     let token = format!("onebox_hop_{}", crate::sys::rand::hex(8)?);
     let families: &[&str] = if ipv6_enabled(&ctx.paths) {
         &["ip", "ip6"]
@@ -162,18 +172,13 @@ fn install_nft(ctx: &Ctx, path: &Path, range: PortRange, target: u16) -> Result<
     let result = ctx.check(&Cmd::new("nft").arg("-f").arg(file.to_string_lossy()));
     let _ = remove_file_if_exists(&file);
     result?;
-    let hop = Hop {
+    Ok(Hop {
         backend: "nft".into(),
         start: range.start,
         end: range.end,
         target,
         token,
-    };
-    if let Err(e) = save(path, std::slice::from_ref(&hop)) {
-        let _ = remove(ctx, &hop);
-        return Err(e);
-    }
-    Ok(())
+    })
 }
 
 /// The only place iptables hop argv is built (`-A`, `-C` or `-D`).
