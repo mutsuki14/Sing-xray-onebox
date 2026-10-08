@@ -459,7 +459,11 @@ pub fn info_with(engine: &Engine, cfg: &NodeConfig) -> Result<SiteInfo> {
         running: engine.services().running(SERVICE),
         generated: store.is_generated()?,
         backups: store.backups()?.len(),
-        cert: crate::cert::store::status(engine.ctx, &CertDir::site(paths))?,
+        // An unreadable certificate shows as "not configured" rather than
+        // hiding the rest of the information.
+        cert: crate::cert::store::status(engine.ctx, &CertDir::site(paths))
+            .ok()
+            .flatten(),
     })
 }
 

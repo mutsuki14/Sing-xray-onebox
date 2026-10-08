@@ -100,6 +100,13 @@ fn proxy_http01_challenge_follows_the_port_80_owner() {
         .reality;
     let site_root = ctx.paths.site_root.clone();
     running(&exec, &[]);
+    // A site root Onebox has not created yet is never written to.
+    assert_eq!(
+        challenge(&site),
+        Source::Acme(Challenge::Responder(tls.responder_webroot()))
+    );
+    std::fs::create_dir_all(&site_root).unwrap();
+    std::fs::write(site_root.join(".onebox-site-owned"), "onebox\n").unwrap();
     assert_eq!(
         challenge(&site),
         Source::Acme(Challenge::Responder(site_root.clone()))
@@ -124,7 +131,14 @@ fn proxy_http01_challenge_follows_the_port_80_owner() {
     });
     assert_eq!(
         challenge(&sub),
-        Source::Acme(Challenge::Responder(subscription_acme_root(&ctx.paths)))
+        Source::Acme(Challenge::Responder(tls.responder_webroot()))
+    );
+    let sub_root = subscription_acme_root(&ctx.paths);
+    std::fs::create_dir_all(&sub_root).unwrap();
+    std::fs::write(sub_root.join(".onebox-owned"), "onebox\n").unwrap();
+    assert_eq!(
+        challenge(&sub),
+        Source::Acme(Challenge::Responder(sub_root))
     );
     assert_eq!(
         challenge(&trojan(acme(AcmeMethod::Cloudflare))),

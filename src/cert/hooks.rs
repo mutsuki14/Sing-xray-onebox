@@ -125,21 +125,36 @@ pub fn proxy_spec(engine: &Engine, cfg: &NodeConfig, dir: &CertDir) -> Option<Ce
 fn proxy_challenge(engine: &Engine, cfg: &NodeConfig, dir: &CertDir) -> Challenge {
     let paths = &engine.ctx.paths;
     match proxy_http01_responder(cfg) {
-        Some(Http01Responder::Site) => served_by(engine, SITE, paths.site_root.clone()),
-        Some(Http01Responder::Subscription) => {
-            served_by(engine, SUBSCRIPTION_WEB, subscription_acme_root(paths))
-        }
+        Some(Http01Responder::Site) => served_by(engine, SITE, &paths.site_root, dir),
+        Some(Http01Responder::Subscription) => served_by(
+            engine,
+            SUBSCRIPTION_WEB,
+            &subscription_acme_root(paths),
+            dir,
+        ),
         _ => Challenge::Responder(dir.responder_webroot()),
     }
 }
 
-/// `webroot` through `service`'s nginx while it runs, else the responder.
-pub fn served_by(engine: &Engine, service: &str, webroot: PathBuf) -> Challenge {
+/// Markers of webroots Onebox created (site, v2 subscription ACME root).
+const OWNED_WEBROOT_MARKERS: [&str; 2] = [".onebox-site-owned", ".onebox-owned"];
+
+/// `webroot` through `service`'s nginx while it runs; else the responder
+/// serving that same webroot (so acme.sh's recorded `Le_Webroot` stays
+/// stable) when Onebox already owns it, or the certificate directory's own
+/// responder webroot (never creating content in someone else's tree).
+pub fn served_by(engine: &Engine, service: &str, webroot: &Path, dir: &CertDir) -> Challenge {
     if engine.services().running(service) {
-        Challenge::Webroot(webroot)
-    } else {
-        Challenge::Responder(webroot)
+        return Challenge::Webroot(webroot.to_path_buf());
     }
+    let owned = OWNED_WEBROOT_MARKERS
+        .iter()
+        .any(|m| webroot.join(m).is_file());
+    Challenge::Responder(if owned {
+        webroot.to_path_buf()
+    } else {
+        dir.responder_webroot()
+    })
 }
 
 /// A web endpoint's spec: `http01` answers HTTP-01 challenges, custom pairs

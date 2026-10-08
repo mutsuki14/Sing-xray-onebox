@@ -164,19 +164,15 @@ fn targets(engine: &Engine, cfg: &NodeConfig, scopes: CertScopes) -> Vec<Target>
     let site_wanted =
         scopes.site || (scopes.subscription && sub_mode == Some(&SubscriptionMode::Site));
     if let Some(site) = cfg.site_active().filter(|_| site_wanted) {
-        let http01 = served_by(engine, SITE, paths.site_root.clone());
+        let dir = CertDir::site(paths);
+        let http01 = served_by(engine, SITE, &paths.site_root, &dir);
         let spec = web_spec(
             std::slice::from_ref(&site.domain),
             &site.cert,
             http01,
             Trust::Public,
         );
-        out.push(target(
-            CertScope::Site,
-            CertDir::site(paths),
-            spec,
-            vec![SITE],
-        ));
+        out.push(target(CertScope::Site, dir, spec, vec![SITE]));
     }
     if let Some(SubscriptionMode::Standalone {
         domain,
@@ -186,7 +182,12 @@ fn targets(engine: &Engine, cfg: &NodeConfig, scopes: CertScopes) -> Vec<Target>
     {
         let dir = CertDir::subscription(paths);
         let http01 = if *http01_port80 {
-            served_by(engine, SUBSCRIPTION_WEB, subscription_acme_root(paths))
+            served_by(
+                engine,
+                SUBSCRIPTION_WEB,
+                &subscription_acme_root(paths),
+                &dir,
+            )
         } else {
             Challenge::Responder(dir.responder_webroot())
         };
