@@ -1,4 +1,5 @@
 use super::*;
+use crate::host::init::InitSystem;
 use crate::sys::exec::{FakeExec, Output};
 use crate::sys::fs::TempDir;
 use std::fs;
@@ -163,82 +164,10 @@ fn failed_disable_only_warns() {
     assert!(ensure_installed_with(&f.ctx, &no_env, true).is_ok());
 }
 
-/// An already-installed nginx under systemd with `enabled` and the given
-/// distro files; returns the commands run.
-fn existing(enabled: bool, files: &[(&str, &str)]) -> Vec<String> {
-    let f = fixture();
-    f.init(InitSystem::Systemd);
-    f.exec.provide("nginx");
-    let state = if enabled { "enabled\n" } else { "disabled\n" };
-    let code = if enabled { 0 } else { 1 };
-    f.exec.on(
-        "systemctl",
-        &["is-enabled"],
-        Output {
-            code,
-            stdout: state.into(),
-            stderr: String::new(),
-        },
-    );
-    f.exec.on("systemctl", &["disable"], Output::success(""));
-    for (rel, text) in files {
-        f.system_file(rel, text);
-    }
-    ensure_installed_with(&f.ctx, &no_env, true).unwrap();
-    f.history()
-}
-
 #[test]
-fn existing_nginx_is_neutralized_only_when_pristine() {
-    let query = "systemctl is-enabled nginx.service";
-    let disable = "systemctl disable --now nginx.service";
-    let pristine = [
-        ("/etc/nginx/nginx.conf", DEBIAN_CONF),
-        (
-            "/etc/nginx/sites-enabled/default",
-            "server { listen 80 default_server; }",
-        ),
-        ("/etc/nginx/conf.d/default.conf", "server { listen 80; }"),
-    ];
-    assert_eq!(existing(true, &pristine), [query, disable]);
-    assert_eq!(existing(true, &[]), [query, disable], "no config at all");
-    assert_eq!(existing(false, &pristine), [query], "not enabled");
-
-    let own_site = [
-        ("/etc/nginx/nginx.conf", DEBIAN_CONF),
-        ("/etc/nginx/sites-enabled/blog", "server { listen 80; }"),
-    ];
-    assert_eq!(existing(true, &own_site), [query]);
-    let inline_server = [(
-        "/etc/nginx/nginx.conf",
-        "events {}\nhttp { server { listen 80; } }\n",
-    )];
-    assert_eq!(existing(true, &inline_server), [query]);
-    let alpine_site = [("/etc/nginx/http.d/app.conf", "server {}")];
-    assert_eq!(existing(true, &alpine_site), [query]);
-}
-
-#[test]
-fn existing_nginx_under_openrc_and_overrides() {
-    let f = fixture();
-    f.init(InitSystem::Openrc);
-    f.exec.provide("nginx");
-    f.system_file("/etc/nginx/nginx.conf", DEBIAN_CONF);
-    ensure_installed_with(&f.ctx, &no_env, true).unwrap();
-    assert!(f.history().is_empty(), "not in the default runlevel");
-    fs::create_dir_all(f.ctx.paths.system("/etc/runlevels/default")).unwrap();
-    std::os::unix::fs::symlink(
-        "/etc/init.d/nginx",
-        f.ctx.paths.system("/etc/runlevels/default/nginx"),
-    )
-    .unwrap();
-    ensure_installed_with(&f.ctx, &no_env, true).unwrap();
-    assert_eq!(
-        f.history(),
-        ["rc-service nginx stop", "rc-update del nginx default"]
-    );
-
-    // A private build named by ONEBOX_NGINX_BIN is used as is.
+fn private_build_is_used_as_is() {
+    // A private build named by ONEBOX_NGINX_BIN: no install, no service
+    // inspection (distro rule details: nginx/distro/tests.rs).
     let f = fixture();
     f.init(InitSystem::Systemd);
     let custom = f._dir.join("nginx");
@@ -248,24 +177,6 @@ fn existing_nginx_under_openrc_and_overrides() {
     let env = |k: &str| (k == ENV_BIN).then(|| shown.clone());
     assert_eq!(ensure_installed_with(&f.ctx, &env, false).unwrap(), custom);
     assert!(f.history().is_empty());
-}
-
-#[test]
-fn server_block_detection() {
-    let cases = [
-        ("server { listen 80; }", true),
-        ("http {\n  server{\n listen 80; } }", true),
-        ("http { server\n  {\n } }", true),
-        ("# server { }\nevents {}", false),
-        ("upstream app { server 127.0.0.1:8080; }", false),
-        ("http { server_names_hash_bucket_size 64; }", false),
-        ("http { proxy_pass http://myserver; }", false),
-        ("http { include x; } # server {", false),
-        ("", false),
-    ];
-    for (text, want) in cases {
-        assert_eq!(has_server_block(text), want, "{text}");
-    }
 }
 
 // ---- commands ---------------------------------------------------------------

@@ -10,21 +10,28 @@
 //! disabled
 //! 1. right after Onebox installed the package (it then only serves the
 //!    distribution's welcome page and would hold 80/443), or
-//! 2. when nginx was already installed, the service is enabled, and the
-//!    distro configuration is untouched: `nginx.conf` has no `server { }`
-//!    block and `sites-enabled/`, `conf.d/`, `http.d/` hold nothing but the
-//!    package defaults (`default`, `default.conf`). A host with its own
-//!    sites is never touched; its port conflicts are reported by the
-//!    port planner instead.
+//! 2. when nginx was already installed and the service is enabled, but the
+//!    package manager confirms the distro configuration is untouched:
+//!    `nginx.conf` and every entry of `sites-enabled/`, `conf.d/`,
+//!    `http.d/`, `default.d/` and `vhosts.d/` (links followed) are
+//!    configuration files of the package with their packaged content (dpkg
+//!    conffile MD5s, or `rpm -V`). An edited default site (hand-made,
+//!    `certbot --nginx`), any other site, or a host without dpkg/rpm
+//!    (Alpine, whose OpenRC never enables nginx by itself) is left alone;
+//!    its port conflicts are reported by the port planner instead.
 //!
 //! Neither happens with `ONEBOX_NGINX_BIN` (a private build) or without an
-//! init system.
+//! init system. Neither is part of an apply journal: both only stop a
+//! service that serves the distribution's welcome page, so a rolled-back
+//! apply does not start it again.
 //!
 //! Changes from v2:
 //! - lookup is `ONEBOX_NGINX_BIN`, PATH, then `/usr/sbin/nginx` (cron's PATH
 //!   lacks sbin; F-8.1#1); the override must be an executable file.
 //! - the distro service rule above (v2 only disabled it after a fresh
-//!   install from the site path, and a failing `systemctl` aborted).
+//!   install from the site path, and a failing `systemctl` aborted); an
+//!   existing nginx counts as unconfigured only when its package manager
+//!   says so, never because of file names.
 //! - `test` uses `-q` and returns nginx's own error lines without
 //!   timestamps/PIDs.
 //! - the worker account comes from the distro configuration's `user`
@@ -32,13 +39,14 @@
 //! - `version()` and [`NginxVersion::supports_http2_directive`] select
 //!   `http2 on;` for nginx ≥ 1.25.1 (G-8.1#20, F-8.1#23).
 
+mod distro;
+
 use crate::ctx::Ctx;
 use crate::error::{Context, Error, Result};
-use crate::host::init::{self, InitSystem};
+use crate::host::init;
 use crate::host::os::{self, process_env, EnvLookup};
 use crate::host::pkg;
 use crate::sys::exec::Cmd;
-use crate::ui::out;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -49,15 +57,6 @@ pub const ENV_BIN: &str = "ONEBOX_NGINX_BIN";
 /// Distro binary location checked when PATH has no `nginx`.
 const SBIN_NGINX: &str = "/usr/sbin/nginx";
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
-const SERVICE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Package-default entries that do not count as user configuration.
-const DEFAULT_ENTRIES: [&str; 2] = ["default", "default.conf"];
-/// Distro include directories that hold server blocks.
-const INCLUDE_DIRS: [&str; 3] = [
-    "/etc/nginx/sites-enabled",
-    "/etc/nginx/conf.d",
-    "/etc/nginx/http.d",
-];
 /// Fallback worker accounts, in order.
 const WORKER_CANDIDATES: [&str; 3] = ["www-data", "nginx", "nobody"];
 
@@ -97,8 +96,8 @@ pub fn ensure_installed(ctx: &Ctx) -> Result<PathBuf> {
 pub fn ensure_installed_with(ctx: &Ctx, env: EnvLookup, root: bool) -> Result<PathBuf> {
     let init = init::detect_with(ctx, env);
     if let Some(bin) = find(ctx, env)? {
-        if env(ENV_BIN).is_none() && distro_service_enabled(ctx, init) && distro_pristine(ctx) {
-            neutralize(ctx, init);
+        if env(ENV_BIN).is_none() && distro::service_enabled(ctx, init) && distro::pristine(ctx) {
+            distro::neutralize(ctx, init);
         }
         return Ok(bin);
     }
@@ -107,112 +106,8 @@ pub fn ensure_installed_with(ctx: &Ctx, env: EnvLookup, root: bool) -> Result<Pa
         "检测到现有 nginx 配置但找不到程序，请先修复 nginx"
     );
     pkg::ensure_as(ctx, "nginx", "nginx", root)?;
-    neutralize(ctx, init);
+    distro::neutralize(ctx, init);
     binary_with(ctx, env)
-}
-
-/// Whether the distro `nginx` service starts at boot.
-fn distro_service_enabled(ctx: &Ctx, init: InitSystem) -> bool {
-    match init {
-        InitSystem::Systemd => ctx
-            .run(&systemctl(&["is-enabled", "nginx.service"]))
-            .is_ok_and(|o| o.ok() && o.stdout.trim() == "enabled"),
-        InitSystem::Openrc => {
-            std::fs::symlink_metadata(ctx.paths.system("/etc/runlevels/default/nginx")).is_ok()
-        }
-        InitSystem::None => false,
-    }
-}
-
-/// The distro configuration carries no user sites (module docs, rule 2).
-fn distro_pristine(ctx: &Ctx) -> bool {
-    let main = ctx.paths.system("/etc/nginx/nginx.conf");
-    let main_clean = match std::fs::read_to_string(&main) {
-        Ok(text) => !has_server_block(&text),
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-    };
-    main_clean
-        && INCLUDE_DIRS
-            .iter()
-            .all(|dir| only_defaults(&ctx.paths.system(dir)))
-}
-
-fn only_defaults(dir: &Path) -> bool {
-    match std::fs::read_dir(dir) {
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-        Ok(entries) => entries.into_iter().all(|entry| {
-            entry.is_ok_and(|e| {
-                DEFAULT_ENTRIES
-                    .iter()
-                    .any(|d| e.file_name().to_str() == Some(d))
-            })
-        }),
-    }
-}
-
-/// Whether nginx config text contains a `server { … }` block (comments
-/// ignored; `server addr;` inside `upstream` is not a block).
-pub fn has_server_block(text: &str) -> bool {
-    let code: String = text
-        .lines()
-        .map(|line| line.split('#').next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let bytes = code.as_bytes();
-    code.match_indices("server").any(|(at, word)| {
-        let before_ok = at == 0 || !is_word_byte(bytes[at - 1]);
-        let rest = code[at + word.len()..].trim_start();
-        before_ok && rest.starts_with('{')
-    })
-}
-
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Stop and disable the distro service. Failures only warn: a service
-/// still holding a port is reported by the port planner later.
-fn neutralize(ctx: &Ctx, init: InitSystem) {
-    match init {
-        InitSystem::Systemd => {
-            let result = ctx.run(&systemctl(&["disable", "--now", "nginx.service"]));
-            match result {
-                Ok(o) if o.ok() => {}
-                Ok(o) => out::warn(format!(
-                    "无法停用系统 nginx 服务: {}",
-                    first_line(&o.stderr)
-                )),
-                Err(e) => out::warn(format!("无法停用系统 nginx 服务: {e}")),
-            }
-        }
-        InitSystem::Openrc => {
-            let _ = ctx.run(
-                &Cmd::new("rc-service")
-                    .args(["nginx", "stop"])
-                    .timeout(SERVICE_TIMEOUT),
-            );
-            let _ = ctx.run(
-                &Cmd::new("rc-update")
-                    .args(["del", "nginx", "default"])
-                    .timeout(SERVICE_TIMEOUT),
-            );
-        }
-        InitSystem::None => return,
-    }
-    out::info("已停用系统自带的 nginx 服务（Onebox 使用独立的 nginx 实例，避免占用 80/443 端口）");
-}
-
-fn systemctl(args: &[&str]) -> Cmd {
-    Cmd::new("systemctl")
-        .args(args.iter().copied())
-        .timeout(SERVICE_TIMEOUT)
-}
-
-fn first_line(text: &str) -> &str {
-    text.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
 }
 
 /// `nginx -t -q -p PREFIX -c CONF`; the error carries nginx's messages.
