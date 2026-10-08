@@ -176,6 +176,7 @@ pub struct FakeExec {
 
 pub struct Rule {
     pub matcher: Box<dyn Fn(&Cmd) -> bool + Send + Sync>,
+    #[allow(clippy::type_complexity)]
     pub respond: Box<dyn Fn(&Cmd) -> Result<Output> + Send + Sync>,
 }
 

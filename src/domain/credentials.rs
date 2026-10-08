@@ -169,7 +169,7 @@ pub fn valid_grpc_service(s: &str) -> bool {
 
 /// REALITY short id: 2–16 hex characters, even length (Xray rule).
 pub fn valid_short_id(s: &str) -> bool {
-    is_hex(s) && s.len() <= 16 && s.len() % 2 == 0
+    is_hex(s) && s.len() <= 16 && s.len().is_multiple_of(2)
 }
 
 /// Keys decode to 32 bytes each and the public key belongs to the private key.
