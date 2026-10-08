@@ -4,8 +4,10 @@
 //! -fL` (HTTPS only, also across redirects), into a temp file next to the
 //! destination that is renamed into place only after the size cap, the
 //! non-emptiness check and, for verified downloads, the hash check; partial
-//! or unverified files are removed on every error. A missing curl is
-//! installed first when running as root (G14).
+//! or unverified files are removed on every error. Transfers require curl;
+//! flows that change the host call [`ensure_curl`] first, which installs a
+//! missing curl as root (G14). Read-only lookups (previews, update checks)
+//! never install anything.
 //!
 //! Proxy policy (`GH_PROXY`: an `https://` prefix, no whitespace), one rule
 //! for every caller:
@@ -28,7 +30,8 @@
 //!
 //! Changes from v2:
 //! - curl only: wget's `--https-only` does not apply to redirects
-//!   (E-8.1#7), so there is no wget fallback; curl is installed on demand.
+//!   (E-8.1#7), so there is no wget fallback; mutating flows install a
+//!   missing curl ([`ensure_curl`]).
 //! - transfer limits scale with the expected size (`--max-time` from a
 //!   32 KiB/s floor, `--speed-limit` 1 KiB/s over 60 s) instead of a fixed
 //!   300 s that failed on slow links; every download has a byte cap
@@ -64,7 +67,7 @@ pub use asset::{
 pub use release::{
     check_elf, checksum_for, is_elf, verify_file, Asset, Release, ReleasePage, Which,
 };
-pub use transfer::{ensure_curl_as, max_time, Pace};
+pub use transfer::{ensure_curl, ensure_curl_as, max_time, require_curl, Pace};
 
 use crate::ctx::Ctx;
 use crate::error::{Context, Error, Result};

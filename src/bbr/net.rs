@@ -11,13 +11,16 @@
 //! documents (`super::release`) and verifies every package's size and
 //! SHA-256 from that metadata before dpkg sees it (`super::install`).
 //!
+//! curl is required, and installed only by [`Fetcher::prepare`], which
+//! `install --apply` calls before its first request; `status`, `releases`
+//! and an install preview never run a package manager (I-8.1#1).
+//!
 //! Changes from v2: package downloads stream curl's progress bar and use a
 //! low-speed limit instead of a 300 s hard cap, so a 100 MB kernel image on
 //! a slow link no longer times out (I-8.1#8/#9); API failures name the curl
 //! error and suggest `GH_TOKEN` on rate limits (v2 said "invalid
-//! response"); a missing curl is installed like for every other download;
-//! the wget fallback is gone (wget does not enforce HTTPS on redirects,
-//! E-8.1#7).
+//! response"); `install --apply` installs a missing curl; the wget fallback
+//! is gone (wget does not enforce HTTPS on redirects, E-8.1#7).
 
 use super::REPO;
 use crate::ctx::Ctx;
@@ -28,6 +31,13 @@ use serde_json::Value;
 use std::path::Path;
 
 pub trait Fetcher {
+    /// Make the transport usable before a flow that changes the host
+    /// (`install --apply`) sends its first request; `root` is the
+    /// session's privilege. Read-only flows never call it.
+    fn prepare(&self, ctx: &Ctx, root: bool) -> Result<()> {
+        let _ = (ctx, root);
+        Ok(())
+    }
     /// GET a GitHub API document of the BBR repository (URL under
     /// `https://api.github.com/repos/{REPO}/`).
     fn json(&self, ctx: &Ctx, url: &str) -> Result<Value>;
@@ -35,13 +45,23 @@ pub trait Fetcher {
     fn download(&self, ctx: &Ctx, url: &str, dest: &Path, size: u64) -> Result<()>;
 }
 
-/// `host::fetch` with the environment it needs captured once.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// `host::fetch` with the environment it needs captured once. `Debug`
+/// never shows the token (ARCH §1: secrets are not printed).
+#[derive(Clone, Default)]
 pub struct CurlFetcher {
     /// `GH_PROXY` prefix for package downloads.
     pub gh_proxy: Option<String>,
     /// `GH_TOKEN` for API requests (higher rate limits).
     pub gh_token: Option<String>,
+}
+
+impl std::fmt::Debug for CurlFetcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CurlFetcher")
+            .field("gh_proxy", &self.gh_proxy)
+            .field("gh_token", &self.gh_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl CurlFetcher {
@@ -63,6 +83,11 @@ impl CurlFetcher {
 }
 
 impl Fetcher for CurlFetcher {
+    /// Install a missing curl as root (`host::fetch::ensure_curl_as`).
+    fn prepare(&self, ctx: &Ctx, root: bool) -> Result<()> {
+        fetch::ensure_curl_as(ctx, root)
+    }
+
     fn json(&self, ctx: &Ctx, url: &str) -> Result<Value> {
         fetch::github_api_json_with(ctx, &|k| self.env(k), REPO, url)
     }
@@ -77,6 +102,7 @@ impl Fetcher for CurlFetcher {
 mod tests {
     use super::*;
     use crate::host::fetch::testing::{output_arg, serve, url_arg, Reply};
+    use crate::sys::exec::Output;
     use crate::sys::fs::TempDir;
 
     const PACKAGE: &str =
@@ -164,6 +190,50 @@ mod tests {
         };
         let err = bad_proxy.download(&ctx, PACKAGE, &empty, 3).unwrap_err();
         assert_eq!(err.to_string(), "GH_PROXY 必须为 HTTPS 地址");
+    }
+
+    #[test]
+    fn debug_output_redacts_the_token() {
+        let shown = format!("{:?}", proxied());
+        assert_eq!(
+            shown,
+            r#"CurlFetcher { gh_proxy: Some("https://gh.example/"), gh_token: Some("<redacted>") }"#
+        );
+        assert!(!format!("{:#?}", proxied()).contains("tok3n"));
+        let none = format!("{:?}", CurlFetcher::default());
+        assert!(none.contains("gh_token: None"), "{none}");
+    }
+
+    #[test]
+    fn only_prepare_installs_curl() {
+        // Lookups as root on a host without curl: a hint, no package manager.
+        let dir = TempDir::new("bbr-net").unwrap();
+        let (ctx, exec, _) = Ctx::test(dir.path());
+        exec.provide("apt-get");
+        let url = super::super::release::list_url(1);
+        let err = proxied().json(&ctx, &url).unwrap_err();
+        assert!(err.to_string().ends_with("请先安装 curl"), "{err}");
+        let err = proxied()
+            .download(&ctx, PACKAGE, &dir.join("pkg.deb"), 3)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "请先安装 curl");
+        assert!(exec.history().is_empty(), "{:?}", exec.history());
+
+        // `prepare` (install --apply) installs it as root ...
+        exec.on("apt-get", &[], Output::success(""));
+        let err = proxied().prepare(&ctx, true).unwrap_err();
+        assert_eq!(err.to_string(), "安装后仍未找到 curl");
+        assert!(exec
+            .history()
+            .iter()
+            .any(|c| c.ends_with("install -y curl")));
+        // ... asks for it otherwise, and is a no-op once curl exists.
+        exec.clear_history();
+        let err = proxied().prepare(&ctx, false).unwrap_err();
+        assert_eq!(err.to_string(), "请先安装 curl");
+        exec.provide("curl");
+        proxied().prepare(&ctx, true).unwrap();
+        assert!(exec.history().is_empty());
     }
 
     #[test]

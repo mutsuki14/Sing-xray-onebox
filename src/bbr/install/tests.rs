@@ -309,6 +309,37 @@ fn preview_needs_no_root_and_changes_nothing() {
 }
 
 #[test]
+fn only_apply_installs_a_missing_curl() {
+    // The real transport, as root, on an eligible host without curl.
+    let f = Fixture::new();
+    f.eligible();
+    let curl = crate::bbr::net::CurlFetcher::default();
+    let session = crate::bbr::Session {
+        ctx: &f.ctx,
+        fetcher: &curl,
+        is_root: true,
+    };
+    let err = session
+        .run(crate::bbr::Action::Install(request(false)))
+        .unwrap_err();
+    assert!(err.to_string().ends_with("请先安装 curl"), "{err}");
+    assert!(f.calls("apt-get").is_empty(), "a preview mutates nothing");
+    assert!(!f.ctx.paths.bbr_dir.exists());
+
+    // `--apply` installs it (the fake apt-get leaves no curl behind).
+    let err = session
+        .run(crate::bbr::Action::Install(request(true)))
+        .unwrap_err();
+    assert_eq!(err.to_string(), "安装后仍未找到 curl");
+    let apt = f.calls("apt-get");
+    assert!(
+        apt.iter().any(|a| a.ends_with(&["curl".to_string()])),
+        "{apt:?}"
+    );
+    assert!(f.calls("curl").is_empty());
+}
+
+#[test]
 fn preview_on_an_ineligible_host_lists_failures_and_fails() {
     let f = Fixture::new();
     f.eligible();

@@ -17,6 +17,9 @@
 //! Xray-version policy), then [`download`] into a staging directory and hand
 //! the staged binary to the apply engine (`Intents.replace_cores`) together
 //! with the new pin. [`download_to`] is resolve + download in one call.
+//! That path changes the host, so it starts with `host::fetch::ensure_curl`
+//! ([`download_to`] and [`ensure_installed`] do so themselves); a plain
+//! [`resolve`] (update checks) never installs curl.
 //!
 //! Changes from v2:
 //! - prereleases are refused (E-8.1#15); a failed `latest` lookup for
@@ -298,7 +301,12 @@ fn stage_binary(
 /// The update path in one call: `resolve(Some(version))` (`version` may be
 /// `latest`; strict) + [`download`] into `staging_dir`. The live binary is
 /// never touched; returns `{staging_dir}/{binary}`.
+/// A missing curl is installed first ([`fetch::ensure_curl`]; callers that
+/// [`resolve`] separately do that themselves before the lookup).
 pub fn download_to(ctx: &Ctx, core: Core, version: &str, staging_dir: &Path) -> Result<PathBuf> {
+    if process_env(offline_env(core)).is_none() {
+        fetch::ensure_curl(ctx)?;
+    }
     let resolved = resolve(ctx, core, Some(version))?;
     download(ctx, &resolved, staging_dir)
 }
@@ -439,6 +447,11 @@ pub fn ensure_installed_with(
         Some(Wanted::Exact(v)) => Some(v.as_str()),
         Some(Wanted::Latest | Wanted::Default) | None => None,
     };
+    if env(offline_env(core)).is_none() {
+        // prepare-cores changes the host anyway: a missing curl is
+        // installed here, not by read-only lookups (`host::fetch`).
+        fetch::ensure_curl(ctx)?;
+    }
     let resolved = resolve_with(ctx, env, core, wanted)?;
     sysfs::ensure_dir(&ctx.paths.bin, 0o755)?;
     let stage = TempDir::new_in(&ctx.paths.bin, "core-stage")?;

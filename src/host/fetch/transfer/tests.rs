@@ -215,6 +215,26 @@ fn curl_is_installed_on_demand() {
 }
 
 #[test]
+fn transfers_require_curl_but_never_install_it() {
+    // Read-only lookups (previews, update checks) as root on a host
+    // without curl: a hint, no package manager run (I-8.1#1).
+    let (_d, ctx, exec) = setup();
+    exec.provide("apt-get");
+    let dest = ctx.paths.bin.join("pkg");
+    let err = download_with(&ctx, &no_env, ASSET_URL, &dest, 10, true).unwrap_err();
+    assert_eq!(err.to_string(), "请先安装 curl");
+    let which = super::super::Which::Latest;
+    let err =
+        super::super::github_release_with(&ctx, &no_env, "SagerNet/sing-box", &which).unwrap_err();
+    assert!(err.to_string().ends_with(": 请先安装 curl"), "{err}");
+    assert!(exec.history().is_empty(), "{:?}", exec.history());
+    assert!(!dest.exists());
+    require_curl(&ctx).unwrap_err();
+    exec.provide("curl");
+    require_curl(&ctx).unwrap();
+}
+
+#[test]
 fn progress_pace_streams_without_a_total_time_limit() {
     let (_d, ctx, exec) = setup();
     let env = env_with(&[("GH_PROXY", "https://ghproxy.example")]);

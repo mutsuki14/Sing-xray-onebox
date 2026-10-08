@@ -20,7 +20,8 @@
 //! - downloads are staged under `ONEBOX_BBR_DIR` (disk) instead of `$TMPDIR`
 //!   (often a small tmpfs); stale staging directories are swept;
 //! - a preview shows every eligibility check instead of only the first
-//!   failure; preview needs no root (I-8.1#1/#4).
+//!   failure; preview needs no root and installs nothing, not even a
+//!   missing curl (`--apply` does, [`Fetcher::prepare`]) (I-8.1#1/#4).
 
 use super::net::Fetcher;
 use super::preflight::{self, missing_kernel_file};
@@ -58,6 +59,11 @@ pub(super) fn install(session: &Session<'_>, req: &InstallRequest) -> Result<()>
                 .unwrap_or("Actions-bbr-v3 内核仅支持 x86_64 / aarch64"),
         )
     })?;
+    if req.apply && report.first_failure().is_none() {
+        // `--apply` changes the host anyway: a missing curl is installed
+        // before the first request. A preview only requires it.
+        session.fetcher.prepare(ctx, session.is_root)?;
+    }
     let manifest = match (
         resolve(session.fetcher, ctx, req, arch),
         report.first_failure(),

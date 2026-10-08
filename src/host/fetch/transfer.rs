@@ -2,14 +2,18 @@
 //! destination, checked, then renamed into place (module docs of
 //! `host::fetch` for the rules).
 //!
-//! curl is installed on demand (G14): every download and API call goes
-//! through [`transfer`], which makes sure `curl` exists first — installing
-//! the `curl` package as root, or asking for it otherwise.
+//! curl is installed on demand (G14), but only by flows that change the
+//! host anyway: they call [`ensure_curl`] before their first transfer
+//! (prepare-cores, `bbr install --apply`, FRP and certificate installs,
+//! self-update). [`transfer`] itself only requires curl ([`require_curl`]),
+//! so read-only lookups — previews, update checks — never run a package
+//! manager (I-8.1#1: a preview mutates nothing).
 //!
 //! Changes from v2: v2 fell back to wget without curl (E-8.1#7) and used
-//! a fixed 300 s limit; here a missing curl is installed, the result is
-//! size-checked and fsynced before the rename, and [`Pace`] chooses between
-//! a quiet size-scaled time limit and a streamed progress bar.
+//! a fixed 300 s limit; here a missing curl is installed by mutating
+//! flows, the result is size-checked and fsynced before the rename, and
+//! [`Pace`] chooses between a quiet size-scaled time limit and a streamed
+//! progress bar.
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
@@ -140,7 +144,7 @@ pub(super) fn curl_cmd(t: &Transfer, output: &Path) -> Cmd {
 pub(super) fn transfer(ctx: &Ctx, t: &Transfer) -> Result<u64> {
     super::check_https(t.url)?;
     ensure!(t.max_bytes > 0, "下载大小上限无效");
-    ensure_curl_as(ctx, crate::host::os::is_root())?;
+    require_curl(ctx)?;
     let parent = t
         .dest
         .parent()
@@ -157,14 +161,29 @@ pub(super) fn transfer(ctx: &Ctx, t: &Transfer) -> Result<u64> {
     result
 }
 
-/// Make sure `curl` is on PATH: root installs the `curl` package (there
-/// is no wget fallback, E-8.1#7); anyone else is asked to install it.
+/// Make sure `curl` is on PATH before a flow that changes the host
+/// (module docs): root installs the `curl` package (there is no wget
+/// fallback, E-8.1#7); anyone else is asked to install it.
+pub fn ensure_curl(ctx: &Ctx) -> Result<()> {
+    ensure_curl_as(ctx, crate::host::os::is_root())
+}
+
+/// [`ensure_curl`] with the caller's root status (tests, sessions that
+/// carry their own).
 pub fn ensure_curl_as(ctx: &Ctx, root: bool) -> Result<()> {
     if ctx.has("curl") {
         return Ok(());
     }
     ensure!(root, "请先安装 curl");
     pkg::ensure_as(ctx, "curl", "curl", true)
+}
+
+/// `curl` must already be on PATH; nothing is installed. Every transfer
+/// checks this, so read-only lookups fail with a hint instead of changing
+/// the host.
+pub fn require_curl(ctx: &Ctx) -> Result<()> {
+    ensure!(ctx.has("curl"), "请先安装 curl");
+    Ok(())
 }
 
 fn temp_path(dir: &Path) -> Result<PathBuf> {

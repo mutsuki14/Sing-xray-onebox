@@ -312,3 +312,34 @@ fn keep_notice_wording() {
     );
     assert_eq!(keep_notice(Core::Xray, "26.3.27", &Ok(None)), None);
 }
+
+#[test]
+fn installing_a_missing_core_needs_curl_and_offline_cores_do_not() {
+    let f = fixture();
+    // Neither curl nor a package manager: the download is refused before
+    // any lookup (as root after looking for a package manager).
+    let err = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &CoreVersions::default())
+        .unwrap_err();
+    assert!(err.to_string().ends_with("请先安装 curl"), "{err}");
+    assert!(f.curl_urls().is_empty());
+
+    // The offline override needs no network at all.
+    let source = f.dir.join("offline-sing-box");
+    std::fs::write(&source, fake_elf("offline")).unwrap();
+    let bin = f.ctx.paths.bin.clone();
+    versions(
+        &f.exec,
+        vec![
+            (source.clone(), singbox_says("1.14.2")),
+            (bin, singbox_says("1.14.2")),
+        ],
+    );
+    let path = source.to_string_lossy().into_owned();
+    let env = move |k: &str| (k == "ONEBOX_SINGBOX_BIN").then(|| path.clone());
+    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default()).unwrap();
+    assert_eq!(v, "1.14.2");
+    assert_eq!(
+        std::fs::read(f.ctx.paths.core_bin(Core::Singbox)).unwrap(),
+        fake_elf("offline")
+    );
+}
