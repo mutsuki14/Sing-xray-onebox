@@ -9,12 +9,16 @@
 //! - os-release values are unquoted like the shell does (escapes inside
 //!   double quotes) and `/usr/lib/os-release` is the fallback (os-release(5));
 //!   v2 stripped every quote character from both ends.
-//! - `ID_LIKE` and `PRETTY_NAME` are exposed; a missing `ID` is shown as
-//!   `linux` instead of an empty string in messages.
-//! - virtualization facts also cover containers announced through
-//!   `/proc/1/environ`, podman (`/run/.containerenv`), OpenVZ (`/proc/vz`
-//!   without `/proc/bc`) and WSL; v2 only knew `systemd-detect-virt` and
-//!   `/.dockerenv`.
+//! - `ID_LIKE`, `VERSION_CODENAME` and `PRETTY_NAME` are exposed; a
+//!   missing `ID` is shown as `linux` instead of an empty string in
+//!   messages.
+//! - system files are read through symlinks (trusted system prefixes,
+//!   ARCHITECTURE §3.5; `/etc/os-release` is a link on most distros) but
+//!   only when they are regular files within a size cap.
+//! - one virtualization/container detection for every caller: every
+//!   container signal of v2's BBR check plus `/proc/1/environ`
+//!   (`container=`, Kubernetes) and the Kubernetes service-account mount
+//!   (v2's other checks only knew `systemd-detect-virt` and `/.dockerenv`).
 //! - one architecture table serves every artifact (sing-box, Xray, FRP,
 //!   Onebox releases, BBRv3); v2 FRP used the compile-time target instead of
 //!   `uname -m` and mapped x86 to a `386` asset that frp does not publish.
@@ -28,6 +32,10 @@ pub use virt::HostFacts;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::exec::Cmd;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::time::Duration;
 
 /// Message of [`require_root`] (v2 wording).
@@ -54,8 +62,11 @@ pub struct OsInfo {
     pub id: String,
     /// `ID_LIKE`, split on whitespace (`["rhel", "centos", "fedora"]`).
     pub id_like: Vec<String>,
-    /// `VERSION_ID` (`12`, `22.04`, `3.20.1`); may be empty.
+    /// `VERSION_ID` (`12`, `22.04`, `3.20.1`); may be empty (Debian
+    /// testing/sid).
     pub version_id: String,
+    /// `VERSION_CODENAME` (`bookworm`, `trixie`, `noble`); may be empty.
+    pub version_codename: String,
     /// `PRETTY_NAME` (`Debian GNU/Linux 12 (bookworm)`); may be empty.
     pub pretty_name: String,
 }
@@ -66,9 +77,7 @@ impl OsInfo {
     pub fn load(ctx: &Ctx) -> OsInfo {
         ["/etc/os-release", "/usr/lib/os-release"]
             .iter()
-            .find_map(|p| {
-                crate::sys::fs::read_to_string_bounded(&ctx.paths.system(p), SYSTEM_FILE_MAX).ok()
-            })
+            .find_map(|p| read_system_file(ctx, p))
             .map(|text| OsInfo::parse(&text))
             .unwrap_or_default()
     }
@@ -87,6 +96,7 @@ impl OsInfo {
                         .collect()
                 }
                 "VERSION_ID" => info.version_id = value,
+                "VERSION_CODENAME" => info.version_codename = value.to_ascii_lowercase(),
                 "PRETTY_NAME" => info.pretty_name = value,
                 _ => {}
             }
@@ -191,10 +201,30 @@ fn uname(ctx: &Ctx, flag: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-/// Read a small system file under `system_root` (`None` if unreadable).
+/// Read a small system file under `system_root` (`None` if unreadable,
+/// not a regular file or larger than 1 MiB); invalid UTF-8 is replaced.
 pub(crate) fn read_system_file(ctx: &Ctx, absolute: &str) -> Option<String> {
-    let bytes = crate::sys::fs::read_bounded(&ctx.paths.system(absolute), SYSTEM_FILE_MAX).ok()?;
+    let bytes = read_system_bytes(&ctx.paths.system(absolute), SYSTEM_FILE_MAX)?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Bounded read that follows symlinks: system prefixes are trusted as they
+/// are (unlike `sys::fs::read_bounded`, meant for Onebox-owned trees), but
+/// only a regular file is read (a FIFO or device could block or never end;
+/// `O_NONBLOCK` keeps the open itself from blocking on a FIFO).
+fn read_system_bytes(path: &Path, max: u64) -> Option<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > max {
+        return None;
+    }
+    let mut buf = Vec::new();
+    file.take(max + 1).read_to_end(&mut buf).ok()?;
+    (buf.len() as u64 <= max).then_some(buf)
 }
 
 #[cfg(test)]

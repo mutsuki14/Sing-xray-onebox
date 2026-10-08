@@ -14,6 +14,7 @@ const DEBIAN: &str = r#"PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
 NAME="Debian GNU/Linux"
 VERSION_ID="12"
 VERSION="12 (bookworm)"
+VERSION_CODENAME=bookworm
 ID=debian
 HOME_URL="https://www.debian.org/"
 "#;
@@ -35,6 +36,7 @@ fn os_release_parsing() {
             id: "debian".into(),
             id_like: vec![],
             version_id: "12".into(),
+            version_codename: "bookworm".into(),
             pretty_name: "Debian GNU/Linux 12 (bookworm)".into(),
         }
     );
@@ -48,6 +50,22 @@ fn os_release_parsing() {
     assert_eq!(
         (alpine.id.as_str(), alpine.version_id.as_str()),
         ("alpine", "3.20.1")
+    );
+}
+
+/// Debian testing/sid has no VERSION_ID; BBR maps the codename instead.
+#[test]
+fn debian_sid_has_only_a_codename() {
+    let sid = OsInfo::parse(
+        "PRETTY_NAME=\"Debian GNU/Linux trixie/sid\"\nNAME=\"Debian GNU/Linux\"\n\
+         VERSION_CODENAME=trixie\nID=debian\nHOME_URL=\"https://www.debian.org/\"\n",
+    );
+    assert_eq!(sid.id, "debian");
+    assert_eq!(sid.version_id, "");
+    assert_eq!(sid.version_codename, "trixie");
+    assert_eq!(
+        OsInfo::parse("VERSION_CODENAME='Noble'\n").version_codename,
+        "noble"
     );
 }
 
@@ -82,6 +100,36 @@ fn os_release_load_prefers_etc_then_usr_lib() {
     assert_eq!(OsInfo::load(&ctx).id, "arch");
     write(&sys, "etc/os-release", DEBIAN);
     assert_eq!(OsInfo::load(&ctx).id, "debian");
+}
+
+/// Debian/Ubuntu/Fedora/Arch/Alpine ship `/etc/os-release` as a relative
+/// link to `../usr/lib/os-release`; here `/usr/lib/os-release` is a link
+/// as well, so only following links finds the data.
+#[test]
+fn os_release_is_read_through_symlinks() {
+    let dir = TempDir::new("os").unwrap();
+    let (ctx, _, _) = Ctx::test(dir.path());
+    let sys = ctx.paths.system_root.clone();
+    write(&sys, "usr/lib/os-release.d/debian", DEBIAN);
+    fs::create_dir_all(sys.join("etc")).unwrap();
+    std::os::unix::fs::symlink("os-release.d/debian", sys.join("usr/lib/os-release")).unwrap();
+    std::os::unix::fs::symlink("../usr/lib/os-release", sys.join("etc/os-release")).unwrap();
+    let info = OsInfo::load(&ctx);
+    assert_eq!(
+        (info.id.as_str(), info.version_id.as_str()),
+        ("debian", "12")
+    );
+
+    // Only regular files within the cap count.
+    let dir = TempDir::new("os").unwrap();
+    let (ctx, _, _) = Ctx::test(dir.path());
+    let sys = ctx.paths.system_root.clone();
+    fs::create_dir_all(sys.join("etc/os-release")).unwrap();
+    write(&sys, "usr/lib/os-release", &"#".repeat(2 << 20));
+    assert_eq!(OsInfo::load(&ctx), OsInfo::default());
+    fs::create_dir_all(sys.join("usr/lib")).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/os-release", sys.join("etc/dangling")).unwrap();
+    assert_eq!(read_system_file(&ctx, "/etc/dangling"), None);
 }
 
 #[test]
@@ -284,15 +332,30 @@ fn facts(setup: impl FnOnce(&Path, &crate::sys::exec::FakeExec)) -> HostFacts {
 #[test]
 fn virtualization_from_systemd_detect_virt() {
     let kvm = facts(|_, exec| {
-        exec.provide("systemd-detect-virt").on(
-            "systemd-detect-virt",
-            &[],
-            Output::success("kvm\n"),
-        );
+        exec.provide("systemd-detect-virt")
+            .on(
+                "systemd-detect-virt",
+                &["--container"],
+                Output::failure(1, "none\n"),
+            )
+            .on("systemd-detect-virt", &[], Output::success("kvm\n"));
     });
     assert_eq!(kvm.virtualization.as_deref(), Some("kvm"));
-    assert!(!kvm.is_container());
+    assert!(!kvm.is_container() && !kvm.kernel_managed_elsewhere());
     assert_eq!(kvm.summary(), "虚拟机 (kvm)");
+
+    // A technology newer than our table: `--container` classifies it.
+    let novel = facts(|_, exec| {
+        exec.provide("systemd-detect-virt")
+            .on(
+                "systemd-detect-virt",
+                &["--container"],
+                Output::success("newbox\n"),
+            )
+            .on("systemd-detect-virt", &[], Output::success("newbox\n"));
+    });
+    assert_eq!(novel.container.as_deref(), Some("newbox"));
+    assert!(novel.kernel_managed_elsewhere());
 
     let lxc = facts(|_, exec| {
         exec.provide("systemd-detect-virt").on(
@@ -332,6 +395,67 @@ fn container_hints_without_systemd() {
 
     let bogus = facts(|root, _| write(root, "proc/1/environ", "container=a b\0"));
     assert_eq!(bogus.container, None, "unprintable ids are ignored");
+
+    let nspawn = facts(|root, _| write(root, "run/systemd/container", "systemd-nspawn\n"));
+    assert_eq!(nspawn.container.as_deref(), Some("systemd-nspawn"));
+    let odd = facts(|root, _| write(root, "run/systemd/container", "?? weird"));
+    assert_eq!(
+        odd.container.as_deref(),
+        Some("container-other"),
+        "fail closed"
+    );
+}
+
+/// Kubernetes/containerd pods: no /.dockerenv, no `container=`, usually no
+/// systemd-detect-virt — the cgroup path or the pod environment tells.
+#[test]
+fn kubernetes_and_runtime_hints() {
+    let cgroup_v1 = facts(|root, _| {
+        write(
+            root,
+            "proc/1/cgroup",
+            "12:memory:/kubepods/burstable/pod0c9e/3f1a\n11:cpu:/kubepods/burstable/pod0c9e/3f1a\n",
+        )
+    });
+    assert_eq!(cgroup_v1.container.as_deref(), Some("kubernetes"));
+    assert!(cgroup_v1.kernel_managed_elsewhere());
+
+    let cases = [
+        (
+            "0::/system.slice/containerd.service/kubepods-besteffort.slice\n",
+            "kubernetes",
+        ),
+        ("0::/machine.slice/libpod-4b1d.scope\n", "podman"),
+        ("0::/system.slice/docker-1a2b.scope\n", "docker"),
+        ("1:name=systemd:/lxc/ct101\n", "lxc"),
+    ];
+    for (cgroup, want) in cases {
+        let got = facts(|root, _| write(root, "proc/1/cgroup", cgroup));
+        assert_eq!(got.container.as_deref(), Some(want), "{cgroup}");
+    }
+    let host = facts(|root, _| write(root, "proc/1/cgroup", "0::/init.scope\n"));
+    assert_eq!(host.container, None);
+
+    let env = facts(|root, _| {
+        write(
+            root,
+            "proc/1/environ",
+            "PATH=/bin\0KUBERNETES_SERVICE_HOST=10.96.0.1\0",
+        )
+    });
+    assert_eq!(env.container.as_deref(), Some("kubernetes"));
+    let mount = facts(|root, _| {
+        fs::create_dir_all(root.join("run/secrets/kubernetes.io/serviceaccount")).unwrap()
+    });
+    assert_eq!(mount.container.as_deref(), Some("kubernetes"));
+    let kernel = facts(|root, _| {
+        write(
+            root,
+            "proc/version",
+            "Linux version 5.4.0-docker (gcc) #1 SMP\n",
+        )
+    });
+    assert_eq!(kernel.container.as_deref(), Some("docker"), "v2 parity");
 }
 
 #[test]
@@ -354,5 +478,18 @@ fn openvz_and_wsl() {
         )
     });
     assert!(wsl.wsl && !wsl.is_container());
+    assert!(
+        wsl.kernel_managed_elsewhere(),
+        "never install kernels on WSL"
+    );
     assert_eq!(wsl.summary(), "WSL");
+    let wsl1 = facts(|root, _| {
+        write(
+            root,
+            "proc/version",
+            "Linux version 4.4.0-19041-Microsoft\n",
+        )
+    });
+    assert!(wsl1.wsl);
+    assert!(guest.kernel_managed_elsewhere());
 }
