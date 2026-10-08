@@ -224,3 +224,6 @@ fn finish(tmp: &Path, t: &Transfer) -> Result<u64> {
     }
     Ok(size)
 }
+
+#[cfg(test)]
+mod tests;
