@@ -125,6 +125,16 @@ class Process:
                 time.sleep(0.03)
         raise AssertionError("core did not open its loopback listener: " + self.tail())
 
+    def wait_ready_marker(self, path, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.alive():
+                raise AssertionError("core exited before finishing startup: " + self.tail())
+            if path.is_file() and path.read_text() == "ready":
+                return
+            time.sleep(0.01)
+        raise AssertionError("core did not finish startup: " + self.tail())
+
     def tail(self):
         self.log.flush()
         return self.log_path.read_text(errors="replace")[-3000:]
@@ -390,8 +400,10 @@ class Matrix:
 
     def server(self, directory, protocol, server, state, env):
         config = self.cli(env, "render", "server", server)
-        if os.environ.get("VERBOSE") == "1":
-            config["log"]["level" if server == "singbox" else "loglevel"] = "debug"
+        # Keep fixture connection diagnostics in process.log for failure reports.
+        config["log"]["level" if server == "singbox" else "loglevel"] = (
+            "debug" if os.environ.get("VERBOSE") == "1" else "info"
+        )
         if server == "singbox":
             override = [
                 {"domain": [TARGET_NAME], "action": "route-options", "override_address": "127.0.0.1"},
@@ -464,9 +476,26 @@ class Matrix:
         elif client == "xray":
             check, start = [binary, "run", "-test", "-c", path], [binary, "run", "-c", path]
         else:
-            check, start = [binary, "-t", "-d", directory, "-f", path], [binary, "-d", directory, "-f", path]
+            check = [binary, "-t", "-d", directory, "-f", path]
+            # Mihomo opens its listener before loading providers and calling
+            # tunnel.OnRunning(); an early TCP request is closed immediately.
+            # Its "Initial configuration complete" log only means parsing ended.
+            # The post-up hook runs after hub.Parse/ApplyConfig returns, so this
+            # marker proves readiness without warming up or retrying proxy traffic.
+            # https://github.com/MetaCubeX/mihomo/blob/v1.19.32/main.go
+            # https://github.com/MetaCubeX/mihomo/blob/v1.19.32/hub/executor/executor.go
+            # The shell command is fixed; cwd is this newly created fixture directory.
+            start = [binary, "-d", directory, "-f", path,
+                     "-post-up", "printf ready > mihomo.ready"]
         run(check, env=env)
-        return Process(start, directory, env)
+        process = Process(start, directory, env)
+        try:
+            if client == "mihomo":
+                process.wait_ready_marker(directory / "mihomo.ready")
+            return process
+        except Exception:
+            process.close()
+            raise
 
     def case(self, protocol, server, profile):
         name = f"{profile}/{server}/{protocol}"
