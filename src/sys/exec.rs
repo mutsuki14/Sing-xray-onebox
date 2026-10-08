@@ -2,14 +2,31 @@
 //! [`FakeExec`].
 //!
 //! Rules (fixes v2 E-8.1#3): children always start with an empty signal mask;
-//! commands built with [`Cmd::daemon_env`] get a cleared environment, a fixed
-//! PATH and only the explicitly passed variables, so admin-shell secrets such
-//! as `CF_Token` never leak into long-running services.
+//! detached daemons must be built with [`Cmd::daemon_env`] (cleared
+//! environment, fixed PATH, only the explicitly passed variables), so
+//! admin-shell secrets such as `CF_Token` never leak into long-running
+//! services — both [`SystemExec`] and [`FakeExec`] refuse a daemon without it.
+//!
+//! Changes from v2: spawn failures name the program (`未找到程序 nginx`
+//! instead of a bare `No such file or directory`) or the missing working
+//! directory; signal deaths report 128 + signal instead of a flat 128;
+//! commands may carry a timeout that bounds the whole run (including output
+//! held open by background grandchildren) and kills the whole process group;
+//! supervised children ([`Exec::spawn`]) run in their own session and are
+//! killed with their group when dropped; `which` also searches [`SAFE_PATH`]
+//! because cron and sudo often run us without the sbin directories.
 
-use crate::error::Result;
+mod fake;
+mod proc;
+mod system;
+
+pub use fake::{FakeExec, FakeLife, Rule, FAKE_PID_BASE};
+pub use system::SystemExec;
+
+use crate::error::{Error, Result};
 use std::os::fd::RawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 /// The fd number used to hand the node lock to a child (`regen` during
@@ -18,6 +35,10 @@ pub const INHERITED_LOCK_FD: RawFd = 198;
 pub const INHERITED_LOCK_ENV: &str = "ONEBOX_INHERITED_LOCK_FD";
 /// PATH given to daemons, cron jobs and cleared-environment children.
 pub const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// Exit code reported when a command exceeded its timeout (like timeout(1)).
+pub const TIMEOUT_EXIT: i32 = 124;
+/// Error for a detached daemon started without [`Cmd::daemon_env`].
+pub const DAEMON_ENV_REQUIRED: &str = "后台进程必须使用隔离环境（Cmd::daemon_env）";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Stdin {
@@ -64,6 +85,11 @@ impl Cmd {
         self.env.push((key.into(), value.into()));
         self
     }
+    /// Start from an empty environment (only `env` entries are passed).
+    pub fn clear_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
     /// Cleared environment with `PATH=SAFE_PATH` plus `vars`.
     pub fn daemon_env(mut self, vars: &[(String, String)]) -> Self {
         self.clear_env = true;
@@ -79,6 +105,12 @@ impl Cmd {
         self.stdin = Stdin::Inherit;
         self
     }
+    /// Bound the whole run by `timeout`: when it expires the command's
+    /// process group is killed and the output has code 124; when the command
+    /// exits in time but background processes it left in its group still
+    /// hold its output pipes at the deadline, they are killed. Timed
+    /// commands run in their own process group, so they must not read from
+    /// the terminal; a terminal Ctrl+C is forwarded to them.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -141,77 +173,81 @@ impl Output {
 }
 
 pub trait Exec: Send + Sync {
-    /// Run to completion. Errors only when the program cannot be started.
+    /// Run to completion. Errors only when the program cannot be started,
+    /// or when a cancellation signal interrupted a timed command while no
+    /// `SignalScope` owner was active (`Error::Cancelled`, exit 130).
     fn run(&self, cmd: &Cmd) -> Result<Output>;
-    /// Start a detached daemon (`setsid`, stdin null, stdout+stderr appended to
-    /// `log` opened with O_NOFOLLOW, mode 0600). Returns the PID.
+    /// Start a supervised child in its own session (so its whole process
+    /// group can be signalled) and return a handle to poll, wait for and
+    /// kill it. Output is captured (the last 1 MiB per stream) unless
+    /// `cmd.stream`. Dropping the handle terminates and reaps the group.
+    /// The child does not see the terminal's Ctrl+C: callers that wait for
+    /// it hold a `SignalScope` and kill it when cancelled.
+    fn spawn(&self, cmd: &Cmd) -> Result<Box<dyn RunningChild>>;
+    /// Start a detached daemon (`setsid`, cwd `/` unless set, stdin null,
+    /// stdout+stderr appended to `log` opened with O_NOFOLLOW, mode 0600).
+    /// `cmd` must use [`Cmd::daemon_env`]. Returns the PID.
     fn spawn_detached(&self, cmd: &Cmd, log: &Path) -> Result<u32>;
     /// Resolve a program name through PATH (absolute names are checked as-is).
     fn which(&self, program: &str) -> Option<PathBuf>;
 }
 
-/// The real implementation.
-pub struct SystemExec;
-
-impl Exec for SystemExec {
-    fn run(&self, _cmd: &Cmd) -> Result<Output> {
-        todo!("WP-A1: std::process::Command with pre_exec signal-mask reset, env policy, stdin, timeout, lock fd 198")
-    }
-    fn spawn_detached(&self, _cmd: &Cmd, _log: &Path) -> Result<u32> {
-        todo!("WP-A1")
-    }
-    fn which(&self, _program: &str) -> Option<PathBuf> {
-        todo!("WP-A1")
-    }
+/// A child started by [`Exec::spawn`]. Results are cached: once an
+/// [`Output`] was returned, later calls return the same one. A `timeout` on
+/// the `Cmd` is enforced whenever the child is polled (code 124).
+pub trait RunningChild: Send {
+    fn pid(&self) -> u32;
+    /// The output if the child has exited (it is then reaped), else `None`.
+    fn try_wait(&mut self) -> Result<Option<Output>>;
+    /// Like `try_wait`, waiting up to `limit` for the child to exit.
+    fn wait_timeout(&mut self, limit: Duration) -> Result<Option<Output>>;
+    /// Send `signal` to the child's whole process group (no-op once reaped).
+    fn kill_group(&mut self, signal: i32) -> Result<()>;
+    /// SIGTERM the group, wait up to `grace`, then SIGKILL it; reap.
+    fn terminate(&mut self, grace: Duration) -> Result<Output>;
 }
 
-/// Scripted fake for tests: first matching rule wins; unmatched commands fail
-/// with exit 127 so tests notice unexpected calls. Records every command.
-#[derive(Default)]
-pub struct FakeExec {
-    pub rules: Mutex<Vec<Rule>>,
-    pub calls: Mutex<Vec<Cmd>>,
-    pub programs: Mutex<Vec<String>>,
+/// Preconditions of [`Exec::spawn_detached`], shared by every implementation
+/// so tests with [`FakeExec`] catch the same mistakes as production.
+pub fn check_detached(cmd: &Cmd) -> Result<()> {
+    if cmd.inherit_lock_fd.is_some() {
+        return Err(Error::msg("后台进程不能继承配置锁"));
+    }
+    if !cmd.clear_env {
+        return Err(Error::msg(DAEMON_ENV_REQUIRED));
+    }
+    Ok(())
 }
 
-pub struct Rule {
-    pub matcher: Box<dyn Fn(&Cmd) -> bool + Send + Sync>,
-    pub respond: Box<dyn Fn(&Cmd) -> Result<Output> + Send + Sync>,
+/// Preconditions of [`Exec::spawn`].
+pub fn check_spawn(cmd: &Cmd) -> Result<()> {
+    if cmd.inherit_lock_fd.is_some() {
+        return Err(Error::msg("子进程不能继承配置锁"));
+    }
+    Ok(())
 }
 
-impl FakeExec {
-    pub fn new() -> Self {
-        FakeExec::default()
+/// `which` against an explicit PATH value, then [`SAFE_PATH`]. Relative
+/// PATH entries are ignored (they would depend on the current directory).
+pub fn which_in(program: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    if program.is_empty() {
+        return None;
     }
-    /// Respond to `program` whose args start with `prefix`.
-    pub fn on(&self, _program: &str, _prefix: &[&str], _output: Output) -> &Self {
-        todo!("WP-A1")
+    if program.contains('/') {
+        let candidate = Path::new(program);
+        return (candidate.is_absolute() && is_executable(candidate))
+            .then(|| candidate.to_path_buf());
     }
-    pub fn on_fn(
-        &self,
-        _matcher: impl Fn(&Cmd) -> bool + Send + Sync + 'static,
-        _respond: impl Fn(&Cmd) -> Result<Output> + Send + Sync + 'static,
-    ) -> &Self {
-        todo!("WP-A1")
-    }
-    /// Make `which(program)` succeed.
-    pub fn provide(&self, _program: &str) -> &Self {
-        todo!("WP-A1")
-    }
-    /// Command lines recorded so far (`Cmd::display`).
-    pub fn history(&self) -> Vec<String> {
-        todo!("WP-A1")
-    }
+    std::env::split_paths(path_var)
+        .chain(std::env::split_paths(SAFE_PATH))
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable(candidate))
 }
 
-impl Exec for FakeExec {
-    fn run(&self, _cmd: &Cmd) -> Result<Output> {
-        todo!("WP-A1")
-    }
-    fn spawn_detached(&self, _cmd: &Cmd, _log: &Path) -> Result<u32> {
-        todo!("WP-A1")
-    }
-    fn which(&self, _program: &str) -> Option<PathBuf> {
-        todo!("WP-A1")
-    }
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
+
+#[cfg(test)]
+mod tests;
