@@ -2,6 +2,7 @@
 
 pub mod bundle;
 pub mod cancel;
+pub mod core_client;
 pub mod http_probe;
 pub mod socks;
 pub mod stats;
