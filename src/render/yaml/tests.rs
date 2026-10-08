@@ -80,13 +80,23 @@ fn nested_lists_of_maps_use_dash_lines() {
 fn sequences_of_sequences_and_mixed_items() {
     let value = json!([[1, [2, "x"]], {"a": [{"b": []}]}, "s", [], {}, null]);
     let text = to_yaml(&value);
-    assert!(text.starts_with("- - 1\n  - - 2\n    - \"x\"\n- a:\n"), "{text}");
+    assert!(
+        text.starts_with("- - 1\n  - - 2\n    - \"x\"\n- a:\n"),
+        "{text}"
+    );
     roundtrip(&value);
 }
 
 #[test]
 fn top_level_scalars_and_empty_collections() {
-    for value in [json!("x"), json!(1), json!([]), json!({}), json!(null), json!(true)] {
+    for value in [
+        json!("x"),
+        json!(1),
+        json!([]),
+        json!({}),
+        json!(null),
+        json!(true),
+    ] {
         roundtrip(&value);
     }
     assert_eq!(to_yaml(&json!({})), "{}\n");

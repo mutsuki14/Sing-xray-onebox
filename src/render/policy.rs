@@ -230,13 +230,16 @@ pub fn xray_server_rules(spec: &NodeSpec) -> Vec<Value> {
         };
         rules.push(json!({"type": "field", "inboundTag": [XRAY_GUARD_TAG],
             "domain": [format!("full:{}", reality.sni)], "outboundTag": target}));
-        rules.push(json!({"type": "field", "inboundTag": [XRAY_GUARD_TAG], "outboundTag": "block"}));
+        rules
+            .push(json!({"type": "field", "inboundTag": [XRAY_GUARD_TAG], "outboundTag": "block"}));
     }
     if spec.routing.block_bt {
         rules.push(json!({"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"}));
     }
     if spec.routing.block_private {
-        rules.push(json!({"type": "field", "ip": spec.routing.blocked_cidrs, "outboundTag": "block"}));
+        rules.push(
+            json!({"type": "field", "ip": spec.routing.blocked_cidrs, "outboundTag": "block"}),
+        );
     }
     rules
 }
@@ -293,8 +296,10 @@ fn full_domains(direct: &DirectTargets) -> Vec<String> {
 pub fn xray_client_dns_servers(direct: &DirectTargets) -> Vec<Value> {
     let mut servers = Vec::new();
     if !direct.domains.is_empty() {
-        servers.push(json!({"address": DNS_DIRECT, "domains": full_domains(direct),
-            "skipFallback": true}));
+        servers.push(
+            json!({"address": DNS_DIRECT, "domains": full_domains(direct),
+            "skipFallback": true}),
+        );
     }
     servers.push(json!(XRAY_DOH));
     servers.push(json!({"address": DNS_DIRECT, "domains": ["geosite:cn"],
@@ -310,7 +315,9 @@ pub fn xray_client_rules(direct: &DirectTargets) -> Vec<Value> {
         rules.push(json!({"type": "field", "ip": direct.cidrs, "outboundTag": "direct"}));
     }
     if !direct.domains.is_empty() {
-        rules.push(json!({"type": "field", "domain": full_domains(direct), "outboundTag": "direct"}));
+        rules.push(
+            json!({"type": "field", "domain": full_domains(direct), "outboundTag": "direct"}),
+        );
     }
     rules.extend([
         json!({"type": "field", "ip": [DNS_DIRECT], "outboundTag": "direct"}),
@@ -343,7 +350,10 @@ pub fn mihomo_rules(direct: &DirectTargets) -> Vec<String> {
 /// mihomo `dns` section: fake-ip with own domains excluded from fake IPs
 /// and resolved by domestic DoH.
 pub fn mihomo_dns(direct: &DirectTargets) -> Value {
-    let mut filter: Vec<String> = MIHOMO_FAKE_IP_FILTER.iter().map(|s| s.to_string()).collect();
+    let mut filter: Vec<String> = MIHOMO_FAKE_IP_FILTER
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     filter.extend(direct.domains.iter().cloned());
     let mut policy = serde_json::Map::new();
     policy.insert("geosite:cn".into(), json!(DOH_CN));
@@ -412,7 +422,10 @@ mod tests {
     fn direct_rules_precede_global_mode_in_v2_order() {
         let d = direct(&["sub.example.com"], &["203.0.113.9/32"]);
         let route = singbox_client_route_rules(&d);
-        assert_eq!(route[2], json!({"ip_cidr": ["203.0.113.9/32"], "outbound": "direct"}));
+        assert_eq!(
+            route[2],
+            json!({"ip_cidr": ["203.0.113.9/32"], "outbound": "direct"})
+        );
         assert_eq!(route[3]["domain"], json!(["sub.example.com"]));
         assert_eq!(route[4]["ip_is_private"], json!(true));
         assert_eq!(route.len(), 8);
@@ -422,7 +435,10 @@ mod tests {
         let xray = xray_client_rules(&d);
         assert_eq!(xray[0]["ip"], json!(["203.0.113.9/32"]));
         assert_eq!(xray[1]["domain"], json!(["full:sub.example.com"]));
-        assert_eq!(xray_client_dns_servers(&d)[0]["domains"], json!(["full:sub.example.com"]));
+        assert_eq!(
+            xray_client_dns_servers(&d)[0]["domains"],
+            json!(["full:sub.example.com"])
+        );
     }
 
     #[test]

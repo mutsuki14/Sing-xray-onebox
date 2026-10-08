@@ -40,6 +40,8 @@ mod json;
 pub(crate) mod fixtures;
 #[cfg(test)]
 mod golden;
+#[cfg(test)]
+mod realcore;
 
 pub use json::{pretty, pretty_line};
 pub use probe::ProbeBundle;

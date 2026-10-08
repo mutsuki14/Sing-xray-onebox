@@ -101,11 +101,15 @@ fn client_dns(spec: &NodeSpec) -> Value {
 fn client_inbounds(tun: bool) -> Vec<Value> {
     let mut inbounds = Vec::new();
     if tun {
-        inbounds.push(json!({"type": "tun", "tag": "tun-in", "address": policy::TUN_ADDRESSES,
-            "auto_route": true, "strict_route": true, "stack": "mixed"}));
+        inbounds.push(
+            json!({"type": "tun", "tag": "tun-in", "address": policy::TUN_ADDRESSES,
+            "auto_route": true, "strict_route": true, "stack": "mixed"}),
+        );
     }
-    inbounds.push(json!({"type": "mixed", "tag": "mixed-in", "listen": policy::LOOPBACK,
-        "listen_port": defaults::SINGBOX_MIXED_PORT}));
+    inbounds.push(
+        json!({"type": "mixed", "tag": "mixed-in", "listen": policy::LOOPBACK,
+        "listen_port": defaults::SINGBOX_MIXED_PORT}),
+    );
     inbounds
 }
 

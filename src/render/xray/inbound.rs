@@ -60,8 +60,11 @@ pub fn inbound(spec: &NodeSpec, ib: &InboundSpec) -> Result<Value> {
         ),
         Shadowsocks => {
             v.set("protocol", "shadowsocks");
-            v.set("settings", json!({"method": creds.ss_method,
-                "password": creds.ss_password, "network": "tcp,udp"}));
+            v.set(
+                "settings",
+                json!({"method": creds.ss_method,
+                "password": creds.ss_password, "network": "tcp,udp"}),
+            );
             return Ok(v);
         }
         Hysteria2 => (
@@ -87,7 +90,10 @@ fn vision_settings(spec: &NodeSpec) -> Value {
     let mut v = vless(json!([{"id": spec.creds.uuid, "email": USER_NAME,
         "flow": "xtls-rprx-vision"}]));
     if spec.xhttp_shared() {
-        v.set("fallbacks", json!([{"dest": policy::XHTTP_SOCKET, "xver": 1}]));
+        v.set(
+            "fallbacks",
+            json!([{"dest": policy::XHTTP_SOCKET, "xver": 1}]),
+        );
     }
     v
 }

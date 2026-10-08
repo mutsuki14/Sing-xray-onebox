@@ -168,9 +168,7 @@ fn reality(spec: &NodeSpec, ib: &InboundSpec, local: bool) -> Result<Option<Real
     }
     let r = spec.reality()?;
     let (reference_host, reference_port) = match spec.site.as_ref().filter(|_| !local) {
-        Some(site) if site.https_entry => {
-            (spec.server_host(), crate::domain::defaults::HTTPS_PORT)
-        }
+        Some(site) if site.https_entry => (spec.server_host(), crate::domain::defaults::HTTPS_PORT),
         Some(_) => (String::new(), 0),
         None => (r.dest.host.to_string(), r.dest.port),
     };
@@ -249,8 +247,7 @@ fn check_entry(entry: &Value) -> Result<()> {
     }
     let primary = outbounds.first().and_then(|o| o.get("tag"));
     ensure!(
-        entry.get("tag").and_then(Value::as_str).is_some()
-            && entry.get("tag") == primary,
+        entry.get("tag").and_then(Value::as_str).is_some() && entry.get("tag") == primary,
         "出站标签不匹配"
     );
     if let Some(meta) = entry.get("reality") {

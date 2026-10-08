@@ -78,12 +78,12 @@ fn direct_outbound(spec: &NodeSpec) -> Value {
 /// Guard target for the own site: only TCP to the site's loopback port.
 fn site_outbound(port: u16) -> Value {
     json!({"tag": policy::XRAY_SITE_TAG, "protocol": "freedom", "settings": {
-        "redirect": format!("{}:{port}", policy::LOOPBACK),
-        "finalRules": [
-            {"action": "allow", "network": "tcp", "ip": [format!("{}/32", policy::LOOPBACK)],
-                "port": port.to_string()},
-            {"action": "block"},
-        ]}})
+    "redirect": format!("{}:{port}", policy::LOOPBACK),
+    "finalRules": [
+        {"action": "allow", "network": "tcp", "ip": [format!("{}/32", policy::LOOPBACK)],
+            "port": port.to_string()},
+        {"action": "block"},
+    ]}})
 }
 
 /// Xray client: local SOCKS and HTTP ports, the first supported node as

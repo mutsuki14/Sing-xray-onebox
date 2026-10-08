@@ -37,15 +37,19 @@ pub fn proxy(spec: &NodeSpec, ib: &InboundSpec) -> Result<Value> {
         }
         VlessWs => {
             let tls = spec.tls()?;
-            v.merge(json!({"type": "vless", "uuid": creds.uuid, "udp": true, "network": "ws",
+            v.merge(
+                json!({"type": "vless", "uuid": creds.uuid, "udp": true, "network": "ws",
                 "tls": true, "client-fingerprint": policy::FINGERPRINT, "alpn": cert_alpn(p),
-                "ws-opts": websocket(&creds.ws_path, Some(&tls.server_name))}));
+                "ws-opts": websocket(&creds.ws_path, Some(&tls.server_name))}),
+            );
             v.merge(certificate(tls, "servername")?);
         }
         VmessWs => v.merge(vmess(spec)?),
         Trojan | Anytls => {
-            v.merge(json!({"type": p.id(), "password": creds.password, "udp": true,
-                "client-fingerprint": policy::FINGERPRINT}));
+            v.merge(
+                json!({"type": p.id(), "password": creds.password, "udp": true,
+                "client-fingerprint": policy::FINGERPRINT}),
+            );
             if p == Trojan {
                 v.set("alpn", json!(cert_alpn(p)));
             }
@@ -55,17 +59,21 @@ pub fn proxy(spec: &NodeSpec, ib: &InboundSpec) -> Result<Value> {
             "password": creds.ss_password, "udp": true})),
         Hysteria2 => v.merge(hysteria2(spec)?),
         Tuic => {
-            v.merge(json!({"type": "tuic", "uuid": creds.uuid, "password": creds.password,
+            v.merge(
+                json!({"type": "tuic", "uuid": creds.uuid, "password": creds.password,
                 "alpn": cert_alpn(p), "congestion-controller": "bbr",
-                "udp-relay-mode": "native"}));
+                "udp-relay-mode": "native"}),
+            );
             v.merge(certificate(spec.tls()?, "sni")?);
         }
-        Shadowtls => v.merge(json!({"type": "ss", "cipher": defaults::SHADOWTLS_SS_METHOD,
+        Shadowtls => v.merge(
+            json!({"type": "ss", "cipher": defaults::SHADOWTLS_SS_METHOD,
             "password": creds.shadowtls_ss_password, "udp": true, "udp-over-tcp": true,
             "udp-over-tcp-version": policy::UOT_VERSION,
             "client-fingerprint": policy::FINGERPRINT, "plugin": "shadow-tls",
             "plugin-opts": {"host": spec.shadowtls.sni, "password": creds.shadowtls_password,
-                "version": 3}})),
+                "version": 3}}),
+        ),
         AnytlsReality => bail!("{p} 不支持 mihomo"),
     }
     Ok(v)
@@ -115,9 +123,11 @@ fn hysteria2(spec: &NodeSpec) -> Result<Value> {
 
 fn reality(spec: &NodeSpec) -> Result<Value> {
     let r = spec.reality()?;
-    Ok(json!({"tls": true, "servername": r.sni, "client-fingerprint": policy::FINGERPRINT,
+    Ok(
+        json!({"tls": true, "servername": r.sni, "client-fingerprint": policy::FINGERPRINT,
         "reality-opts": {"public-key": r.public_key, "short-id": r.short_id,
-            "support-x25519mlkem768": true}}))
+            "support-x25519mlkem768": true}}),
+    )
 }
 
 /// Certificate name under `key`; a pinned certificate is verified by its

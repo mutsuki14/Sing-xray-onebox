@@ -84,7 +84,10 @@ fn vnext_stream(spec: &NodeSpec, p: Protocol) -> Result<Value> {
     match p {
         VlessXhttp => {
             stream.set("network", "xhttp");
-            stream.set("xhttpSettings", json!({"path": creds.xhttp_path, "mode": "auto"}));
+            stream.set(
+                "xhttpSettings",
+                json!({"path": creds.xhttp_path, "mode": "auto"}),
+            );
         }
         VlessGrpc => {
             stream.set("network", "grpc");
@@ -137,9 +140,11 @@ fn hysteria2_stream(spec: &NodeSpec) -> Result<Value> {
 
 fn reality(spec: &NodeSpec) -> Result<Value> {
     let r = spec.reality()?;
-    Ok(json!({"security": "reality", "realitySettings": {"serverName": r.sni,
+    Ok(
+        json!({"security": "reality", "realitySettings": {"serverName": r.sni,
         "fingerprint": policy::FINGERPRINT, "publicKey": r.public_key, "shortId": r.short_id,
-        "spiderX": "/"}}))
+        "spiderX": "/"}}),
+    )
 }
 
 /// Certificate TLS of a client; a pinned certificate is verified by the

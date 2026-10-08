@@ -18,8 +18,8 @@
 use super::policy::PRIVATE_CIDRS;
 use super::tls::TlsMaterial;
 use crate::domain::config::*;
-use crate::domain::protocol::{ClientFormat, Core, Protocol};
 use crate::domain::defaults;
+use crate::domain::protocol::{ClientFormat, Core, Protocol};
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 use std::collections::BTreeSet;
@@ -434,10 +434,9 @@ fn vmess_spec(cfg: &NodeConfig, tls: Option<&TlsSpec>) -> VmessSpec {
 fn hy2_spec(cfg: &NodeConfig) -> Hy2Spec {
     let hy2 = &cfg.hy2;
     let bandwidth = match (hy2.profile, hy2.up_mbps, hy2.down_mbps) {
-        (Some(Hy2Profile::Measured), Some(up_mbps), Some(down_mbps)) => Some(Bandwidth {
-            up_mbps,
-            down_mbps,
-        }),
+        (Some(Hy2Profile::Measured), Some(up_mbps), Some(down_mbps)) => {
+            Some(Bandwidth { up_mbps, down_mbps })
+        }
         _ => None,
     };
     Hy2Spec {
@@ -461,7 +460,12 @@ fn routing_spec(cfg: &NodeConfig) -> RoutingSpec {
     let mut cidrs: BTreeSet<String> = PRIVATE_CIDRS.iter().map(|c| c.to_string()).collect();
     let v4 = server.ipv4.filter(|_| !server.ipv4_warp).map(IpAddr::V4);
     let v6 = server.ipv6.filter(|_| !server.ipv6_warp).map(IpAddr::V6);
-    cidrs.extend([v4, v6, server.addr.ip()].into_iter().flatten().map(host_cidr));
+    cidrs.extend(
+        [v4, v6, server.addr.ip()]
+            .into_iter()
+            .flatten()
+            .map(host_cidr),
+    );
     cidrs.extend(cfg.routing.own_cidrs.iter().cloned());
     let families = match (server.ipv4.is_some(), server.ipv6.is_some()) {
         (true, false) => Families::V4Only,

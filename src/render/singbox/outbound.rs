@@ -63,10 +63,12 @@ fn shadowtls_client(spec: &NodeSpec, label: &str) -> Value {
 /// Shadowsocks outbound (exactly one detour).
 pub fn shadowtls_transport(spec: &NodeSpec) -> Result<Value> {
     let ib = spec.require(Protocol::Shadowtls)?;
-    Ok(json!({"type": "shadowtls", "tag": format!("{}-tls", ib.label),
+    Ok(
+        json!({"type": "shadowtls", "tag": format!("{}-tls", ib.label),
         "server": spec.server_host(), "server_port": ib.port, "version": 3,
         "password": spec.creds.shadowtls_password,
-        "tls": {"enabled": true, "server_name": spec.shadowtls.sni, "utls": utls()}}))
+        "tls": {"enabled": true, "server_name": spec.shadowtls.sni, "utls": utls()}}),
+    )
 }
 
 fn vmess(spec: &NodeSpec) -> Result<Value> {
@@ -86,7 +88,10 @@ fn hysteria2(spec: &NodeSpec) -> Result<Value> {
         v.set("obfs", json!({"type": "salamander", "password": password}));
     }
     if let Some(hop) = spec.hy2.hop {
-        v.set("server_ports", json!([format!("{}:{}", hop.start, hop.end)]));
+        v.set(
+            "server_ports",
+            json!([format!("{}:{}", hop.start, hop.end)]),
+        );
         v.set("hop_interval", policy::SINGBOX_HOP_INTERVAL);
     }
     client_tuning(&spec.hy2, &mut v);

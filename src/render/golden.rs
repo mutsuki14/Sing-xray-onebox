@@ -18,6 +18,7 @@ use super::spec::NodeSpec;
 use super::tls::TlsMaterial;
 use super::yaml::reader;
 use super::{client, inbound, mihomo, outbound, pretty, probe, server};
+use crate::domain::config::NodeConfig;
 use crate::domain::protocol::{ClientFormat, Core, Protocol};
 use crate::paths::Paths;
 use crate::state::v2::{migrate, v2_values_from_json, DeployedCerts};
@@ -51,9 +52,12 @@ const XRAY_HY2_MASQUERADE: &str = "D1-xray-hy2-obfs-masquerade";
 pub(crate) struct Case {
     pub name: String,
     pub dir: PathBuf,
+    /// The migrated configuration and its resolved view.
+    pub config: NodeConfig,
     pub spec: NodeSpec,
     /// Certificate pair deployed with the case (`certs/<pair>`).
     pub cert_pair: Option<String>,
+    pub material: Option<TlsMaterial>,
 }
 
 /// Every golden case, migrated and resolved.
@@ -98,8 +102,10 @@ fn load_case(dir: &Path) -> Case {
     Case {
         name,
         dir: dir.to_owned(),
+        config: migrated.config,
         spec,
         cert_pair,
+        material,
     }
 }
 
@@ -175,7 +181,9 @@ fn drop_obfs_masquerade(value: &mut Value) -> bool {
             }
             changed
         }
-        Value::Array(items) => items.iter_mut().fold(false, |c, v| drop_obfs_masquerade(v) | c),
+        Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |c, v| drop_obfs_masquerade(v) | c),
         _ => false,
     }
 }
@@ -224,7 +232,11 @@ fn check_file(case: &Case, file: &Path) -> Vec<&'static str> {
             let applied = allow_diffs(&mut expected);
             assert_eq!(value, expected, "{label}");
             if applied.is_empty() {
-                assert_eq!(format!("{}\n", pretty(&value).unwrap()), text, "{label}: text");
+                assert_eq!(
+                    format!("{}\n", pretty(&value).unwrap()),
+                    text,
+                    "{label}: text"
+                );
             }
             applied
         }
@@ -266,7 +278,10 @@ fn every_allowed_difference_is_documented() {
     let doc = fs::read_to_string(golden_dir().join("ALLOWED_DIFFS.md")).unwrap();
     for (id, case, file) in ALLOWED {
         assert!(doc.contains(id), "{id} missing from ALLOWED_DIFFS.md");
-        assert!(doc.contains(&format!("{case}/{file}")), "{case}/{file} not documented");
+        assert!(
+            doc.contains(&format!("{case}/{file}")),
+            "{case}/{file} not documented"
+        );
     }
 }
 
@@ -286,11 +301,19 @@ fn cases_cover_the_parity_matrix() {
     assert!(any(&|s| s.site.as_ref().is_some_and(|x| !x.https_entry)));
     assert!(any(&|s| s.tls.as_ref().is_some_and(|t| t.pinned())));
     assert!(any(&|s| s.tls.as_ref().is_some_and(|t| !t.pinned())));
-    assert!(any(&|s| s.hy2.obfs_password.is_some() && s.hy2.hop.is_some()));
-    assert!(any(&|s| s.hy2.bandwidth.is_some() && s.hy2.windows.is_some()));
-    assert!(any(&|s| s.vmess.tls) && any(&|s| s.inbound(Protocol::VmessWs).is_some() && !s.vmess.tls));
+    assert!(any(
+        &|s| s.hy2.obfs_password.is_some() && s.hy2.hop.is_some()
+    ));
+    assert!(any(
+        &|s| s.hy2.bandwidth.is_some() && s.hy2.windows.is_some()
+    ));
+    assert!(
+        any(&|s| s.vmess.tls) && any(&|s| s.inbound(Protocol::VmessWs).is_some() && !s.vmess.tls)
+    );
     assert!(any(&|s| s.server.ip().is_some_and(|ip| ip.is_ipv6())));
     assert!(any(&|s| !s.routing.block_private) && any(&|s| !s.routing.block_bt));
     assert!(any(&|s| !s.direct.domains.is_empty()) && any(&|s| !s.direct.cidrs.is_empty()));
-    assert!(cases.iter().any(|c| c.cert_pair.as_deref() == Some("chain")));
+    assert!(cases
+        .iter()
+        .any(|c| c.cert_pair.as_deref() == Some("chain")));
 }

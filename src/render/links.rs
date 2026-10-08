@@ -148,7 +148,12 @@ fn vmess(spec: &NodeSpec, ib: &InboundSpec) -> Result<String> {
     };
     // Plain VMess leaves every TLS field empty (v2 shape).
     let (security, sni, alpn, fp) = match tls {
-        Some(tls) => ("tls", tls.server_name.as_str(), "http/1.1", policy::FINGERPRINT),
+        Some(tls) => (
+            "tls",
+            tls.server_name.as_str(),
+            "http/1.1",
+            policy::FINGERPRINT,
+        ),
         None => ("", "", "", ""),
     };
     let mut config = json!({
@@ -161,7 +166,10 @@ fn vmess(spec: &NodeSpec, ib: &InboundSpec) -> Result<String> {
         config.set("insecure", "1");
         config.set("pcs", material.leaf_pin());
     }
-    Ok(format!("vmess://{}", STANDARD.encode(serde_json::to_vec(&config)?)))
+    Ok(format!(
+        "vmess://{}",
+        STANDARD.encode(serde_json::to_vec(&config)?)
+    ))
 }
 
 /// One link per supported protocol, each line ending in `"\n"`. `format`

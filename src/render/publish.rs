@@ -106,10 +106,7 @@ fn split(target: &Path) -> Result<(&Path, &str)> {
 
 fn check_names(files: &[(String, Vec<u8>)]) -> Result<()> {
     for (i, (name, _)) in files.iter().enumerate() {
-        let plain = !name.is_empty()
-            && name != "."
-            && name != ".."
-            && !name.contains(['/', '\0']);
+        let plain = !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0']);
         ensure!(plain, "发布文件名无效: {name:?}");
         ensure!(
             !files[..i].iter().any(|(other, _)| other == name),
