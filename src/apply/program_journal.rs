@@ -1,7 +1,7 @@
 //! The self-update journal `ROOT/.self-update.json` and the recovery of an
 //! interrupted manager replacement (spec G §3.8, §5.2).
 //!
-//! The updater (`update`) writes the journal through [`write`] /
+//! The updater (`update`) writes the journal through [`write()`] /
 //! [`ProgramJournal::set_phase`]; every node recovery calls
 //! [`recover_program_locked`] after the configuration journal has been
 //! handled (the child's configuration snapshot may contain the new manager,
@@ -129,6 +129,11 @@ fn valid_digest(value: &str) -> bool {
 
 impl ProgramJournal {
     /// A v3 journal in phase `prepared`.
+    ///
+    /// Writers must only record a v3 manager as `old`: recovery runs the
+    /// restored `old` manager's `regen` while this journal still exists, and
+    /// a v2 manager validates it first and refuses version 2 (and v3-only
+    /// snapshot targets), so the recovery could never finish.
     pub fn new(
         work: String,
         old_sha256: Option<String>,
