@@ -77,7 +77,7 @@ fn v1_only_is_explained() {
 fn v3_round_trip_and_cas_hash() {
     let l = Layout::new();
     let cfg = node();
-    StateStore::save_to(&l.paths, &cfg, &Origin::V3).unwrap();
+    StateStore::save_to(&l.paths, &cfg).unwrap();
     let state = l.paths.state();
     assert_eq!(mode(&state), 0o600);
     assert_eq!(mode(&l.paths.root), 0o700);
@@ -92,7 +92,7 @@ fn v3_round_trip_and_cas_hash() {
 
     let mut changed = cfg.clone();
     changed.node_name = "东京".into();
-    StateStore::save_to(&l.paths, &changed, &Origin::V3).unwrap();
+    StateStore::save_to(&l.paths, &changed).unwrap();
     assert_ne!(StateStore::current_hash_at(&l.paths).unwrap(), loaded.hash);
     assert!(StateStore::installed_at(&l.paths));
 }
@@ -104,10 +104,10 @@ fn save_validates_first_and_tightens_root() {
     fs::set_permissions(&l.paths.root, fs::Permissions::from_mode(0o755)).unwrap();
     let mut bad = node();
     bad.inbounds.clear();
-    let e = StateStore::save_to(&l.paths, &bad, &Origin::V3).unwrap_err();
+    let e = StateStore::save_to(&l.paths, &bad).unwrap_err();
     assert_eq!(e.to_string(), "配置缺少协议列表");
     assert!(!l.paths.state().exists());
-    StateStore::save_to(&l.paths, &node(), &Origin::V3).unwrap();
+    StateStore::save_to(&l.paths, &node()).unwrap();
     assert_eq!(mode(&l.paths.root), 0o700);
 }
 
@@ -123,21 +123,15 @@ fn v2_migrates_on_load_and_keeps_original_on_first_save() {
     let loaded = l.load().unwrap().unwrap();
     assert_eq!(loaded.hash, StateHash::of(&original));
     assert_eq!(loaded.hash, StateStore::current_hash_at(&l.paths).unwrap());
-    let Origin::V2 {
-        devices,
-        original: kept,
-        warnings,
-    } = &loaded.origin
-    else {
+    let Origin::V2 { devices, warnings } = &loaded.origin else {
         panic!("v2 origin expected");
     };
-    assert_eq!(kept, &original);
     assert_eq!(devices.as_ref().map(Vec::len), Some(2));
     assert!(warnings.is_empty());
     assert_eq!(loaded.config.creds.uuid, fixtures::UUID);
     assert!(loaded.config.subscription.is_some());
 
-    StateStore::save_to(&l.paths, &loaded.config, &loaded.origin).unwrap();
+    StateStore::save_to(&l.paths, &loaded.config).unwrap();
     let backup = l.paths.state_v2_backup();
     assert_eq!(fs::read(&backup).unwrap(), original);
     assert_eq!(mode(&backup), 0o600);
@@ -146,14 +140,45 @@ fn v2_migrates_on_load_and_keeps_original_on_first_save() {
     assert_eq!(reloaded.config, loaded.config);
     assert_ne!(reloaded.hash, loaded.hash, "the CAS hash follows the file");
 
-    // A later save with a v2 origin never overwrites the kept original.
-    let other = Origin::V2 {
-        devices: None,
-        original: b"other".to_vec(),
-        warnings: Vec::new(),
-    };
-    StateStore::save_to(&l.paths, &reloaded.config, &other).unwrap();
+    // Later saves replace a v3 file: the kept original is never touched.
+    StateStore::save_to(&l.paths, &reloaded.config).unwrap();
     assert_eq!(fs::read(&backup).unwrap(), original);
+    // Not even when another v2 file shows up again (e.g. a v2 restore).
+    let other = fixtures::file(&fixtures::with(
+        fixtures::preset1(),
+        &[("NODE_NAME", "other")],
+    ));
+    l.write(&l.paths.state(), &other);
+    StateStore::save_to(&l.paths, &reloaded.config).unwrap();
+    assert_eq!(fs::read(&backup).unwrap(), original);
+}
+
+#[test]
+fn any_save_over_a_v2_file_keeps_it() {
+    // The backup does not depend on the caller passing the v2 origin along:
+    // a save built from scratch (e.g. a reinstall) still keeps the v2 bytes.
+    let l = Layout::new();
+    let original = fixtures::file(&fixtures::preset1());
+    l.write(&l.paths.state(), &original);
+    StateStore::save_to(&l.paths, &node()).unwrap();
+    assert_eq!(fs::read(l.paths.state_v2_backup()).unwrap(), original);
+    assert_eq!(l.load().unwrap().unwrap().config, node());
+
+    // A v3 or unreadable predecessor is not backed up.
+    for previous in [serde_json::to_vec(&node()).unwrap(), b"{oops".to_vec()] {
+        let l = Layout::new();
+        l.write(&l.paths.state(), &previous);
+        StateStore::save_to(&l.paths, &node()).unwrap();
+        assert!(!l.paths.state_v2_backup().exists());
+    }
+    // A failed validation writes nothing, not even the backup.
+    let l = Layout::new();
+    l.write(&l.paths.state(), &original);
+    let mut bad = node();
+    bad.inbounds.clear();
+    assert!(StateStore::save_to(&l.paths, &bad).is_err());
+    assert!(!l.paths.state_v2_backup().exists());
+    assert_eq!(fs::read(l.paths.state()).unwrap(), original);
 }
 
 #[test]
@@ -247,6 +272,6 @@ fn symlinks_and_oversized_files_are_refused() {
     let other = Layout::new();
     fs::create_dir_all(&other.dir).unwrap();
     symlink(&l.paths.root, &other.paths.root).unwrap();
-    let e = StateStore::save_to(&other.paths, &node(), &Origin::V3).unwrap_err();
+    let e = StateStore::save_to(&other.paths, &node()).unwrap_err();
     assert!(e.to_string().starts_with("不允许符号链接"));
 }

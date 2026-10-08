@@ -7,7 +7,9 @@
 //! configuration; a missing state is `Error::NotInstalled` instead of a raw
 //! I/O error (A-8.1 #12); `installed()` and `load()` agree on symlinks
 //! (A-8.1 #13: both refuse them); v1 is no longer parsed (dropped by design);
-//! the original v2 file is kept as `state.v2.json` on the first save.
+//! the original v2 file is kept as `state.v2.json` on the first save. That
+//! backup is taken by `save` itself whenever the file it replaces is in v2
+//! shape, so no caller can lose it by passing the wrong origin.
 
 pub mod v2;
 
@@ -67,8 +69,7 @@ pub enum Origin {
         /// Devices from v2 `subscription/settings.json` (to be written to
         /// `subscription/devices.json` by the apply), `None` without the file.
         devices: Option<Vec<Device>>,
-        /// The exact v2 `state.json` bytes (kept as `state.v2.json`).
-        original: Vec<u8>,
+        /// Chinese notes about generated, normalized or dropped values.
         warnings: Vec<String>,
     },
 }
@@ -103,8 +104,8 @@ impl StateStore {
         Self::installed_at(&ctx.paths)
     }
 
-    pub fn save(ctx: &Ctx, cfg: &NodeConfig, origin: &Origin) -> Result<()> {
-        Self::save_to(&ctx.paths, cfg, origin)
+    pub fn save(ctx: &Ctx, cfg: &NodeConfig) -> Result<()> {
+        Self::save_to(&ctx.paths, cfg)
     }
 
     /// [`StateStore::load`] on explicit paths; `rng` fills credentials a
@@ -118,7 +119,7 @@ impl StateStore {
         let hash = StateHash::of(&bytes);
         let doc: Value = serde_json::from_slice(&bytes).context("state.json 无效")?;
         let (config, origin) = match detect(&doc)? {
-            Format::V2 => migrate_v2(paths, bytes, rng)?,
+            Format::V2 => migrate_v2(paths, &bytes, rng)?,
             Format::V3(schema) => (parse_v3(schema, doc)?, Origin::V3),
         };
         Ok(Some(Loaded {
@@ -137,17 +138,14 @@ impl StateStore {
     }
 
     /// Validate, then write pretty JSON + newline (0600) atomically; the root
-    /// directory is forced to 0700. The first save of a v2-migrated config
-    /// first keeps the original bytes as `state.v2.json` (never overwritten).
-    pub fn save_to(paths: &Paths, cfg: &NodeConfig, origin: &Origin) -> Result<()> {
+    /// directory is forced to 0700. When the file being replaced is a v2
+    /// state, its exact bytes are first kept as `state.v2.json` (0600, never
+    /// overwritten). The caller holds the node lock and has checked the CAS
+    /// hash, so those bytes are the ones the migration started from.
+    pub fn save_to(paths: &Paths, cfg: &NodeConfig) -> Result<()> {
         cfg.validate()?;
         prepare_root(&paths.root)?;
-        if let Origin::V2 { original, .. } = origin {
-            let backup = paths.state_v2_backup();
-            if !exists(&backup) {
-                atomic_write(&backup, original, STATE_MODE)?;
-            }
-        }
+        keep_v2_original(paths)?;
         let mut text = serde_json::to_string_pretty(cfg)?;
         text.push('\n');
         atomic_write(&paths.state(), text.as_bytes(), STATE_MODE)
@@ -162,6 +160,24 @@ fn read_state(path: &Path) -> Result<Option<Vec<u8>>> {
         Err(e) => Err(Error::io(path, e)),
         Ok(_) => read_bounded(path, STATE_MAX_BYTES).map(Some),
     }
+}
+
+/// Copy a v2-shaped `state.json` to `state.v2.json` unless a copy exists.
+fn keep_v2_original(paths: &Paths) -> Result<()> {
+    let backup = paths.state_v2_backup();
+    if exists(&backup) {
+        return Ok(());
+    }
+    let Some(bytes) = read_state(&paths.state())? else {
+        return Ok(());
+    };
+    let is_v2 = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .is_some_and(|doc| matches!(detect(&doc), Ok(Format::V2)));
+    if is_v2 {
+        atomic_write(&backup, &bytes, STATE_MODE)?;
+    }
+    Ok(())
 }
 
 fn exists(path: &Path) -> bool {
@@ -197,10 +213,10 @@ fn parse_v3(schema: u32, doc: Value) -> Result<NodeConfig> {
 
 fn migrate_v2(
     paths: &Paths,
-    original: Vec<u8>,
+    original: &[u8],
     rng: &mut dyn Random,
 ) -> Result<(NodeConfig, Origin)> {
-    let values = v2::v2_values_from_json(&original)?;
+    let values = v2::v2_values_from_json(original)?;
     let settings_path = paths.subscription().join("settings.json");
     let settings = match read_state(&settings_path)? {
         Some(bytes) => Some(
@@ -211,7 +227,6 @@ fn migrate_v2(
     let migrated = v2::migrate(&values, settings.as_ref(), rng)?;
     let origin = Origin::V2 {
         devices: migrated.devices,
-        original,
         warnings: migrated.warnings,
     };
     Ok((migrated.config, origin))
