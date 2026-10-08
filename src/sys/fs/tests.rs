@@ -1,3 +1,4 @@
+use super::tree::copy_file_limited;
 use super::*;
 use std::os::unix::fs::symlink;
 
@@ -181,7 +182,15 @@ fn tree_copy_preserves_modes_and_skips() {
     fs::set_permissions(src.join("sub"), fs::Permissions::from_mode(0o750)).unwrap();
     let dst = dir.join("dst");
     let skip = |p: &Path| p.extension().is_some_and(|e| e == "me");
-    assert_eq!(copy_tree(&src, &dst, &skip).unwrap(), 7);
+    let stats = copy_tree(&src, &dst, &skip, &CopyLimits::UNLIMITED).unwrap();
+    assert_eq!(
+        stats,
+        CopyStats {
+            bytes: 7,
+            entries: 4
+        },
+        "a, sub, sub/b, sub/deeper"
+    );
     assert_eq!(fs::read(dst.join("a")).unwrap(), b"12345");
     assert_eq!(mode_of(&dst.join("a")), 0o640);
     assert_eq!(mode_of(&dst.join("sub/b")), 0o755);
@@ -198,7 +207,7 @@ fn tree_copy_applies_read_only_directory_modes_last() {
     fs::write(src.join("ro/file"), b"x").unwrap();
     fs::set_permissions(src.join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
     let dst = dir.join("dst");
-    copy_tree(&src, &dst, &|_| false).unwrap();
+    copy_tree(&src, &dst, &|_| false, &CopyLimits::UNLIMITED).unwrap();
     assert_eq!(fs::read(dst.join("ro/file")).unwrap(), b"x");
     assert_eq!(mode_of(&dst.join("ro")), 0o555);
     // Let TempDir clean up even when not running as root.
@@ -213,10 +222,11 @@ fn tree_copy_refuses_symlinks_and_special_files() {
     let src = dir.join("src");
     fs::create_dir(&src).unwrap();
     symlink("/etc/passwd", src.join("evil")).unwrap();
-    let err = copy_tree(&src, &dir.join("dst"), &|_| false).unwrap_err();
+    let unlimited = &CopyLimits::UNLIMITED;
+    let err = copy_tree(&src, &dir.join("dst"), &|_| false, unlimited).unwrap_err();
     assert!(err.to_string().contains("不允许符号链接"), "{err}");
     // Whitelisting by skip works.
-    copy_tree(&src, &dir.join("dst2"), &|p| p.ends_with("evil")).unwrap();
+    copy_tree(&src, &dir.join("dst2"), &|p| p.ends_with("evil"), unlimited).unwrap();
 
     let fifo_dir = dir.join("fifo");
     fs::create_dir(&fifo_dir).unwrap();
@@ -224,8 +234,155 @@ fn tree_copy_refuses_symlinks_and_special_files() {
     let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
     // SAFETY: valid NUL-terminated path; mkfifo has no other preconditions.
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
-    let err = copy_tree(&fifo_dir, &dir.join("dst3"), &|_| false).unwrap_err();
+    let err = copy_tree(&fifo_dir, &dir.join("dst3"), &|_| false, unlimited).unwrap_err();
     assert!(err.to_string().contains("特殊文件"), "{err}");
+}
+
+/// src/{a (5 bytes), b (2 bytes), d/, d/c (3 bytes)}
+fn sample_tree(dir: &TempDir) -> PathBuf {
+    let src = dir.join("src");
+    fs::create_dir_all(src.join("d")).unwrap();
+    fs::write(src.join("a"), b"12345").unwrap();
+    fs::write(src.join("b"), b"xy").unwrap();
+    fs::write(src.join("d/c"), b"abc").unwrap();
+    src
+}
+
+#[test]
+fn tree_copy_enforces_limits_before_writing() {
+    let dir = tmp();
+    let src = sample_tree(&dir);
+    let none = |_: &Path| false;
+    let exact = copy_tree(&src, &dir.join("ok"), &none, &CopyLimits::new(10, 4)).unwrap();
+    assert_eq!(
+        exact,
+        CopyStats {
+            bytes: 10,
+            entries: 4
+        }
+    );
+
+    // Bytes: a (5) + b (2) fit in 6? No: b would make 7.
+    let err = copy_tree(&src, &dir.join("bytes"), &none, &CopyLimits::new(6, 100)).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("复制内容超过上限: {}", src.join("b").display())
+    );
+    assert!(dir.join("bytes/a").exists());
+    assert!(!dir.join("bytes/b").exists(), "rejected before writing");
+
+    // Entries count directories too: a, b, d fit in 3; d/c does not.
+    let err = copy_tree(&src, &dir.join("entries"), &none, &CopyLimits::new(100, 3)).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("复制内容超过上限: {}", src.join("d/c").display())
+    );
+
+    let limits = CopyLimits::new(1, 100).message("备份超过 4096 文件或 64 MiB 限制");
+    let err = copy_tree(&src, &dir.join("custom"), &none, &limits).unwrap_err();
+    assert_eq!(err.to_string(), "备份超过 4096 文件或 64 MiB 限制");
+}
+
+#[test]
+fn file_copy_stops_at_the_limit_while_streaming() {
+    // The size check before the copy can be outrun by a growing file; the
+    // streaming guard must still stop and leave no destination behind.
+    let dir = tmp();
+    let src = dir.join("big");
+    fs::write(&src, vec![1u8; 4096]).unwrap();
+    let dst = dir.join("out/big");
+    assert_eq!(copy_file_limited(&src, &dst, 0o600, 4095).unwrap(), None);
+    assert!(!dst.exists());
+    let leftovers = fs::read_dir(dir.join("out")).unwrap().count();
+    assert_eq!(leftovers, 0, "temp file removed");
+    assert_eq!(
+        copy_file_limited(&src, &dst, 0o600, 4096).unwrap(),
+        Some(4096)
+    );
+}
+
+#[test]
+fn tree_copy_refuses_a_destination_inside_the_source() {
+    let dir = tmp();
+    let src = sample_tree(&dir);
+    let none = |_: &Path| false;
+    let unlimited = &CopyLimits::UNLIMITED;
+    for dst in [src.join("d/copy"), src.clone(), src.join("x/../d/y")] {
+        let err = copy_tree(&src, &dst, &none, unlimited).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("复制目标不能位于源目录内: {}", dst.display())
+        );
+    }
+    // Also through a symlinked alias of the source.
+    let alias = dir.join("alias");
+    symlink(&src, &alias).unwrap();
+    assert!(copy_tree(&src, &alias.join("copy"), &none, unlimited).is_err());
+    assert!(!src.join("d/copy").exists());
+
+    // Allowed when the destination lies in a skipped subtree.
+    fs::create_dir(src.join(".transaction")).unwrap();
+    let staged = src.join(".transaction/snapshot");
+    let skip = |p: &Path| p.ends_with(".transaction");
+    let stats = copy_tree(&src, &staged, &skip, unlimited).unwrap();
+    assert_eq!(stats.entries, 4);
+    assert!(staged.join("d/c").exists());
+    assert!(!staged.join(".transaction").exists());
+    // A sibling with a common name prefix is not "inside".
+    copy_tree(&src, &dir.join("src-copy"), &none, unlimited).unwrap();
+}
+
+#[test]
+fn skip_aware_tree_removal() {
+    let dir = tmp();
+    let root = dir.join("root");
+    fs::create_dir_all(root.join("acme/keep-me")).unwrap();
+    fs::create_dir_all(root.join("tls/sub")).unwrap();
+    fs::write(root.join("state.json"), b"{}").unwrap();
+    fs::write(root.join("acme/account.json"), b"{}").unwrap();
+    fs::write(root.join("acme/keep-me/acme.sh"), b"#!").unwrap();
+    fs::write(root.join("tls/sub/cert.pem"), b"pem").unwrap();
+    let skip = |p: &Path| p.ends_with("keep-me");
+    remove_tree_contents(&root, &skip).unwrap();
+    assert!(root.join("acme/keep-me/acme.sh").exists());
+    assert!(!root.join("acme/account.json").exists());
+    assert!(!root.join("state.json").exists());
+    assert!(
+        !root.join("tls").exists(),
+        "emptied directories are removed"
+    );
+    assert!(root.is_dir(), "kept because it still holds skipped entries");
+
+    remove_tree_contents(&root, &|_| false).unwrap();
+    assert!(!root.exists());
+    remove_tree_contents(&root, &|_| false).unwrap();
+
+    let file = dir.join("single");
+    fs::write(&file, b"x").unwrap();
+    remove_tree_contents(&file, &|_| false).unwrap();
+    assert!(!file.exists());
+}
+
+#[test]
+fn tree_removal_refuses_links_before_deleting_anything() {
+    let dir = tmp();
+    let root = dir.join("root");
+    fs::create_dir_all(root.join("a")).unwrap();
+    fs::write(root.join("a/file"), b"x").unwrap();
+    let outside = dir.join("outside");
+    fs::write(&outside, b"keep").unwrap();
+    symlink(&outside, root.join("z-link")).unwrap();
+    let err = remove_tree_contents(&root, &|_| false).unwrap_err();
+    assert!(err.to_string().contains("不允许符号链接"), "{err}");
+    assert!(root.join("a/file").exists(), "nothing removed");
+    assert!(outside.exists());
+    // A skipped link is left alone.
+    remove_tree_contents(&root, &|p| p.ends_with("z-link")).unwrap();
+    assert!(!root.join("a").exists());
+    assert!(is_symlink(&root.join("z-link")));
+    let root_link = dir.join("root-link");
+    symlink(&root, &root_link).unwrap();
+    assert!(remove_tree_contents(&root_link, &|_| false).is_err());
 }
 
 #[test]
@@ -248,6 +405,9 @@ fn stale_sweep() {
         sweep_stale(&dir.join("missing"), TEMP_PREFIX, Duration::ZERO).unwrap(),
         0
     );
+    let err = sweep_stale(dir.path(), "", Duration::ZERO).unwrap_err();
+    assert_eq!(err.to_string(), "清理前缀不能为空");
+    assert!(dir.join("keep").exists());
 }
 
 #[test]

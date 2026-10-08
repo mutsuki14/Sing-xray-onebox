@@ -1,11 +1,14 @@
 //! Filesystem primitives: atomic writes, exclusive creates, bounded reads,
-//! owned-tree symlink safety, tree copy/remove, stale temp sweeping.
+//! owned-tree symlink safety, budgeted tree copy, skip-aware tree removal,
+//! stale temp sweeping.
 //!
 //! Changes from v2: missing parents are created 0700 instead of with the
 //! umask (A-8.1#20); temp files carry a common prefix so crashes can be
 //! swept; copies stream instead of reading whole files (E-8.1#22); the
 //! symlink rule applies only below Onebox-owned roots, so distributions
-//! where `/etc/init.d` or `/var/run` are symlinks keep working (E-8.1#6).
+//! where `/etc/init.d` or `/var/run` are symlinks keep working (E-8.1#6);
+//! tree copies enforce their size budget while copying (v2 checked after
+//! reading whole files) and count directories too.
 
 use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
@@ -15,6 +18,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+mod tree;
+
+pub use tree::{copy_tree, remove_tree_contents, CopyLimits, CopyStats};
 
 /// Name prefix of every temp file created by [`atomic_write`] and
 /// [`copy_file`]; [`sweep_stale`] with this prefix removes crash leftovers.
@@ -272,52 +279,14 @@ pub fn copy_file(src: &Path, dst: &Path, mode: u32) -> Result<u64> {
     Ok(copied)
 }
 
-/// Recursively copy `src` to `dst`, streaming file contents and preserving
-/// permission bits. `skip(path)` is called with each entry's source path and
-/// excludes it (and its subtree). Symlinks and special files anywhere in the
-/// tree are refused. Returns the number of file bytes copied.
-pub fn copy_tree(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<u64> {
-    let mut total = 0u64;
-    copy_entry(src, dst, skip, &mut total)?;
-    Ok(total)
-}
-
-fn copy_entry(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool, total: &mut u64) -> Result<()> {
-    let meta = fs::symlink_metadata(src).map_err(|e| Error::io(src, e))?;
-    let mode = meta.permissions().mode() & MODE_MASK;
-    if meta.file_type().is_symlink() {
-        return Err(symlink_error(src));
-    }
-    if meta.is_file() {
-        *total = total.saturating_add(copy_file(src, dst, mode)?);
-        return Ok(());
-    }
-    if !meta.is_dir() {
-        return Err(Error::msg(format!("不支持的特殊文件: {}", src.display())));
-    }
-    // Fill the directory while it is private and writable; its real mode
-    // (possibly read-only) is applied once the children are in place.
-    ensure_dir(dst, 0o700)?;
-    let mut entries = fs::read_dir(src)
-        .map_err(|e| Error::io(src, e))?
-        .map(|entry| entry.map(|e| e.file_name()))
-        .collect::<io::Result<Vec<_>>>()
-        .map_err(|e| Error::io(src, e))?;
-    entries.sort();
-    for name in entries {
-        let child = src.join(&name);
-        if !skip(&child) {
-            copy_entry(&child, &dst.join(&name), skip, total)?;
-        }
-    }
-    ensure_dir(dst, mode)?;
-    fsync_dir(dst).map_err(|e| Error::io(dst, e))
-}
-
 /// Remove entries of `dir` whose name starts with `prefix` and whose mtime
 /// is at least `min_age` old (crash leftovers: temp files, staging dirs).
 /// A missing `dir` is fine. Returns how many entries were removed.
 pub fn sweep_stale(dir: &Path, prefix: &str, min_age: Duration) -> Result<usize> {
+    // An empty prefix would match (and delete) everything in `dir`.
+    if prefix.is_empty() {
+        return Err(Error::msg("清理前缀不能为空"));
+    }
     let entries = match fs::read_dir(dir) {
         Err(e) if not_found(&e) => return Ok(0),
         Err(e) => return Err(Error::io(dir, e)),
