@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+export ONEBOX_DIR='/etc/onebox'
+export ONEBOX_BIN_DIR='/opt/onebox/bin'
+export ONEBOX_LOG_DIR='/var/log/onebox'
+export ONEBOX_RUN_DIR='/run/onebox'
+export ONEBOX_SITE_ROOT='/var/lib/onebox-site'
+export ONEBOX_SYSTEMD_DIR='/etc/systemd/system'
+export ONEBOX_INITD_DIR='/etc/init.d'
+export ONEBOX_EXE='/usr/local/bin/onebox'
+export ONEBOX_FRPS_DIR='/etc/onebox-frp'
+export ONEBOX_FRPS_BIN_DIR='/opt/onebox-frp'
+export ONEBOX_FRPS_WEB_VAR='/var/lib/onebox-frp'
+export ONEBOX_FRPS_LOG_DIR='/var/log/onebox-frp'
+export ONEBOX_FRPS_RUN_DIR='/run/onebox-frp'
+export ONEBOX_INIT='openrc'
+name='onebox-xray'
+supervisor=supervise-daemon
+command='/opt/onebox/bin/xray'
+command_args=''\''run'\'' '\''-c'\'' '\''/etc/onebox/xray.json'\'''
+output_log='/var/log/onebox/onebox-xray.log'
+error_log='/var/log/onebox/onebox-xray.log'
+respawn_delay=5
+respawn_max=10
+respawn_period=120
+rc_ulimit='-n 1048576'
+depend() { want net; after net firewall dns; }

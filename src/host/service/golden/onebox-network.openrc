@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+export ONEBOX_DIR='/etc/onebox'
+export ONEBOX_BIN_DIR='/opt/onebox/bin'
+export ONEBOX_LOG_DIR='/var/log/onebox'
+export ONEBOX_RUN_DIR='/run/onebox'
+export ONEBOX_SITE_ROOT='/var/lib/onebox-site'
+export ONEBOX_SYSTEMD_DIR='/etc/systemd/system'
+export ONEBOX_INITD_DIR='/etc/init.d'
+export ONEBOX_EXE='/usr/local/bin/onebox'
+export ONEBOX_FRPS_DIR='/etc/onebox-frp'
+export ONEBOX_FRPS_BIN_DIR='/opt/onebox-frp'
+export ONEBOX_FRPS_WEB_VAR='/var/lib/onebox-frp'
+export ONEBOX_FRPS_LOG_DIR='/var/log/onebox-frp'
+export ONEBOX_FRPS_RUN_DIR='/run/onebox-frp'
+export ONEBOX_INIT='openrc'
+name='onebox-network'
+depend() { want net; after net firewall dns iptables ip6tables nftables firewalld ufw; }
+start() {
+  ebegin 'Restoring Onebox network rules'
+  '/usr/local/bin/onebox' 'net-apply'
+  eend $?
+}
+stop() { return 0; }
