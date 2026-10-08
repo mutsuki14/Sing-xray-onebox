@@ -85,8 +85,12 @@ generate() { # case-name
 }
 
 if [ "$#" -eq 0 ]; then
-	set -- $(cd "$HERE/cases" && ls)
+	for dir in "$HERE"/cases/*/; do
+		name=${dir%/}
+		generate "${name##*/}"
+	done
+else
+	for name in "$@"; do
+		generate "$name"
+	done
 fi
-for name in "$@"; do
-	generate "$name"
-done
