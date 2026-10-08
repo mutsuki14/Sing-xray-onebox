@@ -138,7 +138,8 @@ fn spec_validation_rejects_credentials_and_injection() {
     let p = paths();
     let good = ServiceDef::network(&p).spec(&service_env(&p, InitSystem::Systemd));
     good.validate().unwrap();
-    let cases: Vec<(&str, Box<dyn Fn(&mut ServiceSpec)>)> = vec![
+    type Mutation = Box<dyn Fn(&mut ServiceSpec)>;
+    let cases: Vec<(&str, Mutation)> = vec![
         (
             "CF_Token",
             Box::new(|s| s.environment.push(("CF_Token".into(), "x".into()))),
