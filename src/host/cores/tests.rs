@@ -712,6 +712,20 @@ fn real_cores_report_versions_and_check_configs() {
             "{err}"
         );
         assert!(!err.contains('\x1b') && !err.contains("[Info]"), "{err}");
+
+        // doctor's variant: the installed binary and a private work dir.
+        let host = TempDir::new("cores-real-doctor").unwrap();
+        let doctor = Ctx {
+            paths: crate::paths::Paths::isolated(host.path()),
+            exec: Arc::new(crate::sys::exec::SystemExec),
+            ui: Arc::new(crate::ui::ScriptedPrompter::new(Vec::<String>::new())),
+        };
+        std::fs::create_dir_all(&doctor.paths.bin).unwrap();
+        std::os::unix::fs::symlink(&bin, doctor.paths.core_bin(core)).unwrap();
+        let work = TempDir::new("doctor-check").unwrap();
+        check_config_in(&doctor, core, &ok, work.path()).unwrap();
+        assert!(check_config_in(&doctor, core, &bad, work.path()).is_err());
+        assert!(!doctor.paths.run.exists(), "nothing under the run root");
     }
 }
 
