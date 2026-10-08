@@ -120,16 +120,28 @@ fn installed_kernels(ctx: &Ctx, running: Option<&str>) -> Vec<InstalledKernel> {
         .collect()
 }
 
+/// `TCP / 默认队列: {cc} / {qdisc}` (`未知` when unreadable).
+fn current_line(congestion: Option<&str>, qdisc: Option<&str>) -> String {
+    format!(
+        "TCP / 默认队列: {} / {}",
+        congestion.unwrap_or("未知"),
+        qdisc.unwrap_or("未知")
+    )
+}
+
+/// The current congestion control and default qdisc in one line (two
+/// `sysctl -n` reads), shown at the top of the BBR menu.
+pub fn headline(ctx: &Ctx) -> String {
+    let read = |key| sysctl::read(ctx, key).ok().filter(|s| !s.is_empty());
+    current_line(read(CC).as_deref(), read(QDISC).as_deref())
+}
+
 /// The stdout text of `bbr status` (v2 wording and order).
 pub fn render(report: &StatusReport) -> String {
     let unknown = |v: &Option<String>| v.clone().unwrap_or_else(|| "未知".into());
     let mut lines = vec![
         format!("运行内核: {}", unknown(&report.kernel)),
-        format!(
-            "TCP / 默认队列: {} / {}",
-            unknown(&report.congestion),
-            unknown(&report.qdisc)
-        ),
+        current_line(report.congestion.as_deref(), report.qdisc.as_deref()),
         format!("可用拥塞算法: {}", unknown(&report.available)),
     ];
     lines.push(match report.loaded_bbr.as_deref() {

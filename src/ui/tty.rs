@@ -217,7 +217,7 @@ impl Prompter for TtyPrompter {
         let mut terminal = self.terminal();
         terminal.say(&format_menu(title, items, back))?;
         let hint = select_hint(items.len(), back);
-        terminal.ask_until(&select_prompt(items.len(), default), &hint, |a| {
+        terminal.ask_until(&select_prompt(items.len(), default, back), &hint, |a| {
             parse_select(a, items.len(), default, back)
         })
     }

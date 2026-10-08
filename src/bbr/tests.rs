@@ -172,6 +172,16 @@ fn interactive(f: &Fixture, answers: &[&str]) {
     f.ui.extend(answers.iter().copied());
 }
 
+/// The BBR menu as the fixture's host shows it.
+const MENU_TITLE: &str = "TCP BBR 管理\nTCP / 默认队列: cubic / fq_codel";
+
+fn bbr_menus(f: &Fixture) -> usize {
+    f.ui.menus()
+        .iter()
+        .filter(|m| m.starts_with(MENU_TITLE))
+        .count()
+}
+
 #[test]
 fn menu_builds_actions_and_returns_on_zero() {
     let f = Fixture::new();
@@ -180,13 +190,29 @@ fn menu_builds_actions_and_returns_on_zero() {
     session.run(Action::Menu).unwrap();
     let menus = f.ui.menus();
     assert_eq!(menus.len(), 3);
-    assert!(menus[0].starts_with("TCP BBR 管理\n  1) 状态与实际网卡队列"));
+    assert!(
+        menus[0].starts_with(&format!("{MENU_TITLE}\n  1) 状态与实际网卡队列")),
+        "current values first: {}",
+        menus[0]
+    );
     assert!(menus[0].ends_with("  6) 安装/更新 Max 实验版（先预览，确认后执行）\n  0) 返回"));
     assert_eq!(
         f.github.requests(),
         ["https://api.github.com/repos/byJoey/Actions-bbr-v3/releases?per_page=100&page=1"]
     );
     assert_eq!(f.ui.remaining(), 0);
+}
+
+#[test]
+fn enter_at_the_menu_goes_back() {
+    let f = Fixture::new();
+    interactive(&f, &[""]);
+    f.session().run(Action::Menu).unwrap();
+    assert_eq!(bbr_menus(&f), 1);
+    assert_eq!(
+        crate::ui::select_prompt(MENU.len(), BACK, true),
+        "请选择 [默认: 0]: "
+    );
 }
 
 #[test]
@@ -198,12 +224,17 @@ fn menu_enable_picks_a_queue_and_back_returns_to_the_menu() {
     assert_eq!(f.sysctl.get(CC), "bbr");
     let menus = f.ui.menus();
     assert!(menus[1].starts_with("默认队列\n  1) fq（默认）"));
+    assert!(
+        menus[4].starts_with("TCP BBR 管理\nTCP / 默认队列: bbr / cake"),
+        "the header follows the change: {}",
+        menus[4]
+    );
 }
 
 #[test]
-fn menu_failures_are_reported_and_root_is_checked_per_item() {
+fn menu_checks_root_before_asking_follow_up_questions() {
     let f = Fixture::new();
-    interactive(&f, &["2", "1", "0"]);
+    interactive(&f, &["2", "4", "1", "0"]);
     let session = Session {
         ctx: &f.ctx,
         fetcher: &f.github,
@@ -215,6 +246,12 @@ fn menu_failures_are_reported_and_root_is_checked_per_item() {
         .calls("sysctl")
         .iter()
         .all(|a| a[0] == "-n" || a.is_empty()));
+    assert_eq!(bbr_menus(&f), 4, "no queue picker, no tag prompt");
+    assert_eq!(f.ui.menus().len(), 4);
+    assert!(!f
+        .ui
+        .prompts()
+        .contains(&"完整 Release 标签或 latest".to_string()));
 }
 
 #[test]
@@ -237,11 +274,62 @@ fn menu_install_previews_then_asks_before_installing() {
 }
 
 #[test]
+fn a_mistyped_tag_is_asked_again() {
+    let f = Fixture::new();
+    interactive(&f, &["6", "x86_64-7.2.8", "x86_64-7.2.8-max"]);
+    let err = f.session().run(Action::Menu).unwrap_err();
+    assert!(err.is_cancelled());
+    assert_eq!(
+        f.ui.errors(),
+        ["Release 标签与架构/标准或 Max 类型不匹配"],
+        "a standard tag is not a Max tag"
+    );
+    assert_eq!(
+        f.github.requests(),
+        [crate::bbr::release::tag_url("x86_64-7.2.8-max")]
+    );
+}
+
+#[test]
 fn eof_in_the_menu_cancels() {
     let f = Fixture::new();
     interactive(&f, &[]);
     let err = f.session().run(Action::Menu).unwrap_err();
     assert!(err.is_cancelled());
+    assert_eq!(err.exit_code(), 130);
+}
+
+#[test]
+fn eof_in_a_follow_up_question_returns_to_the_menu() {
+    for (answers, prompt) in [
+        (&["2"][..], "默认队列"),
+        (&["4"], "完整 Release 标签或 latest"),
+    ] {
+        let f = Fixture::new();
+        interactive(&f, answers);
+        let err = f.session().run(Action::Menu).unwrap_err();
+        assert!(err.is_cancelled() && err.exit_code() == 130, "{prompt}");
+        assert!(f.ui.prompts().contains(&prompt.to_string()));
+        assert_eq!(bbr_menus(&f), 2, "{prompt}: shown again, then EOF leaves");
+        assert_eq!(f.sysctl.get(CC), "cubic");
+    }
+}
+
+#[test]
+fn eof_at_the_install_confirmation_returns_to_the_menu() {
+    let f = Fixture::new();
+    f.eligible();
+    interactive(&f, &["4", ""]);
+    let err = f.session().run(Action::Menu).unwrap_err();
+    assert!(err.is_cancelled());
+    assert!(f
+        .ui
+        .prompts()
+        .iter()
+        .any(|p| p.starts_with("安装 x86_64-7.2.8？")));
+    assert_eq!(bbr_menus(&f), 2);
+    assert_eq!(f.calls("apt-get").len(), 1, "only the simulation ran");
+    assert!(f.calls("update-grub").is_empty());
 }
 
 #[test]

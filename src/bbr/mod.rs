@@ -19,7 +19,12 @@
 //!   `install --apply` do (v2 required root for `menu` and previews and
 //!   accepted `info|list|preview` that the parser rejected, I-8.1#1/#2);
 //! - the menu builds actions directly instead of re-parsing strings, and a
-//!   failed item prints `[错误] …` and returns to the menu (I-8.1#6);
+//!   failed item prints `[错误] …` and returns to the menu (I-8.1#6); a
+//!   cancelled item (EOF or Ctrl+C in a follow-up question or the install
+//!   confirmation) returns to the menu too, only the menu prompt itself
+//!   leaves with 130 (ARCH G5); the menu shows the current congestion
+//!   control and qdisc first, checks root before asking follow-up
+//!   questions, and re-asks a mistyped release tag;
 //! - `bbr install --dry-run` is the preview.
 
 pub mod enable;
@@ -36,7 +41,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::fs::ensure_dir;
 use crate::sys::lock::FileLock;
-use crate::ui::out;
+use crate::ui::{out, BACK};
 use net::{CurlFetcher, Fetcher};
 use release::Arch;
 
@@ -281,49 +286,48 @@ impl Session<'_> {
         Ok(())
     }
 
-    /// The interactive menu; a failed item is reported and the menu shown
-    /// again, cancellation (EOF) leaves.
+    /// The interactive menu. The current congestion control and qdisc head
+    /// it and Enter goes back (v2 `[默认: 0]`). A failed item prints
+    /// `[错误] …`, a cancelled one `[提示] 操作已取消`, and the menu is shown
+    /// again; only cancellation at the menu prompt itself leaves (exit 130).
     fn menu(&self) -> Result<()> {
-        let items: Vec<String> = [
-            "状态与实际网卡队列",
-            "启用当前内核 BBR，选择默认队列",
-            "查看 BBRv3 标准版 Release",
-            "安装/更新标准版（先预览，确认后执行）",
-            "查看 BBRv3 Max 实验版 Release",
-            "安装/更新 Max 实验版（先预览，确认后执行）",
-        ]
-        .map(String::from)
-        .to_vec();
+        let items: Vec<String> = MENU.iter().map(|(_, label)| label.to_string()).collect();
+        // Detected once: it validates the tags typed for installs.
+        let arch = Arch::detect(self.ctx).map_err(|e| e.to_string());
         loop {
-            let Some(choice) = self.ctx.ui.select("TCP BBR 管理", &items, 0, true)? else {
+            let title = format!("TCP BBR 管理\n{}", status::headline(self.ctx));
+            let Some(choice) = self.ctx.ui.select(&title, &items, BACK, true)? else {
                 return Ok(());
             };
-            let Some(action) = self.menu_action(choice)? else {
+            let Some((item, _)) = MENU.get(choice) else {
                 continue;
             };
-            if let Err(e) = self.run(action) {
-                if e.is_cancelled() {
-                    return Err(e);
-                }
-                out::error(e);
+            let outcome = self
+                .menu_action(*item, &arch)
+                .and_then(|action| action.map_or(Ok(()), |a| self.run(a)));
+            match outcome {
+                Ok(()) => {}
+                Err(e) if e.is_cancelled() => out::info("操作已取消"),
+                Err(e) => out::error(e),
             }
         }
     }
 
-    /// The action of menu item `choice` (0-based); `None` = back.
-    fn menu_action(&self, choice: usize) -> Result<Option<Action>> {
+    /// The action of a menu item, asking its follow-up questions (after the
+    /// root check, so a non-root user is not asked in vain); `None` = back.
+    fn menu_action(
+        &self,
+        item: MenuItem,
+        arch: &std::result::Result<Arch, String>,
+    ) -> Result<Option<Action>> {
+        if item.template().requires_root() && !self.is_root {
+            return Err(Error::msg(ROOT_REQUIRED));
+        }
         let ui = &self.ctx.ui;
-        let install = |max| -> Result<Option<Action>> {
-            let desired = ui.input("完整 Release 标签或 latest", "latest")?;
-            Ok(Some(Action::Install(InstallRequest {
-                desired,
-                max,
-                apply: true,
-            })))
-        };
-        match choice {
-            0 => Ok(Some(Action::Status)),
-            1 => {
+        match item {
+            MenuItem::Status => Ok(Some(Action::Status)),
+            MenuItem::Releases { max } => Ok(Some(Action::Releases { max })),
+            MenuItem::Enable => {
                 let queues: Vec<String> = ["fq（默认）", "fq_codel", "fq_pie", "cake"]
                     .map(String::from)
                     .to_vec();
@@ -332,14 +336,72 @@ impl Session<'_> {
                     .and_then(|i| Queue::ALL.get(i).copied())
                     .map(Action::Enable))
             }
-            2 => Ok(Some(Action::Releases { max: false })),
-            3 => install(false),
-            4 => Ok(Some(Action::Releases { max: true })),
-            5 => install(true),
-            _ => Ok(None),
+            MenuItem::Install { max } => {
+                let arch = arch.clone().map_err(Error::msg)?;
+                let check = |tag: &str| -> Result<String> {
+                    if tag != "latest" {
+                        release::kernel_name(tag, arch, max)?;
+                    }
+                    Ok(tag.to_string())
+                };
+                let desired = ui.input_with("完整 Release 标签或 latest", "latest", &check)?;
+                Ok(Some(Action::Install(InstallRequest {
+                    desired,
+                    max,
+                    apply: true,
+                })))
+            }
         }
     }
 }
+
+/// One entry of the BBR menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuItem {
+    Status,
+    Enable,
+    Releases { max: bool },
+    Install { max: bool },
+}
+
+impl MenuItem {
+    /// The item's action with default answers; the follow-up answers (queue,
+    /// tag) never change its root policy.
+    fn template(self) -> Action {
+        match self {
+            MenuItem::Status => Action::Status,
+            MenuItem::Enable => Action::Enable(Queue::Fq),
+            MenuItem::Releases { max } => Action::Releases { max },
+            MenuItem::Install { max } => Action::Install(InstallRequest {
+                desired: "latest".into(),
+                max,
+                apply: true,
+            }),
+        }
+    }
+}
+
+/// The menu in v2 order (installs preview and confirm before changing anything).
+const MENU: [(MenuItem, &str); 6] = [
+    (MenuItem::Status, "状态与实际网卡队列"),
+    (MenuItem::Enable, "启用当前内核 BBR，选择默认队列"),
+    (
+        MenuItem::Releases { max: false },
+        "查看 BBRv3 标准版 Release",
+    ),
+    (
+        MenuItem::Install { max: false },
+        "安装/更新标准版（先预览，确认后执行）",
+    ),
+    (
+        MenuItem::Releases { max: true },
+        "查看 BBRv3 Max 实验版 Release",
+    ),
+    (
+        MenuItem::Install { max: true },
+        "安装/更新 Max 实验版（先预览，确认后执行）",
+    ),
+];
 
 /// A system path as the admin knows it: `/boot` rather than
 /// `{system_root}/boot` (tests use a fixture root).
