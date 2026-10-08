@@ -13,8 +13,10 @@
 //!
 //! Changes from v2:
 //! - prereleases are refused (E-8.1#15); a failed `latest` lookup for
-//!   sing-box falls back to 1.14.2 only when no version was asked for
-//!   (install), and says so; an explicit `latest` fails instead (G-8.1#3).
+//!   sing-box falls back to 1.14.2 only when installing without a specific
+//!   version ([`resolve`] without a wish, or [`ensure_installed`] for a
+//!   missing core), and says so; `resolve(…, Some("latest"))`, the core
+//!   update path, fails instead of quietly downgrading (G-8.1#3).
 //! - the offline override reports the parsed version instead of the first
 //!   output line, refuses symlinks, and warns when it differs from the pin.
 //! - `ensure_installed` re-downloads a binary that cannot run (v2 only
@@ -506,10 +508,11 @@ pub fn ensure_installed_with(
         }
         return Ok(current);
     }
+    // Installing a missing core, `latest` means "any version": like v2 a
+    // failed lookup may still fall back (only `onebox update` is strict).
     let wanted = match &wish {
         Some(Wanted::Exact(v)) => Some(v.as_str()),
-        Some(Wanted::Latest) => Some("latest"),
-        Some(Wanted::Default) | None => None,
+        Some(Wanted::Latest | Wanted::Default) | None => None,
     };
     let resolved = resolve_with(ctx, env, core, wanted)?;
     sysfs::ensure_dir(&ctx.paths.bin, 0o755)?;

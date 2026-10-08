@@ -141,6 +141,19 @@ fn environment_versions_apply_when_nothing_is_pinned() {
     ensure_installed_with(&f.ctx, &env, Core::Singbox, &pinned).unwrap();
     assert_eq!(f.curl_urls()[0], format!("{SB_API}/tags/v1.14.2"));
 
+    // `latest` while installing a missing core keeps v2's fallback.
+    let mut f = fixture();
+    serve_singbox(&mut f, "1.14.2", &format!("{SB_API}/tags/v1.14.2"));
+    f.route(format!("{SB_API}/latest"), Reply::http(403));
+    f.serve();
+    versions(
+        &f.exec,
+        vec![(f.ctx.paths.bin.clone(), singbox_says("1.14.2"))],
+    );
+    let env = |k: &str| (k == "ONEBOX_SINGBOX_VERSION").then(|| "latest".to_owned());
+    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default()).unwrap();
+    assert_eq!(v, "1.14.2");
+
     let bad = |k: &str| (k == "ONEBOX_XRAY_VERSION").then(|| "../x".to_owned());
     let err =
         ensure_installed_with(&f.ctx, &bad, Core::Xray, &CoreVersions::default()).unwrap_err();
