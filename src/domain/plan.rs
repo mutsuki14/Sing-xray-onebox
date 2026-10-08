@@ -15,6 +15,12 @@
 //! ShadowTLS SNI clears an explicit handshake target (#3); Hysteria2 tuning is
 //! validated once as integer Mbps and switching away from `measured` clears
 //! stale bandwidth (#20, C-8.1 #1).
+//!
+//! Contract with the apply engine: a custom proxy certificate's
+//! `ProxyTls::pinned` is provisional ([`PROVISIONAL_CUSTOM_PIN`]) until the
+//! prepare-certificates stage records the trust check of the deployed pair
+//! (`ProxyTls::record_trust`); the apply persists that result with the rest
+//! of the configuration. Self-signed and ACME pins follow from the mode.
 
 mod install;
 mod node;
@@ -294,7 +300,12 @@ fn proxy_tls(choice: &ProxyCertChoice, current: Option<&ProxyTls>) -> Result<Pro
             }
         }
     };
-    let pinned = !mode.is_domain_cert();
+    let pinned = match current {
+        // The same custom pair again: keep the trust the certificate stage
+        // recorded for it.
+        Some(cur) if cur.mode == mode && mode.implied_pin().is_none() => cur.pinned,
+        _ => mode.implied_pin().unwrap_or(PROVISIONAL_CUSTOM_PIN),
+    };
     Ok(ProxyTls { mode, pinned })
 }
 

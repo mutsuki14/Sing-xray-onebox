@@ -341,10 +341,20 @@ pub enum WebCert {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyTls {
     pub mode: ProxyCertMode,
-    /// Not publicly trusted: clients pin the leaf SHA-256.
+    /// Not publicly trusted: clients pin the leaf SHA-256. Self-signed is
+    /// always pinned and ACME never ([`ProxyCertMode::implied_pin`]); for a
+    /// custom certificate only the deployed pair can tell, so the
+    /// prepare-certificates stage records it with [`ProxyTls::record_trust`]
+    /// before the configuration is saved, and a planner's value is
+    /// provisional (v2 derived `CERT_PINNED` the same way, in `cert::prepare`).
     #[serde(default)]
     pub pinned: bool,
 }
+
+/// `pinned` of a custom certificate before the certificate stage has checked
+/// it: a pin works for trusted and untrusted certificates alike, so clients
+/// built from a provisional configuration still connect.
+pub const PROVISIONAL_CUSTOM_PIN: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]

@@ -108,6 +108,31 @@ impl ProxyCertMode {
     pub fn is_domain_cert(&self) -> bool {
         !matches!(self, ProxyCertMode::SelfSigned { .. })
     }
+
+    /// `ProxyTls::pinned` as far as the mode alone decides it: self-signed is
+    /// pinned, ACME certificates are publicly trusted. A custom certificate
+    /// can be either (`None`): see [`ProxyTls::record_trust`].
+    pub fn implied_pin(&self) -> Option<bool> {
+        match self {
+            ProxyCertMode::SelfSigned { .. } => Some(true),
+            ProxyCertMode::Acme { .. } => Some(false),
+            ProxyCertMode::Custom { .. } => None,
+        }
+    }
+}
+
+impl ProxyTls {
+    /// Record whether the deployed pair verifies against the public CA store
+    /// for its domain (v2 `cert::prepare`: `CERT_PINNED` = `0` if trusted,
+    /// else `1`). Called by the prepare-certificates stage on the
+    /// configuration the apply commits, before `StateStore::save`.
+    /// Self-signed certificates stay pinned whatever the check says.
+    pub fn record_trust(&mut self, publicly_trusted: bool) {
+        self.pinned = match self.mode {
+            ProxyCertMode::SelfSigned { .. } => true,
+            _ => !publicly_trusted,
+        };
+    }
 }
 
 impl SubscriptionMode {

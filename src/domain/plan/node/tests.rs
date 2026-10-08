@@ -626,5 +626,63 @@ fn proxy_certificate_changes() {
     };
     let next = set_proxy_cert(&on80, &custom).unwrap();
     assert!(next.vmess_tls);
-    assert!(!next.tls.unwrap().pinned);
+    assert!(
+        next.tls.unwrap().pinned,
+        "provisional until the certificate stage checks trust"
+    );
+}
+
+#[test]
+fn custom_certificate_pin_is_decided_by_the_certificate_stage() {
+    let trojan = config(&[(Trojan, 443, SB)]);
+    let custom = ProxyCertChoice::Custom {
+        domain: "proxy.example.com".into(),
+        cert: "/etc/ssl/proxy.pem".into(),
+        key: "/etc/ssl/proxy.key".into(),
+    };
+    // The planner cannot know whether the pair is publicly trusted.
+    let mut planned = set_proxy_cert(&trojan, &custom).unwrap();
+    let tls = planned.tls.as_mut().unwrap();
+    assert_eq!(tls.mode.implied_pin(), None);
+    assert_eq!(tls.pinned, PROVISIONAL_CUSTOM_PIN);
+    // prepare-certificates records the trust check before the save.
+    tls.record_trust(true);
+    assert!(!tls.pinned);
+    planned.validate().unwrap();
+    // Re-applying the same pair keeps the recorded result ...
+    let again = set_proxy_cert(&planned, &custom).unwrap();
+    assert!(!again.tls.as_ref().unwrap().pinned);
+    // ... unrelated changes keep it too ...
+    let moved = set_port(&again, Trojan, 8443, &env()).unwrap();
+    assert!(!moved.tls.as_ref().unwrap().pinned);
+    // ... while another pair starts provisional again.
+    let other = ProxyCertChoice::Custom {
+        domain: "proxy.example.com".into(),
+        cert: "/etc/ssl/new.pem".into(),
+        key: "/etc/ssl/new.key".into(),
+    };
+    let next = set_proxy_cert(&again, &other).unwrap();
+    assert!(next.tls.as_ref().unwrap().pinned);
+    // An untrusted pair (private CA) stays pinned.
+    let mut untrusted = next.tls.clone().unwrap();
+    untrusted.record_trust(false);
+    assert!(untrusted.pinned);
+
+    // Self-signed and ACME follow from the mode; a trust check never unpins
+    // a self-signed certificate (validate requires the pin).
+    let mut selfsigned = crate::domain::fixtures::self_signed();
+    assert_eq!(selfsigned.mode.implied_pin(), Some(true));
+    selfsigned.record_trust(true);
+    assert!(selfsigned.pinned);
+    let acme = ProxyCertChoice::Acme {
+        domain: "proxy.example.com".into(),
+        method: AcmeMethod::Cloudflare,
+    };
+    let mut issued = set_proxy_cert(&trojan, &acme).unwrap().tls.unwrap();
+    assert!(!issued.pinned);
+    issued.record_trust(false);
+    assert!(
+        issued.pinned,
+        "an untrusted ACME chain (staging CA) is pinned, as in v2"
+    );
 }
