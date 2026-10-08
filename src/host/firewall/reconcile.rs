@@ -10,13 +10,18 @@
 //!   administrator created are never touched (a recorded firewalld/ufw port
 //!   that an administrator rule replaced is forgotten, not removed);
 //! - a port that is one shared object (firewalld, ufw) stays open while
-//!   another Onebox owner still records it (`siblings`);
-//! - a rule whose backend program is gone counts as gone.
+//!   another Onebox record still needs it (`siblings`);
+//! - a rule whose backend program is gone counts as gone;
+//! - a rule that cannot be removed stays recorded and is reported (and
+//!   printed as a warning); only ledger or lock problems are errors, so a
+//!   stopped firewalld or a disabled ufw never blocks an apply, a rollback
+//!   or an uninstall.
 
 use super::ledger::{lock, LOCK_WAIT};
 use super::siblings::Siblings;
 use super::{
-    detect, ledger_path, new_token, spans, validate_owner, Entry, Ledger, Location, PortSpan, Rule,
+    detect, ledger_path, new_token, spans, ufw, validate_owner, Entry, Ledger, Location, PortSpan,
+    Rule,
 };
 use crate::ctx::Ctx;
 use crate::domain::protocol::Transport;
@@ -25,8 +30,8 @@ use crate::ui::out;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// What a reconcile changed. Failed removals were already printed as
-/// warnings; their rules stay recorded and are retried next time.
+/// What a reconcile or clear changed. Failed removals were already printed
+/// as warnings; their rules stay recorded and are retried next time.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
     /// `"{location} {span}/{proto}"` of rules added (new or re-created).
@@ -146,10 +151,17 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// Whether a port the firewall already has open for `entry` is held by
+    /// another Onebox record rather than by the administrator.
     fn shared(&self, entry: &Entry) -> bool {
-        self.siblings
-            .holder(&entry.location, entry.rule.range())
-            .is_some()
+        let span = entry.rule.range();
+        match entry.location {
+            Location::Ufw(_) => self.siblings.ufw_holder(&entry.location, span).is_some(),
+            Location::Firewalld(_) => others(&self.siblings, &self.ledger, entry)
+                .iter()
+                .any(|o| o.contains(&span)),
+            Location::Nft(_) | Location::Iptables(_) => false,
+        }
     }
 
     /// Append a freshly created rule and save at once; when saving fails the
@@ -180,7 +192,7 @@ impl Run<'_> {
             .cloned()
             .collect();
         for entry in stale {
-            match remove_entry(self.ctx, &self.siblings, &entry) {
+            match remove_entry(self.ctx, &self.siblings, &self.ledger, &entry) {
                 Ok(()) => {
                     self.ledger.remove_token(&entry.rule.token);
                     self.ledger.save()?;
@@ -199,16 +211,33 @@ impl Run<'_> {
     }
 }
 
+/// The spans other Onebox records hold at `entry`'s location: other
+/// owners' entries and this owner's other entries.
+fn others(siblings: &Siblings, ledger: &Ledger, entry: &Entry) -> Vec<PortSpan> {
+    let own = ledger
+        .entries
+        .iter()
+        .filter(|e| e.location == entry.location && e.rule.token != entry.rule.token)
+        .map(|e| e.rule.range());
+    siblings.spans_at(&entry.location).chain(own).collect()
+}
+
 /// Remove a recorded rule. A backend whose program disappeared took its
-/// rules with it; a port another owner still records stays open.
-fn remove_entry(ctx: &Ctx, siblings: &Siblings, entry: &Entry) -> Result<()> {
+/// rules with it; ports another record still needs stay open.
+fn remove_entry(ctx: &Ctx, siblings: &Siblings, ledger: &Ledger, entry: &Entry) -> Result<()> {
     let backend = entry.location.backend();
     if !ctx.has(backend.program()) {
         return Ok(());
     }
-    match siblings.holder(&entry.location, entry.rule.range()) {
-        Some(holder) => Siblings::hand_over(ctx, entry, holder),
-        None => backend.remove(ctx, &entry.rule),
+    match &entry.location {
+        Location::Firewalld(zone) => {
+            zone.release(ctx, &entry.rule, &others(siblings, ledger, entry))
+        }
+        Location::Ufw(_) => match siblings.ufw_holder(&entry.location, entry.rule.range()) {
+            Some(holder) => ufw::recomment(ctx, &entry.rule, &holder.rule.token),
+            None => backend.remove(ctx, &entry.rule),
+        },
+        Location::Nft(_) | Location::Iptables(_) => backend.remove(ctx, &entry.rule),
     }
 }
 
@@ -222,37 +251,38 @@ fn describe(entry: &Entry) -> String {
 }
 
 /// [`clear`] at the owner's v2 ledger location.
-pub fn clear_owner(ctx: &Ctx, owner: &str) -> Result<()> {
+pub fn clear_owner(ctx: &Ctx, owner: &str) -> Result<Report> {
     validate_owner(owner)?;
     clear(ctx, &ledger_path(&ctx.paths, owner), owner)
 }
 
 /// Remove every rule recorded for `owner`. Removed rules leave the ledger
-/// one by one; rules that could not be removed stay recorded and the error
-/// lists them.
-pub fn clear(ctx: &Ctx, ledger: &Path, owner: &str) -> Result<()> {
+/// one by one; a rule that cannot be removed now (ufw disabled, firewalld
+/// stopped, …) stays recorded, is printed as a warning and listed in
+/// `failed`. Errors are only ledger and lock problems.
+pub fn clear(ctx: &Ctx, ledger: &Path, owner: &str) -> Result<Report> {
     validate_owner(owner)?;
     let _lock = lock(ledger, LOCK_WAIT)?;
     let mut ledger = Ledger::load(ledger, owner)?;
     let siblings = Siblings::load(ctx, ledger.path());
-    let mut failed = Vec::new();
+    let mut report = Report::default();
     for entry in ledger.entries.clone() {
-        match remove_entry(ctx, &siblings, &entry) {
+        match remove_entry(ctx, &siblings, &ledger, &entry) {
             Ok(()) => {
                 ledger.remove_token(&entry.rule.token);
                 ledger.save()?;
+                report.removed.push(describe(&entry));
             }
-            Err(e) => failed.push(e.to_string()),
+            Err(e) => {
+                let message = format!("{}: {e}", describe(&entry));
+                out::warn(format!(
+                    "未能删除防火墙规则（已保留台账，稍后重试）: {message}"
+                ));
+                report.failed.push(message);
+            }
         }
     }
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::msg(format!(
-            "部分规则未清理，已保留台账: {}",
-            failed.join("; ")
-        )))
-    }
+    Ok(report)
 }
 
 #[cfg(test)]

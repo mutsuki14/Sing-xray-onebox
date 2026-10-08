@@ -1,24 +1,25 @@
 //! Rules recorded by the other Onebox owners, for backends where a port is
 //! one shared object rather than a rule of its own.
 //!
-//! firewalld has exactly one entry per port and zone, and ufw keeps one rule
-//! per spec (adding it again only replaces the comment). When two owners
-//! want the same port (typically `proxy` and the temporary `acme` owner on
-//! TCP 80), the port must stay open until neither wants it: an owner that
-//! finds the port held by another owner records it as shared instead of
-//! treating it as an administrator rule, and an owner that no longer wants
-//! it leaves it in place (handing the ufw comment back) while another owner
-//! still records it. v2 closed TCP 80 after a certificate issuance on such
-//! hosts when `acme` was cleared after `proxy` had adopted the port.
+//! ufw keeps one rule per spec (adding it again only replaces the
+//! comment), and firewalld one entry per port range and zone — since 0.9
+//! it even merges overlapping ranges into one entry and splits an entry
+//! when part of it is removed. When two owners want the same port
+//! (typically `proxy` and the temporary `acme` owner on TCP 80), the port
+//! must stay open until neither wants it: an owner that finds the port
+//! already open for another owner records it as shared instead of treating
+//! it as an administrator rule, and an owner that no longer wants it leaves
+//! the ports other owners still record in place (handing the ufw comment
+//! back; for firewalld see `Firewalld::release`). v2 closed TCP 80 after a
+//! certificate issuance on such hosts when `acme` was cleared after `proxy`
+//! had adopted the port.
 //!
 //! Sibling ledgers are read without their locks: their writers replace them
 //! atomically, and owners that share ports (`proxy`, `acme`) are reconciled
 //! one after another under the node lock.
 
-use super::ufw;
 use super::{Entry, Ledger, Location, PortSpan};
 use crate::ctx::Ctx;
-use crate::error::Result;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
@@ -61,9 +62,10 @@ impl Siblings {
         Siblings(entries)
     }
 
-    /// Another owner's record of `span` at a shared-object `location`.
-    pub fn holder(&self, location: &Location, span: PortSpan) -> Option<&Entry> {
-        if !matches!(location, Location::Firewalld(_) | Location::Ufw(_)) {
+    /// Another owner's record of exactly `span` at a ufw location (the
+    /// same ufw rule).
+    pub fn ufw_holder(&self, location: &Location, span: PortSpan) -> Option<&Entry> {
+        if !matches!(location, Location::Ufw(_)) {
             return None;
         }
         self.0
@@ -71,12 +73,11 @@ impl Siblings {
             .find(|e| e.location == *location && e.rule.range() == span)
     }
 
-    /// Stop wanting `entry` while `holder` still does: firewalld keeps the
-    /// port as it is; ufw gets the holder's token back on the rule.
-    pub fn hand_over(ctx: &Ctx, entry: &Entry, holder: &Entry) -> Result<()> {
-        match entry.location {
-            Location::Ufw(_) => ufw::recomment(ctx, &entry.rule, &holder.rule.token),
-            _ => Ok(()),
-        }
+    /// The spans other owners record at `location`.
+    pub fn spans_at<'a>(&'a self, location: &'a Location) -> impl Iterator<Item = PortSpan> + 'a {
+        self.0
+            .iter()
+            .filter(move |e| e.location == *location)
+            .map(|e| e.rule.range())
     }
 }

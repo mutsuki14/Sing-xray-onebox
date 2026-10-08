@@ -324,10 +324,12 @@ fn clear_owner_retains_only_failed_rules() {
     let f = Fixture::new();
     f.reconcile(&[(443, 443, TCP), (8443, 8443, TCP)]).unwrap();
     f.sim().fail_delete = Some("--dport 443 ".into());
-    let err = clear_owner(&f.ctx, "proxy").unwrap_err().to_string();
+    let report = clear_owner(&f.ctx, "proxy").unwrap();
+    assert_eq!(report.removed, ["iptables 8443/tcp"]);
+    assert_eq!(report.failed.len(), 1);
     assert!(
-        err.starts_with("部分规则未清理，已保留台账: iptables 执行失败 (7)"),
-        "{err}"
+        report.failed[0].starts_with("iptables 443/tcp: iptables 执行失败 (7)"),
+        "{report:?}"
     );
     let ledger = f.ledger();
     assert_eq!(ledger.entries.len(), 1);
@@ -345,8 +347,38 @@ fn clear_owner_retains_only_failed_rules() {
         );
     }
     f.sim().fail_delete = None;
-    clear_owner(&f.ctx, "proxy").unwrap();
+    let report = clear_owner(&f.ctx, "proxy").unwrap();
+    assert_eq!(report.removed, ["iptables 443/tcp"]);
     assert!(f.ledger().entries.is_empty() && f.sim().v4.is_empty());
+}
+
+#[test]
+fn clearing_rules_of_a_disabled_ufw_keeps_them_recorded_without_failing() {
+    let dir = TempDir::new("reconcile").unwrap();
+    let (ctx, exec, _) = Ctx::test(dir.path());
+    let path = ledger_path(&ctx.paths, "proxy");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let ledger = r#"{"rules":[{"backend":"ufw","port":443,"end":443,"udp":false,"token":"onebox-proxy-1111111111111111"}]}"#;
+    std::fs::write(&path, ledger).unwrap();
+    exec.provide("ufw");
+    exec.on(
+        "ufw",
+        &["status", "numbered"],
+        Output::success("Status: inactive\n"),
+    );
+    let report = clear_owner(&ctx, "proxy").unwrap();
+    assert!(report.removed.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert!(
+        report.failed[0].starts_with("ufw 443/tcp: ufw 未启用"),
+        "{report:?}"
+    );
+    assert_eq!(
+        Ledger::load(&path, "proxy").unwrap().entries.len(),
+        1,
+        "kept for the next attempt"
+    );
+    assert_eq!(exec.history(), ["ufw status numbered"]);
 }
 
 #[test]
@@ -422,6 +454,46 @@ fn real_firewall_in_private_netns() {
         "input",
         "{ type filter hook input priority 0; policy drop; }",
     ]);
+    // Chains that must not get rules: LXD's (a name nft argv cannot carry
+    // safely) and a crowdsec-like chain whose only drop is conditional.
+    run(&["nft", "add", "table", "inet", "lxd"]);
+    run(&[
+        "nft",
+        "add",
+        "chain",
+        "inet",
+        "lxd",
+        "in.lxdbr0",
+        "{ type filter hook input priority 0; policy accept; }",
+    ]);
+    run(&["nft", "add", "table", "ip", "crowdsec"]);
+    run(&[
+        "nft",
+        "add",
+        "set",
+        "ip",
+        "crowdsec",
+        "crowdsec-blacklists",
+        "{ type ipv4_addr; }",
+    ]);
+    run(&[
+        "nft",
+        "add",
+        "chain",
+        "ip",
+        "crowdsec",
+        "crowdsec-chain",
+        "{ type filter hook input priority -10; policy accept; }",
+    ]);
+    run(&[
+        "nft",
+        "add",
+        "rule",
+        "ip",
+        "crowdsec",
+        "crowdsec-chain",
+        "ip saddr @crowdsec-blacklists drop",
+    ]);
     let report = reconcile_owner(&ctx, "proxy", &desired).unwrap();
     assert_eq!(
         report.created,
@@ -435,6 +507,10 @@ fn real_firewall_in_private_netns() {
         chain.contains("tcp dport 443 accept comment \"onebox-proxy-"),
         "{chain}"
     );
+    for table in [["inet", "lxd"], ["ip", "crowdsec"]] {
+        let listed = run(&["nft", "list", "table", table[0], table[1]]);
+        assert!(!listed.contains("onebox-proxy-"), "{listed}");
+    }
     let compat = run(&["nft", "-j", "list", "table", "ip", "filter"]);
     assert!(
         !compat.contains("\"comment\": \"onebox-proxy-"),

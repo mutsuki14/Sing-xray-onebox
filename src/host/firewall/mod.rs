@@ -45,7 +45,12 @@
 //!   (ufw merges identical rules, so v2 adopted and later deleted them);
 //! - firewalld/ufw ports wanted by two owners (`proxy` and `acme` on TCP
 //!   80) stay open until neither records them (v2 closed TCP 80 after the
-//!   first HTTP-01 issuance on firewalld hosts);
+//!   first HTTP-01 issuance on firewalld hosts), also when firewalld ≥ 0.9
+//!   merged the owners' ranges into one entry; removing a port never cuts
+//!   into a range an administrator opened over it;
+//! - `clear`/`clear_owner` report rules they could not remove (ufw
+//!   disabled, firewalld stopped) instead of failing, like `reconcile`, so
+//!   rollback, recover and uninstall still complete;
 //! - the owner name `v2` is reserved (its ledger file is `proxy`'s);
 //! - a failing `nft list ruleset` (kernel without nf_tables) falls back to
 //!   iptables instead of failing the apply;
@@ -120,11 +125,7 @@ pub struct Rule {
 impl Rule {
     /// `start` alone, or `start{sep}end` for a real range.
     pub fn span(&self, sep: &str) -> String {
-        if self.end > self.start {
-            format!("{}{sep}{}", self.start, self.end)
-        } else {
-            self.start.to_string()
-        }
+        self.range().text(sep)
     }
 
     /// The range key used to match desired ports.
@@ -143,6 +144,57 @@ pub struct PortSpan {
     pub start: u16,
     pub end: u16,
     pub proto: Proto,
+}
+
+impl PortSpan {
+    /// Every port of `other` is in `self` (same protocol).
+    pub fn contains(&self, other: &PortSpan) -> bool {
+        self.proto == other.proto && self.start <= other.start && other.end <= self.end
+    }
+
+    pub fn overlaps(&self, other: &PortSpan) -> bool {
+        self.proto == other.proto && self.start <= other.end && other.start <= self.end
+    }
+
+    /// The sub-ranges of `self` no span of `covers` includes, ascending.
+    pub fn uncovered(&self, covers: &[PortSpan]) -> Vec<PortSpan> {
+        let mut parts: Vec<(u16, u16)> = covers
+            .iter()
+            .filter(|c| c.overlaps(self))
+            .map(|c| (c.start.max(self.start), c.end.min(self.end)))
+            .collect();
+        parts.sort_unstable();
+        let mut gaps = Vec::new();
+        // The next port not yet accounted for (u32: may pass 65535).
+        let mut next = u32::from(self.start);
+        for (start, end) in parts {
+            if u32::from(start) > next {
+                gaps.push((next, u32::from(start) - 1));
+            }
+            next = next.max(u32::from(end) + 1);
+        }
+        if next <= u32::from(self.end) {
+            gaps.push((next, u32::from(self.end)));
+        }
+        gaps.into_iter()
+            .filter_map(|(start, end)| {
+                Some(PortSpan {
+                    start: u16::try_from(start).ok()?,
+                    end: u16::try_from(end).ok()?,
+                    proto: self.proto,
+                })
+            })
+            .collect()
+    }
+
+    /// `start` alone, or `start{sep}end` for a real range.
+    pub fn text(&self, sep: &str) -> String {
+        if self.end > self.start {
+            format!("{}{sep}{}", self.start, self.end)
+        } else {
+            self.start.to_string()
+        }
+    }
 }
 
 /// A firewall implementation. Every backend builds its argv in exactly one

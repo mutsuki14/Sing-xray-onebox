@@ -75,7 +75,7 @@ pub(super) fn parse_line(line: &str) -> Option<Listed<'_>> {
     let (from, from_interface) = interface(&tail[..attrs]);
     let attributes = tail[attrs..]
         .iter()
-        .flat_map(|w| w.split(|c| matches!(c, '(' | ')' | ',')))
+        .flat_map(|w| w.split(['(', ')', ',']))
         .filter(|a| !a.is_empty())
         .collect();
     if to.is_empty() || from.is_empty() {

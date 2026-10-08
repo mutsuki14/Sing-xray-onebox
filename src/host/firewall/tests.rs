@@ -154,6 +154,11 @@ fn firewalld_argv_golden() {
         &["--zone=public", "--query-port=20000-40000/udp"],
         Output::success("yes"),
     )
+    .on(
+        "firewall-cmd",
+        &["--zone=public", "--list-ports"],
+        Output::success("80/tcp 20000-40000/udp\n"),
+    )
     .on("firewall-cmd", &[], Output::success("success"));
     let runtime = Firewalld {
         zone: "public".into(),
@@ -183,11 +188,53 @@ fn firewalld_argv_golden() {
             "firewall-cmd --zone=public --add-port=443/tcp --permanent",
             "firewall-cmd --zone=public --query-port=20000-40000/udp",
             "firewall-cmd --zone=public --query-port=20000-40000/udp",
-            "firewall-cmd --zone=public --query-port=20000-40000/udp",
+            "firewall-cmd --zone=public --list-ports",
             "firewall-cmd --zone=public --remove-port=20000-40000/udp",
-            "firewall-cmd --zone=public --query-port=443/tcp",
+            "firewall-cmd --zone=public --list-ports",
+        ],
+        "443/tcp is not listed: nothing to remove"
+    );
+}
+
+#[test]
+fn firewalld_port_lists_are_parsed() {
+    let span = |start, end, proto| PortSpan { start, end, proto };
+    assert_eq!(
+        firewalld::parse_ports("80/tcp 443/udp 20000-40000/udp http/tcp 9-1/tcp 1/sctp\n"),
+        [
+            span(80, 80, Proto::Tcp),
+            span(443, 443, Proto::Udp),
+            span(20000, 40000, Proto::Udp)
         ]
     );
+    assert!(firewalld::parse_ports("\n").is_empty());
+}
+
+#[test]
+fn port_span_set_arithmetic() {
+    let span = |start, end| PortSpan {
+        start,
+        end,
+        proto: Proto::Tcp,
+    };
+    let udp = PortSpan {
+        start: 80,
+        end: 90,
+        proto: Proto::Udp,
+    };
+    assert!(span(80, 90).contains(&span(85, 90)) && !span(80, 90).contains(&span(85, 91)));
+    assert!(span(80, 90).overlaps(&span(90, 95)) && !span(80, 90).overlaps(&span(91, 95)));
+    assert!(!span(80, 90).overlaps(&udp) && !span(80, 90).contains(&udp));
+    assert_eq!(
+        span(80, 90).uncovered(&[span(82, 83), span(70, 80), span(83, 85), udp]),
+        [span(81, 81), span(86, 90)]
+    );
+    assert!(span(80, 81).uncovered(&[span(1, 65535)]).is_empty());
+    assert_eq!(
+        span(65534, 65535).uncovered(&[span(65534, 65534)]),
+        [span(65535, 65535)]
+    );
+    assert_eq!(span(1, 3).uncovered(&[]), [span(1, 3)]);
 }
 
 #[test]
@@ -209,8 +256,14 @@ fn firewalld_query_failures_change_nothing() {
         "firewalld 查询失败，未变更规则: FirewallD is not running"
     );
     assert!(zone.exists(&ctx, &r).is_err());
-    assert!(zone.remove(&ctx, &r).is_err());
-    assert!(exec.history().iter().all(|c| c.contains("--query-port")));
+    assert_eq!(
+        zone.remove(&ctx, &r).unwrap_err().to_string(),
+        "无法读取 firewalld 端口: FirewallD is not running"
+    );
+    assert!(exec
+        .history()
+        .iter()
+        .all(|c| c.contains("--query-port") || c.contains("--list-ports")));
 }
 
 #[test]
