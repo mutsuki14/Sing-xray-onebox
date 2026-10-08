@@ -1,10 +1,10 @@
 //! Test fixtures shared by the apply leaf modules: a real journal written
 //! by the v2.0.1 binary and the layout it was taken from.
 //!
-//! `fixtures/v2-journal.json` was produced by running `onebox-v2 regen`
-//! (ONEBOX_INIT=none, offline fake cores) on the layout [`build_v2_layout`]
-//! creates and killing it in phase `prepare-cores`; the layout root was
-//! replaced by `@ROOT@`. Its snapshot entries (slots, presence, digests)
+//! `fixtures/v2-journal.json` was produced by `fixtures/capture-v2-journal.sh`:
+//! it runs `onebox-v2 regen` (ONEBOX_INIT=none, offline fake cores) on the
+//! layout [`build_v2_layout`] mirrors and kills it in phase `prepare-cores`;
+//! the layout root was replaced by `@ROOT@`. Its snapshot entries (slots, presence, digests)
 //! are therefore exactly what v2 computes for that layout.
 
 use crate::paths::Paths;
@@ -51,7 +51,7 @@ pub fn dir(path: &Path, mode: u32) {
 }
 
 /// Recreate the live layout the fixture journal was taken from (same
-/// contents and modes; see `capture-v2-journal.sh` in the work notes).
+/// contents and modes as `fixtures/capture-v2-journal.sh` creates).
 pub fn build_v2_layout(root: &Path) -> Paths {
     let paths = v2_paths(root);
     let etc = &paths.root;
