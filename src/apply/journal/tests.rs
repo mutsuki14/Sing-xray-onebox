@@ -349,3 +349,96 @@ fn pending_reports_both_journals_and_refuses_corrupt_ones() {
         "不支持的事务日志版本"
     );
 }
+
+#[test]
+fn unusable_old_states_are_refused_when_read() {
+    let base: Value = serde_json::from_str(&v2_journal_text(Path::new("/r"))).unwrap();
+    let cases = [
+        (
+            serde_json::json!({"values": {"PORT_vless_reality": 443}}),
+            "v2 状态值必须为字符串: PORT_vless_reality",
+        ),
+        (
+            serde_json::json!({"values": []}),
+            "v2 state.json 的 values 必须是对象",
+        ),
+        (
+            serde_json::json!(["values"]),
+            "v2 state.json 必须是 JSON 对象",
+        ),
+        (serde_json::json!("x"), "v2 state.json 必须是 JSON 对象"),
+    ];
+    for (old, detail) in cases {
+        let mut doc = base.clone();
+        doc["old_state"] = old;
+        let err = parse(&serde_json::to_vec(&doc).unwrap()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("事务日志记录的旧配置无效: {detail}")
+        );
+    }
+    // v2 accepted a state without `values` (serde default): so does v3.
+    let mut doc = base.clone();
+    doc["old_state"] = serde_json::json!({});
+    parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    // A v3 journal whose old configuration fails validation.
+    let Journal::V2(mut v3) = v3_journal() else {
+        unreachable!()
+    };
+    v3.old_config.as_mut().unwrap().node_name = String::new();
+    let err = parse(&serde_json::to_vec(&v3).unwrap()).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("事务日志记录的旧配置无效: 节点名称"),
+        "{err}"
+    );
+}
+
+#[test]
+fn validate_checks_everything_a_rollback_needs_before_it_starts() {
+    let dir_ = tmp();
+    let root = dir_.path();
+    let paths = build_v2_layout(root);
+    fs::create_dir(dir(&paths)).unwrap();
+    // A v2 journal whose snapshot of this layout is in files/.
+    let allow = v2_node_allowlist_with(&paths, &[acme_home(root)]);
+    let mut targets = v2_fixed_targets(&paths);
+    targets.push(acme_deployment(root));
+    let taken = take(&targets, &files_dir(&paths), &allow).unwrap();
+    let mut doc: Value = serde_json::from_str(&v2_journal_text(root)).unwrap();
+    doc["snapshot"] = serde_json::to_value(&taken).unwrap();
+    let v2 = parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    v2.validate_with(&paths, &allow).unwrap();
+    let no_home = v2_node_allowlist_with(&paths, &[]);
+    assert_eq!(
+        v2.validate_with(&paths, &no_home).unwrap_err().to_string(),
+        "快照路径范围不合法"
+    );
+    fs::write(files_dir(&paths).join("item-0"), b"tampered").unwrap();
+    assert_eq!(
+        v2.validate_with(&paths, &allow).unwrap_err().to_string(),
+        "快照文件缺失或校验失败: item-0"
+    );
+    // A v3 journal is validated against the node allowlist.
+    fs::remove_dir_all(dir(&paths)).unwrap();
+    fs::create_dir(dir(&paths)).unwrap();
+    let node = snapshot::node_allowlist(&paths);
+    let taken = take(&snapshot::node_targets(&paths), &files_dir(&paths), &node).unwrap();
+    let Journal::V2(mut v3) = v3_journal() else {
+        unreachable!()
+    };
+    v3.snapshot = taken;
+    let journal = Journal::V2(v3.clone());
+    journal.validate(&paths).unwrap();
+    // In-memory journals get the same content checks as parsed ones.
+    v3.old_config.as_mut().unwrap().inbounds.clear();
+    let err = Journal::V2(v3.clone()).validate(&paths).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "事务日志记录的旧配置无效: 配置缺少协议列表"
+    );
+    v3.old_config = None;
+    v3.active_services.push("sshd".into());
+    let err = Journal::V2(v3).validate(&paths).unwrap_err();
+    assert_eq!(err.to_string(), "事务日志含未知服务");
+}

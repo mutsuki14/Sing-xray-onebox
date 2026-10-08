@@ -24,12 +24,16 @@
 //! - the phase is a typed enum (unknown phases are refused instead of being
 //!   rolled back blindly);
 //! - a `.transaction` that is not a real directory is refused;
+//! - the recorded old state is checked when the journal is read (v2 noticed
+//!   a malformed one only in `rollback-services`, after stopping services
+//!   and restoring files), and [`Journal::validate`] checks everything a
+//!   rollback needs before the first rollback phase;
 //! - [`pending`] reports both journals for the operations that must not run
 //!   while a recovery is due (backup, doctor, uninstall, device changes) and
 //!   treats a corrupt journal as an error, never as "nothing pending".
 
 use crate::apply::program_journal;
-use crate::apply::snapshot::{node_allowlist, v2_node_allowlist, Allowlist, Snapshot};
+use crate::apply::snapshot::{self, node_allowlist, v2_node_allowlist, Allowlist, Snapshot};
 use crate::domain::config::NodeConfig;
 use crate::error::{Context, Error, Result};
 use crate::host::cron::CronSnapshot;
@@ -399,6 +403,35 @@ impl Journal {
         })
     }
 
+    /// Everything a rollback relies on, checked before the engine changes
+    /// anything: service names, the recorded old state, and the snapshot in
+    /// `files/` against [`Journal::allowlist`]. The engine calls this before
+    /// entering `rollback-stop` (v2 ran `validate_files` there), so a
+    /// malformed journal never stops services and then aborts half-way.
+    pub fn validate(&self, paths: &Paths) -> Result<()> {
+        self.validate_with(paths, &self.allowlist(paths))
+    }
+
+    /// [`Journal::validate`] against an explicit snapshot allowlist (tests,
+    /// or acme.sh homes other than [`acme_homes`](crate::apply::snapshot::acme_homes)).
+    pub fn validate_with(&self, paths: &Paths, allow: &Allowlist) -> Result<()> {
+        self.check_services()?;
+        self.check_old_state()?;
+        snapshot::validate(self.snapshot(), &files_dir(paths), allow)
+    }
+
+    /// The recorded old state is usable by a rollback: v2's document of
+    /// string values (version 1, what `state::v2::migrate` needs) or a
+    /// configuration that passes `NodeConfig::validate` (version 2).
+    fn check_old_state(&self) -> Result<()> {
+        match self.old() {
+            OldState::None => Ok(()),
+            OldState::V2(_) => self.v2_values().map(drop),
+            OldState::Config(cfg) => cfg.validate(),
+        }
+        .context("事务日志记录的旧配置无效")
+    }
+
     /// Every journaled service is a node service or a legacy network unit
     /// (their names reach service-manager commands).
     fn check_services(&self) -> Result<()> {
@@ -448,7 +481,9 @@ pub fn load(paths: &Paths) -> Result<Option<Journal>> {
     parse(&bytes).map(Some)
 }
 
-/// Parse a journal of either version and check its service names.
+/// Parse a journal of either version and check its contents (service
+/// names and old state; the snapshot is checked by [`Journal::validate`],
+/// which hashes every slot).
 pub fn parse(bytes: &[u8]) -> Result<Journal> {
     let doc: Value = serde_json::from_slice(bytes).context("事务日志无效")?;
     let journal = match doc.get("version").and_then(Value::as_u64) {
@@ -459,6 +494,7 @@ pub fn parse(bytes: &[u8]) -> Result<Journal> {
         _ => bail!("不支持的事务日志版本"),
     };
     journal.check_services()?;
+    journal.check_old_state()?;
     Ok(journal)
 }
 
