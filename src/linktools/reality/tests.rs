@@ -2,15 +2,14 @@ use super::*;
 use crate::linktools::options::{Common, Scope};
 use crate::linktools::report::REALITY_WARNINGS;
 use crate::linktools::testutil::{
-    arg_after, curl_ok, entry, have, proxy_port, reality_entry, to_value, FakeLauncher,
+    arg_after, curl_ok, entry, have, proxy_port, reality_entry, tls_server, to_value, FakeLauncher,
 };
 use crate::render::fixtures::cert_pair;
-use crate::sys::exec::{Cmd, Exec, FakeExec, Output, SystemExec};
+use crate::sys::exec::{Cmd, FakeExec, Output, SystemExec};
 use crate::sys::fs::TempDir;
 use crate::sys::rand::SeqRandom;
 use serde_json::json;
 use std::io::Write;
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
 
 const NODE: &str = "203.0.113.10:443";
@@ -21,7 +20,9 @@ fn pem(name: &str) -> String {
 }
 
 fn s_client(cert: &str, alpn: Option<&str>) -> Output {
-    let alpn = alpn.map_or("No ALPN negotiated".to_owned(), |a| format!("ALPN protocol: {a}"));
+    let alpn = alpn.map_or("No ALPN negotiated".to_owned(), |a| {
+        format!("ALPN protocol: {a}")
+    });
     Output::success(format!(
         "CONNECTED(00000003)\n{cert}---\nNew, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256\n{alpn}\n"
     ))
@@ -99,7 +100,10 @@ fn script(exec: &FakeExec, world: World) {
     );
 }
 
-fn check(world: World, entries: &[&ProbeEntry]) -> (Result<(Report<RealityRow>, Outcome)>, Arc<FakeExec>) {
+fn check(
+    world: World,
+    entries: &[&ProbeEntry],
+) -> (Result<(Report<RealityRow>, Outcome)>, Arc<FakeExec>) {
     let dir = TempDir::new("linktools-test").unwrap();
     let (ctx, exec, _) = Ctx::test(dir.path());
     script(&exec, world);
@@ -170,11 +174,14 @@ fn differences_without_failures_are_warnings() {
     let e = referenced();
     let (report, outcome) = check(world, &[&e]).0.unwrap();
     let row = &report.entries[0];
-    assert_eq!(row.checks[H2], false);
+    assert!(!row.checks[H2]);
     assert!(!row.failed(), "h2 alone does not fail");
     assert_eq!(row.warnings, [BODY_DIFFERS, NO_H2]);
     let exit = conclude(Tool::Reality, outcome, Ok(())).unwrap_err();
-    assert_eq!((exit.exit_code(), exit.to_string()), (2, REALITY_WARNINGS.to_string()));
+    assert_eq!(
+        (exit.exit_code(), exit.to_string()),
+        (2, REALITY_WARNINGS.to_string())
+    );
 }
 
 #[test]
@@ -189,7 +196,11 @@ fn mismatches_and_accepted_wrong_ids_fail() {
     let (report, outcome) = check(world, &[&e]).0.unwrap();
     let checks = &report.entries[0].checks;
     assert_eq!(
-        (checks[SAME_CERTIFICATE], checks[SAME_ALPN], checks[WRONG_REJECTED]),
+        (
+            checks[SAME_CERTIFICATE],
+            checks[SAME_ALPN],
+            checks[WRONG_REJECTED]
+        ),
         (false, false, false)
     );
     assert!(checks[AUTHENTICATED]);
@@ -248,7 +259,11 @@ fn block_errors_are_recorded_with_their_causes() {
 
 #[test]
 fn only_reality_entries_are_checked_and_cancellation_wins() {
-    let plain = entry("trojan", Core::Xray, crate::domain::protocol::Transport::Tcp);
+    let plain = entry(
+        "trojan",
+        Core::Xray,
+        crate::domain::protocol::Transport::Tcp,
+    );
     let err = check(World::default(), &[&plain]).0.unwrap_err();
     assert_eq!(err.to_string(), "配置中没有 REALITY 入口");
 
@@ -272,15 +287,23 @@ fn only_reality_entries_are_checked_and_cancellation_wins() {
     assert!(report.entries.is_empty() && report.cancelled && outcome.cancelled);
     assert_eq!(report.scope, "server-local");
     let exit = conclude(Tool::Reality, outcome, Ok(())).unwrap_err();
-    assert_eq!((exit.exit_code(), exit.to_string()), (130, "REALITY 检查已取消".to_string()));
+    assert_eq!(
+        (exit.exit_code(), exit.to_string()),
+        (130, "REALITY 检查已取消".to_string())
+    );
 }
 
 #[test]
 fn wrong_short_ids_change_only_the_copy() {
     let original = reality_entry("anytls-reality", Core::Singbox, ("", 0));
     let changed = wrong_short_id(&original, &mut SeqRandom(1)).unwrap();
-    assert_eq!(original.outbounds[0]["tls"]["reality"]["short_id"], "0123abcd");
-    let new = changed.outbounds[0]["tls"]["reality"]["short_id"].as_str().unwrap();
+    assert_eq!(
+        original.outbounds[0]["tls"]["reality"]["short_id"],
+        "0123abcd"
+    );
+    let new = changed.outbounds[0]["tls"]["reality"]["short_id"]
+        .as_str()
+        .unwrap();
     assert_ne!(new, "0123abcd");
     assert_eq!(new.len(), 16);
 
@@ -311,54 +334,6 @@ fn wrong_short_ids_change_only_the_copy() {
 
 // ---- real openssl (skipped without it) ----
 
-fn free_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// A local TLS 1.3 server for `localhost` with its own CA file.
-pub(crate) struct TlsServer {
-    pub port: u16,
-    pub cert: std::path::PathBuf,
-    _child: Box<dyn crate::sys::exec::RunningChild>,
-    _dir: TempDir,
-}
-
-pub(crate) fn tls_server() -> TlsServer {
-    let dir = TempDir::new("linktools-tls").unwrap();
-    let cert = dir.join("cert.pem");
-    let key = dir.join("key.pem");
-    let generate = Cmd::new("openssl")
-        .args(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"])
-        .args(["-nodes", "-days", "1", "-subj", "/CN=localhost"])
-        .args(["-addext", "subjectAltName=DNS:localhost", "-keyout"])
-        .arg(key.to_str().unwrap())
-        .arg("-out")
-        .arg(cert.to_str().unwrap())
-        .timeout(Duration::from_secs(20));
-    assert!(SystemExec.run(&generate).unwrap().ok());
-    let port = free_port();
-    let server = Cmd::new("openssl")
-        .args(["s_server", "-accept", &format!("127.0.0.1:{port}")])
-        .args(["-cert", cert.to_str().unwrap(), "-key", key.to_str().unwrap()])
-        .args(["-www", "-quiet", "-alpn", "h2,http/1.1"]);
-    let child = SystemExec.spawn(&server).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err() {
-        assert!(std::time::Instant::now() < deadline, "s_server did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    TlsServer {
-        port,
-        cert,
-        _child: child,
-        _dir: dir,
-    }
-}
-
 #[test]
 fn real_openssl_probe_validates_the_certificate() {
     if !have("openssl") {
@@ -370,8 +345,14 @@ fn real_openssl_probe_validates_the_certificate() {
     ctx.exec = Arc::new(SystemExec);
     let cancel = CancelToken::manual();
     let t = Duration::from_secs(5);
-    let ok = tls::probe(&ctx, ("127.0.0.1", server.port, "localhost"), Some(&server.cert), t, &cancel)
-        .unwrap();
+    let ok = tls::probe(
+        &ctx,
+        ("127.0.0.1", server.port, "localhost"),
+        Some(&server.cert),
+        t,
+        &cancel,
+    )
+    .unwrap();
     assert_eq!(ok.protocol.as_deref(), Some("TLSv1.3"));
     assert_eq!(ok.alpn.as_deref(), Some("h2"));
     let expected = crate::render::TlsMaterial::load(&server.cert).unwrap();
@@ -383,7 +364,16 @@ fn real_openssl_probe_validates_the_certificate() {
         t,
         &cancel,
     );
-    assert!(wrong_name.unwrap_err().to_string().starts_with("TLS 探测失败"));
-    let untrusted = tls::probe(&ctx, ("127.0.0.1", server.port, "localhost"), None, t, &cancel);
+    assert!(wrong_name
+        .unwrap_err()
+        .to_string()
+        .starts_with("TLS 探测失败"));
+    let untrusted = tls::probe(
+        &ctx,
+        ("127.0.0.1", server.port, "localhost"),
+        None,
+        t,
+        &cancel,
+    );
     assert!(untrusted.is_err());
 }

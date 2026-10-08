@@ -22,7 +22,10 @@ fn v2_select_order_and_default_tcp_quic_pair() {
         entry("tcp", Core::Singbox, Tcp),
         entry("more", Core::Singbox, Tcp),
     ]);
-    assert_eq!(ids(&select(&b, None, Selection::Pair).unwrap()), ["tcp", "quic"]);
+    assert_eq!(
+        ids(&select(&b, None, Selection::Pair).unwrap()),
+        ["tcp", "quic"]
+    );
     assert_eq!(
         ids(&select(&b, Some(&strings(&["more", "tcp"])), Selection::All).unwrap()),
         ["more", "tcp"]
@@ -57,18 +60,30 @@ fn default_selections() {
         entry("b", Core::Singbox, Tcp),
     ]);
     // An all-TCP bundle yields one entry (failover then needs --entries).
-    assert_eq!(ids(&select(&all_tcp, None, Selection::Pair).unwrap()), ["a"]);
-    assert_eq!(ids(&select(&all_tcp, None, Selection::All).unwrap()), ["a", "b"]);
+    assert_eq!(
+        ids(&select(&all_tcp, None, Selection::Pair).unwrap()),
+        ["a"]
+    );
+    assert_eq!(
+        ids(&select(&all_tcp, None, Selection::All).unwrap()),
+        ["a", "b"]
+    );
     let both = bundle(vec![
         entry("ss", Core::Singbox, Both),
         entry("hy", Core::Singbox, Udp),
     ]);
-    assert_eq!(ids(&select(&both, None, Selection::Pair).unwrap()), ["ss", "hy"]);
+    assert_eq!(
+        ids(&select(&both, None, Selection::Pair).unwrap()),
+        ["ss", "hy"]
+    );
     let udp_only = bundle(vec![
         entry("hy", Core::Singbox, Udp),
         entry("tuic", Core::Singbox, Udp),
     ]);
-    assert_eq!(ids(&select(&udp_only, None, Selection::Pair).unwrap()), ["hy"]);
+    assert_eq!(
+        ids(&select(&udp_only, None, Selection::Pair).unwrap()),
+        ["hy"]
+    );
 }
 
 #[test]
@@ -80,7 +95,11 @@ fn merge_prefixes_by_input_position() {
     let second = bundle(vec![entry("vless-reality", Core::Xray, Tcp)]);
     let merged = merge(&[first, second]).unwrap();
     assert_eq!(
-        merged.entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        merged
+            .entries
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
         ["n1-vless-reality", "n1-hysteria2", "n2-vless-reality"]
     );
     assert_eq!(merged.entries[2].core, Core::Xray);
@@ -130,7 +149,10 @@ fn private_outputs_never_overwrite_or_follow_symlinks() {
     assert!(err.to_string().starts_with("目标已存在"), "{err}");
     let link = dir.join("link.json");
     std::os::unix::fs::symlink(dir.join("absent.json"), &link).unwrap();
-    assert!(write_private(&link, "{}").is_err(), "dangling symlink refused");
+    assert!(
+        write_private(&link, "{}").is_err(),
+        "dangling symlink refused"
+    );
     assert!(!dir.join("absent.json").exists());
 }
 
@@ -157,5 +179,8 @@ fn export_reads_the_installed_node() {
     assert_eq!(local.entries[0].reality.clone().unwrap().host, "127.0.0.1");
     let text = json_text(&public.to_value().unwrap()).unwrap();
     let private = cfg.creds.reality.as_ref().unwrap().private_key.clone();
-    assert!(!text.contains(&private), "server private key never exported");
+    assert!(
+        !text.contains(&private),
+        "server private key never exported"
+    );
 }

@@ -128,7 +128,16 @@ mod tests {
 
     #[test]
     fn reports_serialize_sorted_with_a_trailing_newline() {
-        let report = Report::new(BENCH_SCOPE, BENCH_NOTE, vec![Row { id: "x", b: 2, a: 1 }], false);
+        let report = Report::new(
+            BENCH_SCOPE,
+            BENCH_NOTE,
+            vec![Row {
+                id: "x",
+                b: 2,
+                a: 1,
+            }],
+            false,
+        );
         let text = report.text().unwrap();
         assert!(text.ends_with("}\n") && !text.ends_with("\n\n"));
         let keys: Vec<&str> = text
@@ -138,7 +147,16 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["cancelled", "entries", "a", "b", "id", "note", "schema", "scope"]
+            [
+                "cancelled",
+                "entries",
+                "a",
+                "b",
+                "id",
+                "note",
+                "schema",
+                "scope"
+            ]
         );
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
@@ -156,7 +174,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
         let err = publish("{}\n", Some(&path)).unwrap_err();
         assert!(
-            err.to_string().starts_with("报告已打印，但保存失败: 目标已存在"),
+            err.to_string()
+                .starts_with("报告已打印，但保存失败: 目标已存在"),
             "{err}"
         );
         publish("{}\n", None).unwrap();
@@ -178,12 +197,27 @@ mod tests {
         };
         let cases = [
             (Tool::Bench, o(false, false, false), 0, ""),
-            (Tool::Bench, o(false, true, false), 1, "部分入口测试失败，详见 JSON 报告"),
+            (
+                Tool::Bench,
+                o(false, true, false),
+                1,
+                "部分入口测试失败，详见 JSON 报告",
+            ),
             (Tool::Bench, o(true, true, false), 130, "测试已取消"),
             (Tool::Bench, o(false, false, true), 0, ""),
             (Tool::Reality, o(false, false, true), 2, REALITY_WARNINGS),
-            (Tool::Reality, o(false, true, true), 1, "REALITY 检查失败，详见 JSON 报告"),
-            (Tool::Reality, o(true, false, true), 130, "REALITY 检查已取消"),
+            (
+                Tool::Reality,
+                o(false, true, true),
+                1,
+                "REALITY 检查失败，详见 JSON 报告",
+            ),
+            (
+                Tool::Reality,
+                o(true, false, true),
+                130,
+                "REALITY 检查已取消",
+            ),
         ];
         for (tool, outcome, exit, message) in cases {
             assert_eq!(

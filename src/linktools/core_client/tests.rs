@@ -143,7 +143,10 @@ fn core_messages_are_shown_without_credentials() {
         "Failed to start: *** invalid"
     );
     let long = Output::failure(1, "x".repeat(500));
-    assert_eq!(redacted_detail(&long, &secrets).chars().count(), DETAIL_CHARS);
+    assert_eq!(
+        redacted_detail(&long, &secrets).chars().count(),
+        DETAIL_CHARS
+    );
 }
 
 /// Reads the port and token of the config named by a check command.
@@ -205,20 +208,32 @@ fn a_core_is_ready_once_its_socks_login_works() {
             Ok(Output::success(""))
         },
     )
-    .on_spawn("sing-box", &["run"], FakeLife::UntilKilled, Output::default());
+    .on_spawn(
+        "sing-box",
+        &["run"],
+        FakeLife::UntilKilled,
+        Output::default(),
+    );
     let core = start(&ctx, &CancelToken::manual()).unwrap();
     assert!(inbound.lock().unwrap().take().unwrap().join().unwrap());
     assert_eq!(core.endpoint().token.len(), 48);
     assert!(core.endpoint().token.bytes().all(|b| b.is_ascii_hexdigit()));
     assert_eq!(core.exited(), None);
-    assert_eq!(core.resources(), Resources::default(), "fake pid has no /proc");
+    assert_eq!(
+        core.resources(),
+        Resources::default(),
+        "fake pid has no /proc"
+    );
     let run = exec.calls().pop().unwrap();
     assert_eq!(run.args[..2], ["run", "-c"]);
     let config = PathBuf::from(&run.args[2]);
     let mode = fs::metadata(&config).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
     let work = config.parent().unwrap().to_path_buf();
-    assert_eq!(fs::metadata(&work).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(
+        fs::metadata(&work).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
     core.terminate();
     assert_eq!(exec.signals(), [(core.pid(), libc::SIGTERM)]);
     assert!(core.exited().is_some());
@@ -230,7 +245,11 @@ fn a_core_is_ready_once_its_socks_login_works() {
 fn startup_failures_are_distinguished() {
     let dir = TempDir::new("linktools-test").unwrap();
     let (ctx, exec, _) = Ctx::test(dir.path());
-    exec.on("sing-box", &["check"], Output::failure(1, "FATAL unknown field"));
+    exec.on(
+        "sing-box",
+        &["check"],
+        Output::failure(1, "FATAL unknown field"),
+    );
     let err = start(&ctx, &CancelToken::manual()).err().unwrap();
     assert_eq!(
         err.to_string(),
@@ -239,13 +258,23 @@ fn startup_failures_are_distinguished() {
 
     let (ctx, exec, _) = Ctx::test(dir.path());
     exec.on("sing-box", &["check"], Output::success(""))
-        .on_spawn("sing-box", &["run"], FakeLife::Exits, Output::failure(2, ""));
+        .on_spawn(
+            "sing-box",
+            &["run"],
+            FakeLife::Exits,
+            Output::failure(2, ""),
+        );
     let err = start(&ctx, &CancelToken::manual()).err().unwrap();
     assert_eq!(err.to_string(), "客户端内核启动失败（退出码 2）");
 
     let (ctx, exec, _) = Ctx::test(dir.path());
     exec.on("sing-box", &["check"], Output::success(""))
-        .on_spawn("sing-box", &["run"], FakeLife::UntilKilled, Output::default());
+        .on_spawn(
+            "sing-box",
+            &["run"],
+            FakeLife::UntilKilled,
+            Output::default(),
+        );
     let err = start(&ctx, &CancelToken::manual()).err().unwrap();
     assert_eq!(err.to_string(), "客户端内核启动超时");
     // Cancelled while waiting for readiness.
@@ -259,7 +288,11 @@ fn startup_failures_are_distinguished() {
     timer.join().unwrap();
     assert!(err.is_cancelled(), "{err}");
     let killed = exec.signals();
-    assert_eq!(killed.len(), 2, "both unready cores were stopped: {killed:?}");
+    assert_eq!(
+        killed.len(),
+        2,
+        "both unready cores were stopped: {killed:?}"
+    );
 }
 
 #[test]
@@ -268,22 +301,20 @@ fn a_port_lost_to_another_process_is_retried() {
     let (ctx, exec, _) = Ctx::test(dir.path());
     let held = Arc::new(Mutex::new(Vec::new()));
     let thief = held.clone();
-    exec.on("sing-box", &["check"], Output::success(""))
-        .on_fn(
-            |cmd| cmd.args.first().is_some_and(|a| a == "run"),
-            move |cmd| {
-                // Another process grabs the port between reservation and bind.
-                let path = &cmd.args[2];
-                let config: Value =
-                    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-                let port = config["inbounds"][0]["listen_port"].as_u64().unwrap() as u16;
-                thief
-                    .lock()
-                    .unwrap()
-                    .push(TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap());
-                Ok(Output::failure(1, "listen: address already in use"))
-            },
-        );
+    exec.on("sing-box", &["check"], Output::success("")).on_fn(
+        |cmd| cmd.args.first().is_some_and(|a| a == "run"),
+        move |cmd| {
+            // Another process grabs the port between reservation and bind.
+            let path = &cmd.args[2];
+            let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            let port = config["inbounds"][0]["listen_port"].as_u64().unwrap() as u16;
+            thief
+                .lock()
+                .unwrap()
+                .push(TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap());
+            Ok(Output::failure(1, "listen: address already in use"))
+        },
+    );
     let err = start(&ctx, &CancelToken::manual()).err().unwrap();
     assert_eq!(err.to_string(), "客户端内核启动失败：本机端口被占用");
     assert_eq!(held.lock().unwrap().len(), START_ATTEMPTS);

@@ -181,8 +181,9 @@ pub fn serve(
     cancel: &CancelToken,
     emit: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<()> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, svc.port))
-        .map_err(|e| Error::io(format!("127.0.0.1:{}", svc.port), e).wrap("无法监听本机 SOCKS5 端口"))?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, svc.port)).map_err(|e| {
+        Error::io(format!("127.0.0.1:{}", svc.port), e).wrap("无法监听本机 SOCKS5 端口")
+    })?;
     listener.set_nonblocking(true)?;
     let active = Active::default();
     let slots = Slots::new(svc.max_clients);
@@ -249,11 +250,13 @@ fn accept_loop<'scope>(
 
 /// Accept errors that say nothing about the listener itself.
 fn transient(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted)
-        || matches!(
-            e.raw_os_error(),
-            Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM | libc::EPROTO)
-        )
+    matches!(
+        e.kind(),
+        io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+    ) || matches!(
+        e.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM | libc::EPROTO)
+    )
 }
 
 /// Health rounds and events until cancelled.

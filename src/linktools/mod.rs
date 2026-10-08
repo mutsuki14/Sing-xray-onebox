@@ -57,4 +57,6 @@ pub mod url;
 pub use cli::{BENCH, COMMANDS, FAILOVER, PROBE, REALITY_CHECK};
 
 #[cfg(test)]
+mod e2e;
+#[cfg(test)]
 pub(crate) mod testutil;

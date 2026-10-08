@@ -188,7 +188,10 @@ fn stats_come_from_the_last_record() {
         ("", "HTTP 请求没有返回统计"),
         ("ONEBOX_STATS:{bad", "HTTP 请求统计无效"),
         ("ONEBOX_STATS:{\"status\":200}", "HTTP 请求统计无效"),
-        ("ONEBOX_STATS:{\"status\":-1,\"setup\":0,\"ttfb\":0,\"duration\":0,\"sent\":0}", "HTTP 请求统计无效"),
+        (
+            "ONEBOX_STATS:{\"status\":-1,\"setup\":0,\"ttfb\":0,\"duration\":0,\"sent\":0}",
+            "HTTP 请求统计无效",
+        ),
     ] {
         assert_eq!(parse_stats(text).unwrap_err().to_string(), message);
     }
@@ -257,7 +260,13 @@ fn results_round_like_v2() {
     let r = result(&stats, body, String::new());
     assert!(r.ok);
     assert_eq!(
-        (r.setup_ms, r.ttfb_ms, r.total_ms, r.download_mbps, r.upload_mbps),
+        (
+            r.setup_ms,
+            r.ttfb_ms,
+            r.total_ms,
+            r.download_mbps,
+            r.upload_mbps
+        ),
         (160.0, 190.0, 812.0, 41.323, 0.0)
     );
     let zero = CurlStats {
@@ -342,10 +351,25 @@ fn scripted_measurements() {
     assert_eq!(Measurement::Done(r).ok_ttfb(), Some(200.0));
 
     let refused = url("https://h/refused");
-    let m = safe_measure(&ctx, &HttpRequest { url: &refused, ..req }, &cancel);
+    let m = safe_measure(
+        &ctx,
+        &HttpRequest {
+            url: &refused,
+            ..req
+        },
+        &cancel,
+    );
     assert_eq!(m, Measurement::Failed("HTTP 请求没有返回统计".into()));
     let silent = url("https://h/silent");
-    let err = measure(&ctx, &HttpRequest { url: &silent, ..req }, &cancel).unwrap_err();
+    let err = measure(
+        &ctx,
+        &HttpRequest {
+            url: &silent,
+            ..req
+        },
+        &cancel,
+    )
+    .unwrap_err();
     assert_eq!(err.to_string(), "HTTP 请求没有返回统计");
     assert!(!m.ok() && m.ok_ttfb().is_none());
 }
@@ -443,7 +467,9 @@ fn real_curl_caps_bodies_and_reports_status() {
         return;
     }
     let (_dir, ctx) = real_ctx();
-    let head = |code| format!("HTTP/1.1 {code} Test\r\nContent-Length: 200000\r\nConnection: close\r\n\r\n");
+    let head = |code| {
+        format!("HTTP/1.1 {code} Test\r\nContent-Length: 200000\r\nConnection: close\r\n\r\n")
+    };
     let (port, worker) = serve(vec![(head(200), 200_000), (head(503), 200_000)]);
     let u = local_url(port, "/");
     let req = HttpRequest {
@@ -513,7 +539,9 @@ fn real_curl_uploads_the_exact_size() {
             .unwrap();
         let head = read_head(&mut stream);
         assert!(head.starts_with("POST /upload HTTP/1.1\r\n"), "{head}");
-        let length = header_value(&head, "content-length").parse::<usize>().unwrap();
+        let length = header_value(&head, "content-length")
+            .parse::<usize>()
+            .unwrap();
         assert_eq!(length, 4096);
         let mut payload = vec![0; length];
         stream.read_exact(&mut payload).unwrap();
@@ -594,14 +622,20 @@ fn real_curl_logs_in_to_the_proxy_from_stdin() {
         client.read_exact(&mut len).unwrap();
         let mut password = vec![0u8; usize::from(len[0])];
         client.read_exact(&mut password).unwrap();
-        assert_eq!((user.as_slice(), password), (&b"onebox-"[..], token.into_bytes()));
+        assert_eq!(
+            (user.as_slice(), password),
+            (&b"onebox-"[..], token.into_bytes())
+        );
         client.write_all(&[1, 0]).unwrap();
         let mut request = [0u8; 4];
         client.read_exact(&mut request).unwrap();
         let host = crate::linktools::socks::read_address(&mut client, request[3]).unwrap();
         let mut port = [0u8; 2];
         client.read_exact(&mut port).unwrap();
-        assert_eq!(host, "localhost", "socks5h: the name is not resolved by curl");
+        assert_eq!(
+            host, "localhost",
+            "socks5h: the name is not resolved by curl"
+        );
         let mut upstream =
             TcpStream::connect((Ipv4Addr::LOCALHOST, u16::from_be_bytes(port))).unwrap();
         client

@@ -83,7 +83,13 @@ fn failures_are_counted_per_sample() {
         samples: 5,
         ..BenchOptions::default()
     };
-    let (report, outcome) = bench(&ctx, &FakeLauncher::new(42000), &[&e], &opts, &CancelToken::manual());
+    let (report, outcome) = bench(
+        &ctx,
+        &FakeLauncher::new(42000),
+        &[&e],
+        &opts,
+        &CancelToken::manual(),
+    );
     assert!(outcome.failed);
     let row = &report.entries[0];
     assert_eq!(row.request_failure_rate, Some(0.6));
@@ -96,7 +102,10 @@ fn failures_are_counted_per_sample() {
         }))
     );
     let samples = to_value(row.samples.as_ref().unwrap());
-    assert_eq!(samples[1], json!({"ok": false, "setup_ms": 25.0, "status": 503, "ttfb_ms": 50.0}));
+    assert_eq!(
+        samples[1],
+        json!({"ok": false, "setup_ms": 25.0, "status": 503, "ttfb_ms": 50.0})
+    );
     assert_eq!(
         samples[2],
         json!({"error": "request_failed", "ok": false,
@@ -131,7 +140,13 @@ fn transfers_sample_latency_under_load_each() {
         ..BenchOptions::default()
     };
     let e = entry("anytls", Core::Singbox, Transport::Tcp);
-    let (report, outcome) = bench(&ctx, &FakeLauncher::new(43000), &[&e], &opts, &CancelToken::manual());
+    let (report, outcome) = bench(
+        &ctx,
+        &FakeLauncher::new(43000),
+        &[&e],
+        &opts,
+        &CancelToken::manual(),
+    );
     assert!(outcome.failed, "the upload failed");
     let row = to_value(&report.entries[0]);
     let loaded = json!({"median": 100.0, "p95": 100.0});
@@ -166,10 +181,16 @@ fn cancellation_stops_between_entries_and_reports_it() {
     let (report, outcome) = bench(&ctx, &launcher, &[&a, &b], &opts(), &cancel);
     assert!(outcome.cancelled && report.cancelled);
     assert_eq!(report.entries.len(), 1, "b never started");
-    assert_eq!(report.entries[0].error_detail.as_deref(), Some("测试已停止"));
+    assert_eq!(
+        report.entries[0].error_detail.as_deref(),
+        Some("测试已停止")
+    );
     assert_eq!(launcher.launched().len(), 1);
     let exit = conclude(Tool::Bench, outcome, Ok(())).unwrap_err();
-    assert_eq!((exit.exit_code(), exit.to_string()), (130, "测试已取消".to_string()));
+    assert_eq!(
+        (exit.exit_code(), exit.to_string()),
+        (130, "测试已取消".to_string())
+    );
 
     let cancel = CancelToken::manual();
     cancel.cancel();
@@ -195,5 +216,8 @@ fn the_cli_entry_point_validates_before_starting() {
         ..BenchOptions::default()
     };
     let err = run(&ctx, &opts).unwrap_err();
-    assert_eq!(err.to_string(), "--entries 包含未知 ID（先执行 probe list）");
+    assert_eq!(
+        err.to_string(),
+        "--entries 包含未知 ID（先执行 probe list）"
+    );
 }

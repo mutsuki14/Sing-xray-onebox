@@ -25,11 +25,23 @@ fn defaults_are_v2s() {
             ..BenchOptions::default()
         }
     );
-    assert_eq!(bench.common.url.as_str(), "https://www.gstatic.com/generate_204");
-    assert_eq!((bench.common.timeout, bench.samples, bench.bytes), (8, 5, 4_194_304));
+    assert_eq!(
+        bench.common.url.as_str(),
+        "https://www.gstatic.com/generate_204"
+    );
+    assert_eq!(
+        (bench.common.timeout, bench.samples, bench.bytes),
+        (8, 5, 4_194_304)
+    );
     let failover = FailoverOptions::from_matches(&matches(&["p"], &[])).unwrap();
     assert_eq!(
-        (failover.port, failover.interval, failover.failures, failover.recoveries, failover.cooldown),
+        (
+            failover.port,
+            failover.interval,
+            failover.failures,
+            failover.recoveries,
+            failover.cooldown
+        ),
         (2080, 15, 3, 3, 60)
     );
     let reality = RealityOptions::from_matches(&matches(&["p"], &[])).unwrap();
@@ -54,8 +66,14 @@ fn every_flag_is_read() {
         ],
     );
     let o = BenchOptions::from_matches(&m).unwrap();
-    assert_eq!(o.common.entries, Some(vec!["a".to_string(), " b".to_string()]));
-    assert_eq!(o.common.binaries.singbox, Some(PathBuf::from("/x/sing-box")));
+    assert_eq!(
+        o.common.entries,
+        Some(vec!["a".to_string(), " b".to_string()])
+    );
+    assert_eq!(
+        o.common.binaries.singbox,
+        Some(PathBuf::from("/x/sing-box"))
+    );
     assert_eq!(o.common.binaries.xray, Some(PathBuf::from("/x/xray")));
     assert_eq!(o.common.url.port(), 8080);
     assert_eq!((o.common.timeout, o.samples, o.bytes), (60, 20, 1024));
@@ -87,7 +105,11 @@ fn ranges_are_digits_only_and_name_the_flag() {
         (TIMEOUT, "", "--timeout 必须是 1..60 之间的整数"),
         (SAMPLES, "21", "--samples 必须是 1..20 之间的整数"),
         (BYTES, "1023", "--bytes 必须是 1024..67108864 之间的整数"),
-        (BYTES, "67108865", "--bytes 必须是 1024..67108864 之间的整数"),
+        (
+            BYTES,
+            "67108865",
+            "--bytes 必须是 1024..67108864 之间的整数",
+        ),
         (
             TIMEOUT,
             "99999999999999999999999",
@@ -122,16 +144,24 @@ fn scope_rules() {
     let with = |positionals: &[&str], scope: &str| {
         RealityOptions::from_matches(&matches(positionals, &[(SCOPE, scope)]))
     };
-    assert_eq!(with(&["b"], "server-local").unwrap().scope, Scope::ServerLocal);
+    assert_eq!(
+        with(&["b"], "server-local").unwrap().scope,
+        Scope::ServerLocal
+    );
     assert_eq!(
         with(&["b"], "current-machine-to-server").unwrap().scope,
         Scope::CurrentMachineToServer
     );
     assert_eq!(with(&[], "server-local").unwrap().scope, Scope::ServerLocal);
     let local = RealityOptions::from_matches(&matches(&[], &[])).unwrap();
-    assert_eq!((local.scope, local.common.bundle), (Scope::ServerLocal, None));
     assert_eq!(
-        with(&[], "current-machine-to-server").unwrap_err().to_string(),
+        (local.scope, local.common.bundle),
+        (Scope::ServerLocal, None)
+    );
+    assert_eq!(
+        with(&[], "current-machine-to-server")
+            .unwrap_err()
+            .to_string(),
         "省略探测配置时只能执行本机回环检查（--scope server-local）"
     );
     assert_eq!(
@@ -153,12 +183,18 @@ fn outputs_must_be_new_files_in_existing_directories() {
     assert_eq!(err.to_string(), "输出文件已存在；请选择新文件路径");
     let link = dir.join("dangling");
     std::os::unix::fs::symlink(dir.join("nowhere"), &link).unwrap();
-    assert!(check_output(&link).is_err(), "dangling symlink counts as existing");
+    assert!(
+        check_output(&link).is_err(),
+        "dangling symlink counts as existing"
+    );
     let missing = dir.join("no/such/dir/r.json");
     let err = check_output(&missing).unwrap_err();
     assert_eq!(
         err.to_string(),
-        format!("输出文件所在目录不存在: {}", dir.join("no/such/dir").display())
+        format!(
+            "输出文件所在目录不存在: {}",
+            dir.join("no/such/dir").display()
+        )
     );
     assert!(check_output(Path::new("onebox-surely-absent-report.json")).is_ok());
 }

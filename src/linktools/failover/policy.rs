@@ -47,7 +47,11 @@ impl FailoverPolicy {
     pub fn update(&mut self, results: &[bool], now: f64) -> Option<usize> {
         let results = &results[..results.len().min(self.good.len())];
         for (i, &ok) in results.iter().enumerate() {
-            self.good[i] = if ok { self.good[i].saturating_add(1) } else { 0 };
+            self.good[i] = if ok {
+                self.good[i].saturating_add(1)
+            } else {
+                0
+            };
             self.bad[i] = if ok { 0 } else { self.bad[i].saturating_add(1) };
             if ok && (self.last_switch.is_none() || self.good[i] >= self.recoveries) {
                 self.available[i] = true;
@@ -159,6 +163,10 @@ mod tests {
         assert_eq!(p.update(&[true], 0.0), Some(0));
         assert_eq!(p.update(&[false, true], 1.0), Some(1));
         assert_eq!(p.update(&[], 2.0), Some(1), "no evidence, no change");
-        assert_eq!(p.update(&[true, true, true, true], 3.0), Some(0), "extra ignored");
+        assert_eq!(
+            p.update(&[true, true, true, true], 3.0),
+            Some(0),
+            "extra ignored"
+        );
     }
 }

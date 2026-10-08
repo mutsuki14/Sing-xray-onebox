@@ -178,7 +178,9 @@ pub fn run(ctx: &Ctx, opts: &BenchOptions) -> Result<()> {
         timing: Timing::default(),
     };
     let (report, outcome) = bench(ctx, &launcher, &entries, opts, cancel);
-    let published = report.text().and_then(|t| publish(&t, opts.output.as_deref()));
+    let published = report
+        .text()
+        .and_then(|t| publish(&t, opts.output.as_deref()));
     conclude(Tool::Bench, outcome, published)
 }
 

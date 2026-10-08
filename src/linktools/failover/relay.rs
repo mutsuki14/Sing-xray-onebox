@@ -233,7 +233,10 @@ mod tests {
         let quiet = CancelToken::manual();
         relay(left, right, &quiet, Duration::from_millis(1500)).unwrap();
         let took = started.elapsed();
-        assert!(took >= Duration::from_millis(1500) && took < Duration::from_secs(5), "{took:?}");
+        assert!(
+            took >= Duration::from_millis(1500) && took < Duration::from_secs(5),
+            "{took:?}"
+        );
     }
 
     #[test]

@@ -54,7 +54,8 @@ impl TestUrl {
 
     pub fn parse(url: &str) -> Result<TestUrl> {
         ensure!(
-            !url.bytes().any(|b| b <= b' ' || b == 0x7f || b == b'#' || b == b'\\'),
+            !url.bytes()
+                .any(|b| b <= b' ' || b == 0x7f || b == b'#' || b == b'\\'),
             "测试 URL 包含空白、片段或控制字符"
         );
         let (scheme, rest) = url
@@ -125,7 +126,10 @@ fn split_authority(authority: &str, default_port: u16) -> Result<(String, u16)> 
         Some((host, port)) => (host, parse_port(port)?),
         None => (authority, default_port),
     };
-    ensure!(valid_host(host), "URL 主机名无效（国际域名请使用 Punycode）");
+    ensure!(
+        valid_host(host),
+        "URL 主机名无效（国际域名请使用 Punycode）"
+    );
     Ok((host.to_owned(), port))
 }
 
@@ -158,7 +162,10 @@ mod tests {
             ("file:///etc/passwd", "测试 URL 必须为 HTTP(S)"),
             ("HTTPS://x/", "测试 URL 必须为 HTTP(S)"),
             ("example.org/x", "测试 URL 必须为 HTTP(S)"),
-            ("https://a:b@example.org", "测试 URL 不得包含账号，且必须有主机名"),
+            (
+                "https://a:b@example.org",
+                "测试 URL 不得包含账号，且必须有主机名",
+            ),
             ("https:///path", "测试 URL 不得包含账号，且必须有主机名"),
             ("https://x/#frag", "测试 URL 包含空白、片段或控制字符"),
             (
@@ -176,7 +183,10 @@ mod tests {
             ("https://[fe80::1%25eth0]/", "IPv6 URL 地址无效"),
             ("https://[nope]/", "IPv6 URL 地址无效"),
             ("https://::1/", "URL 主机名无效（国际域名请使用 Punycode）"),
-            ("https://例子.cn/", "URL 主机名无效（国际域名请使用 Punycode）"),
+            (
+                "https://例子.cn/",
+                "URL 主机名无效（国际域名请使用 Punycode）",
+            ),
             ("https://a*b/", "URL 主机名无效（国际域名请使用 Punycode）"),
         ];
         for (url, message) in cases {
@@ -190,10 +200,20 @@ mod tests {
         let cases = [
             ("https://[::1]:8443/path?q=1", Scheme::Https, "::1", 8443),
             ("http://localhost/", Scheme::Http, "localhost", 80),
-            ("https://www.gstatic.com/generate_204", Scheme::Https, "www.gstatic.com", 443),
+            (
+                "https://www.gstatic.com/generate_204",
+                Scheme::Https,
+                "www.gstatic.com",
+                443,
+            ),
             ("https://[2001:db8::1]", Scheme::Https, "2001:db8::1", 443),
             ("http://127.0.0.1:8080?x=1", Scheme::Http, "127.0.0.1", 8080),
-            ("https://a_b.example:443/", Scheme::Https, "a_b.example", 443),
+            (
+                "https://a_b.example:443/",
+                Scheme::Https,
+                "a_b.example",
+                443,
+            ),
         ];
         for (text, scheme, host, port) in cases {
             let url = TestUrl::parse(text).unwrap();

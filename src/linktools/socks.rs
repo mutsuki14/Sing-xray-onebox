@@ -102,7 +102,10 @@ pub fn login<S: Read + Write>(stream: &mut S, token: &str) -> Result<()> {
     auth.push(password);
     auth.extend_from_slice(token.as_bytes());
     stream.write_all(&auth)?;
-    ensure!(read_array::<2>(stream)? == [AUTH_VERSION, 0], "SOCKS 认证失败");
+    ensure!(
+        read_array::<2>(stream)? == [AUTH_VERSION, 0],
+        "SOCKS 认证失败"
+    );
     Ok(())
 }
 
@@ -266,7 +269,9 @@ pub(crate) mod tests {
             (
                 "::1",
                 8080,
-                &[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90],
+                &[
+                    4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90,
+                ],
             ),
         ];
         for (host, port, bytes) in cases {
@@ -284,7 +289,9 @@ pub(crate) mod tests {
         let replies: [&[u8]; 3] = [
             &[5, 0, 0, 1, 0, 0, 0, 0, 0, 0],
             &[5, 0, 0, 3, 1, b'x', 0, 1],
-            &[5, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1],
+            &[
+                5, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1,
+            ],
         ];
         for reply in replies {
             let mut stream = Duplex::new(reply);
@@ -316,7 +323,9 @@ pub(crate) mod tests {
                 },
             ),
             (
-                &[5, 1, 0, 5, 1, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 22],
+                &[
+                    5, 1, 0, 5, 1, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 22,
+                ],
                 Target {
                     host: "::1".into(),
                     port: 22,

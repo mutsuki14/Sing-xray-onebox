@@ -28,7 +28,7 @@ pub fn distribution(values: &[f64]) -> Option<Distribution> {
     sorted.sort_by(f64::total_cmp);
     let n = sorted.len();
     let middle = n / 2;
-    let median = if n % 2 == 0 {
+    let median = if n.is_multiple_of(2) {
         (sorted[middle - 1] + sorted[middle]) / 2.0
     } else {
         sorted[middle]
@@ -50,7 +50,10 @@ mod tests {
     #[test]
     fn v2_golden_distribution() {
         let d = distribution(&[4.0, 1.0, 2.0, 3.0]).unwrap();
-        assert_eq!(serde_json::to_value(d).unwrap(), json!({"median":2.5,"p95":4.0}));
+        assert_eq!(
+            serde_json::to_value(d).unwrap(),
+            json!({"median":2.5,"p95":4.0})
+        );
         assert_eq!(distribution(&[]), None);
     }
 

@@ -190,11 +190,17 @@ mod tests {
              -verify_hostname www.example.com -verify_return_error -tls1_3 -alpn h2,http/1.1 \
              -showcerts -no_ign_eof"
         );
-        let cmd = s_client_command("2001:db8::1", 8443, "a.example", Some(Path::new("/ca.pem")))
-            .unwrap();
+        let cmd =
+            s_client_command("2001:db8::1", 8443, "a.example", Some(Path::new("/ca.pem"))).unwrap();
         assert!(cmd.display().contains("-connect [2001:db8::1]:8443 "));
         assert!(cmd.display().ends_with("-no_ign_eof -CAfile /ca.pem"));
-        for (host, sni) in [("", "a"), ("h", ""), ("h", "-x"), ("h o", "a"), ("h", "a\nb")] {
+        for (host, sni) in [
+            ("", "a"),
+            ("h", ""),
+            ("h", "-x"),
+            ("h o", "a"),
+            ("h", "a\nb"),
+        ] {
             let err = s_client_command(host, 1, sni, None).unwrap_err();
             assert_eq!(err.to_string(), "TLS 探测目标无效", "{host:?} {sni:?}");
         }
@@ -217,10 +223,16 @@ mod tests {
         assert_eq!(plain.alpn, None);
         let newline_only = "New, TLSv1.2, Cipher is X\n".to_owned() + &pem;
         assert_eq!(protocol(&newline_only).as_deref(), Some("TLSv1.2"));
-        assert_eq!(protocol("Protocol version: TLSv1.3\n").as_deref(), Some("TLSv1.3"));
+        assert_eq!(
+            protocol("Protocol version: TLSv1.3\n").as_deref(),
+            Some("TLSv1.3")
+        );
         let cases = [
             ("CONNECTED\nno certificate\n".to_owned(), "TLS 响应缺少证书"),
-            (format!("{BEGIN}\n!!!\n-----END CERTIFICATE-----\n"), "TLS 响应证书无效"),
+            (
+                format!("{BEGIN}\n!!!\n-----END CERTIFICATE-----\n"),
+                "TLS 响应证书无效",
+            ),
             (format!("{BEGIN}\nMAMCAQE=\n"), "TLS 响应证书无效"),
             ("x".repeat(MAX_OUTPUT + 1), "TLS 响应过大"),
         ];
@@ -247,20 +259,34 @@ mod tests {
         let pem = cert();
         let ok = s_client_output(&pem, Some("h2"));
         let old = ok.replace("TLSv1.3", "TLSv1.2");
-        exec.on("openssl", &["s_client", "-connect", "ok:443"], Output::success(ok))
-            .on("openssl", &["s_client", "-connect", "old:443"], Output::success(old))
-            .on(
-                "openssl",
-                &["s_client", "-connect", "bad:443"],
-                Output::failure(1, "40F7:error:0A000086:SSL routines::certificate verify failed\n"),
-            );
+        exec.on(
+            "openssl",
+            &["s_client", "-connect", "ok:443"],
+            Output::success(ok),
+        )
+        .on(
+            "openssl",
+            &["s_client", "-connect", "old:443"],
+            Output::success(old),
+        )
+        .on(
+            "openssl",
+            &["s_client", "-connect", "bad:443"],
+            Output::failure(
+                1,
+                "40F7:error:0A000086:SSL routines::certificate verify failed\n",
+            ),
+        );
         let cancel = CancelToken::manual();
         let t = Duration::from_secs(2);
         let probe = probe_at(&ctx, "ok", t, &cancel).unwrap();
         assert_eq!(probe.alpn.as_deref(), Some("h2"));
         assert_eq!(exec.calls()[0].timeout, Some(t));
         let err = probe_at(&ctx, "old", t, &cancel).unwrap_err();
-        assert_eq!(err.to_string(), "TLS 探测失败: 协商的协议为 TLSv1.2，不是 TLS 1.3");
+        assert_eq!(
+            err.to_string(),
+            "TLS 探测失败: 协商的协议为 TLSv1.2，不是 TLS 1.3"
+        );
         let err = probe_at(&ctx, "bad", t, &cancel).unwrap_err();
         assert_eq!(
             err.to_string(),

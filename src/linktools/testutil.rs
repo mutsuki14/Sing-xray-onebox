@@ -131,6 +131,79 @@ pub fn to_value<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap()
 }
 
+/// A free loopback TCP port (bound and released; racy but fine in tests).
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Wait until something accepts TCP connections on `port`.
+pub fn wait_listening(port: u16) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nothing listens on {port}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A local `openssl s_server` (TLS 1.3, ALPN h2/http1.1, `-www`) for
+/// `localhost`, whose self-signed certificate is its own CA file.
+pub struct TlsServer {
+    pub port: u16,
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    _child: Mutex<Box<dyn crate::sys::exec::RunningChild>>,
+    _dir: crate::sys::fs::TempDir,
+}
+
+pub fn tls_server() -> TlsServer {
+    use crate::sys::exec::{Exec, SystemExec};
+    let dir = crate::sys::fs::TempDir::new("linktools-tls").unwrap();
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    let generate = Cmd::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+        ])
+        .args(["-nodes", "-days", "1", "-subj", "/CN=localhost"])
+        .args(["-addext", "subjectAltName=DNS:localhost", "-keyout"])
+        .arg(key.to_str().unwrap())
+        .arg("-out")
+        .arg(cert.to_str().unwrap())
+        .timeout(std::time::Duration::from_secs(20));
+    assert!(SystemExec.run(&generate).unwrap().ok());
+    let port = free_port();
+    let server = Cmd::new("openssl")
+        .args(["s_server", "-accept", &format!("127.0.0.1:{port}")])
+        .args([
+            "-cert",
+            cert.to_str().unwrap(),
+            "-key",
+            key.to_str().unwrap(),
+        ])
+        .args(["-www", "-quiet", "-alpn", "h2,http/1.1"]);
+    let child = SystemExec.spawn(&server).unwrap();
+    wait_listening(port);
+    TlsServer {
+        port,
+        cert,
+        key,
+        _child: Mutex::new(child),
+        _dir: dir,
+    }
+}
+
 /// A launcher of fake proxies: ports are handed out from `base` in launch
 /// order (scripted curl rules match on them); ids in `fail` fail.
 pub struct FakeLauncher {

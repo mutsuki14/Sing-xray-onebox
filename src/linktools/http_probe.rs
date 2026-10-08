@@ -164,7 +164,9 @@ pub fn curl_command(req: &HttpRequest, files: &CurlFiles) -> Result<Cmd> {
         connect_to: Some((host, port)),
     } = req.route
     {
-        cmd = cmd.arg("--connect-to").arg(connect_to(req.url, host, port)?);
+        cmd = cmd
+            .arg("--connect-to")
+            .arg(connect_to(req.url, host, port)?);
     }
     if req.limit > 0 {
         cmd = cmd.arg("--range").arg(format!("0-{}", req.limit - 1));
@@ -409,7 +411,8 @@ fn write_payload(path: &Path, bytes: u64) -> Result<PathBuf> {
     let mut remaining = bytes;
     while remaining > 0 {
         let n = remaining.min(PAYLOAD_BLOCK as u64) as usize;
-        file.write_all(&block[..n]).map_err(|e| Error::io(path, e))?;
+        file.write_all(&block[..n])
+            .map_err(|e| Error::io(path, e))?;
         remaining -= n as u64;
     }
     Ok(path.to_path_buf())
@@ -459,8 +462,7 @@ impl BodySink {
     }
 
     fn finish(mut self) -> Result<BodyRead> {
-        self.close()
-            .unwrap_or_else(|| Ok(BodyRead::empty()))
+        self.close().unwrap_or_else(|| Ok(BodyRead::empty()))
     }
 
     /// Drop our write end and collect the reader (once).

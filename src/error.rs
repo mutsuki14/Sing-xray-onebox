@@ -220,6 +220,11 @@ pub fn report(error: &Error) -> i32 {
             }
         }
         Error::Cancelled => eprintln!("[错误] 输入结束，操作已取消"),
+        // A warnings-only result (reality-check) is not an error (D-8.1#3).
+        Error::Exit {
+            code: EXIT_WARNINGS,
+            message,
+        } => eprintln!("[警告] {message}"),
         _ => eprintln!("[错误] {error}"),
     }
     code
@@ -247,6 +252,13 @@ mod tests {
     fn context_formats_chain() {
         let r: Result<()> = Err(Error::msg("内层")).context("外层");
         assert_eq!(r.unwrap_err().to_string(), "外层: 内层");
+    }
+
+    #[test]
+    fn report_returns_the_exit_code() {
+        assert_eq!(report(&Error::exit(EXIT_WARNINGS, "检查完成，有警告")), 2);
+        assert_eq!(report(&Error::exit(EXIT_CANCELLED, "测试已取消")), 130);
+        assert_eq!(report(&Error::msg("失败")), 1);
     }
 
     #[test]

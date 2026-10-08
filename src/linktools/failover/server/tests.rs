@@ -79,7 +79,9 @@ fn tunnel(mut client: TcpStream, count: &AtomicUsize) -> Result<()> {
 /// origin and read the reply.
 fn ping_via(front: u16, origin: u16) -> std::result::Result<String, Vec<u8>> {
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, front)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.write_all(&[5, 1, 0]).unwrap();
     let mut method = [0u8; 2];
     stream.read_exact(&mut method).unwrap();
@@ -175,7 +177,10 @@ fn no_healthy_entry_is_host_unreachable() {
     let origin = echo_origin();
     let (front, worker) = front_once(None);
     assert_eq!(ping_via(front, origin).unwrap_err(), REPLY_HOST_UNREACHABLE);
-    assert_eq!(worker.join().unwrap().unwrap_err().to_string(), "无健康入口");
+    assert_eq!(
+        worker.join().unwrap().unwrap_err().to_string(),
+        "无健康入口"
+    );
 
     // An upstream that refuses the credential: also 05 04.
     let (upstream, tunnels) = fake_upstream();
@@ -185,7 +190,10 @@ fn no_healthy_entry_is_host_unreachable() {
     };
     let (front, worker) = front_once(Some(wrong));
     assert_eq!(ping_via(front, origin).unwrap_err(), REPLY_HOST_UNREACHABLE);
-    assert_eq!(worker.join().unwrap().unwrap_err().to_string(), "SOCKS 认证失败");
+    assert_eq!(
+        worker.join().unwrap().unwrap_err().to_string(),
+        "SOCKS 认证失败"
+    );
     assert_eq!(tunnels.load(Ordering::SeqCst), 0);
 }
 
@@ -215,7 +223,11 @@ fn harness(count: usize) -> Harness {
 fn wait_for(events: &Mutex<Vec<String>>, needle: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !events.lock().unwrap().iter().any(|e| e.contains(needle)) {
-        assert!(Instant::now() < deadline, "no event {needle}: {:?}", events.lock().unwrap());
+        assert!(
+            Instant::now() < deadline,
+            "no event {needle}: {:?}",
+            events.lock().unwrap()
+        );
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -269,8 +281,14 @@ fn the_service_switches_on_failure_and_stops_cleanly() {
         cancel.cancel();
         served.join().unwrap().unwrap();
     });
-    assert!(h.proxies.iter().all(|p| p.exited().is_some()), "cores stopped");
-    assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(), "listener closed");
+    assert!(
+        h.proxies.iter().all(|p| p.exited().is_some()),
+        "cores stopped"
+    );
+    assert!(
+        TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(),
+        "listener closed"
+    );
 }
 
 #[test]
@@ -307,14 +325,21 @@ fn over_capacity_clients_are_refused_and_bind_errors_reported() {
         let holder = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         thread::sleep(Duration::from_millis(100));
         let mut second = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-        second.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
         let mut reply = [0u8; 2];
         second.read_exact(&mut reply).unwrap();
         assert_eq!(reply, socks::NO_ACCEPTABLE_METHODS);
 
         // A second service cannot bind the same port.
-        let err = serve(&svc, FailoverPolicy::new(2, 3, 3, 60), &CancelToken::manual(), &mut |_| Ok(()))
-            .unwrap_err();
+        let err = serve(
+            &svc,
+            FailoverPolicy::new(2, 3, 3, 60),
+            &CancelToken::manual(),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .starts_with(&format!("无法监听本机 SOCKS5 端口: 127.0.0.1:{port}")),

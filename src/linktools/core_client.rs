@@ -338,7 +338,8 @@ impl ClientCore {
         let config = super::bundle::json_text(&client_config(entry, port, &token))?;
         super::bundle::write_private(&work.join(CONFIG_FILE), &config)?;
 
-        let check = ctx.run(&check_command(entry.core, binary, work.path())?.timeout(timing.check))?;
+        let check =
+            ctx.run(&check_command(entry.core, binary, work.path())?.timeout(timing.check))?;
         if cancel.is_cancelled() {
             return Err(Error::Cancelled.into());
         }
@@ -351,7 +352,9 @@ impl ClientCore {
         }
         // The port stays reserved until just before the core binds it.
         drop(reserve);
-        let mut child = ctx.exec.spawn(&run_command(entry.core, binary, work.path())?)?;
+        let mut child = ctx
+            .exec
+            .spawn(&run_command(entry.core, binary, work.path())?)?;
         let endpoint = SocksEndpoint { port, token };
         match wait_ready(child.as_mut(), &endpoint, cancel, timing) {
             Ok(()) => Ok(ClientCore {

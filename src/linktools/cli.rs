@@ -37,7 +37,8 @@ const URL: OptSpec = OptSpec::value(
 );
 const TIMEOUT: OptSpec = OptSpec::value(o::TIMEOUT, "秒", "连接与请求超时 1..60（默认 8）");
 const CA: OptSpec = OptSpec::value(o::CA, "文件", "自有 CA 证书");
-const OUTPUT: OptSpec = OptSpec::value(o::OUTPUT, "新文件", "同时保存报告（不可已存在，权限 0600）");
+const OUTPUT: OptSpec =
+    OptSpec::value(o::OUTPUT, "新文件", "同时保存报告（不可已存在，权限 0600）");
 const SAMPLES: OptSpec = OptSpec::value(o::SAMPLES, "次数", "健康检测次数 1..20（默认 5）");
 const DOWNLOAD_URL: OptSpec = OptSpec::value(
     o::DOWNLOAD_URL,
@@ -61,11 +62,8 @@ const PORT: OptSpec = OptSpec::value(
 );
 const INTERVAL: OptSpec = OptSpec::value(o::INTERVAL, "秒", "健康检测间隔 1..3600（默认 15）");
 const FAILURES: OptSpec = OptSpec::value(o::FAILURES, "次数", "切换前连续失败次数 1..20（默认 3）");
-const RECOVERIES: OptSpec = OptSpec::value(
-    o::RECOVERIES,
-    "次数",
-    "恢复前连续成功次数 1..20（默认 3）",
-);
+const RECOVERIES: OptSpec =
+    OptSpec::value(o::RECOVERIES, "次数", "恢复前连续成功次数 1..20（默认 3）");
 const COOLDOWN: OptSpec = OptSpec::value(
     o::COOLDOWN,
     "秒",
@@ -181,7 +179,7 @@ fn probe_usage(_ctx: &Ctx, _m: &Matches) -> Result<()> {
     Err(Error::msg(PROBE_USAGE))
 }
 
-fn positional<'a>(m: &'a Matches, index: usize) -> Result<&'a str> {
+fn positional(m: &Matches, index: usize) -> Result<&str> {
     m.positional(index).ok_or_else(|| Error::msg(PROBE_USAGE))
 }
 
@@ -249,7 +247,9 @@ mod tests {
     fn root_is_needed_only_to_read_the_node_state() {
         assert!(root_needed(&["probe", "export", "x.json"]));
         assert!(!root_needed(&["probe", "list", "x.json"]));
-        assert!(!root_needed(&["probe", "merge", "o.json", "a.json", "b.json"]));
+        assert!(!root_needed(&[
+            "probe", "merge", "o.json", "a.json", "b.json"
+        ]));
         assert!(!root_needed(&["bench", "p.json"]));
         assert!(!root_needed(&["failover", "p.json", "--port", "3000"]));
         assert!(!root_needed(&["reality-check", "p.json"]));
@@ -261,17 +261,35 @@ mod tests {
         let dir = TempDir::new("linktools-test").unwrap();
         let (ctx, _, _) = Ctx::test(dir.path());
         let cases = [
-            (&["bench", "p", "--port", "3000"][..], "bench 不支持选项 --port；请执行 onebox bench --help"),
-            (&["failover", "p", "--output", "r"], "failover 不支持选项 --output；请执行 onebox failover --help"),
-            (&["reality-check", "--samples", "3"], "reality-check 不支持选项 --samples；请执行 onebox reality-check --help"),
+            (
+                &["bench", "p", "--port", "3000"][..],
+                "bench 不支持选项 --port；请执行 onebox bench --help",
+            ),
+            (
+                &["failover", "p", "--output", "r"],
+                "failover 不支持选项 --output；请执行 onebox failover --help",
+            ),
+            (
+                &["reality-check", "--samples", "3"],
+                "reality-check 不支持选项 --samples；请执行 onebox reality-check --help",
+            ),
             (&["bench", "p", "q"], "多余的参数: q"),
             (&["bench"], "缺少参数: probe.json"),
-            (&["bench", "p", "--url", "https://a/", "--url", "https://b/"], "重复选项: --url"),
+            (
+                &["bench", "p", "--url", "https://a/", "--url", "https://b/"],
+                "重复选项: --url",
+            ),
             (&["bench", "p", "--timeout"], "--timeout 需要参数"),
             (&["probe"], PROBE_USAGE),
-            (&["probe", "show"], "未知子命令: show；请执行 onebox probe --help"),
+            (
+                &["probe", "show"],
+                "未知子命令: show；请执行 onebox probe --help",
+            ),
             (&["probe", "merge", "o"], "缺少参数: 配置"),
-            (&["bench", "p", "--timeout", "0"], "--timeout 必须是 1..60 之间的整数"),
+            (
+                &["bench", "p", "--timeout", "0"],
+                "--timeout 必须是 1..60 之间的整数",
+            ),
         ];
         for (argv, message) in cases {
             let err = invoke(&ctx, argv).unwrap_err();
@@ -281,15 +299,30 @@ mod tests {
 
     #[test]
     fn help_pages_exist_for_every_tool() {
-        for argv in [&["bench", "--help"][..], &["probe", "--help"], &["probe", "merge", "-h"]] {
+        for argv in [
+            &["bench", "--help"][..],
+            &["probe", "--help"],
+            &["probe", "merge", "-h"],
+        ] {
             let inv = parse(&COMMANDS, &words(argv), Globals::default()).unwrap();
             assert!(inv.help, "{argv:?}");
             let page = command_help(&inv.chain);
             assert!(page.contains("用法:"), "{page}");
         }
-        let inv = parse(&COMMANDS, &words(&["failover", "--help"]), Globals::default()).unwrap();
+        let inv = parse(
+            &COMMANDS,
+            &words(&["failover", "--help"]),
+            Globals::default(),
+        )
+        .unwrap();
         let page = command_help(&inv.chain);
-        for flag in ["--port 端口", "--interval 秒", "--failures 次数", "--recoveries 次数", "--cooldown 秒"] {
+        for flag in [
+            "--port 端口",
+            "--interval 秒",
+            "--failures 次数",
+            "--recoveries 次数",
+            "--cooldown 秒",
+        ] {
             assert!(page.contains(flag), "{flag} in {page}");
         }
     }
@@ -300,19 +333,37 @@ mod tests {
         let (ctx, _, _) = Ctx::test(dir.path());
         let a = dir.join("a.json");
         let b = dir.join("b.json");
-        bundle::write_bundle(&a, &fixture(vec![entry("vless-reality", Core::Singbox, Transport::Tcp)]))
-            .unwrap();
-        bundle::write_bundle(&b, &fixture(vec![entry("hysteria2", Core::Singbox, Transport::Udp)]))
-            .unwrap();
+        bundle::write_bundle(
+            &a,
+            &fixture(vec![entry("vless-reality", Core::Singbox, Transport::Tcp)]),
+        )
+        .unwrap();
+        bundle::write_bundle(
+            &b,
+            &fixture(vec![entry("hysteria2", Core::Singbox, Transport::Udp)]),
+        )
+        .unwrap();
         let path = |p: &std::path::Path| p.to_str().unwrap().to_owned();
         invoke(&ctx, &["probe", "list", &path(&a)]).unwrap();
         let merged = dir.join("all.json");
-        invoke(&ctx, &["probe", "merge", &path(&merged), &path(&a), &path(&b)]).unwrap();
+        invoke(
+            &ctx,
+            &["probe", "merge", &path(&merged), &path(&a), &path(&b)],
+        )
+        .unwrap();
         let text = fs::read_to_string(&merged).unwrap();
         assert!(text.contains("\"n1-vless-reality\"") && text.contains("\"n2-hysteria2\""));
-        let err = invoke(&ctx, &["probe", "merge", &path(&merged), &path(&a), &path(&b)]).unwrap_err();
+        let err = invoke(
+            &ctx,
+            &["probe", "merge", &path(&merged), &path(&a), &path(&b)],
+        )
+        .unwrap_err();
         assert!(err.to_string().starts_with("目标已存在"), "{err}");
-        let err = invoke(&ctx, &["probe", "merge", &path(&dir.join("one.json")), &path(&a)]).unwrap_err();
+        let err = invoke(
+            &ctx,
+            &["probe", "merge", &path(&dir.join("one.json")), &path(&a)],
+        )
+        .unwrap_err();
         assert_eq!(err.to_string(), "probe merge 至少需要两份探测配置");
         let err = invoke(&ctx, &["probe", "export", &path(&dir.join("e.json"))]).unwrap_err();
         assert_eq!(err.to_string(), "尚未安装 Onebox，请先执行 onebox install");

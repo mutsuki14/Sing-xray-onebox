@@ -100,7 +100,9 @@ pub fn run(ctx: &Ctx, opts: &RealityOptions) -> Result<()> {
         cancel,
     };
     let (report, outcome) = checker.check_all(&entries, &mut OsRandom)?;
-    let published = report.text().and_then(|t| publish(&t, opts.output.as_deref()));
+    let published = report
+        .text()
+        .and_then(|t| publish(&t, opts.output.as_deref()));
     conclude(Tool::Reality, outcome, published)
 }
 
@@ -201,7 +203,11 @@ impl Checker<'_> {
             return Ok(());
         }
         ensure!(meta.reference_port != 0, "REALITY 参考端口无效");
-        let reference_target = (meta.reference_host.as_str(), meta.reference_port, meta.sni.as_str());
+        let reference_target = (
+            meta.reference_host.as_str(),
+            meta.reference_port,
+            meta.sni.as_str(),
+        );
         let reference = tls::probe(self.ctx, reference_target, ca, self.timeout(), self.cancel)?;
         row.checks.insert(
             SAME_CERTIFICATE,
