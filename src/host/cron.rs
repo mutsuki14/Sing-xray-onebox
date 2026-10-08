@@ -336,7 +336,7 @@ impl Crontab {
     /// Make `new_lines` the whole group of `tag`, at the position of the
     /// group's first line (appended when the group is new). Each new line
     /// must be a single line owned by exactly `tag` (build it with
-    /// [`line`]). Returns whether the crontab changed.
+    /// [`line()`]). Returns whether the crontab changed.
     pub fn replace(&mut self, tag: &Tag, new_lines: &[String]) -> Result<bool> {
         let mut fresh = Vec::with_capacity(new_lines.len());
         for text in new_lines {

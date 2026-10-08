@@ -10,9 +10,10 @@
 //! (`onebox net-apply`, node lock) and `onebox-frps` (`onebox frps
 //! net-apply`, FRP lock). A caller holding that lock must not start or
 //! restart them through systemd or OpenRC — the helper would find the lock
-//! busy and fail (the apply engine therefore restores the rules itself and
-//! only writes and enables `onebox-network`); without an init system it
-//! hands the lock over with [`Services::start_with_lock`].
+//! busy and fail, so the apply engine must restore the rules itself and
+//! only write and enable `onebox-network` (as v2 did), and `onebox service
+//! onebox-network start` must not take the node lock first; without an init
+//! system the holder hands the lock over with [`Services::start_with_lock`].
 
 use super::logs;
 use super::{

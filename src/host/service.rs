@@ -101,7 +101,7 @@ impl Scope {
 /// the PID record's start time and the executable path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Identity {
-    /// argv[1] must be this word (cores: `run`).
+    /// `argv[1]` must be this word (cores: `run`).
     pub subcommand: Option<String>,
     /// The configuration the process runs with: every `-c`/`--config`/
     /// `-config` (and `--config=`/`-config=`) must name it, at least once.
