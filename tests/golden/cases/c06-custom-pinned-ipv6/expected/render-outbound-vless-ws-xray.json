@@ -1,0 +1,34 @@
+{
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "2001:db8::20",
+        "port": 443,
+        "users": [
+          {
+            "encryption": "none",
+            "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "ws",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "http/1.1"
+      ],
+      "fingerprint": "chrome",
+      "pinnedPeerCertSha256": "a9189d48608c8e717cbde93fdb8671059b5ee542d85a1949e54c26a21eae00f2",
+      "serverName": "proxy.example.com"
+    },
+    "wsSettings": {
+      "host": "proxy.example.com",
+      "path": "/ws1a2b3c"
+    }
+  },
+  "tag": "edge-v6-VLESS-WS-TLS"
+}

@@ -1,0 +1,154 @@
+{
+  "inbounds": [
+    {
+      "listen": "::",
+      "port": 8443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "email": "onebox",
+            "flow": "xtls-rprx-vision",
+            "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+          }
+        ],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "enabled": true,
+        "routeOnly": true
+      },
+      "streamSettings": {
+        "network": "raw",
+        "realitySettings": {
+          "privateKey": "IHSC2L_iZdYdbNh8X42T6b3LbaJlcTCBbhmdTGdCvkE",
+          "serverNames": [
+            "site.example.com"
+          ],
+          "shortIds": [
+            "0123456789abcdef"
+          ],
+          "target": "127.0.0.1:18002"
+        },
+        "security": "reality"
+      },
+      "tag": "vless-reality-in"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 18002,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "network": "tcp",
+        "port": 10443
+      },
+      "sniffing": {
+        "destOverride": [
+          "tls"
+        ],
+        "enabled": true,
+        "routeOnly": true
+      },
+      "tag": "reality-dest-in"
+    }
+  ],
+  "log": {
+    "access": "none",
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "UseIPv4"
+        }
+      },
+      "tag": "direct"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {
+        "finalRules": [
+          {
+            "action": "allow",
+            "ip": [
+              "127.0.0.1/32"
+            ],
+            "network": "tcp",
+            "port": "10443"
+          },
+          {
+            "action": "block"
+          }
+        ],
+        "redirect": "127.0.0.1:10443"
+      },
+      "tag": "reality-site"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "domain": [
+          "full:site.example.com"
+        ],
+        "inboundTag": [
+          "reality-dest-in"
+        ],
+        "outboundTag": "reality-site",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "reality-dest-in"
+        ],
+        "outboundTag": "block",
+        "type": "field"
+      },
+      {
+        "outboundTag": "block",
+        "protocol": [
+          "bittorrent"
+        ],
+        "type": "field"
+      },
+      {
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "192.88.99.0/24",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "203.0.113.20/32",
+          "224.0.0.0/3",
+          "::/127",
+          "fc00::/7",
+          "fe80::/10",
+          "ff00::/8"
+        ],
+        "outboundTag": "block",
+        "type": "field"
+      }
+    ]
+  }
+}

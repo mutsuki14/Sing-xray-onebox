@@ -1,0 +1,14 @@
+{
+  "protocol": "shadowsocks",
+  "settings": {
+    "servers": [
+      {
+        "address": "203.0.113.10",
+        "method": "2022-blake3-aes-128-gcm",
+        "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+        "port": 8388
+      }
+    ]
+  },
+  "tag": "香港 #1-Shadowsocks-2022"
+}

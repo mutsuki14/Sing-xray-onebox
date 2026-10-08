@@ -1,0 +1,8 @@
+{
+  "method": "2022-blake3-aes-128-gcm",
+  "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+  "server": "2001:db8::10",
+  "server_port": 8388,
+  "tag": "onebox-Shadowsocks-2022",
+  "type": "shadowsocks"
+}

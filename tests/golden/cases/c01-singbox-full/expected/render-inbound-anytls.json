@@ -1,0 +1,18 @@
+{
+  "listen": "::",
+  "listen_port": 2096,
+  "tag": "anytls-in",
+  "tls": {
+    "certificate_path": "/tmp/onebox-golden/c01-singbox-full/tls/cert.pem",
+    "enabled": true,
+    "key_path": "/tmp/onebox-golden/c01-singbox-full/tls/key.pem",
+    "server_name": "www.bing.com"
+  },
+  "type": "anytls",
+  "users": [
+    {
+      "name": "onebox",
+      "password": "p@ss:w/rd?&#\"x'中文"
+    }
+  ]
+}

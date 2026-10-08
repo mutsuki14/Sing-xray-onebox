@@ -1,0 +1,27 @@
+{
+  "listen": "::",
+  "listen_port": 20000,
+  "tag": "anytls-reality-in",
+  "tls": {
+    "enabled": true,
+    "reality": {
+      "enabled": true,
+      "handshake": {
+        "server": "www.microsoft.com",
+        "server_port": 443
+      },
+      "private_key": "IHSC2L_iZdYdbNh8X42T6b3LbaJlcTCBbhmdTGdCvkE",
+      "short_id": [
+        "0123456789abcdef"
+      ]
+    },
+    "server_name": "www.microsoft.com"
+  },
+  "type": "anytls",
+  "users": [
+    {
+      "name": "onebox",
+      "password": "p@ss:w/rd?&#\"x'中文"
+    }
+  ]
+}

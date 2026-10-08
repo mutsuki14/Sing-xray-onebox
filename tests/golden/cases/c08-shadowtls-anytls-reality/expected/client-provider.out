@@ -1,0 +1,42 @@
+{
+  "proxies": [
+    {
+      "cipher": "2022-blake3-aes-128-gcm",
+      "client-fingerprint": "chrome",
+      "name": "onebox-ShadowTLS-v3",
+      "password": "c2hhZG93dGxzLXNzLWtleQ==",
+      "plugin": "shadow-tls",
+      "plugin-opts": {
+        "host": "www.cloudflare.com",
+        "password": "1234567890abcdef1234567890abcdef12345678",
+        "version": 3
+      },
+      "port": 443,
+      "server": "203.0.113.80",
+      "type": "ss",
+      "udp": true,
+      "udp-over-tcp": true,
+      "udp-over-tcp-version": 2
+    },
+    {
+      "alpn": [
+        "h3"
+      ],
+      "fingerprint": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "hop-interval": 30,
+      "initial-connection-receive-window": 5242880,
+      "initial-stream-receive-window": 2097152,
+      "max-connection-receive-window": 5242880,
+      "max-stream-receive-window": 2097152,
+      "name": "onebox-Hysteria2",
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "port": 8443,
+      "ports": "50000-50999",
+      "server": "203.0.113.80",
+      "skip-cert-verify": true,
+      "sni": "www.bing.com",
+      "type": "hysteria2"
+    }
+  ]
+}
+

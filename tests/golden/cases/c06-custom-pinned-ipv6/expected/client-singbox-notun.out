@@ -1,0 +1,240 @@
+{
+  "dns": {
+    "final": "dns-remote",
+    "rules": [
+      {
+        "clash_mode": "Direct",
+        "server": "dns-direct"
+      },
+      {
+        "clash_mode": "Global",
+        "server": "dns-remote"
+      },
+      {
+        "rule_set": "geosite-cn",
+        "server": "dns-direct"
+      }
+    ],
+    "servers": [
+      {
+        "detour": "proxy",
+        "server": "1.1.1.1",
+        "tag": "dns-remote",
+        "tls": {
+          "server_name": "cloudflare-dns.com"
+        },
+        "type": "https"
+      },
+      {
+        "server": "223.5.5.5",
+        "tag": "dns-direct",
+        "type": "udp"
+      }
+    ],
+    "strategy": "prefer_ipv4"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true
+    },
+    "clash_api": {
+      "default_mode": "Rule",
+      "external_controller": "127.0.0.1:9090",
+      "secret": "0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 2080,
+      "tag": "mixed-in",
+      "type": "mixed"
+    }
+  ],
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "default": "auto",
+      "outbounds": [
+        "auto",
+        "edge-v6-VLESS-WS-TLS",
+        "edge-v6-Trojan-TLS",
+        "edge-v6-Hysteria2",
+        "edge-v6-VMess-WS",
+        "direct"
+      ],
+      "tag": "proxy",
+      "type": "selector"
+    },
+    {
+      "interval": "3m",
+      "outbounds": [
+        "edge-v6-VLESS-WS-TLS",
+        "edge-v6-Trojan-TLS",
+        "edge-v6-Hysteria2",
+        "edge-v6-VMess-WS"
+      ],
+      "tag": "auto",
+      "tolerance": 50,
+      "type": "urltest",
+      "url": "https://www.gstatic.com/generate_204"
+    },
+    {
+      "server": "2001:db8::20",
+      "server_port": 443,
+      "tag": "edge-v6-VLESS-WS-TLS",
+      "tls": {
+        "alpn": [
+          "http/1.1"
+        ],
+        "certificate": [
+          "-----BEGIN CERTIFICATE-----\nMIIBsTCCAVigAwIBAgIUelhh0mtLx6UExIbmM0Ii0KDrKrIwCgYIKoZIzj0EAwIw\nIDEeMBwGA1UEAwwVT25lYm94IEdvbGRlbiBUZXN0IENBMCAXDTI2MTAwODE4MTkx\nM1oYDzIxMjYwOTE0MTgxOTEzWjAcMRowGAYDVQQDDBFwcm94eS5leGFtcGxlLmNv\nbTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAPbIy3C8BlVnhYX7ga2NDf0LsTL\nsq/SzegGaR4BKwsaJrGuTEgl5f8cz7q2J6B/+gRUSctTYGsxA9wAEd5abDKjcjBw\nMC4GA1UdEQQnMCWCEXByb3h5LmV4YW1wbGUuY29tghBzaXRlLmV4YW1wbGUuY29t\nMB0GA1UdDgQWBBRtfpk+roYadVKMn8HILHpwDUyLxzAfBgNVHSMEGDAWgBSW1sSO\n1o2pkq0//4o4QPrHwgq1vzAKBggqhkjOPQQDAgNHADBEAiBzwVHzO40cQ4nrDHoh\nw5LxnLWIELHThPg4bFVJaEUwpgIgehSjstLlplSupZJXTdbtkNdcsFWzGyhDJaSR\nuKT57jo=\n-----END CERTIFICATE-----\n",
+          "-----BEGIN CERTIFICATE-----\nMIIBlzCCAT2gAwIBAgIUbFIKcLDjs7yz6JPRW95M/PRzKycwCgYIKoZIzj0EAwIw\nIDEeMBwGA1UEAwwVT25lYm94IEdvbGRlbiBUZXN0IENBMCAXDTI2MTAwODE4MTkx\nM1oYDzIxMjYwOTE0MTgxOTEzWjAgMR4wHAYDVQQDDBVPbmVib3ggR29sZGVuIFRl\nc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQzDPWr0RsolZOcFv9cfL2g\nwBCv+IMR8mVKcdxRKcXlYK3Bcz8g15EVWF2GyCVx0rG4OiyoeVXWHD2wFWTISPMl\no1MwUTAdBgNVHQ4EFgQUltbEjtaNqZKtP/+KOED6x8IKtb8wHwYDVR0jBBgwFoAU\nltbEjtaNqZKtP/+KOED6x8IKtb8wDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQD\nAgNIADBFAiA8wRVumYnErcaijVmO7k4G2cO0RC/8F6LapnI6YpARtgIhAKzJFDCn\n+yOL02ArajxUswSpBCcdT6LIYP70tbvcHhUG\n-----END CERTIFICATE-----\n"
+        ],
+        "enabled": true,
+        "server_name": "proxy.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "transport": {
+        "early_data_header_name": "Sec-WebSocket-Protocol",
+        "headers": {
+          "Host": "proxy.example.com"
+        },
+        "max_early_data": 2048,
+        "path": "/ws1a2b3c",
+        "type": "ws"
+      },
+      "type": "vless",
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+    },
+    {
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "server": "2001:db8::20",
+      "server_port": 8443,
+      "tag": "edge-v6-Trojan-TLS",
+      "tls": {
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "certificate": [
+          "-----BEGIN CERTIFICATE-----\nMIIBsTCCAVigAwIBAgIUelhh0mtLx6UExIbmM0Ii0KDrKrIwCgYIKoZIzj0EAwIw\nIDEeMBwGA1UEAwwVT25lYm94IEdvbGRlbiBUZXN0IENBMCAXDTI2MTAwODE4MTkx\nM1oYDzIxMjYwOTE0MTgxOTEzWjAcMRowGAYDVQQDDBFwcm94eS5leGFtcGxlLmNv\nbTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAPbIy3C8BlVnhYX7ga2NDf0LsTL\nsq/SzegGaR4BKwsaJrGuTEgl5f8cz7q2J6B/+gRUSctTYGsxA9wAEd5abDKjcjBw\nMC4GA1UdEQQnMCWCEXByb3h5LmV4YW1wbGUuY29tghBzaXRlLmV4YW1wbGUuY29t\nMB0GA1UdDgQWBBRtfpk+roYadVKMn8HILHpwDUyLxzAfBgNVHSMEGDAWgBSW1sSO\n1o2pkq0//4o4QPrHwgq1vzAKBggqhkjOPQQDAgNHADBEAiBzwVHzO40cQ4nrDHoh\nw5LxnLWIELHThPg4bFVJaEUwpgIgehSjstLlplSupZJXTdbtkNdcsFWzGyhDJaSR\nuKT57jo=\n-----END CERTIFICATE-----\n",
+          "-----BEGIN CERTIFICATE-----\nMIIBlzCCAT2gAwIBAgIUbFIKcLDjs7yz6JPRW95M/PRzKycwCgYIKoZIzj0EAwIw\nIDEeMBwGA1UEAwwVT25lYm94IEdvbGRlbiBUZXN0IENBMCAXDTI2MTAwODE4MTkx\nM1oYDzIxMjYwOTE0MTgxOTEzWjAgMR4wHAYDVQQDDBVPbmVib3ggR29sZGVuIFRl\nc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQzDPWr0RsolZOcFv9cfL2g\nwBCv+IMR8mVKcdxRKcXlYK3Bcz8g15EVWF2GyCVx0rG4OiyoeVXWHD2wFWTISPMl\no1MwUTAdBgNVHQ4EFgQUltbEjtaNqZKtP/+KOED6x8IKtb8wHwYDVR0jBBgwFoAU\nltbEjtaNqZKtP/+KOED6x8IKtb8wDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQD\nAgNIADBFAiA8wRVumYnErcaijVmO7k4G2cO0RC/8F6LapnI6YpARtgIhAKzJFDCn\n+yOL02ArajxUswSpBCcdT6LIYP70tbvcHhUG\n-----END CERTIFICATE-----\n"
+        ],
+        "enabled": true,
+        "server_name": "proxy.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "type": "trojan"
+    },
+    {
+      "obfs": {
+        "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "type": "salamander"
+      },
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "server": "2001:db8::20",
+      "server_port": 443,
+      "tag": "edge-v6-Hysteria2",
+      "tls": {
+        "alpn": [
+          "h3"
+        ],
+        "certificate": [
+          "-----BEGIN CERTIFICATE-----\nMIIBsTCCAVigAwIBAgIUelhh0mtLx6UExIbmM0Ii0KDrKrIwCgYIKoZIzj0EAwIw\nIDEeMBwGA1UEAwwVT25lYm94IEdvbGRlbiBUZXN0IENBMCAXDTI2MTAwODE4MTkx\nM1oYDzIxMjYwOTE0MTgxOTEzWjAcMRowGAYDVQQDDBFwcm94eS5leGFtcGxlLmNv\nbTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAPbIy3C8BlVnhYX7ga2NDf0LsTL\nsq/SzegGaR4BKwsaJrGuTEgl5f8cz7q2J6B/+gRUSctTYGsxA9wAEd5abDKjcjBw\nMC4GA1UdEQQnMCWCEXByb3h5LmV4YW1wbGUuY29tghBzaXRlLmV4YW1wbGUuY29t\nMB0GA1UdDgQWBBRtfpk+roYadVKMn8HILHpwDUyLxzAfBgNVHSMEGDAWgBSW1sSO\n1o2pkq0//4o4QPrHwgq1vzAKBggqhkjOPQQDAgNHADBEAiBzwVHzO40cQ4nrDHoh\nw5LxnLWIELHThPg4bFVJaEUwpgIgehSjstLlplSupZJXTdbtkNdcsFWzGyhDJaSR\nuKT57jo=\n-----END CERTIFICATE-----\n",
+          "-----BEGIN CERTIFICATE-----\nMIIBlzCCAT2gAwIBAgIUbFIKcLDjs7yz6JPRW95M/PRzKycwCgYIKoZIzj0EAwIw\nIDEeMBwGA1UEAwwVT25lYm94IEdvbGRlbiBUZXN0IENBMCAXDTI2MTAwODE4MTkx\nM1oYDzIxMjYwOTE0MTgxOTEzWjAgMR4wHAYDVQQDDBVPbmVib3ggR29sZGVuIFRl\nc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQzDPWr0RsolZOcFv9cfL2g\nwBCv+IMR8mVKcdxRKcXlYK3Bcz8g15EVWF2GyCVx0rG4OiyoeVXWHD2wFWTISPMl\no1MwUTAdBgNVHQ4EFgQUltbEjtaNqZKtP/+KOED6x8IKtb8wHwYDVR0jBBgwFoAU\nltbEjtaNqZKtP/+KOED6x8IKtb8wDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQD\nAgNIADBFAiA8wRVumYnErcaijVmO7k4G2cO0RC/8F6LapnI6YpARtgIhAKzJFDCn\n+yOL02ArajxUswSpBCcdT6LIYP70tbvcHhUG\n-----END CERTIFICATE-----\n"
+        ],
+        "enabled": true,
+        "server_name": "proxy.example.com"
+      },
+      "type": "hysteria2"
+    },
+    {
+      "alter_id": 0,
+      "security": "auto",
+      "server": "2001:db8::20",
+      "server_port": 8880,
+      "tag": "edge-v6-VMess-WS",
+      "transport": {
+        "early_data_header_name": "Sec-WebSocket-Protocol",
+        "headers": {
+          "Host": "proxy.example.com"
+        },
+        "max_early_data": 2048,
+        "path": "/vm4d5e6f",
+        "type": "ws"
+      },
+      "type": "vmess",
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+    },
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-direct",
+    "final": "proxy",
+    "rule_set": [
+      {
+        "download_detour": "direct",
+        "format": "binary",
+        "tag": "geosite-cn",
+        "type": "remote",
+        "url": "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-cn.srs"
+      },
+      {
+        "download_detour": "direct",
+        "format": "binary",
+        "tag": "geoip-cn",
+        "type": "remote",
+        "url": "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
+      }
+    ],
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "hijack-dns",
+        "protocol": "dns"
+      },
+      {
+        "ip_cidr": [
+          "198.51.100.44/32"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "clash_mode": "Direct",
+        "outbound": "direct"
+      },
+      {
+        "clash_mode": "Global",
+        "outbound": "proxy"
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "geosite-cn",
+          "geoip-cn"
+        ]
+      }
+    ]
+  }
+}
+

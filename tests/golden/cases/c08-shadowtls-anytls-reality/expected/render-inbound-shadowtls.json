@@ -1,0 +1,19 @@
+{
+  "detour": "shadowtls-ss-in",
+  "handshake": {
+    "server": "1.1.1.1",
+    "server_port": 443
+  },
+  "listen": "::",
+  "listen_port": 443,
+  "strict_mode": true,
+  "tag": "shadowtls-in",
+  "type": "shadowtls",
+  "users": [
+    {
+      "name": "onebox",
+      "password": "1234567890abcdef1234567890abcdef12345678"
+    }
+  ],
+  "version": 3
+}

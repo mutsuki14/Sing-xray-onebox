@@ -1,0 +1,30 @@
+{
+  "bbr_profile": "conservative",
+  "connection_receive_window": 41943040,
+  "ignore_client_bandwidth": true,
+  "listen": "::",
+  "listen_port": 443,
+  "max_concurrent_streams": 1024,
+  "obfs": {
+    "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "type": "salamander"
+  },
+  "stream_receive_window": 16777216,
+  "tag": "hysteria2-in",
+  "tls": {
+    "alpn": [
+      "h3"
+    ],
+    "certificate_path": "/tmp/onebox-golden/c01-singbox-full/tls/cert.pem",
+    "enabled": true,
+    "key_path": "/tmp/onebox-golden/c01-singbox-full/tls/key.pem",
+    "server_name": "www.bing.com"
+  },
+  "type": "hysteria2",
+  "users": [
+    {
+      "name": "onebox",
+      "password": "p@ss:w/rd?&#\"x'中文"
+    }
+  ]
+}

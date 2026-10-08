@@ -1,0 +1,208 @@
+{
+  "entries": [
+    {
+      "core": "xray",
+      "id": "vless-reality",
+      "outbounds": [
+        {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "2001:db8::10",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "flow": "xtls-rprx-vision",
+                    "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "raw",
+            "realitySettings": {
+              "fingerprint": "chrome",
+              "publicKey": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+              "serverName": "www.microsoft.com",
+              "shortId": "0123456789abcdef",
+              "spiderX": "/"
+            },
+            "security": "reality"
+          },
+          "tag": "proxy"
+        }
+      ],
+      "reality": {
+        "host": "2001:db8::10",
+        "port": 443,
+        "reference_host": "www.microsoft.com",
+        "reference_port": 443,
+        "sni": "www.microsoft.com"
+      },
+      "tag": "proxy",
+      "transport": "tcp"
+    },
+    {
+      "core": "xray",
+      "id": "vless-xhttp",
+      "outbounds": [
+        {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "2001:db8::10",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "xhttp",
+            "realitySettings": {
+              "fingerprint": "chrome",
+              "publicKey": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+              "serverName": "www.microsoft.com",
+              "shortId": "0123456789abcdef",
+              "spiderX": "/"
+            },
+            "security": "reality",
+            "xhttpSettings": {
+              "mode": "auto",
+              "path": "/xh7a8b9c"
+            }
+          },
+          "tag": "proxy"
+        }
+      ],
+      "reality": {
+        "host": "2001:db8::10",
+        "port": 443,
+        "reference_host": "www.microsoft.com",
+        "reference_port": 443,
+        "sni": "www.microsoft.com"
+      },
+      "tag": "proxy",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "hysteria2",
+      "outbounds": [
+        {
+          "connection_receive_window": 5242880,
+          "down_mbps": 200,
+          "obfs": {
+            "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "type": "salamander"
+          },
+          "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+          "server": "2001:db8::10",
+          "server_port": 443,
+          "stream_receive_window": 2097152,
+          "tag": "onebox-Hysteria2",
+          "tls": {
+            "alpn": [
+              "h3"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com"
+          },
+          "type": "hysteria2",
+          "up_mbps": 50
+        }
+      ],
+      "tag": "onebox-Hysteria2",
+      "transport": "udp"
+    },
+    {
+      "core": "singbox",
+      "id": "tuic",
+      "outbounds": [
+        {
+          "congestion_control": "bbr",
+          "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+          "server": "2001:db8::10",
+          "server_port": 8443,
+          "tag": "onebox-TUIC-v5",
+          "tls": {
+            "alpn": [
+              "h3"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com"
+          },
+          "type": "tuic",
+          "udp_relay_mode": "native",
+          "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+          "zero_rtt_handshake": false
+        }
+      ],
+      "tag": "onebox-TUIC-v5",
+      "transport": "udp"
+    },
+    {
+      "core": "singbox",
+      "id": "anytls",
+      "outbounds": [
+        {
+          "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+          "server": "2001:db8::10",
+          "server_port": 2053,
+          "tag": "onebox-AnyTLS",
+          "tls": {
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "anytls"
+        }
+      ],
+      "tag": "onebox-AnyTLS",
+      "transport": "tcp"
+    },
+    {
+      "core": "xray",
+      "id": "shadowsocks",
+      "outbounds": [
+        {
+          "protocol": "shadowsocks",
+          "settings": {
+            "servers": [
+              {
+                "address": "2001:db8::10",
+                "method": "2022-blake3-aes-128-gcm",
+                "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+                "port": 8388
+              }
+            ]
+          },
+          "tag": "proxy"
+        }
+      ],
+      "tag": "proxy",
+      "transport": "both"
+    }
+  ],
+  "schema": 1
+}

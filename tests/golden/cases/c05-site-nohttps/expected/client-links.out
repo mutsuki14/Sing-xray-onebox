@@ -1,0 +1,4 @@
+vless://6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f@203.0.113.30:443?encryption=none&security=reality&sni=blog.example.net&fp=chrome&pbk=2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk&sid=0123456789abcdef&type=grpc&serviceName=grpc0d1e2f&mode=gun#onebox-VLESS-gRPC-Reality
+vless://6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f@203.0.113.30:8443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=blog.example.net&fp=chrome&pbk=2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk&sid=0123456789abcdef&type=tcp&headerType=none#onebox-VLESS-Reality-Vision
+vmess://eyJhZGQiOiIyMDMuMC4xMTMuMzAiLCJhaWQiOiIwIiwiYWxwbiI6IiIsImZwIjoiIiwiaG9zdCI6ImNkbi5leGFtcGxlLm5ldCIsImlkIjoiNmYyYzFkM2UtOGE0Yi00YzVkLThlNmYtMGExYjJjM2Q0ZTVmIiwibmV0Ijoid3MiLCJwYXRoIjoiL3ZtNGQ1ZTZmIiwicG9ydCI6IjgwODAiLCJwcyI6Im9uZWJveC1WTWVzcy1XUyIsInNjeSI6ImF1dG8iLCJzbmkiOiIiLCJ0bHMiOiIiLCJ0eXBlIjoibm9uZSIsInYiOiIyIn0=
+

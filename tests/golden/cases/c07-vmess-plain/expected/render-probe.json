@@ -1,0 +1,55 @@
+{
+  "entries": [
+    {
+      "core": "xray",
+      "id": "vmess-ws",
+      "outbounds": [
+        {
+          "protocol": "vmess",
+          "settings": {
+            "vnext": [
+              {
+                "address": "198.51.100.50",
+                "port": 8080,
+                "users": [
+                  {
+                    "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+                    "security": "auto"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "ws",
+            "security": "none",
+            "wsSettings": {
+              "host": "cdn.example.com",
+              "path": "/vm4d5e6f"
+            }
+          },
+          "tag": "proxy"
+        }
+      ],
+      "tag": "proxy",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "shadowsocks",
+      "outbounds": [
+        {
+          "method": "2022-blake3-aes-128-gcm",
+          "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+          "server": "198.51.100.50",
+          "server_port": 8388,
+          "tag": "test node-Shadowsocks-2022",
+          "type": "shadowsocks"
+        }
+      ],
+      "tag": "test node-Shadowsocks-2022",
+      "transport": "both"
+    }
+  ],
+  "schema": 1
+}

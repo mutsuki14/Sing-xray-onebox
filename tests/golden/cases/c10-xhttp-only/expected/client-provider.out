@@ -1,0 +1,26 @@
+{
+  "proxies": [
+    {
+      "client-fingerprint": "chrome",
+      "name": "onebox-VLESS-XHTTP-Reality",
+      "network": "xhttp",
+      "port": 443,
+      "reality-opts": {
+        "public-key": "VAH1RwtVerAfMTfsALNNNJ0Ype3SwgK3SFyJJZ2RWEE",
+        "short-id": "0123456789abcdef",
+        "support-x25519mlkem768": true
+      },
+      "server": "203.0.113.100",
+      "servername": "www.microsoft.com",
+      "tls": true,
+      "type": "vless",
+      "udp": true,
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+      "xhttp-opts": {
+        "mode": "auto",
+        "path": "/xh7a8b9c"
+      }
+    }
+  ]
+}
+

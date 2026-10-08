@@ -1,0 +1,158 @@
+{
+  "entries": [
+    {
+      "core": "xray",
+      "id": "vless-ws",
+      "outbounds": [
+        {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "2001:db8::20",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": {
+              "alpn": [
+                "http/1.1"
+              ],
+              "fingerprint": "chrome",
+              "pinnedPeerCertSha256": "a9189d48608c8e717cbde93fdb8671059b5ee542d85a1949e54c26a21eae00f2",
+              "serverName": "proxy.example.com"
+            },
+            "wsSettings": {
+              "host": "proxy.example.com",
+              "path": "/ws1a2b3c"
+            }
+          },
+          "tag": "proxy"
+        }
+      ],
+      "tag": "proxy",
+      "transport": "tcp"
+    },
+    {
+      "core": "xray",
+      "id": "trojan",
+      "outbounds": [
+        {
+          "protocol": "trojan",
+          "settings": {
+            "servers": [
+              {
+                "address": "2001:db8::20",
+                "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+                "port": 8443
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "raw",
+            "security": "tls",
+            "tlsSettings": {
+              "alpn": [
+                "h2",
+                "http/1.1"
+              ],
+              "fingerprint": "chrome",
+              "pinnedPeerCertSha256": "a9189d48608c8e717cbde93fdb8671059b5ee542d85a1949e54c26a21eae00f2",
+              "serverName": "proxy.example.com"
+            }
+          },
+          "tag": "proxy"
+        }
+      ],
+      "tag": "proxy",
+      "transport": "tcp"
+    },
+    {
+      "core": "xray",
+      "id": "hysteria2",
+      "outbounds": [
+        {
+          "protocol": "hysteria",
+          "settings": {
+            "address": "2001:db8::20",
+            "port": 443,
+            "version": 2
+          },
+          "streamSettings": {
+            "finalmask": {
+              "udp": [
+                {
+                  "settings": {
+                    "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+                  },
+                  "type": "salamander"
+                }
+              ]
+            },
+            "hysteriaSettings": {
+              "auth": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+              "version": 2
+            },
+            "network": "hysteria",
+            "security": "tls",
+            "tlsSettings": {
+              "alpn": [
+                "h3"
+              ],
+              "fingerprint": "chrome",
+              "pinnedPeerCertSha256": "a9189d48608c8e717cbde93fdb8671059b5ee542d85a1949e54c26a21eae00f2",
+              "serverName": "proxy.example.com"
+            }
+          },
+          "tag": "proxy"
+        }
+      ],
+      "tag": "proxy",
+      "transport": "udp"
+    },
+    {
+      "core": "xray",
+      "id": "vmess-ws",
+      "outbounds": [
+        {
+          "protocol": "vmess",
+          "settings": {
+            "vnext": [
+              {
+                "address": "2001:db8::20",
+                "port": 8880,
+                "users": [
+                  {
+                    "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+                    "security": "auto"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "ws",
+            "security": "none",
+            "wsSettings": {
+              "host": "proxy.example.com",
+              "path": "/vm4d5e6f"
+            }
+          },
+          "tag": "proxy"
+        }
+      ],
+      "tag": "proxy",
+      "transport": "tcp"
+    }
+  ],
+  "schema": 1
+}

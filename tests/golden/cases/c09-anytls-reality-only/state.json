@@ -1,0 +1,33 @@
+{
+  "values": {
+    "CLASH_SECRET": "0123456789abcdef0123456789abcdef0123456789abcdef",
+    "GRPC_SERVICE": "grpc0d1e2f",
+    "HY2_OBFS_PASSWORD": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "INSTALLED_AT": "1700000000",
+    "LISTEN_ADDR": "203.0.113.90",
+    "NODE_NAME": "onebox",
+    "PASSWORD": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+    "PORT_anytls_reality": "443",
+    "PROTOCOLS": "anytls-reality",
+    "REALITY_DEST": "www.microsoft.com:443",
+    "REALITY_GUARD_PORT": "18000",
+    "REALITY_PRIVATE_KEY": "IHSC2L_iZdYdbNh8X42T6b3LbaJlcTCBbhmdTGdCvkE",
+    "REALITY_PUBLIC_KEY": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+    "REALITY_SHORT_ID": "0123456789abcdef",
+    "REALITY_SNI": "www.microsoft.com",
+    "SB_VERSION": "1.14.2",
+    "SERVER_ADDR": "203.0.113.90",
+    "SERVER_IPV4": "203.0.113.90",
+    "SHADOWTLS_PASSWORD": "1234567890abcdef1234567890abcdef12345678",
+    "SHADOWTLS_SNI": "www.microsoft.com",
+    "SHADOWTLS_SS_PASSWORD": "c2hhZG93dGxzLXNzLWtleQ==",
+    "SS_METHOD": "2022-blake3-aes-128-gcm",
+    "SS_PASSWORD": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "TLS_SNI": "www.bing.com",
+    "UUID": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+    "VMESS_PATH": "/vm4d5e6f",
+    "WS_PATH": "/ws1a2b3c",
+    "XHTTP_PATH": "/xh7a8b9c",
+    "XR_VERSION": "26.3.27"
+  }
+}

@@ -1,0 +1,252 @@
+{
+  "dns": {
+    "final": "dns-remote",
+    "rules": [
+      {
+        "clash_mode": "Direct",
+        "server": "dns-direct"
+      },
+      {
+        "clash_mode": "Global",
+        "server": "dns-remote"
+      },
+      {
+        "rule_set": "geosite-cn",
+        "server": "dns-direct"
+      }
+    ],
+    "servers": [
+      {
+        "detour": "proxy",
+        "server": "1.1.1.1",
+        "tag": "dns-remote",
+        "tls": {
+          "server_name": "cloudflare-dns.com"
+        },
+        "type": "https"
+      },
+      {
+        "server": "223.5.5.5",
+        "tag": "dns-direct",
+        "type": "udp"
+      }
+    ],
+    "strategy": "prefer_ipv4"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true
+    },
+    "clash_api": {
+      "default_mode": "Rule",
+      "external_controller": "127.0.0.1:9090",
+      "secret": "0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  },
+  "inbounds": [
+    {
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "stack": "mixed",
+      "strict_route": true,
+      "tag": "tun-in",
+      "type": "tun"
+    },
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 2080,
+      "tag": "mixed-in",
+      "type": "mixed"
+    }
+  ],
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "default": "auto",
+      "outbounds": [
+        "auto",
+        "onebox-VLESS-Reality-Vision",
+        "onebox-Hysteria2",
+        "onebox-TUIC-v5",
+        "onebox-AnyTLS",
+        "onebox-Shadowsocks-2022",
+        "direct"
+      ],
+      "tag": "proxy",
+      "type": "selector"
+    },
+    {
+      "interval": "3m",
+      "outbounds": [
+        "onebox-VLESS-Reality-Vision",
+        "onebox-Hysteria2",
+        "onebox-TUIC-v5",
+        "onebox-AnyTLS",
+        "onebox-Shadowsocks-2022"
+      ],
+      "tag": "auto",
+      "tolerance": 50,
+      "type": "urltest",
+      "url": "https://www.gstatic.com/generate_204"
+    },
+    {
+      "flow": "xtls-rprx-vision",
+      "server": "2001:db8::10",
+      "server_port": 443,
+      "tag": "onebox-VLESS-Reality-Vision",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "public_key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+          "short_id": "0123456789abcdef"
+        },
+        "server_name": "www.microsoft.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "type": "vless",
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+    },
+    {
+      "connection_receive_window": 5242880,
+      "down_mbps": 200,
+      "obfs": {
+        "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "type": "salamander"
+      },
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "server": "2001:db8::10",
+      "server_port": 443,
+      "stream_receive_window": 2097152,
+      "tag": "onebox-Hysteria2",
+      "tls": {
+        "alpn": [
+          "h3"
+        ],
+        "certificate": [
+          "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+        ],
+        "enabled": true,
+        "server_name": "www.bing.com"
+      },
+      "type": "hysteria2",
+      "up_mbps": 50
+    },
+    {
+      "congestion_control": "bbr",
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "server": "2001:db8::10",
+      "server_port": 8443,
+      "tag": "onebox-TUIC-v5",
+      "tls": {
+        "alpn": [
+          "h3"
+        ],
+        "certificate": [
+          "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+        ],
+        "enabled": true,
+        "server_name": "www.bing.com"
+      },
+      "type": "tuic",
+      "udp_relay_mode": "native",
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+      "zero_rtt_handshake": false
+    },
+    {
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "server": "2001:db8::10",
+      "server_port": 2053,
+      "tag": "onebox-AnyTLS",
+      "tls": {
+        "certificate": [
+          "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+        ],
+        "enabled": true,
+        "server_name": "www.bing.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "type": "anytls"
+    },
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+      "server": "2001:db8::10",
+      "server_port": 8388,
+      "tag": "onebox-Shadowsocks-2022",
+      "type": "shadowsocks"
+    },
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-direct",
+    "final": "proxy",
+    "rule_set": [
+      {
+        "download_detour": "direct",
+        "format": "binary",
+        "tag": "geosite-cn",
+        "type": "remote",
+        "url": "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-cn.srs"
+      },
+      {
+        "download_detour": "direct",
+        "format": "binary",
+        "tag": "geoip-cn",
+        "type": "remote",
+        "url": "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
+      }
+    ],
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "hijack-dns",
+        "protocol": "dns"
+      },
+      {
+        "ip_cidr": [
+          "2001:db8::10/128"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "clash_mode": "Direct",
+        "outbound": "direct"
+      },
+      {
+        "clash_mode": "Global",
+        "outbound": "proxy"
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "geosite-cn",
+          "geoip-cn"
+        ]
+      }
+    ]
+  }
+}
+

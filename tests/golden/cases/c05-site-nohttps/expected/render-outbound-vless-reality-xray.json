@@ -1,0 +1,30 @@
+{
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "203.0.113.30",
+        "port": 8443,
+        "users": [
+          {
+            "encryption": "none",
+            "flow": "xtls-rprx-vision",
+            "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "raw",
+    "realitySettings": {
+      "fingerprint": "chrome",
+      "publicKey": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+      "serverName": "blog.example.net",
+      "shortId": "0123456789abcdef",
+      "spiderX": "/"
+    },
+    "security": "reality"
+  },
+  "tag": "onebox-VLESS-Reality-Vision"
+}

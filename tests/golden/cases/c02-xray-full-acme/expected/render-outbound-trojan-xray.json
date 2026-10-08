@@ -1,0 +1,25 @@
+{
+  "protocol": "trojan",
+  "settings": {
+    "servers": [
+      {
+        "address": "proxy.example.com",
+        "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+        "port": 2087
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "raw",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "h2",
+        "http/1.1"
+      ],
+      "fingerprint": "chrome",
+      "serverName": "proxy.example.com"
+    }
+  },
+  "tag": "onebox-Trojan-TLS"
+}

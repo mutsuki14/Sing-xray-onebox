@@ -1,0 +1,22 @@
+{
+  "password": "p@ss:w/rd?&#\"x'中文",
+  "server": "203.0.113.10",
+  "server_port": 2087,
+  "tag": "香港 #1-Trojan-TLS",
+  "tls": {
+    "alpn": [
+      "h2",
+      "http/1.1"
+    ],
+    "certificate": [
+      "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+    ],
+    "enabled": true,
+    "server_name": "www.bing.com",
+    "utls": {
+      "enabled": true,
+      "fingerprint": "chrome"
+    }
+  },
+  "type": "trojan"
+}

@@ -1,0 +1,41 @@
+{
+  "listen": "::",
+  "port": 443,
+  "protocol": "vless",
+  "settings": {
+    "clients": [
+      {
+        "email": "onebox",
+        "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+      }
+    ],
+    "decryption": "none"
+  },
+  "sniffing": {
+    "destOverride": [
+      "http",
+      "tls",
+      "quic"
+    ],
+    "enabled": true,
+    "routeOnly": true
+  },
+  "streamSettings": {
+    "grpcSettings": {
+      "serviceName": "grpc0d1e2f"
+    },
+    "network": "grpc",
+    "realitySettings": {
+      "privateKey": "IHSC2L_iZdYdbNh8X42T6b3LbaJlcTCBbhmdTGdCvkE",
+      "serverNames": [
+        "blog.example.net"
+      ],
+      "shortIds": [
+        "0123456789abcdef"
+      ],
+      "target": "127.0.0.1:18003"
+    },
+    "security": "reality"
+  },
+  "tag": "vless-grpc-in"
+}

@@ -1,0 +1,128 @@
+{
+  "dns": {
+    "servers": [
+      {
+        "tag": "local",
+        "type": "local"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "listen": "::",
+      "listen_port": 2053,
+      "tag": "anytls-reality-in",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "127.0.0.1",
+            "server_port": 10443
+          },
+          "private_key": "IHSC2L_iZdYdbNh8X42T6b3LbaJlcTCBbhmdTGdCvkE",
+          "short_id": [
+            "0123456789abcdef"
+          ]
+        },
+        "server_name": "site.example.com"
+      },
+      "type": "anytls",
+      "users": [
+        {
+          "name": "onebox",
+          "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334"
+        }
+      ]
+    },
+    {
+      "listen": "::",
+      "listen_port": 2083,
+      "tag": "vless-grpc-in",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "127.0.0.1",
+            "server_port": 10443
+          },
+          "private_key": "IHSC2L_iZdYdbNh8X42T6b3LbaJlcTCBbhmdTGdCvkE",
+          "short_id": [
+            "0123456789abcdef"
+          ]
+        },
+        "server_name": "site.example.com"
+      },
+      "transport": {
+        "service_name": "grpc0d1e2f",
+        "type": "grpc"
+      },
+      "type": "vless",
+      "users": [
+        {
+          "name": "onebox",
+          "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+        }
+      ]
+    }
+  ],
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "default_domain_resolver": {
+      "server": "local",
+      "strategy": "ipv4_only"
+    },
+    "final": "direct",
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "reject",
+        "protocol": "bittorrent"
+      },
+      {
+        "action": "resolve",
+        "strategy": "ipv4_only"
+      },
+      {
+        "action": "reject",
+        "ip_is_private": true
+      },
+      {
+        "action": "reject",
+        "ip_cidr": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "192.88.99.0/24",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "203.0.113.20/32",
+          "224.0.0.0/3",
+          "::/127",
+          "fc00::/7",
+          "fe80::/10",
+          "ff00::/8"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "server": "203.0.113.10",
+  "server_port": 8443,
+  "tag": "香港 #1-VLESS-gRPC-Reality",
+  "tls": {
+    "enabled": true,
+    "reality": {
+      "enabled": true,
+      "public_key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+      "short_id": "0123456789abcdef"
+    },
+    "server_name": "www.microsoft.com",
+    "utls": {
+      "enabled": true,
+      "fingerprint": "chrome"
+    }
+  },
+  "transport": {
+    "service_name": "grpc0d1e2f",
+    "type": "grpc"
+  },
+  "type": "vless",
+  "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+}

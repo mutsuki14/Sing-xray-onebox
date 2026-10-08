@@ -1,0 +1,170 @@
+{
+  "allow-lan": false,
+  "dns": {
+    "default-nameserver": [
+      "223.5.5.5",
+      "119.29.29.29"
+    ],
+    "enable": true,
+    "enhanced-mode": "fake-ip",
+    "fake-ip-filter": [
+      "geosite:private",
+      "geosite:connectivity-check",
+      "+.lan",
+      "+.local",
+      "+.home.arpa",
+      "time.*.com",
+      "ntp.*.com",
+      "+.pool.ntp.org",
+      "+.stun.*.*",
+      "+.stun.*.*.*",
+      "+.srv.nintendo.net",
+      "+.stun.playstation.net",
+      "xbox.*.microsoft.com",
+      "+.xboxlive.com"
+    ],
+    "fake-ip-range": "198.18.0.1/16",
+    "ipv6": true,
+    "listen": "127.0.0.1:1053",
+    "nameserver": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ],
+    "nameserver-policy": {
+      "geosite:cn": [
+        "https://dns.alidns.com/dns-query",
+        "https://doh.pub/dns-query"
+      ],
+      "geosite:geolocation-!cn": [
+        "https://dns.cloudflare.com/dns-query#节点选择",
+        "https://dns.google/dns-query#节点选择"
+      ]
+    },
+    "proxy-server-nameserver": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ]
+  },
+  "external-controller": "127.0.0.1:9090",
+  "geo-auto-update": true,
+  "geo-update-interval": 24,
+  "geodata-mode": true,
+  "geox-url": {
+    "asn": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
+    "geoip": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat",
+    "geosite": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+    "mmdb": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
+  },
+  "ipv6": true,
+  "log-level": "info",
+  "mixed-port": 7890,
+  "mode": "rule",
+  "profile": {
+    "store-fake-ip": true,
+    "store-selected": true
+  },
+  "proxies": [
+    {
+      "alterId": 0,
+      "cipher": "auto",
+      "name": "test node-VMess-WS",
+      "network": "ws",
+      "port": 8080,
+      "server": "198.51.100.50",
+      "tls": false,
+      "type": "vmess",
+      "udp": true,
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+      "ws-opts": {
+        "early-data-header-name": "Sec-WebSocket-Protocol",
+        "headers": {
+          "Host": "cdn.example.com"
+        },
+        "max-early-data": 2048,
+        "path": "/vm4d5e6f"
+      }
+    },
+    {
+      "cipher": "2022-blake3-aes-128-gcm",
+      "name": "test node-Shadowsocks-2022",
+      "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+      "port": 8388,
+      "server": "198.51.100.50",
+      "type": "ss",
+      "udp": true
+    }
+  ],
+  "proxy-groups": [
+    {
+      "name": "节点选择",
+      "proxies": [
+        "自动选择",
+        "test node-VMess-WS",
+        "test node-Shadowsocks-2022",
+        "DIRECT"
+      ],
+      "type": "select"
+    },
+    {
+      "interval": 300,
+      "name": "自动选择",
+      "proxies": [
+        "test node-VMess-WS",
+        "test node-Shadowsocks-2022"
+      ],
+      "tolerance": 50,
+      "type": "url-test",
+      "url": "https://www.gstatic.com/generate_204"
+    }
+  ],
+  "rules": [
+    "GEOSITE,private,DIRECT",
+    "GEOIP,private,DIRECT,no-resolve",
+    "GEOSITE,category-ads-all,REJECT",
+    "GEOSITE,cn,DIRECT",
+    "GEOSITE,geolocation-!cn,节点选择",
+    "GEOIP,CN,DIRECT",
+    "MATCH,节点选择"
+  ],
+  "secret": "0123456789abcdef0123456789abcdef0123456789abcdef",
+  "sniffer": {
+    "enable": true,
+    "skip-domain": [
+      "Mijia Cloud",
+      "+.push.apple.com"
+    ],
+    "sniff": {
+      "HTTP": {
+        "override-destination": true,
+        "ports": [
+          80,
+          "8080-8880"
+        ]
+      },
+      "QUIC": {
+        "ports": [
+          443,
+          8443
+        ]
+      },
+      "TLS": {
+        "ports": [
+          443,
+          8443
+        ]
+      }
+    }
+  },
+  "tcp-concurrent": true,
+  "tun": {
+    "auto-detect-interface": true,
+    "auto-route": true,
+    "dns-hijack": [
+      "any:53"
+    ],
+    "enable": false,
+    "stack": "mixed"
+  },
+  "unified-delay": true
+}
+

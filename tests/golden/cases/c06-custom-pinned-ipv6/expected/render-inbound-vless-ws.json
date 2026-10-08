@@ -1,0 +1,43 @@
+{
+  "listen": "::",
+  "port": 443,
+  "protocol": "vless",
+  "settings": {
+    "clients": [
+      {
+        "email": "onebox",
+        "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+      }
+    ],
+    "decryption": "none"
+  },
+  "sniffing": {
+    "destOverride": [
+      "http",
+      "tls",
+      "quic"
+    ],
+    "enabled": true,
+    "routeOnly": true
+  },
+  "streamSettings": {
+    "network": "ws",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "http/1.1"
+      ],
+      "certificates": [
+        {
+          "certificateFile": "/tmp/onebox-golden/c06-custom-pinned-ipv6/tls/cert.pem",
+          "keyFile": "/tmp/onebox-golden/c06-custom-pinned-ipv6/tls/key.pem"
+        }
+      ],
+      "serverName": "proxy.example.com"
+    },
+    "wsSettings": {
+      "path": "/ws1a2b3c"
+    }
+  },
+  "tag": "vless-ws-in"
+}
