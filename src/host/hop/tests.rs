@@ -134,16 +134,84 @@ fn applying_again_replaces_the_previous_tables() {
     .on("nft", &["delete", "table"], Output::success(""));
     apply(&ctx, range(30000, 31000), 443).unwrap();
     let history = exec.history();
+    assert!(history[0].starts_with("nft -f "), "new table first");
     assert_eq!(
-        history[..3],
+        history[1..],
         [
             "nft -j list tables",
             "nft delete table ip onebox_hop_aaaaaaaaaaaaaaaa",
             "nft delete table ip6 onebox_hop_aaaaaaaaaaaaaaaa",
         ]
     );
-    assert!(history[3].starts_with("nft -f "));
-    assert_eq!(recorded(&ctx).unwrap()[0].start, 30000);
+    let hops = recorded(&ctx).unwrap();
+    assert_eq!(hops.len(), 1);
+    assert_eq!(hops[0].start, 30000);
+}
+
+#[test]
+fn a_failed_change_keeps_the_working_hopping() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("nft");
+    capture_nft(&exec, 1);
+    let previous = r#"[{"backend":"nft","start":20000,"end":30000,"target":443,"token":"onebox_hop_aaaaaaaaaaaaaaaa"}]"#;
+    std::fs::write(ledger_path(&ctx), previous).unwrap();
+    assert!(apply(&ctx, range(30000, 31000), 443).is_err());
+    assert_eq!(
+        std::fs::read_to_string(ledger_path(&ctx)).unwrap(),
+        previous
+    );
+    assert!(exec.history().iter().all(|c| !c.contains("delete")));
+}
+
+#[test]
+fn a_partial_iptables_install_is_undone() {
+    let (_dir, ctx, exec) = setup();
+    enable_ipv6(&ctx);
+    exec.provide("iptables").provide("ip6tables");
+    exec.on("iptables", &[], Output::success("")).on(
+        "ip6tables",
+        &[],
+        Output::failure(3, "can't initialize ip6tables table `nat'"),
+    );
+    let err = apply(&ctx, range(20000, 21000), 443)
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("ip6tables 执行失败 (3)"), "{err}");
+    let history = exec.history();
+    assert!(
+        history[2].starts_with("iptables -w 5 -t nat -C PREROUTING"),
+        "{history:?}"
+    );
+    assert!(
+        history[3].starts_with("iptables -w 5 -t nat -D PREROUTING"),
+        "{history:?}"
+    );
+    assert!(recorded(&ctx).unwrap().is_empty());
+}
+
+#[test]
+fn old_rules_that_cannot_be_retired_stay_recorded() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("iptables");
+    let old = r#"[{"backend":"iptables","start":20000,"end":30000,"target":443,"token":"onebox-hop-1111111111111111"}]"#;
+    std::fs::write(ledger_path(&ctx), old).unwrap();
+    exec.on(
+        "iptables",
+        &["-w", "5", "-t", "nat", "-A"],
+        Output::success(""),
+    )
+    .on("iptables", &[], Output::failure(4, "resource problem"));
+    let err = apply(&ctx, range(30000, 31000), 443)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.starts_with("新的端口跳跃规则已生效，但旧规则清理失败"),
+        "{err}"
+    );
+    let hops = recorded(&ctx).unwrap();
+    assert_eq!(hops.len(), 2, "old and new both recorded");
+    assert_eq!(hops[0].token, "onebox-hop-1111111111111111");
+    assert_eq!(hops[1].start, 30000);
 }
 
 #[test]

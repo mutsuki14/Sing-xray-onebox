@@ -82,23 +82,33 @@ fn write(state: &mut SysctlState, assignments: &[String]) -> Output {
     if pairs.len() == 1 && state.fail_restore.as_deref() == Some(pairs[0].0.as_str()) {
         return Output::failure(1, state.write_error.clone());
     }
+    // Like procps sysctl: successful assignments are echoed on stdout.
+    let echo = |applied: &[(String, String)]| -> String {
+        applied
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}\n"))
+            .collect()
+    };
     match fault {
-        Some(WriteFault::Ignore) => Output::success(""),
+        Some(WriteFault::Ignore) => Output::success(echo(&pairs)),
         Some(WriteFault::FailAt(index)) => {
-            for (k, v) in pairs.iter().take(index) {
+            let applied = &pairs[..index.min(pairs.len())];
+            for (k, v) in applied {
                 state.values.insert(k.clone(), v.clone());
             }
             let failing = pairs.get(index).map(|(k, _)| k.clone()).unwrap_or_default();
-            Output::failure(
-                1,
-                format!("sysctl: setting key \"{failing}\": {}", state.write_error),
-            )
+            Output {
+                code: 1,
+                stdout: echo(applied),
+                stderr: format!("sysctl: setting key \"{failing}\": {}", state.write_error),
+            }
         }
         None => {
+            let out = Output::success(echo(&pairs));
             for (k, v) in pairs {
                 state.values.insert(k, v);
             }
-            Output::success("")
+            out
         }
     }
 }

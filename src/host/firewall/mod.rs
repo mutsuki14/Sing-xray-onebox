@@ -28,7 +28,15 @@
 //!   and a failed removal of a stale rule no longer aborts the whole apply:
 //!   the rule stays in the ledger, a warning is printed and the next
 //!   reconcile retries (F-8.1#13);
-//! - an nft chain that no longer exists counts as "rule gone";
+//! - an nft chain that no longer exists counts as "rule gone"; iptables-nft's
+//!   `nat`/`mangle`/`raw`/`security` INPUT chains and non-filter chains are
+//!   never edited;
+//! - ufw specs held by an administrator rule are no longer re-commented
+//!   (ufw merges identical rules, so v2 adopted and later deleted them);
+//! - firewalld/ufw ports wanted by two owners (`proxy` and `acme` on TCP
+//!   80) stay open until neither records them (v2 closed TCP 80 after the
+//!   first HTTP-01 issuance on firewalld hosts);
+//! - the owner name `v2` is reserved (its ledger file is `proxy`'s);
 //! - a failing `nft list ruleset` (kernel without nf_tables) falls back to
 //!   iptables instead of failing the apply;
 //! - the ledger lock waits at most 30 seconds instead of forever.
@@ -41,6 +49,7 @@ mod iptables;
 mod ledger;
 mod nft;
 mod reconcile;
+mod siblings;
 mod ufw;
 
 pub use firewalld::Firewalld;
@@ -55,6 +64,9 @@ use crate::domain::protocol::Transport;
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 use crate::sys::exec::Output;
+use crate::sys::lock::FileLock;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Layer-4 protocol of one rule (a rule never covers both).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -212,10 +224,12 @@ pub fn ipv6_enabled(paths: &Paths) -> bool {
             .unwrap_or(true)
 }
 
-/// Owner names become file names and tokens: `[A-Za-z0-9-]{1,31}`.
+/// Owner names become file names and tokens: `[A-Za-z0-9-]{1,31}`, and
+/// never `v2`, whose `firewall-v2.json` is the `proxy` ledger.
 pub fn validate_owner(owner: &str) -> Result<()> {
     let ok = !owner.is_empty()
         && owner.len() < 32
+        && owner != "v2"
         && owner
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-');
@@ -273,6 +287,20 @@ pub fn spans(desired: &[(u16, u16, Transport)]) -> Result<Vec<PortSpan>> {
         );
     }
     Ok(out)
+}
+
+/// Take the lock file `path`, waiting up to `wait` while another process
+/// holds it (ledger mutations are short); then `Error::Busy(busy)`.
+pub(crate) fn lock_waiting(path: &Path, busy: &str, wait: Duration) -> Result<FileLock> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match FileLock::acquire(path, busy) {
+            Err(Error::Busy(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            other => return other,
+        }
+    }
 }
 
 /// `{message}` or `{message}: {stderr}` for a failed probe.

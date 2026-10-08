@@ -425,6 +425,7 @@ fn ruleset(chains: &[String]) -> String {
 
 #[test]
 fn ruleset_classification_keeps_iptables_nft_tables_out_of_nft() {
+    let nat_input = r#"{"chain":{"family":"inet","table":"natty","name":"input","handle":2,"type":"nat","hook":"input","prio":100,"policy":"accept"}}"#;
     let doc: serde_json::Value = serde_json::from_str(&ruleset(&[
         chain_json("ip", "filter", "INPUT", "input"),
         chain_json("ip6", "filter", "INPUT", "input"),
@@ -433,6 +434,10 @@ fn ruleset_classification_keeps_iptables_nft_tables_out_of_nft() {
         chain_json("ip", "filter", "FORWARD", "forward"),
         chain_json("bridge", "filter", "input", "input"),
         chain_json("ip", "mangle", "INPUT", "input"),
+        chain_json("ip", "security", "INPUT", "input"),
+        chain_json("ip", "nat", "INPUT", "input"),
+        chain_json("ip", "myfilter", "INPUT", "input"),
+        nat_input.to_string(),
     ]))
     .unwrap();
     let scan = nft::parse_ruleset(&doc).unwrap();
@@ -447,11 +452,16 @@ fn ruleset_classification_keeps_iptables_nft_tables_out_of_nft() {
             },
             Nft {
                 family: "ip".into(),
-                table: "mangle".into(),
+                table: "myfilter".into(),
                 chain: "INPUT".into()
             },
-        ]
+        ],
+        "iptables-nft tables and non-filter chains are never edited"
     );
+    let mangle_only: serde_json::Value =
+        serde_json::from_str(&ruleset(&[chain_json("ip", "mangle", "INPUT", "input")])).unwrap();
+    let scan = nft::parse_ruleset(&mangle_only).unwrap();
+    assert!(!scan.compat_v4 && scan.native.is_empty());
     let unsafe_doc: serde_json::Value = serde_json::from_str(&ruleset(&[chain_json(
         "inet", "my table", "input", "input",
     )]))

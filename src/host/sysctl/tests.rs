@@ -186,6 +186,17 @@ fn a_hint_replaces_the_raw_error_for_its_key() {
         "当前内核不支持队列 cake"
     );
     f.assert_untouched();
+    // The qdisc was accepted (and echoed on stdout); another key failed.
+    f.sysctl.state().next_write = Some(WriteFault::FailAt(1));
+    let txn = f.txn("cake").hint(QDISC, "当前内核不支持队列 cake");
+    let err = txn.commit(&f.ctx).unwrap_err().to_string();
+    assert!(
+        err.starts_with(
+            "sysctl 执行失败 (1): sysctl: setting key \"net.ipv4.tcp_congestion_control\""
+        ),
+        "{err}"
+    );
+    f.assert_untouched();
 }
 
 #[test]

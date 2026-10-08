@@ -19,19 +19,23 @@
 //!   iptables is used instead of failing;
 //! - hop changes take their own lock (`hop-v2.lock`), so `hop-clear` cannot
 //!   race an apply (E-8.1#20, F-8.1#16);
-//! - a recorded rule whose program vanished counts as removed.
+//! - a recorded rule whose program vanished counts as removed;
+//! - a change installs the new rules before removing the old ones and
+//!   undoes a partial install (e.g. ip6tables failing after iptables), so a
+//!   failed change no longer leaves the host without hopping or with an
+//!   unreported IPv4-only hop.
 
 use crate::ctx::Ctx;
 use crate::domain::config::PortRange;
 use crate::error::{Error, Result};
-use crate::host::firewall::{ipv6_enabled, safe_word};
+use crate::host::firewall::{ipv6_enabled, lock_waiting, safe_word};
 use crate::sys::exec::Cmd;
 use crate::sys::fs::{atomic_write, read_bounded, remove_file_if_exists, write_new_exclusive};
 use crate::sys::lock::FileLock;
 use crate::ui::out;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const LEDGER: &str = "hop-v2.json";
 const MAX_LEDGER_BYTES: u64 = 1 << 20;
@@ -59,26 +63,47 @@ pub fn recorded(ctx: &Ctx) -> Result<Vec<Hop>> {
     load(&ledger_path(ctx))
 }
 
-/// Replace any previous hopping with `range` → `target`.
+/// Replace any previous hopping with `range` → `target`. The new rules are
+/// installed and recorded before the previous ones are removed, so a
+/// failed change leaves the working hopping in place.
 pub fn apply(ctx: &Ctx, range: PortRange, target: u16) -> Result<()> {
     if range.start < 1024 || range.start >= range.end || target == 0 {
         return Err(Error::msg("跳跃范围必须为1024以上递增端口"));
     }
     let path = ledger_path(ctx);
     let _lock = lock(&path)?;
-    clear_locked(ctx, &path)?;
+    let mut hops = load(&path)?;
+    let previous = hops.len();
+    install(ctx, &path, &mut hops, range, target)?;
+    retire(ctx, &path, hops, previous)
+}
+
+/// Install the new hops after the `previous` ones already in `hops`,
+/// recording each at once. On failure everything installed here is taken
+/// out again and the ledger is restored.
+fn install(
+    ctx: &Ctx,
+    path: &Path,
+    hops: &mut Vec<Hop>,
+    range: PortRange,
+    target: u16,
+) -> Result<()> {
     let binaries = iptables_binaries(ctx);
+    let mut nft_error = None;
     if ctx.has("nft") {
         match load_nft(ctx, range, target) {
-            Ok(hop) => return record(ctx, &path, &mut Vec::new(), hop),
+            Ok(hop) => return record(ctx, path, hops, hop),
             Err(e) if binaries.is_empty() => return Err(e),
-            Err(e) => out::warn(format!("nft 无法加载端口跳跃规则，改用 iptables: {e}")),
+            Err(e) => {
+                out::warn(format!("nft 无法加载端口跳跃规则，改用 iptables: {e}"));
+                nft_error = Some(e);
+            }
         }
     }
     if binaries.is_empty() {
         return Err(Error::msg("端口跳跃需要 nft 或 iptables/ip6tables"));
     }
-    let mut hops = Vec::new();
+    let previous = hops.len();
     for binary in binaries {
         let hop = Hop {
             backend: binary.into(),
@@ -87,8 +112,16 @@ pub fn apply(ctx: &Ctx, range: PortRange, target: u16) -> Result<()> {
             target,
             token: format!("onebox-hop-{}", crate::sys::rand::hex(8)?),
         };
-        ctx.check(&iptables_cmd(&hop, "-A"))?;
-        record(ctx, &path, &mut hops, hop)?;
+        let added = ctx
+            .check(&iptables_cmd(&hop, "-A"))
+            .and_then(|_| record(ctx, path, hops, hop));
+        if let Err(e) = added {
+            undo(ctx, path, hops, previous);
+            return Err(match &nft_error {
+                Some(nft) => Error::msg(format!("{e}（nft: {nft}）")),
+                None => e,
+            });
+        }
     }
     Ok(())
 }
@@ -97,13 +130,48 @@ pub fn apply(ctx: &Ctx, range: PortRange, target: u16) -> Result<()> {
 /// taken out again so nothing unrecorded stays behind.
 fn record(ctx: &Ctx, path: &Path, hops: &mut Vec<Hop>, hop: Hop) -> Result<()> {
     hops.push(hop);
-    let Err(e) = save(path, hops) else {
+    let Err(error) = save(path, hops) else {
         return Ok(());
     };
-    if let Some(hop) = hops.pop() {
-        let _ = remove(ctx, &hop);
+    let Some(hop) = hops.pop() else {
+        return Err(error);
+    };
+    match remove(ctx, &hop) {
+        Ok(()) => Err(error),
+        Err(cleanup) => Err(Error::msg(format!(
+            "跳跃记录保存失败: {error}；新规则清理失败: {cleanup}"
+        ))),
     }
-    Err(e)
+}
+
+/// Take out the hops installed after index `keep` and record only the rest.
+fn undo(ctx: &Ctx, path: &Path, hops: &mut Vec<Hop>, keep: usize) {
+    while hops.len() > keep {
+        let Some(hop) = hops.pop() else { break };
+        if let Err(e) = remove(ctx, &hop) {
+            out::warn(format!("未能撤销新的端口跳跃规则 {}: {e}", hop.token));
+            hops.push(hop);
+            break;
+        }
+    }
+    if let Err(e) = save(path, hops) {
+        out::warn(format!("端口跳跃记录保存失败: {e}"));
+    }
+}
+
+/// Remove the first `count` (previous) hops now that the new ones work.
+fn retire(ctx: &Ctx, path: &Path, mut hops: Vec<Hop>, count: usize) -> Result<()> {
+    for _ in 0..count {
+        let Some(old) = hops.first() else { break };
+        remove(ctx, old).map_err(|e| {
+            Error::msg(format!(
+                "新的端口跳跃规则已生效，但旧规则清理失败（已保留记录）: {e}"
+            ))
+        })?;
+        hops.remove(0);
+        save(path, &hops)?;
+    }
+    Ok(())
 }
 
 /// Remove every recorded hop. Hops are removed in order and the ledger is
@@ -267,16 +335,7 @@ fn save(path: &Path, hops: &[Hop]) -> Result<()> {
 }
 
 fn lock(ledger: &Path) -> Result<FileLock> {
-    let path = ledger.with_extension("lock");
-    let deadline = Instant::now() + LOCK_WAIT;
-    loop {
-        match FileLock::acquire(&path, LOCK_BUSY) {
-            Err(Error::Busy(_)) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(100))
-            }
-            other => return other,
-        }
-    }
+    lock_waiting(&ledger.with_extension("lock"), LOCK_BUSY, LOCK_WAIT)
 }
 
 #[cfg(test)]

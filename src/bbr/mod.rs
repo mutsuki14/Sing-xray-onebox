@@ -341,6 +341,15 @@ impl Session<'_> {
     }
 }
 
+/// A system path as the admin knows it: `/boot` rather than
+/// `{system_root}/boot` (tests use a fixture root).
+pub(crate) fn shown(ctx: &Ctx, path: &std::path::Path) -> String {
+    match path.strip_prefix(&ctx.paths.system_root) {
+        Ok(rel) => format!("/{}", rel.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// The BBR lock `ONEBOX_BBR_DIR/lock` (dir 0700, file 0600, non-blocking),
 /// shared by enable and kernel installs (v2-compatible path).
 pub(crate) fn lock(ctx: &Ctx) -> Result<FileLock> {

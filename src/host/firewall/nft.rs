@@ -25,20 +25,25 @@ pub(super) struct Scan {
     pub compat_v6: bool,
 }
 
-/// The table/chain iptables-nft uses for `iptables -I INPUT`. Editing it
-/// with raw nft makes iptables report the table as incompatible.
-fn is_iptables_compat(family: &str, table: &str, chain: &str) -> bool {
-    matches!(family, "ip" | "ip6") && table == "filter" && chain == "INPUT"
+/// An `INPUT` chain of one of iptables-nft's tables. Editing those with raw
+/// nft makes iptables report the table as incompatible; only `filter INPUT`
+/// (where `iptables -I INPUT` goes) decides whether a packet is accepted.
+fn iptables_table(family: &str, table: &str, chain: &str) -> bool {
+    matches!(family, "ip" | "ip6")
+        && matches!(table, "filter" | "nat" | "mangle" | "raw" | "security")
+        && chain == "INPUT"
 }
 
 /// Classify the input base chains of a `nft -j list ruleset` document.
+/// Only `type filter` chains can accept or drop; nat/route chains are
+/// ignored.
 pub(super) fn parse_ruleset(doc: &Value) -> Result<Scan> {
     let entries = doc["nftables"]
         .as_array()
         .ok_or_else(|| Error::msg("nft ruleset 格式无效"))?;
     let mut scan = Scan::default();
     for chain in entries.iter().map(|e| &e["chain"]) {
-        if chain["hook"] != "input" {
+        if chain["hook"] != "input" || chain["type"].as_str().is_some_and(|t| t != "filter") {
             continue;
         }
         let family = chain["family"]
@@ -56,9 +61,10 @@ pub(super) fn parse_ruleset(doc: &Value) -> Result<Scan> {
         if !safe_word(table) || !safe_word(name) {
             return Err(Error::msg("nft 表或链名无法安全管理"));
         }
-        if is_iptables_compat(family, table, name) {
-            scan.compat_v4 |= family == "ip";
-            scan.compat_v6 |= family == "ip6";
+        if iptables_table(family, table, name) {
+            let filter = table == "filter";
+            scan.compat_v4 |= filter && family == "ip";
+            scan.compat_v6 |= filter && family == "ip6";
             continue;
         }
         let found = Nft {

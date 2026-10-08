@@ -213,8 +213,10 @@ impl SysctlTxn {
         let cmd = Cmd::new("sysctl").arg("-w").args(assignments);
         let out = ctx.run(&cmd)?;
         if !out.ok() {
-            let text = format!("{}{}", out.stderr, out.stdout);
-            if let Some((_, hint)) = self.hints.iter().find(|(key, _)| text.contains(key)) {
+            // Only stderr names failing keys; stdout echoes the assignments
+            // that succeeded (`net.core.default_qdisc = fq`).
+            let failed = |key: &str| out.stderr.contains(key);
+            if let Some((_, hint)) = self.hints.iter().find(|(key, _)| failed(key)) {
                 return Err(Error::msg(hint.clone()));
             }
             return Err(Error::Command {

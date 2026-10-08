@@ -251,12 +251,8 @@ fn push_conflict(
         return;
     };
     if sets_tcp_keys(&text) {
-        let shown = match path.strip_prefix(&ctx.paths.system_root) {
-            Ok(rel) => format!("/{}", rel.display()),
-            Err(_) => path.display().to_string(),
-        };
         found.push(Conflict {
-            path: shown,
+            path: super::shown(ctx, path),
             overrides,
         });
     }

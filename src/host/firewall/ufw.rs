@@ -5,8 +5,9 @@
 //! adding a rule. So a spec already held by a rule without an Onebox token
 //! belongs to the administrator: it is not touched, not recorded and never
 //! removed (v2 silently re-commented such rules and deleted them later). A
-//! spec held by another Onebox owner may be taken over: that owner's next
-//! clear then finds nothing to delete, and its reconcile re-asserts it.
+//! spec held by another Onebox owner is taken over (the comment moves to
+//! us); when we stop wanting it while that owner still records it, the
+//! comment is handed back instead of deleting the rule (`siblings`).
 
 use super::{Backend, Rule};
 use crate::ctx::Ctx;
@@ -69,6 +70,16 @@ pub(super) fn foreign_rule<'a>(status: &'a str, spec: &str) -> Option<Listed<'a>
 
 fn status_numbered(ctx: &Ctx) -> Result<String> {
     ctx.check(&Cmd::new("ufw").args(["status", "numbered"]))
+}
+
+/// Give the rule carrying `rule.token` to another owner by replacing its
+/// comment with `token` (ufw updates the existing rule in place).
+pub(super) fn recomment(ctx: &Ctx, rule: &Rule, token: &str) -> Result<()> {
+    if numbered_matches(&status_numbered(ctx)?, &rule.token).is_empty() {
+        return Ok(());
+    }
+    ctx.check(&Cmd::new("ufw").args(["allow", &spec(rule), "comment", token]))?;
+    Ok(())
 }
 
 fn spec(rule: &Rule) -> String {

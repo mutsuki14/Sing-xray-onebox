@@ -14,13 +14,12 @@ use crate::sys::fs::{atomic_write, read_bounded};
 use crate::sys::lock::FileLock;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Ledgers are small; anything bigger is not ours.
 const MAX_LEDGER_BYTES: u64 = 4 << 20;
 /// How long to wait for another process working on the same owner.
 pub(super) const LOCK_WAIT: Duration = Duration::from_secs(30);
-const LOCK_POLL: Duration = Duration::from_millis(100);
 const LOCK_BUSY: &str = "另一个防火墙操作正在进行；稍后重试";
 
 /// v2 ledger location: `frp` under the FRP root, `proxy` as
@@ -194,20 +193,14 @@ fn row_of(entry: &Entry) -> Row {
 /// Serialize ledger mutations of one owner: `{ledger}.lock` (v2 path,
 /// e.g. `firewall-v2.lock`), waiting up to `wait` for another holder.
 pub(super) fn lock(ledger: &Path, wait: Duration) -> Result<FileLock> {
-    let path = ledger.with_extension("lock");
-    let deadline = Instant::now() + wait;
-    loop {
-        match FileLock::acquire(&path, LOCK_BUSY) {
-            Err(Error::Busy(_)) if Instant::now() < deadline => std::thread::sleep(LOCK_POLL),
-            other => return other,
-        }
-    }
+    super::lock_waiting(&ledger.with_extension("lock"), LOCK_BUSY, wait)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sys::fs::TempDir;
+    use std::time::Instant;
 
     /// A v2 ledger as v2's `serde_json::to_vec_pretty` wrote it.
     const V2_LEDGER: &str = r#"{

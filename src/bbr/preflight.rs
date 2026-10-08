@@ -14,6 +14,7 @@
 //! looked for in `/proc/1/cgroup`.
 
 use super::release::Arch;
+use super::shown;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::exec::Cmd;
@@ -328,17 +329,9 @@ pub fn boot_ready(ctx: &Ctx, kernel: &str) -> Result<()> {
         return Err(boot_error("缺少 /boot/grub/grub.cfg"));
     }
     if let Some(missing) = missing_kernel_file(ctx, kernel) {
-        return Err(boot_error(&format!("缺少 {}", display(ctx, &missing))));
+        return Err(boot_error(&format!("缺少 {}", shown(ctx, &missing))));
     }
     Ok(())
-}
-
-/// A system path as the user knows it (without the fixture prefix).
-fn display(ctx: &Ctx, path: &Path) -> String {
-    match path.strip_prefix(&ctx.paths.system_root) {
-        Ok(rel) => format!("/{}", rel.display()),
-        Err(_) => path.display().to_string(),
-    }
 }
 
 /// Fails closed: an enabled EFI variable wins; without a proven "disabled"
@@ -392,10 +385,10 @@ pub fn secure_boot_disabled(ctx: &Ctx) -> Result<String> {
 /// `df -Pk -- path`: the 4th field of the second non-empty line must be at
 /// least `minimum_kib`.
 pub fn space(ctx: &Ctx, path: &Path, minimum_kib: u64) -> Result<String> {
-    let shown = display(ctx, path);
+    let label = shown(ctx, path);
     let failure = || {
         Error::msg(format!(
-            "{shown} 空间不足或无法读取 (至少需要 {minimum_kib} KiB 可用空间)"
+            "{label} 空间不足或无法读取 (至少需要 {minimum_kib} KiB 可用空间)"
         ))
     };
     let out = ctx

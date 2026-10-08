@@ -7,10 +7,14 @@
 //! - existence is always queried from the live firewall, never assumed from
 //!   the ledger;
 //! - only ledger rules are ever removed, by their token: rules an
-//!   administrator created are never touched;
+//!   administrator created are never touched (a recorded firewalld/ufw port
+//!   that an administrator rule replaced is forgotten, not removed);
+//! - a port that is one shared object (firewalld, ufw) stays open while
+//!   another Onebox owner still records it (`siblings`);
 //! - a rule whose backend program is gone counts as gone.
 
 use super::ledger::{lock, LOCK_WAIT};
+use super::siblings::Siblings;
 use super::{
     detect, ledger_path, new_token, spans, validate_owner, Entry, Ledger, Location, PortSpan, Rule,
 };
@@ -58,6 +62,7 @@ pub fn reconcile(
         ctx,
         owner,
         ledger: Ledger::load(ledger, owner)?,
+        siblings: Siblings::load(ctx, ledger),
         keep: BTreeSet::new(),
         report: Report::default(),
     };
@@ -79,6 +84,7 @@ struct Run<'a> {
     ctx: &'a Ctx,
     owner: &'a str,
     ledger: Ledger,
+    siblings: Siblings,
     keep: BTreeSet<String>,
     report: Report,
 }
@@ -86,17 +92,36 @@ struct Run<'a> {
 impl Run<'_> {
     /// Make sure `span` is allowed at `location`, reusing a recorded rule.
     fn ensure(&mut self, span: PortSpan, location: &Location) -> Result<()> {
-        let backend = location.backend();
         let recorded = self.ledger.entries.iter().find(|e| {
             e.rule.range() == span && e.location == *location && !self.keep.contains(&e.rule.token)
         });
-        if let Some(entry) = recorded.cloned() {
-            self.keep.insert(entry.rule.token.clone());
-            if !backend.exists(self.ctx, &entry.rule)? && backend.create(self.ctx, &entry.rule)? {
-                self.report.created.push(describe(&entry));
-            }
-            return Ok(());
+        match recorded.cloned() {
+            Some(entry) => self.refresh(entry),
+            None => self.add(span, location),
         }
+    }
+
+    /// A recorded rule: re-create it when it vanished.
+    fn refresh(&mut self, entry: Entry) -> Result<()> {
+        let backend = entry.location.backend();
+        let token = entry.rule.token.clone();
+        if backend.exists(self.ctx, &entry.rule)? {
+            self.keep.insert(token);
+        } else if backend.create(self.ctx, &entry.rule)? {
+            self.keep.insert(token);
+            self.report.created.push(describe(&entry));
+        } else if self.shared(&entry) {
+            self.keep.insert(token);
+        } else {
+            // An administrator rule now covers the port: it is theirs.
+            self.ledger.remove_token(&token);
+            self.ledger.save()?;
+        }
+        Ok(())
+    }
+
+    /// A span without a record at `location`: create and record it.
+    fn add(&mut self, span: PortSpan, location: &Location) -> Result<()> {
         let entry = Entry {
             location: location.clone(),
             rule: Rule {
@@ -107,13 +132,24 @@ impl Run<'_> {
                 token: new_token(self.owner)?,
             },
         };
-        if !backend.create(self.ctx, &entry.rule)? {
+        if location.backend().create(self.ctx, &entry.rule)? {
+            self.record(&entry)?;
+            self.report.created.push(describe(&entry));
+        } else if self.shared(&entry) {
+            // Already open for another owner: record our interest only.
+            self.ledger.entries.push(entry.clone());
+            self.ledger.save()?;
+        } else {
             return Ok(());
         }
-        self.record(&entry)?;
-        self.keep.insert(entry.rule.token.clone());
-        self.report.created.push(describe(&entry));
+        self.keep.insert(entry.rule.token);
         Ok(())
+    }
+
+    fn shared(&self, entry: &Entry) -> bool {
+        self.siblings
+            .holder(&entry.location, entry.rule.range())
+            .is_some()
     }
 
     /// Append a freshly created rule and save at once; when saving fails the
@@ -144,7 +180,7 @@ impl Run<'_> {
             .cloned()
             .collect();
         for entry in stale {
-            match remove_entry(self.ctx, &entry) {
+            match remove_entry(self.ctx, &self.siblings, &entry) {
                 Ok(()) => {
                     self.ledger.remove_token(&entry.rule.token);
                     self.ledger.save()?;
@@ -163,14 +199,17 @@ impl Run<'_> {
     }
 }
 
-/// Remove a recorded rule; a backend whose program disappeared took its
-/// rules with it.
-fn remove_entry(ctx: &Ctx, entry: &Entry) -> Result<()> {
+/// Remove a recorded rule. A backend whose program disappeared took its
+/// rules with it; a port another owner still records stays open.
+fn remove_entry(ctx: &Ctx, siblings: &Siblings, entry: &Entry) -> Result<()> {
     let backend = entry.location.backend();
     if !ctx.has(backend.program()) {
         return Ok(());
     }
-    backend.remove(ctx, &entry.rule)
+    match siblings.holder(&entry.location, entry.rule.range()) {
+        Some(holder) => Siblings::hand_over(ctx, entry, holder),
+        None => backend.remove(ctx, &entry.rule),
+    }
 }
 
 fn describe(entry: &Entry) -> String {
@@ -195,9 +234,10 @@ pub fn clear(ctx: &Ctx, ledger: &Path, owner: &str) -> Result<()> {
     validate_owner(owner)?;
     let _lock = lock(ledger, LOCK_WAIT)?;
     let mut ledger = Ledger::load(ledger, owner)?;
+    let siblings = Siblings::load(ctx, ledger.path());
     let mut failed = Vec::new();
     for entry in ledger.entries.clone() {
-        match remove_entry(ctx, &entry) {
+        match remove_entry(ctx, &siblings, &entry) {
             Ok(()) => {
                 ledger.remove_token(&entry.rule.token);
                 ledger.save()?;
@@ -215,5 +255,7 @@ pub fn clear(ctx: &Ctx, ledger: &Path, owner: &str) -> Result<()> {
     }
 }
 
+#[cfg(test)]
+mod shared_tests;
 #[cfg(test)]
 mod tests;
