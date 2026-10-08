@@ -1,0 +1,33 @@
+{
+  "protocol": "vmess",
+  "settings": {
+    "vnext": [
+      {
+        "address": "proxy.example.com",
+        "port": 2082,
+        "users": [
+          {
+            "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+            "security": "auto"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "ws",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "http/1.1"
+      ],
+      "fingerprint": "chrome",
+      "serverName": "proxy.example.com"
+    },
+    "wsSettings": {
+      "host": "proxy.example.com",
+      "path": "/vm4d5e6f"
+    }
+  },
+  "tag": "onebox-VMess-WS"
+}

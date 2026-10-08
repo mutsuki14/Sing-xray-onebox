@@ -1,0 +1,365 @@
+{
+  "entries": [
+    {
+      "core": "singbox",
+      "id": "vless-reality",
+      "outbounds": [
+        {
+          "flow": "xtls-rprx-vision",
+          "server": "203.0.113.10",
+          "server_port": 443,
+          "tag": "香港 #1-VLESS-Reality-Vision",
+          "tls": {
+            "enabled": true,
+            "reality": {
+              "enabled": true,
+              "public_key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+              "short_id": "0123456789abcdef"
+            },
+            "server_name": "www.microsoft.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "vless",
+          "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+        }
+      ],
+      "reality": {
+        "host": "203.0.113.10",
+        "port": 443,
+        "reference_host": "www.microsoft.com",
+        "reference_port": 443,
+        "sni": "www.microsoft.com"
+      },
+      "tag": "香港 #1-VLESS-Reality-Vision",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "vless-grpc",
+      "outbounds": [
+        {
+          "server": "203.0.113.10",
+          "server_port": 8443,
+          "tag": "香港 #1-VLESS-gRPC-Reality",
+          "tls": {
+            "enabled": true,
+            "reality": {
+              "enabled": true,
+              "public_key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+              "short_id": "0123456789abcdef"
+            },
+            "server_name": "www.microsoft.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "transport": {
+            "service_name": "grpc0d1e2f",
+            "type": "grpc"
+          },
+          "type": "vless",
+          "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+        }
+      ],
+      "reality": {
+        "host": "203.0.113.10",
+        "port": 8443,
+        "reference_host": "www.microsoft.com",
+        "reference_port": 443,
+        "sni": "www.microsoft.com"
+      },
+      "tag": "香港 #1-VLESS-gRPC-Reality",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "vless-ws",
+      "outbounds": [
+        {
+          "server": "203.0.113.10",
+          "server_port": 2053,
+          "tag": "香港 #1-VLESS-WS-TLS",
+          "tls": {
+            "alpn": [
+              "http/1.1"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "transport": {
+            "early_data_header_name": "Sec-WebSocket-Protocol",
+            "headers": {
+              "Host": "www.bing.com"
+            },
+            "max_early_data": 2048,
+            "path": "/ws1a2b3c",
+            "type": "ws"
+          },
+          "type": "vless",
+          "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+        }
+      ],
+      "tag": "香港 #1-VLESS-WS-TLS",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "vmess-ws",
+      "outbounds": [
+        {
+          "alter_id": 0,
+          "security": "auto",
+          "server": "203.0.113.10",
+          "server_port": 2083,
+          "tag": "香港 #1-VMess-WS",
+          "tls": {
+            "alpn": [
+              "http/1.1"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "transport": {
+            "early_data_header_name": "Sec-WebSocket-Protocol",
+            "headers": {
+              "Host": "www.bing.com"
+            },
+            "max_early_data": 2048,
+            "path": "/vm4d5e6f",
+            "type": "ws"
+          },
+          "type": "vmess",
+          "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+        }
+      ],
+      "tag": "香港 #1-VMess-WS",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "trojan",
+      "outbounds": [
+        {
+          "password": "p@ss:w/rd?&#\"x'中文",
+          "server": "203.0.113.10",
+          "server_port": 2087,
+          "tag": "香港 #1-Trojan-TLS",
+          "tls": {
+            "alpn": [
+              "h2",
+              "http/1.1"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "trojan"
+        }
+      ],
+      "tag": "香港 #1-Trojan-TLS",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "shadowsocks",
+      "outbounds": [
+        {
+          "method": "2022-blake3-aes-128-gcm",
+          "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+          "server": "203.0.113.10",
+          "server_port": 8388,
+          "tag": "香港 #1-Shadowsocks-2022",
+          "type": "shadowsocks"
+        }
+      ],
+      "tag": "香港 #1-Shadowsocks-2022",
+      "transport": "both"
+    },
+    {
+      "core": "singbox",
+      "id": "hysteria2",
+      "outbounds": [
+        {
+          "bbr_profile": "conservative",
+          "connection_receive_window": 41943040,
+          "hop_interval": "30s",
+          "obfs": {
+            "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "type": "salamander"
+          },
+          "password": "p@ss:w/rd?&#\"x'中文",
+          "server": "203.0.113.10",
+          "server_port": 443,
+          "server_ports": [
+            "30000:30100"
+          ],
+          "stream_receive_window": 16777216,
+          "tag": "香港 #1-Hysteria2",
+          "tls": {
+            "alpn": [
+              "h3"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com"
+          },
+          "type": "hysteria2"
+        }
+      ],
+      "tag": "香港 #1-Hysteria2",
+      "transport": "udp"
+    },
+    {
+      "core": "singbox",
+      "id": "tuic",
+      "outbounds": [
+        {
+          "congestion_control": "bbr",
+          "password": "p@ss:w/rd?&#\"x'中文",
+          "server": "203.0.113.10",
+          "server_port": 8443,
+          "tag": "香港 #1-TUIC-v5",
+          "tls": {
+            "alpn": [
+              "h3"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com"
+          },
+          "type": "tuic",
+          "udp_relay_mode": "native",
+          "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+          "zero_rtt_handshake": false
+        }
+      ],
+      "tag": "香港 #1-TUIC-v5",
+      "transport": "udp"
+    },
+    {
+      "core": "singbox",
+      "id": "anytls",
+      "outbounds": [
+        {
+          "password": "p@ss:w/rd?&#\"x'中文",
+          "server": "203.0.113.10",
+          "server_port": 2096,
+          "tag": "香港 #1-AnyTLS",
+          "tls": {
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "anytls"
+        }
+      ],
+      "tag": "香港 #1-AnyTLS",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "shadowtls",
+      "outbounds": [
+        {
+          "detour": "香港 #1-ShadowTLS-v3-tls",
+          "method": "2022-blake3-aes-128-gcm",
+          "password": "c2hhZG93dGxzLXNzLWtleQ==",
+          "tag": "香港 #1-ShadowTLS-v3",
+          "type": "shadowsocks",
+          "udp_over_tcp": {
+            "enabled": true,
+            "version": 2
+          }
+        },
+        {
+          "password": "1234567890abcdef1234567890abcdef12345678",
+          "server": "203.0.113.10",
+          "server_port": 9443,
+          "tag": "香港 #1-ShadowTLS-v3-tls",
+          "tls": {
+            "enabled": true,
+            "server_name": "www.microsoft.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "shadowtls",
+          "version": 3
+        }
+      ],
+      "tag": "香港 #1-ShadowTLS-v3",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "anytls-reality",
+      "outbounds": [
+        {
+          "password": "p@ss:w/rd?&#\"x'中文",
+          "server": "203.0.113.10",
+          "server_port": 20000,
+          "tag": "香港 #1-AnyTLS-REALITY",
+          "tls": {
+            "enabled": true,
+            "reality": {
+              "enabled": true,
+              "public_key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+              "short_id": "0123456789abcdef"
+            },
+            "server_name": "www.microsoft.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "anytls"
+        }
+      ],
+      "reality": {
+        "host": "203.0.113.10",
+        "port": 20000,
+        "reference_host": "www.microsoft.com",
+        "reference_port": 443,
+        "sni": "www.microsoft.com"
+      },
+      "tag": "香港 #1-AnyTLS-REALITY",
+      "transport": "tcp"
+    }
+  ],
+  "schema": 1
+}

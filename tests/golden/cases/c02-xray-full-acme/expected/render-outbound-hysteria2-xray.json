@@ -1,0 +1,32 @@
+{
+  "protocol": "hysteria",
+  "settings": {
+    "address": "proxy.example.com",
+    "port": 2096,
+    "version": 2
+  },
+  "streamSettings": {
+    "finalmask": {
+      "quicParams": {
+        "udpHop": {
+          "interval": "25-35",
+          "ports": "40000-40100"
+        }
+      }
+    },
+    "hysteriaSettings": {
+      "auth": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "version": 2
+    },
+    "network": "hysteria",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "h3"
+      ],
+      "fingerprint": "chrome",
+      "serverName": "proxy.example.com"
+    }
+  },
+  "tag": "onebox-Hysteria2"
+}

@@ -1,0 +1,247 @@
+{
+  "allow-lan": false,
+  "dns": {
+    "default-nameserver": [
+      "223.5.5.5",
+      "119.29.29.29"
+    ],
+    "enable": true,
+    "enhanced-mode": "fake-ip",
+    "fake-ip-filter": [
+      "geosite:private",
+      "geosite:connectivity-check",
+      "+.lan",
+      "+.local",
+      "+.home.arpa",
+      "time.*.com",
+      "ntp.*.com",
+      "+.pool.ntp.org",
+      "+.stun.*.*",
+      "+.stun.*.*.*",
+      "+.srv.nintendo.net",
+      "+.stun.playstation.net",
+      "xbox.*.microsoft.com",
+      "+.xboxlive.com"
+    ],
+    "fake-ip-range": "198.18.0.1/16",
+    "ipv6": true,
+    "listen": "127.0.0.1:1053",
+    "nameserver": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ],
+    "nameserver-policy": {
+      "geosite:cn": [
+        "https://dns.alidns.com/dns-query",
+        "https://doh.pub/dns-query"
+      ],
+      "geosite:geolocation-!cn": [
+        "https://dns.cloudflare.com/dns-query#节点选择",
+        "https://dns.google/dns-query#节点选择"
+      ]
+    },
+    "proxy-server-nameserver": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ]
+  },
+  "external-controller": "127.0.0.1:9090",
+  "geo-auto-update": true,
+  "geo-update-interval": 24,
+  "geodata-mode": true,
+  "geox-url": {
+    "asn": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
+    "geoip": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat",
+    "geosite": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+    "mmdb": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
+  },
+  "ipv6": true,
+  "log-level": "info",
+  "mixed-port": 7890,
+  "mode": "rule",
+  "profile": {
+    "store-fake-ip": true,
+    "store-selected": true
+  },
+  "proxies": [
+    {
+      "client-fingerprint": "chrome",
+      "flow": "xtls-rprx-vision",
+      "name": "onebox-VLESS-Reality-Vision",
+      "network": "tcp",
+      "port": 443,
+      "reality-opts": {
+        "public-key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+        "short-id": "0123456789abcdef",
+        "support-x25519mlkem768": true
+      },
+      "server": "2001:db8::10",
+      "servername": "www.microsoft.com",
+      "tls": true,
+      "type": "vless",
+      "udp": true,
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+    },
+    {
+      "client-fingerprint": "chrome",
+      "name": "onebox-VLESS-XHTTP-Reality",
+      "network": "xhttp",
+      "port": 443,
+      "reality-opts": {
+        "public-key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+        "short-id": "0123456789abcdef",
+        "support-x25519mlkem768": true
+      },
+      "server": "2001:db8::10",
+      "servername": "www.microsoft.com",
+      "tls": true,
+      "type": "vless",
+      "udp": true,
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+      "xhttp-opts": {
+        "mode": "auto",
+        "path": "/xh7a8b9c"
+      }
+    },
+    {
+      "alpn": [
+        "h3"
+      ],
+      "down": 200,
+      "fingerprint": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "initial-connection-receive-window": 5242880,
+      "initial-stream-receive-window": 2097152,
+      "max-connection-receive-window": 5242880,
+      "max-stream-receive-window": 2097152,
+      "name": "onebox-Hysteria2",
+      "obfs": "salamander",
+      "obfs-password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "port": 443,
+      "server": "2001:db8::10",
+      "skip-cert-verify": true,
+      "sni": "www.bing.com",
+      "type": "hysteria2",
+      "up": 50
+    },
+    {
+      "alpn": [
+        "h3"
+      ],
+      "congestion-controller": "bbr",
+      "fingerprint": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "name": "onebox-TUIC-v5",
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "port": 8443,
+      "server": "2001:db8::10",
+      "skip-cert-verify": true,
+      "sni": "www.bing.com",
+      "type": "tuic",
+      "udp-relay-mode": "native",
+      "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+    },
+    {
+      "client-fingerprint": "chrome",
+      "fingerprint": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "name": "onebox-AnyTLS",
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "port": 2053,
+      "server": "2001:db8::10",
+      "skip-cert-verify": true,
+      "sni": "www.bing.com",
+      "type": "anytls",
+      "udp": true
+    },
+    {
+      "cipher": "2022-blake3-aes-128-gcm",
+      "name": "onebox-Shadowsocks-2022",
+      "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+      "port": 8388,
+      "server": "2001:db8::10",
+      "type": "ss",
+      "udp": true
+    }
+  ],
+  "proxy-groups": [
+    {
+      "name": "节点选择",
+      "proxies": [
+        "自动选择",
+        "onebox-VLESS-Reality-Vision",
+        "onebox-VLESS-XHTTP-Reality",
+        "onebox-Hysteria2",
+        "onebox-TUIC-v5",
+        "onebox-AnyTLS",
+        "onebox-Shadowsocks-2022",
+        "DIRECT"
+      ],
+      "type": "select"
+    },
+    {
+      "interval": 300,
+      "name": "自动选择",
+      "proxies": [
+        "onebox-VLESS-Reality-Vision",
+        "onebox-VLESS-XHTTP-Reality",
+        "onebox-Hysteria2",
+        "onebox-TUIC-v5",
+        "onebox-AnyTLS",
+        "onebox-Shadowsocks-2022"
+      ],
+      "tolerance": 50,
+      "type": "url-test",
+      "url": "https://www.gstatic.com/generate_204"
+    }
+  ],
+  "rules": [
+    "IP-CIDR6,2001:db8::10/128,DIRECT,no-resolve",
+    "GEOSITE,private,DIRECT",
+    "GEOIP,private,DIRECT,no-resolve",
+    "GEOSITE,category-ads-all,REJECT",
+    "GEOSITE,cn,DIRECT",
+    "GEOSITE,geolocation-!cn,节点选择",
+    "GEOIP,CN,DIRECT",
+    "MATCH,节点选择"
+  ],
+  "secret": "0123456789abcdef0123456789abcdef0123456789abcdef",
+  "sniffer": {
+    "enable": true,
+    "skip-domain": [
+      "Mijia Cloud",
+      "+.push.apple.com"
+    ],
+    "sniff": {
+      "HTTP": {
+        "override-destination": true,
+        "ports": [
+          80,
+          "8080-8880"
+        ]
+      },
+      "QUIC": {
+        "ports": [
+          443,
+          8443
+        ]
+      },
+      "TLS": {
+        "ports": [
+          443,
+          8443
+        ]
+      }
+    }
+  },
+  "tcp-concurrent": true,
+  "tun": {
+    "auto-detect-interface": true,
+    "auto-route": true,
+    "dns-hijack": [
+      "any:53"
+    ],
+    "enable": false,
+    "stack": "mixed"
+  },
+  "unified-delay": true
+}
+

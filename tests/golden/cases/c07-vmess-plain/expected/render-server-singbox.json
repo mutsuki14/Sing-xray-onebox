@@ -1,0 +1,78 @@
+{
+  "dns": {
+    "servers": [
+      {
+        "tag": "local",
+        "type": "local"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "listen_port": 8388,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+      "tag": "shadowsocks-in",
+      "type": "shadowsocks"
+    }
+  ],
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "default_domain_resolver": {
+      "server": "local",
+      "strategy": "prefer_ipv4"
+    },
+    "final": "direct",
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "reject",
+        "protocol": "bittorrent"
+      },
+      {
+        "action": "resolve",
+        "strategy": "prefer_ipv4"
+      },
+      {
+        "action": "reject",
+        "ip_is_private": true
+      },
+      {
+        "action": "reject",
+        "ip_cidr": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "192.88.99.0/24",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "198.51.100.50/32",
+          "203.0.113.0/24",
+          "224.0.0.0/3",
+          "::/127",
+          "fc00::/7",
+          "fe80::/10",
+          "ff00::/8"
+        ]
+      }
+    ]
+  }
+}

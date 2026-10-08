@@ -1,0 +1,11 @@
+{
+  "detour": "香港 #1-ShadowTLS-v3-tls",
+  "method": "2022-blake3-aes-128-gcm",
+  "password": "c2hhZG93dGxzLXNzLWtleQ==",
+  "tag": "香港 #1-ShadowTLS-v3",
+  "type": "shadowsocks",
+  "udp_over_tcp": {
+    "enabled": true,
+    "version": 2
+  }
+}

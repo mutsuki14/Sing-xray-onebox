@@ -1,0 +1,14 @@
+{
+  "protocol": "shadowsocks",
+  "settings": {
+    "servers": [
+      {
+        "address": "2001:db8::10",
+        "method": "2022-blake3-aes-128-gcm",
+        "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+        "port": 8388
+      }
+    ]
+  },
+  "tag": "onebox-Shadowsocks-2022"
+}

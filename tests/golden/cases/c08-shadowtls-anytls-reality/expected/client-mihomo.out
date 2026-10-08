@@ -1,0 +1,178 @@
+{
+  "allow-lan": false,
+  "dns": {
+    "default-nameserver": [
+      "223.5.5.5",
+      "119.29.29.29"
+    ],
+    "enable": true,
+    "enhanced-mode": "fake-ip",
+    "fake-ip-filter": [
+      "geosite:private",
+      "geosite:connectivity-check",
+      "+.lan",
+      "+.local",
+      "+.home.arpa",
+      "time.*.com",
+      "ntp.*.com",
+      "+.pool.ntp.org",
+      "+.stun.*.*",
+      "+.stun.*.*.*",
+      "+.srv.nintendo.net",
+      "+.stun.playstation.net",
+      "xbox.*.microsoft.com",
+      "+.xboxlive.com"
+    ],
+    "fake-ip-range": "198.18.0.1/16",
+    "ipv6": true,
+    "listen": "127.0.0.1:1053",
+    "nameserver": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ],
+    "nameserver-policy": {
+      "geosite:cn": [
+        "https://dns.alidns.com/dns-query",
+        "https://doh.pub/dns-query"
+      ],
+      "geosite:geolocation-!cn": [
+        "https://dns.cloudflare.com/dns-query#节点选择",
+        "https://dns.google/dns-query#节点选择"
+      ]
+    },
+    "proxy-server-nameserver": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ]
+  },
+  "external-controller": "127.0.0.1:9090",
+  "geo-auto-update": true,
+  "geo-update-interval": 24,
+  "geodata-mode": true,
+  "geox-url": {
+    "asn": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
+    "geoip": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat",
+    "geosite": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+    "mmdb": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
+  },
+  "ipv6": true,
+  "log-level": "info",
+  "mixed-port": 7890,
+  "mode": "rule",
+  "profile": {
+    "store-fake-ip": true,
+    "store-selected": true
+  },
+  "proxies": [
+    {
+      "cipher": "2022-blake3-aes-128-gcm",
+      "client-fingerprint": "chrome",
+      "name": "onebox-ShadowTLS-v3",
+      "password": "c2hhZG93dGxzLXNzLWtleQ==",
+      "plugin": "shadow-tls",
+      "plugin-opts": {
+        "host": "www.cloudflare.com",
+        "password": "1234567890abcdef1234567890abcdef12345678",
+        "version": 3
+      },
+      "port": 443,
+      "server": "203.0.113.80",
+      "type": "ss",
+      "udp": true,
+      "udp-over-tcp": true,
+      "udp-over-tcp-version": 2
+    },
+    {
+      "alpn": [
+        "h3"
+      ],
+      "fingerprint": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "hop-interval": 30,
+      "initial-connection-receive-window": 5242880,
+      "initial-stream-receive-window": 2097152,
+      "max-connection-receive-window": 5242880,
+      "max-stream-receive-window": 2097152,
+      "name": "onebox-Hysteria2",
+      "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "port": 8443,
+      "ports": "50000-50999",
+      "server": "203.0.113.80",
+      "skip-cert-verify": true,
+      "sni": "www.bing.com",
+      "type": "hysteria2"
+    }
+  ],
+  "proxy-groups": [
+    {
+      "name": "节点选择",
+      "proxies": [
+        "自动选择",
+        "onebox-ShadowTLS-v3",
+        "onebox-Hysteria2",
+        "DIRECT"
+      ],
+      "type": "select"
+    },
+    {
+      "interval": 300,
+      "name": "自动选择",
+      "proxies": [
+        "onebox-ShadowTLS-v3",
+        "onebox-Hysteria2"
+      ],
+      "tolerance": 50,
+      "type": "url-test",
+      "url": "https://www.gstatic.com/generate_204"
+    }
+  ],
+  "rules": [
+    "GEOSITE,private,DIRECT",
+    "GEOIP,private,DIRECT,no-resolve",
+    "GEOSITE,category-ads-all,REJECT",
+    "GEOSITE,cn,DIRECT",
+    "GEOSITE,geolocation-!cn,节点选择",
+    "GEOIP,CN,DIRECT",
+    "MATCH,节点选择"
+  ],
+  "secret": "0123456789abcdef0123456789abcdef0123456789abcdef",
+  "sniffer": {
+    "enable": true,
+    "skip-domain": [
+      "Mijia Cloud",
+      "+.push.apple.com"
+    ],
+    "sniff": {
+      "HTTP": {
+        "override-destination": true,
+        "ports": [
+          80,
+          "8080-8880"
+        ]
+      },
+      "QUIC": {
+        "ports": [
+          443,
+          8443
+        ]
+      },
+      "TLS": {
+        "ports": [
+          443,
+          8443
+        ]
+      }
+    }
+  },
+  "tcp-concurrent": true,
+  "tun": {
+    "auto-detect-interface": true,
+    "auto-route": true,
+    "dns-hijack": [
+      "any:53"
+    ],
+    "enable": false,
+    "stack": "mixed"
+  },
+  "unified-delay": true
+}
+

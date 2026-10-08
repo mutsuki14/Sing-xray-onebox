@@ -1,0 +1,35 @@
+{
+  "protocol": "hysteria",
+  "settings": {
+    "address": "2001:db8::10",
+    "port": 443,
+    "version": 2
+  },
+  "streamSettings": {
+    "finalmask": {
+      "udp": [
+        {
+          "settings": {
+            "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+          },
+          "type": "salamander"
+        }
+      ]
+    },
+    "hysteriaSettings": {
+      "auth": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+      "version": 2
+    },
+    "network": "hysteria",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "h3"
+      ],
+      "fingerprint": "chrome",
+      "pinnedPeerCertSha256": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "serverName": "www.bing.com"
+    }
+  },
+  "tag": "onebox-Hysteria2"
+}

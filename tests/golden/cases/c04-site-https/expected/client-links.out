@@ -1,0 +1,3 @@
+vless://6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f@203.0.113.20:8443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=site.example.com&fp=chrome&pbk=2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk&sid=0123456789abcdef&type=tcp&headerType=none#onebox-VLESS-Reality-Vision
+vless://6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f@203.0.113.20:2083?encryption=none&security=reality&sni=site.example.com&fp=chrome&pbk=2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk&sid=0123456789abcdef&type=grpc&serviceName=grpc0d1e2f&mode=gun#onebox-VLESS-gRPC-Reality
+

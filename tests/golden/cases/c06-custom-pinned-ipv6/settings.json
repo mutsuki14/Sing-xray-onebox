@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "mode": "ip",
+  "domain": "198.51.100.44",
+  "port": 8448,
+  "method": "none",
+  "custom_cert": null,
+  "custom_key": null,
+  "devices": []
+}

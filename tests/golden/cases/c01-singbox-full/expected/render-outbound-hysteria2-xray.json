@@ -1,0 +1,41 @@
+{
+  "protocol": "hysteria",
+  "settings": {
+    "address": "203.0.113.10",
+    "port": 443,
+    "version": 2
+  },
+  "streamSettings": {
+    "finalmask": {
+      "quicParams": {
+        "udpHop": {
+          "interval": "25-35",
+          "ports": "30000-30100"
+        }
+      },
+      "udp": [
+        {
+          "settings": {
+            "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+          },
+          "type": "salamander"
+        }
+      ]
+    },
+    "hysteriaSettings": {
+      "auth": "p@ss:w/rd?&#\"x'中文",
+      "version": 2
+    },
+    "network": "hysteria",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "h3"
+      ],
+      "fingerprint": "chrome",
+      "pinnedPeerCertSha256": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "serverName": "www.bing.com"
+    }
+  },
+  "tag": "香港 #1-Hysteria2"
+}

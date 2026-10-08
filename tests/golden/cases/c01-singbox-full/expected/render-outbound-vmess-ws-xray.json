@@ -1,0 +1,34 @@
+{
+  "protocol": "vmess",
+  "settings": {
+    "vnext": [
+      {
+        "address": "203.0.113.10",
+        "port": 2083,
+        "users": [
+          {
+            "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f",
+            "security": "auto"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "ws",
+    "security": "tls",
+    "tlsSettings": {
+      "alpn": [
+        "http/1.1"
+      ],
+      "fingerprint": "chrome",
+      "pinnedPeerCertSha256": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+      "serverName": "www.bing.com"
+    },
+    "wsSettings": {
+      "host": "www.bing.com",
+      "path": "/vm4d5e6f"
+    }
+  },
+  "tag": "香港 #1-VMess-WS"
+}

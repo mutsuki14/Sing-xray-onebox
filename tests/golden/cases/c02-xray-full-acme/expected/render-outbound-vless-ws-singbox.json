@@ -1,0 +1,27 @@
+{
+  "server": "proxy.example.com",
+  "server_port": 2083,
+  "tag": "onebox-VLESS-WS-TLS",
+  "tls": {
+    "alpn": [
+      "http/1.1"
+    ],
+    "enabled": true,
+    "server_name": "proxy.example.com",
+    "utls": {
+      "enabled": true,
+      "fingerprint": "chrome"
+    }
+  },
+  "transport": {
+    "early_data_header_name": "Sec-WebSocket-Protocol",
+    "headers": {
+      "Host": "proxy.example.com"
+    },
+    "max_early_data": 2048,
+    "path": "/ws1a2b3c",
+    "type": "ws"
+  },
+  "type": "vless",
+  "uuid": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+}

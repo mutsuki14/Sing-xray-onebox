@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "mode": "site",
+  "domain": "site.example.com",
+  "port": 443,
+  "method": "cf",
+  "custom_cert": null,
+  "custom_key": null,
+  "devices": []
+}

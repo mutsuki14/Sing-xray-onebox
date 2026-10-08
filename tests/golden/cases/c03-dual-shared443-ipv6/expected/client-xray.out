@@ -1,0 +1,242 @@
+{
+  "dns": {
+    "queryStrategy": "UseIP",
+    "servers": [
+      "https://1.1.1.1/dns-query",
+      {
+        "address": "223.5.5.5",
+        "domains": [
+          "geosite:cn"
+        ],
+        "expectIPs": [
+          "geoip:cn"
+        ],
+        "skipFallback": true
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "enabled": true,
+        "routeOnly": true
+      },
+      "tag": "socks-in"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 10809,
+      "protocol": "http",
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls"
+        ],
+        "enabled": true,
+        "routeOnly": true
+      },
+      "tag": "http-in"
+    }
+  ],
+  "log": {
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "2001:db8::10",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "raw",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+          "serverName": "www.microsoft.com",
+          "shortId": "0123456789abcdef",
+          "spiderX": "/"
+        },
+        "security": "reality"
+      },
+      "tag": "proxy"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "2001:db8::10",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "id": "6f2c1d3e-8a4b-4c5d-8e6f-0a1b2c3d4e5f"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+          "serverName": "www.microsoft.com",
+          "shortId": "0123456789abcdef",
+          "spiderX": "/"
+        },
+        "security": "reality",
+        "xhttpSettings": {
+          "mode": "auto",
+          "path": "/xh7a8b9c"
+        }
+      },
+      "tag": "vless-xhttp"
+    },
+    {
+      "protocol": "hysteria",
+      "settings": {
+        "address": "2001:db8::10",
+        "port": 443,
+        "version": 2
+      },
+      "streamSettings": {
+        "finalmask": {
+          "udp": [
+            {
+              "settings": {
+                "password": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+              },
+              "type": "salamander"
+            }
+          ]
+        },
+        "hysteriaSettings": {
+          "auth": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+          "version": 2
+        },
+        "network": "hysteria",
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": [
+            "h3"
+          ],
+          "fingerprint": "chrome",
+          "pinnedPeerCertSha256": "7ddd08ade31c4f33bcbfbd2008033073c1a1ecee981d49d6d703223109e804c1",
+          "serverName": "www.bing.com"
+        }
+      },
+      "tag": "hysteria2"
+    },
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "2001:db8::10",
+            "method": "2022-blake3-aes-128-gcm",
+            "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+            "port": 8388
+          }
+        ]
+      },
+      "tag": "shadowsocks"
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "ip": [
+          "2001:db8::10/128"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      },
+      {
+        "ip": [
+          "223.5.5.5"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      },
+      {
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.88.99.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "224.0.0.0/3",
+          "::/127",
+          "fc00::/7",
+          "fe80::/10",
+          "ff00::/8"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "geosite:category-ads-all"
+        ],
+        "outboundTag": "block",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "geosite:cn"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      },
+      {
+        "ip": [
+          "geoip:cn"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      }
+    ]
+  }
+}
+

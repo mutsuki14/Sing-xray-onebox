@@ -1,0 +1,106 @@
+{
+  "entries": [
+    {
+      "core": "singbox",
+      "id": "shadowtls",
+      "outbounds": [
+        {
+          "detour": "onebox-ShadowTLS-v3-tls",
+          "method": "2022-blake3-aes-128-gcm",
+          "password": "c2hhZG93dGxzLXNzLWtleQ==",
+          "tag": "onebox-ShadowTLS-v3",
+          "type": "shadowsocks",
+          "udp_over_tcp": {
+            "enabled": true,
+            "version": 2
+          }
+        },
+        {
+          "password": "1234567890abcdef1234567890abcdef12345678",
+          "server": "203.0.113.80",
+          "server_port": 443,
+          "tag": "onebox-ShadowTLS-v3-tls",
+          "tls": {
+            "enabled": true,
+            "server_name": "www.cloudflare.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "shadowtls",
+          "version": 3
+        }
+      ],
+      "tag": "onebox-ShadowTLS-v3",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "anytls-reality",
+      "outbounds": [
+        {
+          "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+          "server": "203.0.113.80",
+          "server_port": 8443,
+          "tag": "onebox-AnyTLS-REALITY",
+          "tls": {
+            "enabled": true,
+            "reality": {
+              "enabled": true,
+              "public_key": "2d3llZo1akCmI2rRkrsJHw0hh0cSPZMPiUVB9omYnEk",
+              "short_id": "0123456789abcdef"
+            },
+            "server_name": "www.example.org",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            }
+          },
+          "type": "anytls"
+        }
+      ],
+      "reality": {
+        "host": "203.0.113.80",
+        "port": 8443,
+        "reference_host": "2001:db8::9",
+        "reference_port": 443,
+        "sni": "www.example.org"
+      },
+      "tag": "onebox-AnyTLS-REALITY",
+      "transport": "tcp"
+    },
+    {
+      "core": "singbox",
+      "id": "hysteria2",
+      "outbounds": [
+        {
+          "connection_receive_window": 5242880,
+          "hop_interval": "30s",
+          "password": "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+          "server": "203.0.113.80",
+          "server_port": 8443,
+          "server_ports": [
+            "50000:50999"
+          ],
+          "stream_receive_window": 2097152,
+          "tag": "onebox-Hysteria2",
+          "tls": {
+            "alpn": [
+              "h3"
+            ],
+            "certificate": [
+              "-----BEGIN CERTIFICATE-----\nMIIBnjCCAUSgAwIBAgIUG0aVKEm4PR65WcbRhpwgozVz7ZwwCgYIKoZIzj0EAwIw\nFzEVMBMGA1UEAwwMd3d3LmJpbmcuY29tMCAXDTI2MTAwODE4MTkxM1oYDzIxMjYw\nOTE0MTgxOTEzWjAXMRUwEwYDVQQDDAx3d3cuYmluZy5jb20wWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAASzCtn6+s+CzxVHcFmQwRgb23RSlk5mCy7tKZoMjYs52Rvk\npSFIOGHV8VaB2c6s80A4wCMHmVzet5zW39v+W8Bgo2wwajAdBgNVHQ4EFgQU/hoV\nwOeUQVBOMwz0K6kTjPiQsmIwHwYDVR0jBBgwFoAU/hoVwOeUQVBOMwz0K6kTjPiQ\nsmIwDwYDVR0TAQH/BAUwAwEB/zAXBgNVHREEEDAOggx3d3cuYmluZy5jb20wCgYI\nKoZIzj0EAwIDSAAwRQIhAOXiQFZR9gAKxqw8Nvin1kLBxZmWtqe+JKpXVpy9c04V\nAiAC6SN1WstYuMRqKJoEAzKzz946JLSRQ5YxOaRh6cnqQQ==\n-----END CERTIFICATE-----\n"
+            ],
+            "enabled": true,
+            "server_name": "www.bing.com"
+          },
+          "type": "hysteria2"
+        }
+      ],
+      "tag": "onebox-Hysteria2",
+      "transport": "udp"
+    }
+  ],
+  "schema": 1
+}

@@ -1,0 +1,14 @@
+{
+  "protocol": "shadowsocks",
+  "settings": {
+    "servers": [
+      {
+        "address": "198.51.100.50",
+        "method": "2022-blake3-aes-128-gcm",
+        "password": "MDEyMzQ1Njc4OWFiY2RlZg==",
+        "port": 8388
+      }
+    ]
+  },
+  "tag": "test node-Shadowsocks-2022"
+}
