@@ -32,6 +32,8 @@
 
 mod line;
 mod scheduler;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use line::line;
 pub use scheduler::{ensure_available, scheduler_running, NOT_RUNNING};

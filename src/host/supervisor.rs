@@ -23,6 +23,8 @@
 //! - a oneshot (the network restore) runs its own command synchronously
 //!   instead of calling back into the workflow.
 
+#[cfg(test)]
+pub(crate) mod fixture;
 pub mod identity;
 
 use crate::ctx::Ctx;
