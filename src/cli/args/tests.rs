@@ -33,7 +33,17 @@ static SUBSCRIPTION: [CommandSpec; 2] = [
         .handler(ok),
 ];
 
-static COMMANDS: [CommandSpec; 7] = [
+static BBR: [CommandSpec; 2] = [
+    CommandSpec::new("info", Group::Feature, "BBR 状态")
+        .root(Root::NotRequired)
+        .handler(ok),
+    // A feature module may declare its own `help` subcommand.
+    CommandSpec::new("help", Group::Feature, "BBR 说明")
+        .root(Root::NotRequired)
+        .handler(ok),
+];
+
+static COMMANDS: [CommandSpec; 8] = [
     CommandSpec::new("install", Group::Node, "安装节点")
         .options(&[
             OptSpec::value("protocols", "列表", "协议列表"),
@@ -68,6 +78,10 @@ static COMMANDS: [CommandSpec; 7] = [
         .handler(ok),
     CommandSpec::new("backup", Group::Maintain, "备份")
         .args(&[ArgSpec::optional("标签", "备份标签")])
+        .handler(ok),
+    // A group with a default action and no positional arguments.
+    CommandSpec::new("bbr", Group::Feature, "BBR")
+        .subcommands(&BBR)
         .handler(ok),
 ];
 
@@ -154,6 +168,8 @@ fn errors() {
         ),
         ("subscription add", "缺少参数: 名称"),
         ("subscription a b", "多余的参数: b"),
+        ("bbr enabel", "未知子命令: enabel；请执行 onebox bbr --help"),
+        ("bbr info extra", "多余的参数: extra"),
     ] {
         assert_eq!(error(line), message, "{line}");
     }
@@ -304,4 +320,38 @@ fn spec_helpers() {
         Group::VISIBLE.map(Group::title),
         ["节点", "客户端", "服务", "功能", "诊断", "维护"]
     );
+}
+
+#[test]
+fn help_word_under_command_groups() {
+    // `frps help` shows the frps page (v2 form), `frps help install` the
+    // subcommand's page.
+    let inv = parse_line("frps help").unwrap();
+    assert!(inv.help);
+    assert_eq!(inv.chain.len(), 1);
+    assert_eq!(inv.spec.name, "frps");
+    let inv = parse_line("frps help install").unwrap();
+    assert!(inv.help);
+    assert_eq!(inv.matches.path, ["frps", "install"]);
+    // Groups with their own handler and legacy positionals too.
+    let inv = parse_line("sub help").unwrap();
+    assert!(inv.help);
+    assert_eq!(inv.matches.path, ["subscription"]);
+    assert!(inv.matches.positionals.is_empty());
+    // A declared `help` subcommand wins over the generic help.
+    let inv = parse_line("bbr help").unwrap();
+    assert!(!inv.help);
+    assert_eq!(inv.matches.path, ["bbr", "help"]);
+    assert_eq!(inv.spec.name, "help");
+    // Commands without subcommands treat `help` as an ordinary word.
+    assert_eq!(matches("del help").positionals, ["help"]);
+    assert_eq!(error("add a help"), "多余的参数: help");
+}
+
+#[test]
+fn group_with_default_action_runs_without_subcommand() {
+    let inv = parse_line("bbr").unwrap();
+    assert!(!inv.help);
+    assert_eq!(inv.matches.path, ["bbr"]);
+    assert_eq!(matches("bbr info").path, ["bbr", "info"]);
 }

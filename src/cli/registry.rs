@@ -40,11 +40,13 @@ pub fn require_root() -> Result<()> {
 
 /// Commands that must work without a context: `version` is run by v2's
 /// self-update to verify a new binary, and neither it nor `help` should
-/// fail because of an invalid `ONEBOX_*` path override.
-pub fn builtin(spec: &CommandSpec, matches: &Matches) -> Option<Result<()>> {
-    match spec.name {
-        "version" => Some(print_version()),
-        "help" => Some(print_help(&matches.positionals)),
+/// fail because of an invalid `ONEBOX_*` path override. Matched on the
+/// canonical command path, so a feature module's own `help` or `version`
+/// subcommand (e.g. `frps help`) is never taken over.
+pub fn builtin(matches: &Matches) -> Option<Result<()>> {
+    match matches.path.as_slice() {
+        ["version"] => Some(print_version()),
+        ["help"] => Some(print_help(&matches.positionals)),
         _ => None,
     }
 }
@@ -118,14 +120,28 @@ mod tests {
         assert_eq!(names.len(), total);
     }
 
+    fn path(path: &[&'static str]) -> Matches {
+        Matches {
+            path: path.to_vec(),
+            ..Matches::default()
+        }
+    }
+
     #[test]
     fn builtins_need_no_root_or_context() {
         for name in ["version", "help"] {
             let spec = find(COMMANDS, name).unwrap();
             assert!(!requires_root(spec, &Matches::default()));
-            assert!(builtin(spec, &Matches::default()).is_some());
+            assert!(builtin(&path(&[name])).is_some());
             assert!(spec.handler.is_some());
         }
+    }
+
+    #[test]
+    fn nested_commands_named_like_builtins_are_not_taken_over() {
+        assert!(builtin(&path(&["frps", "help"])).is_none());
+        assert!(builtin(&path(&["update", "version"])).is_none());
+        assert!(builtin(&path(&[])).is_none());
     }
 
     #[test]

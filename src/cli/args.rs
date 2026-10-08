@@ -450,14 +450,22 @@ impl<'a> Parser<'a> {
         Ok(consumed)
     }
 
-    /// A positional word: the first one may select a subcommand.
+    /// A positional word: the first one may select a subcommand. Under a
+    /// command group, `help` (unless the group declares a `help`
+    /// subcommand) shows the group's help, as v2's `onebox frps help` did;
+    /// any other unknown word is a mistyped subcommand unless the group
+    /// declares positional arguments of its own (legacy forms).
     fn positional(&mut self, word: &str) -> Result<()> {
         let leaf = self.leaf;
         if !leaf.subcommands.is_empty() && self.matches.positionals.is_empty() {
             if let Some(sub) = leaf.subcommand(word) {
                 return self.descend(sub);
             }
-            if leaf.handler.is_none() {
+            if word == "help" {
+                self.help = true;
+                return Ok(());
+            }
+            if leaf.handler.is_none() || leaf.args.is_empty() {
                 let cmd = self.matches.command();
                 return Err(Error::msg(format!(
                     "未知子命令: {word}；请执行 onebox {cmd} --help"

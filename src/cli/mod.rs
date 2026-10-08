@@ -34,7 +34,7 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
     }
     invocation.matches.assume_yes |= auto;
     let spec = invocation.spec;
-    if let Some(result) = registry::builtin(spec, &invocation.matches) {
+    if let Some(result) = registry::builtin(&invocation.matches) {
         return result;
     }
     let handler = spec
