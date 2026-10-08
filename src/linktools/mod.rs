@@ -4,6 +4,7 @@ pub mod bench;
 pub mod bundle;
 pub mod cancel;
 pub mod core_client;
+pub mod failover;
 pub mod http_probe;
 pub mod options;
 pub mod report;
