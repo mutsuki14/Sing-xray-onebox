@@ -1,6 +1,10 @@
 //! Self-signed certificates: EC P-256, 3650 days, the exact v2
 //! `openssl.cnf` (F §3.6), generated in a private staging directory
 //! `<D>/.issue-<16 hex>` that is always removed afterwards.
+//!
+//! Changes from v2: none in what is generated; the pair goes through the
+//! common validated install (`store::install_pair`), so an unchanged
+//! deployment is not rewritten.
 
 use super::openssl::Trust;
 use super::store::{install_pair, CertDir};

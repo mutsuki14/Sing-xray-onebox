@@ -79,14 +79,14 @@ impl<'a> ContentStore<'a> {
         ContentStore { paths }
     }
 
-    pub fn root(&self) -> &Path {
+    pub fn web_root(&self) -> &Path {
         &self.paths.site_root
     }
     fn site_dir(&self) -> PathBuf {
         self.paths.site()
     }
     pub fn index(&self) -> PathBuf {
-        self.root().join("index.html")
+        self.web_root().join("index.html")
     }
     pub fn index_hash_file(&self) -> PathBuf {
         self.site_dir().join("index.sha256")
@@ -101,7 +101,7 @@ impl<'a> ContentStore<'a> {
     /// v2 `paths_safe`: the web root is a dedicated directory, neither a
     /// system directory nor inside (or around) the private configuration.
     pub fn check_paths(&self) -> Result<()> {
-        let root = self.root();
+        let root = self.web_root();
         let unsafe_root = root.parent().is_none()
             || UNSAFE_ROOTS.iter().any(|p| root == Path::new(p))
             || root.starts_with(&self.paths.root)
@@ -117,7 +117,7 @@ impl<'a> ContentStore<'a> {
     pub fn prepare(&self) -> Result<()> {
         self.check_paths()?;
         ensure_dir(&self.site_dir(), 0o700)?;
-        let root = self.root();
+        let root = self.web_root();
         let foreign = root.exists()
             && !root.join(OWNED_MARKER).exists()
             && fs::read_dir(root)
@@ -257,7 +257,8 @@ impl<'a> ContentStore<'a> {
             .ok()
             .filter(|p| p.is_dir())
             .ok_or_else(|| Error::msg(format!("导入目录不存在或不是目录: {}", source.display())))?;
-        let root = fs::canonicalize(self.root()).unwrap_or_else(|_| self.root().to_path_buf());
+        let root =
+            fs::canonicalize(self.web_root()).unwrap_or_else(|_| self.web_root().to_path_buf());
         let recursive =
             canonical == root || root.starts_with(&canonical) || canonical.starts_with(&root);
         if recursive || SYSTEM_DIRS.iter().any(|p| canonical == Path::new(p)) {
@@ -283,7 +284,7 @@ impl<'a> ContentStore<'a> {
             return Err(Error::msg("网站需要 index.html"));
         }
         let id = format!("{}-{}", now(), crate::sys::rand::hex(4)?);
-        let stage = self.root().with_file_name(format!(".onebox-site-{id}"));
+        let stage = self.web_root().with_file_name(format!(".onebox-site-{id}"));
         let result = self.publish_staged(source, &stage, &id, generated);
         let _ = remove_tree_if_exists(&stage);
         result?;
@@ -294,7 +295,7 @@ impl<'a> ContentStore<'a> {
     fn publish_staged(&self, source: &Path, stage: &Path, id: &str, generated: bool) -> Result<()> {
         let limits = CopyLimits::new(MAX_CONTENT_BYTES, MAX_CONTENT_ENTRIES).message(LIMIT_MESSAGE);
         copy_tree(source, stage, &|p| top_level_skip(source, p), &limits)?;
-        let live_challenges = self.root().join(".well-known");
+        let live_challenges = self.web_root().join(".well-known");
         if live_challenges.is_dir() {
             copy_tree(
                 &live_challenges,
@@ -316,7 +317,7 @@ impl<'a> ContentStore<'a> {
 
     /// Copy the live root into `content-backups/<id>` (dir 0700).
     fn backup_live(&self, id: &str, limits: &CopyLimits) -> Result<()> {
-        let root = self.root();
+        let root = self.web_root();
         if !root.exists() {
             return Ok(());
         }
@@ -333,7 +334,7 @@ impl<'a> ContentStore<'a> {
     /// Put `stage` in place of the live root; the old tree ends up at
     /// `stage` (removed by the caller).
     fn swap(&self, stage: &Path) -> Result<()> {
-        let root = self.root();
+        let root = self.web_root();
         if !root.exists() {
             return fs::rename(stage, root).map_err(|e| Error::io(root, e));
         }

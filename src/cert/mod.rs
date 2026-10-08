@@ -40,8 +40,8 @@ pub(crate) mod testing;
 pub use cloudflare::CfCredentials;
 pub use engine::{Engine, RenewKind};
 pub use hooks::{
-    issue_domains, prepare_proxy, prepare_web, renew_dir, renew_needed, status, web_cert_ready,
-    RenewNeed, WebCertTarget,
+    issue_domains, prepare_proxy, prepare_web, renew_dir, renew_needed, renewal_due, status,
+    web_cert_ready, RenewNeed, WebCertTarget,
 };
 pub use method::{CertSpec, Challenge, MethodId, Source};
 pub use openssl::{publicly_trusted, validate_pair, Trust};

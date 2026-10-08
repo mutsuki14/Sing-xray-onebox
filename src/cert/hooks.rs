@@ -7,6 +7,13 @@
 //! `Option<&CfCredentials>` (resolved by the CLI) or from what is stored for
 //! the directory. The apply engine opens the temporary `acme` firewall owner
 //! itself around certificate work (G21).
+//!
+//! Changes from v2: the proxy's HTTP-01 challenge goes to the nginx that
+//! owns TCP 80 (site, standalone subscription) whatever the domain, or to
+//! the built-in responder (v2 switched `standalone`→`http` only when the
+//! proxy and site domains were equal, F-8.1#5); public web endpoints given a
+//! self-signed or private-CA pair get an explicit message; the proxy's
+//! public trust is recorded on the configuration the apply saves.
 
 use super::engine::{Engine, RenewKind};
 use super::method::{CertSpec, Challenge, MethodId, Source};
@@ -268,6 +275,17 @@ pub fn renew_dir_with(
         RenewKind::Scheduled
     };
     engine.renew(&cert_dir, &spec, kind, cf)
+}
+
+/// Read-only preflight (v2 `renewal_due`): whether the certificate
+/// recorded in `dir`'s metadata needs a renewal. `false` without metadata.
+pub fn renewal_due(ctx: &Ctx, dir: &Path) -> Result<bool> {
+    let cert_dir = CertDir::new(dir);
+    let Some(metadata) = cert_dir.metadata()? else {
+        return Ok(false);
+    };
+    let spec = spec_from_metadata(&cert_dir, &metadata)?;
+    Engine::system(ctx).due(&cert_dir, &spec)
 }
 
 /// The spec a directory's recorded metadata describes.

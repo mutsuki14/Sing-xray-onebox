@@ -145,10 +145,21 @@ pub fn render_conf(
     sub: Option<&SiteSubscription>,
     phase: SitePhase,
 ) -> Result<String> {
+    render_conf_env(ctx, &crate::host::os::process_env, cfg, sub, phase)
+}
+
+/// [`render_conf`] with an injected environment (`SSL_CERT_FILE`).
+pub fn render_conf_env(
+    ctx: &Ctx,
+    env: EnvLookup,
+    cfg: &NodeConfig,
+    sub: Option<&SiteSubscription>,
+    phase: SitePhase,
+) -> Result<String> {
     active(cfg)?;
     let facts = NginxFacts::detect(ctx)?;
     let ca = match phase == SitePhase::Full && uses_frontend(cfg) {
-        true => Some(ca_bundle(&ctx.paths)?),
+        true => Some(ca_bundle_with(&ctx.paths, env)?),
         false => None,
     };
     render_conf_with(&ctx.paths, cfg, sub, phase, &facts, ca.as_deref())
@@ -210,11 +221,20 @@ pub fn check(
     cfg: &NodeConfig,
     sub: Option<&SiteSubscription>,
 ) -> Result<Option<PathBuf>> {
+    check_with(&Engine::system(ctx), cfg, sub)
+}
+
+/// [`check`] with an explicit engine.
+pub fn check_with(
+    engine: &Engine,
+    cfg: &NodeConfig,
+    sub: Option<&SiteSubscription>,
+) -> Result<Option<PathBuf>> {
     if cfg.site_active().is_none() {
         return Ok(None);
     }
-    let text = render_conf(ctx, cfg, sub, SitePhase::Full)?;
-    test_conf(ctx, &text).map(Some)
+    let text = render_conf_env(engine.ctx, engine.env, cfg, sub, SitePhase::Full)?;
+    test_conf(engine.ctx, &text).map(Some)
 }
 
 /// prepare-certificates (module docs). Records a content backup id in
@@ -295,7 +315,7 @@ fn bootstrap(engine: &Engine, cfg: &NodeConfig) -> Result<()> {
     if crate::sys::net::listening(&ctx.paths.system_root, crate::cert::http01::HTTP_PORT, true) {
         return Err(Error::msg(crate::cert::http01::PORT_BUSY));
     }
-    let text = render_conf(ctx, cfg, None, SitePhase::Bootstrap)?;
+    let text = render_conf_env(ctx, engine.env, cfg, None, SitePhase::Bootstrap)?;
     install_conf(ctx, &test_conf(ctx, &text)?)?;
     let services = engine.services();
     services.restart(SERVICE)?;
@@ -315,7 +335,7 @@ pub fn apply_with(engine: &Engine, cfg: &NodeConfig, sub: Option<&SiteSubscripti
         return disable_with(engine);
     }
     let ctx = engine.ctx;
-    let text = render_conf(ctx, cfg, sub, SitePhase::Full)?;
+    let text = render_conf_env(ctx, engine.env, cfg, sub, SitePhase::Full)?;
     let staged = staged_conf(&ctx.paths);
     let tested = read_bounded(&staged, CONF_MAX).is_ok_and(|b| b == text.as_bytes());
     let tested = if tested {

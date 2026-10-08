@@ -6,6 +6,9 @@
 //! Title and description are HTML-escaped (`&`, `<`, `>`, `"`, `'`, in that
 //! order); an empty title or description falls back to the defaults
 //! (`山间手记`, `给思考一点空间，给日常一些留白。`), as v2's `get_or` did.
+//!
+//! Changes from v2: none (the template and theme are typed, so v2's
+//! "unknown template/theme" errors are now parse errors of the CLI).
 
 use crate::domain::config::{SiteConfig, SiteTemplate, SiteTheme};
 use crate::domain::defaults::{SITE_DESCRIPTION, SITE_TITLE};

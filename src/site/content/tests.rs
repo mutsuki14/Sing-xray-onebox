@@ -35,10 +35,13 @@ fn prepare_creates_owned_directories_and_refuses_foreign_content() {
     let s = site();
     let store = ContentStore::new(&s.paths);
     store.prepare().unwrap();
-    assert_eq!(mode(store.root()), 0o755);
-    assert_eq!(mode(store.root().join(".well-known/acme-challenge")), 0o755);
+    assert_eq!(mode(store.web_root()), 0o755);
+    assert_eq!(
+        mode(store.web_root().join(".well-known/acme-challenge")),
+        0o755
+    );
     assert_eq!(mode(s.paths.site()), 0o700);
-    assert_eq!(read(store.root().join(OWNED_MARKER)), "onebox\n");
+    assert_eq!(read(store.web_root().join(OWNED_MARKER)), "onebox\n");
     assert_eq!(mode(s.paths.site().join(OWNED_MARKER)), 0o600);
     store.prepare().unwrap();
 
@@ -90,7 +93,7 @@ fn import_keeps_challenges_backs_up_and_forces_modes() {
     let store = ContentStore::new(&s.paths);
     store.prepare().unwrap();
     store.ensure_default("old").unwrap();
-    let token = store.root().join(".well-known/acme-challenge/token");
+    let token = store.web_root().join(".well-known/acme-challenge/token");
     fs::write(&token, "challenge").unwrap();
     let src = upload(&s, "upload", "new");
     fs::create_dir_all(src.join("docs/.well-known")).unwrap();
@@ -107,14 +110,14 @@ fn import_keeps_challenges_backs_up_and_forces_modes() {
     let id = store.import(&src).unwrap();
     assert_eq!(read(store.index()), "new");
     assert_eq!(read(&token), "challenge");
-    assert!(!store.root().join(".well-known/evil").exists());
+    assert!(!store.web_root().join(".well-known/evil").exists());
     assert_eq!(
-        read(store.root().join("docs/.well-known/security.txt")),
+        read(store.web_root().join("docs/.well-known/security.txt")),
         "contact"
     );
-    assert_eq!(read(store.root().join(OWNED_MARKER)), "onebox\n");
-    assert_eq!(mode(store.root().join("assets/app.css")), 0o644);
-    assert_eq!(mode(store.root().join("assets")), 0o755);
+    assert_eq!(read(store.web_root().join(OWNED_MARKER)), "onebox\n");
+    assert_eq!(mode(store.web_root().join("assets/app.css")), 0o644);
+    assert_eq!(mode(store.web_root().join("assets")), 0o755);
     assert!(
         !store.index_hash_file().exists(),
         "imports are not generated"
