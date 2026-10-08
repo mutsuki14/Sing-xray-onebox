@@ -115,12 +115,12 @@ fn tls_settlement() {
     // VMess-WS uses TLS with a domain certificate only.
     let mut cfg = config(&[(VmessWs, 8080, SB)]);
     assert!(cfg.tls.is_none());
-    settle_tls(&mut cfg, Some(&acme)).unwrap();
+    settle_tls(&mut cfg, Some(&acme), false).unwrap();
     assert!(cfg.vmess_tls);
     let tls = cfg.tls.clone().unwrap();
     assert!(!tls.pinned);
     assert_eq!(tls.mode.server_name(), "proxy.example.com");
-    settle_tls(&mut cfg, Some(&ProxyCertChoice::SelfSigned)).unwrap();
+    settle_tls(&mut cfg, Some(&ProxyCertChoice::SelfSigned), false).unwrap();
     assert!(!cfg.vmess_tls);
     assert!(cfg.tls.is_none(), "plain VMess needs no certificate");
 
@@ -131,7 +131,7 @@ fn tls_settlement() {
         port: 443,
         core: SB,
     });
-    settle_tls(&mut cfg, None).unwrap();
+    settle_tls(&mut cfg, None, false).unwrap();
     let tls = cfg.tls.clone().unwrap();
     assert!(tls.pinned);
     assert_eq!(tls.mode.server_name(), "www.bing.com");
@@ -142,7 +142,9 @@ fn tls_settlement() {
         key: "/etc/key.pem".into(),
     };
     assert_eq!(
-        settle_tls(&mut cfg, Some(&custom)).unwrap_err().to_string(),
+        settle_tls(&mut cfg, Some(&custom), false)
+            .unwrap_err()
+            .to_string(),
         "证书路径必须为绝对路径"
     );
     let bad = ProxyCertChoice::Acme {
@@ -150,7 +152,9 @@ fn tls_settlement() {
         method: AcmeMethod::Http01,
     };
     assert_eq!(
-        settle_tls(&mut cfg, Some(&bad)).unwrap_err().to_string(),
+        settle_tls(&mut cfg, Some(&bad), false)
+            .unwrap_err()
+            .to_string(),
         "证书域名无效"
     );
 }

@@ -297,16 +297,26 @@ fn proxy_tls(choice: &ProxyCertChoice, current: Option<&ProxyTls>) -> Result<Pro
     Ok(ProxyTls { mode, pinned })
 }
 
-/// Apply an optional certificate choice, then restore the TLS invariants:
-/// VMess-WS uses TLS exactly when the certificate is a real domain
-/// certificate, a certificate exists iff some inbound needs one, and a newly
-/// needed certificate defaults to self-signed.
-fn settle_tls(cfg: &mut NodeConfig, choice: Option<&ProxyCertChoice>) -> Result<()> {
+/// Apply an optional certificate choice, then restore the TLS invariants.
+///
+/// `vmess_tls` is (re)decided when the certificate changes or VMess-WS is
+/// newly added (`vmess_added`): TLS exactly with a real domain certificate
+/// (v2 rule). Otherwise the stored decision is kept, as v2 pinned it, so an
+/// unrelated change never flips VMess between TLS and plain. A certificate
+/// exists iff some inbound needs one; a newly needed one is self-signed.
+fn settle_tls(
+    cfg: &mut NodeConfig,
+    choice: Option<&ProxyCertChoice>,
+    vmess_added: bool,
+) -> Result<()> {
     if let Some(choice) = choice {
         cfg.tls = Some(proxy_tls(choice, cfg.tls.as_ref())?);
     }
-    cfg.vmess_tls =
-        cfg.has(Protocol::VmessWs) && cfg.tls.as_ref().is_some_and(|t| t.mode.is_domain_cert());
+    let has_vmess = cfg.has(Protocol::VmessWs);
+    if choice.is_some() || vmess_added {
+        cfg.vmess_tls = has_vmess && cfg.tls.as_ref().is_some_and(|t| t.mode.is_domain_cert());
+    }
+    cfg.vmess_tls &= has_vmess;
     if !cfg.needs_cert() {
         cfg.tls = None;
     } else if cfg.tls.is_none() {

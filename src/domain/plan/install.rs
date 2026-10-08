@@ -89,7 +89,7 @@ pub fn install(req: &InstallRequest, env: &PlanEnv, rng: &mut dyn Random) -> Res
         cfg.shadowtls.sni = normalize_domain(sni, "ShadowTLS SNI 域名无效")?;
         cfg.shadowtls.dest = None;
     }
-    settle_tls(&mut cfg, req.cert.as_ref())?;
+    settle_tls(&mut cfg, req.cert.as_ref(), true)?;
     assign_ports(&mut cfg, &req.ports, env)?;
     finish(cfg, env)
 }

@@ -45,7 +45,7 @@ pub fn add(
     }
     apply_reality(&mut next, &opts.reality)?;
     check_site_subscription(cfg, &next)?;
-    settle_tls(&mut next, opts.cert.as_ref())?;
+    settle_tls(&mut next, opts.cert.as_ref(), protocol == Protocol::VmessWs)?;
     ensure!(
         opts.cert.is_none() || next.tls.is_some(),
         "{NO_CERT_NEEDED}"
@@ -78,7 +78,7 @@ pub fn remove(cfg: &NodeConfig, protocol: Protocol) -> Result<NodeConfig> {
         next.creds.reality = None;
         check_site_subscription(cfg, &next)?;
     }
-    settle_tls(&mut next, None)?;
+    settle_tls(&mut next, None, false)?;
     finish_local(next)
 }
 
@@ -215,7 +215,7 @@ pub fn tune_reset(cfg: &NodeConfig) -> Result<NodeConfig> {
 /// certificate kind.
 pub fn set_proxy_cert(cfg: &NodeConfig, choice: &ProxyCertChoice) -> Result<NodeConfig> {
     let mut next = cfg.clone();
-    settle_tls(&mut next, Some(choice))?;
+    settle_tls(&mut next, Some(choice), false)?;
     ensure!(next.tls.is_some(), "{NO_CERT_NEEDED}");
     finish_local(next)
 }

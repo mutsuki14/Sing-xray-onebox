@@ -10,6 +10,25 @@ fn env() -> PlanEnv<'static> {
     PlanEnv::offline(true, 0)
 }
 
+#[test]
+fn vmess_tls_decision_is_pinned_across_unrelated_changes() {
+    // A v2 state with VMESS_TLS=1 and a self-signed certificate.
+    let mut pinned = config(&[(Trojan, 443, SB), (VmessWs, 8080, SB)]);
+    pinned.vmess_tls = true;
+    pinned.validate().unwrap();
+    let next = remove(&pinned, Trojan).unwrap();
+    assert!(
+        next.vmess_tls,
+        "removing another protocol keeps the decision"
+    );
+    assert!(next.tls.as_ref().unwrap().pinned);
+    let next = add_default(&pinned, Tuic).unwrap();
+    assert!(next.vmess_tls, "adding another protocol keeps the decision");
+    // Changing the certificate re-decides it (Trojan keeps needing one).
+    let next = set_proxy_cert(&pinned, &ProxyCertChoice::SelfSigned).unwrap();
+    assert!(!next.vmess_tls);
+}
+
 fn preset1() -> NodeConfig {
     config(&[
         (VlessReality, 443, SB),
