@@ -177,6 +177,11 @@ impl Paths {
     pub fn subscription(&self) -> PathBuf {
         self.root.join("subscription")
     }
+    /// v2 subscription settings with the v2 device list (read-only input
+    /// for the migration and the worker): `ROOT/subscription/settings.json`.
+    pub fn subscription_v2_settings(&self) -> PathBuf {
+        self.subscription().join("settings.json")
+    }
     /// Subscription devices (token hashes): `ROOT/subscription/devices.json`.
     pub fn devices(&self) -> PathBuf {
         self.subscription().join("devices.json")
@@ -235,6 +240,10 @@ mod tests {
             (p.subscription_acme(), "/var/lib/onebox-subscription-acme"),
             (p.subscription_socket(), "/run/onebox/subscription.sock"),
             (p.devices(), "/etc/onebox/subscription/devices.json"),
+            (
+                p.subscription_v2_settings(),
+                "/etc/onebox/subscription/settings.json",
+            ),
             (p.published(), "/etc/onebox/subscription/published.json"),
         ];
         for (got, want) in derived {
