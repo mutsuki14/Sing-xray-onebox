@@ -1,21 +1,24 @@
 //! HTTPS downloads through curl and GitHub release metadata.
 //!
 //! Every transfer is `curl --proto =https --proto-redir =https --tlsv1.2
-//! -fLsS` (HTTPS only, also across redirects), into a temp file next to the
+//! -fL` (HTTPS only, also across redirects), into a temp file next to the
 //! destination that is renamed into place only after the size cap, the
 //! non-emptiness check and, for verified downloads, the hash check; partial
-//! or unverified files are removed on every error.
+//! or unverified files are removed on every error. A missing curl is
+//! installed first when running as root (G14).
 //!
 //! Proxy policy (`GH_PROXY`: an `https://` prefix, no whitespace), one rule
 //! for every caller:
 //! - API metadata (api.github.com) and release checksum files
-//!   (`SHA256SUMS`, `.dgst`) always go direct. They authenticate payloads;
-//!   for assets the API has no digest for (older releases) the checksum
-//!   file is the only trust anchor, so a mirror must never be able to swap
-//!   it together with the payload.
+//!   (`SHA256SUMS`, `.dgst`) always go direct to
+//!   `https://github.com/{repo}/releases/download/{tag}/…`. They
+//!   authenticate payloads; for assets the API has no digest for (older
+//!   releases) the checksum file is the only trust anchor, so a mirror must
+//!   never be able to swap it together with the payload (G26).
 //! - release payloads from `https://github.com/` may use the proxy: their
 //!   size and SHA-256 are known from direct sources before the download
-//!   ([`download_asset`]).
+//!   ([`download_asset`]) or are verified by the caller against direct
+//!   metadata ([`download_paced_with`] for BBR packages).
 //! - files whose SHA-256 is pinned in the code may also be fetched from
 //!   `https://raw.githubusercontent.com/` through the proxy
 //!   ([`download_pinned`]).
@@ -25,19 +28,22 @@
 //!
 //! Changes from v2:
 //! - curl only: wget's `--https-only` does not apply to redirects
-//!   (E-8.1#7), so there is no wget fallback.
+//!   (E-8.1#7), so there is no wget fallback; curl is installed on demand.
 //! - transfer limits scale with the expected size (`--max-time` from a
 //!   32 KiB/s floor, `--speed-limit` 1 KiB/s over 60 s) instead of a fixed
 //!   300 s that failed on slow links; every download has a byte cap
-//!   (`--max-filesize` plus a check of the result).
+//!   (`--max-filesize` plus a check of the result). Interactive downloads
+//!   of large packages ([`Pace::Progress`]) show curl's progress bar and are
+//!   bounded by the low-speed limit only.
 //! - TLS 1.2 minimum; 15 s connect timeout.
 //! - one verification chain for every release download
 //!   ([`download_asset`]): the API digest is preferred and a release
 //!   `SHA256SUMS`/`.dgst` is the fallback when the API has none (G-8.1#6);
 //!   the checksum file must match its metadata size, and the payload is
 //!   fetched only once its expected hash is known.
-//! - release lists ([`github_releases`]) share the API transport, token and
-//!   rate-limit handling.
+//! - release lists ([`github_releases`]) and raw API documents
+//!   ([`github_api_json`]) share the API transport, token and rate-limit
+//!   handling.
 //! - hash-pinned files may use `GH_PROXY` for raw.githubusercontent.com
 //!   (v2 never proxied them).
 //! - temp files use the shared `.onebox-tmp-` prefix so crash leftovers are
@@ -49,6 +55,7 @@ mod asset;
 mod release;
 #[cfg(test)]
 pub(crate) mod testing;
+mod transfer;
 
 pub use asset::{
     download_asset, download_asset_with, download_pinned, download_pinned_with, release_checksums,
@@ -57,14 +64,14 @@ pub use asset::{
 pub use release::{
     check_elf, checksum_for, is_elf, verify_file, Asset, Release, ReleasePage, Which,
 };
+pub use transfer::{ensure_curl_as, max_time, Pace};
 
 use crate::ctx::Ctx;
 use crate::error::{Context, Error, Result};
 use crate::host::os::{process_env, EnvLookup};
-use crate::sys::exec::{Cmd, Output};
-use crate::sys::fs::{self, TempDir, TEMP_PREFIX};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use crate::sys::fs::{self, TempDir};
+use std::path::Path;
+use transfer::{transfer, Check, Transfer};
 
 /// Response size cap for GitHub API metadata (v2 value).
 pub const API_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -79,14 +86,6 @@ const API_HEADERS: [&str; 2] = [
     "Accept: application/vnd.github+json",
     "X-GitHub-Api-Version: 2022-11-28",
 ];
-/// Throughput floor used to derive `--max-time` from the size cap.
-const MIN_RATE: u64 = 32 * 1024;
-/// curl aborts a transfer slower than this many bytes/s for `STALL_SECS`.
-const STALL_RATE: u64 = 1024;
-const STALL_SECS: u64 = 60;
-const MIN_MAX_TIME: u64 = 120;
-const MAX_MAX_TIME: u64 = 2 * 60 * 60;
-const RETRIES: u64 = 2;
 
 /// Which URLs `GH_PROXY` may front for one transfer (module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,23 +106,14 @@ impl Route {
             Route::Pinned => url.starts_with(GITHUB) || url.starts_with(RAW_GITHUB),
         }
     }
-}
 
-/// Inspects the downloaded temp file before it is renamed into place.
-type Check<'a> = &'a dyn Fn(&Path) -> Result<()>;
-
-/// One curl transfer into `dest`.
-struct Transfer<'a> {
-    /// What the user asked for (used in messages).
-    url: &'a str,
-    /// What curl fetches (`url`, possibly behind `GH_PROXY`).
-    target: String,
-    dest: &'a Path,
-    max_bytes: u64,
-    headers: &'a [&'a str],
-    /// curl config read from stdin (secret headers).
-    config: Option<String>,
-    check: Option<Check<'a>>,
+    fn payload_if(use_proxy: bool) -> Route {
+        if use_proxy {
+            Route::Payload
+        } else {
+            Route::Direct
+        }
+    }
 }
 
 /// Download `url` to `dest` (replaced atomically) and return its size.
@@ -142,15 +132,43 @@ pub fn download_with(
     max_bytes: u64,
     use_proxy: bool,
 ) -> Result<u64> {
-    let route = if use_proxy {
-        Route::Payload
-    } else {
-        Route::Direct
-    };
-    fetch_to(ctx, env, url, dest, max_bytes, route, None)
+    download_paced_with(ctx, env, url, dest, max_bytes, use_proxy, Pace::Bounded)
 }
 
-/// The shared download path: proxy routing, transfer, optional check.
+/// [`download_with`] with an explicit [`Pace`]: [`Pace::Progress`] shows
+/// curl's progress bar and stops only on the low-speed limit (large
+/// packages on slow links). The caller verifies the content (size and
+/// SHA-256 from direct metadata) before using it.
+pub fn download_paced_with(
+    ctx: &Ctx,
+    env: EnvLookup,
+    url: &str,
+    dest: &Path,
+    max_bytes: u64,
+    use_proxy: bool,
+    pace: Pace,
+) -> Result<u64> {
+    let target = route_target(
+        url,
+        env("GH_PROXY").as_deref(),
+        Route::payload_if(use_proxy),
+    )?;
+    transfer(
+        ctx,
+        &Transfer {
+            url,
+            target,
+            dest,
+            max_bytes,
+            headers: &[],
+            config: None,
+            check: None,
+            pace,
+        },
+    )
+}
+
+/// The shared verified-download path: proxy routing, transfer, check.
 fn fetch_to(
     ctx: &Ctx,
     env: EnvLookup,
@@ -171,6 +189,7 @@ fn fetch_to(
             headers: &[],
             config: None,
             check,
+            pace: Pace::Bounded,
         },
     )
 }
@@ -211,6 +230,28 @@ pub fn github_releases_with(
     Release::parse_list(&body).with_context(|| format!("{repo} 发行列表无效"))
 }
 
+/// A GitHub API document under `https://api.github.com/repos/{repo}/` as
+/// raw JSON, over the same transport as [`github_release`] (direct, API
+/// headers, optional `GH_TOKEN`, [`API_MAX_BYTES`] cap, rate-limit hint).
+/// For callers that apply their own trust rules to the document (BBR's
+/// release manifests); everyone else should use the typed calls.
+pub fn github_api_json(ctx: &Ctx, repo: &str, url: &str) -> Result<serde_json::Value> {
+    github_api_json_with(ctx, &process_env, repo, url)
+}
+
+/// [`github_api_json`] with an injected environment lookup.
+pub fn github_api_json_with(
+    ctx: &Ctx,
+    env: EnvLookup,
+    repo: &str,
+    url: &str,
+) -> Result<serde_json::Value> {
+    check_api_url(repo, url)?;
+    let body = api_get(ctx, env, repo, url)?;
+    serde_json::from_slice(&body)
+        .map_err(|e| Error::msg(format!("{repo} 的 GitHub API 响应不是有效 JSON: {e}")))
+}
+
 /// GET an API URL (direct, API headers, optional token) into memory.
 fn api_get(ctx: &Ctx, env: EnvLookup, repo: &str, url: &str) -> Result<Vec<u8>> {
     let config = env("GH_TOKEN").map(|t| token_config(&t)).transpose()?;
@@ -226,6 +267,7 @@ fn api_get(ctx: &Ctx, env: EnvLookup, repo: &str, url: &str) -> Result<Vec<u8>> 
             headers: &API_HEADERS,
             config,
             check: None,
+            pace: Pace::Bounded,
         },
     );
     fetched.map_err(|e| api_error(e, repo))?;
@@ -256,6 +298,23 @@ pub fn releases_url(repo: &str, page: u32, per_page: u32) -> Result<String> {
     ))
 }
 
+/// `url` lies below `https://api.github.com/repos/{repo}/`: plain path
+/// segments (no `.`/`..`, which curl would resolve into another
+/// repository) and a simple query.
+fn check_api_url(repo: &str, url: &str) -> Result<()> {
+    ensure!(valid_repo(repo), "GitHub 仓库名无效: {repo}");
+    let rest = url.strip_prefix(&format!("{API}repos/{repo}/"));
+    let ok = rest.is_some_and(|rest| {
+        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+        path.split('/').all(valid_tag_segment)
+            && query
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"=&_.-".contains(&b))
+    });
+    ensure!(ok, "元信息必须来自 api.github.com/repos/{repo}/");
+    Ok(())
+}
+
 fn valid_segment(s: &str) -> bool {
     !s.is_empty()
         && s != "."
@@ -273,11 +332,16 @@ fn valid_repo(repo: &str) -> bool {
 /// Tags are interpolated into URLs: one path segment of a safe charset
 /// (`v1.14.2`, `testing`, `x86_64-7.2.8-max`, `v1.0.0+build`).
 fn valid_tag(tag: &str) -> bool {
-    !tag.is_empty()
-        && tag.len() <= 128
-        && !tag.starts_with(['.', '-'])
-        && tag
-            .bytes()
+    !tag.is_empty() && tag.len() <= 128 && !tag.starts_with(['.', '-']) && valid_tag_segment(tag)
+}
+
+/// One URL path segment that is a name or a tag (never `.` or `..`).
+fn valid_tag_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && s.len() <= 128
+        && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
 }
 
@@ -294,12 +358,7 @@ pub fn check_https(url: &str) -> Result<()> {
 /// `use_proxy`; everything else unchanged. A bad `GH_PROXY` is an error only
 /// when it would be used.
 pub fn proxied(url: &str, gh_proxy: Option<&str>, use_proxy: bool) -> Result<String> {
-    let route = if use_proxy {
-        Route::Payload
-    } else {
-        Route::Direct
-    };
-    route_target(url, gh_proxy, route)
+    route_target(url, gh_proxy, Route::payload_if(use_proxy))
 }
 
 fn route_target(url: &str, gh_proxy: Option<&str>, route: Route) -> Result<String> {
@@ -323,144 +382,6 @@ fn token_config(token: &str) -> Result<String> {
             .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b));
     ensure!(ok, "GH_TOKEN 格式无效");
     Ok(format!("header = \"Authorization: Bearer {token}\"\n"))
-}
-
-/// `--max-time` for a transfer of at most `max_bytes`.
-pub fn max_time(max_bytes: u64) -> Duration {
-    let secs = 60 + max_bytes / MIN_RATE;
-    Duration::from_secs(secs.clamp(MIN_MAX_TIME, MAX_MAX_TIME))
-}
-
-fn curl_cmd(t: &Transfer, output: &Path) -> Cmd {
-    let limit = max_time(t.max_bytes);
-    let mut cmd = Cmd::new("curl").args([
-        "--proto",
-        "=https",
-        "--proto-redir",
-        "=https",
-        "--tlsv1.2",
-        "-fLsS",
-        "--connect-timeout",
-        "15",
-    ]);
-    cmd = cmd
-        .args(["--max-time".to_string(), limit.as_secs().to_string()])
-        .args(["--speed-limit".to_string(), STALL_RATE.to_string()])
-        .args(["--speed-time".to_string(), STALL_SECS.to_string()])
-        .args(["--retry".to_string(), RETRIES.to_string()])
-        .args(["--max-filesize".to_string(), t.max_bytes.to_string()]);
-    for header in t.headers {
-        cmd = cmd.args(["-H", header]);
-    }
-    if let Some(config) = &t.config {
-        cmd = cmd.args(["--config", "-"]).stdin_bytes(config.as_bytes());
-    }
-    // Hard bound for curl itself: every attempt may use its full budget.
-    let hard = limit * (RETRIES as u32 + 1) + Duration::from_secs(30);
-    cmd.arg("--output")
-        .arg(output.to_string_lossy())
-        .arg(&t.target)
-        .timeout(hard)
-}
-
-fn transfer(ctx: &Ctx, t: &Transfer) -> Result<u64> {
-    check_https(t.url)?;
-    ensure!(t.max_bytes > 0, "下载大小上限无效");
-    ensure!(ctx.has("curl"), "请先安装 curl");
-    let parent = t
-        .dest
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| Error::msg("下载目标缺少目录"))?;
-    if !parent.exists() {
-        fs::ensure_dir(parent, 0o700)?;
-    }
-    let tmp = temp_path(parent)?;
-    let result = run_curl(ctx, t, &tmp).and_then(|()| finish(&tmp, t));
-    if result.is_err() {
-        let _ = fs::remove_file_if_exists(&tmp);
-    }
-    result
-}
-
-fn temp_path(dir: &Path) -> Result<PathBuf> {
-    Ok(dir.join(format!(
-        "{TEMP_PREFIX}download-{}",
-        crate::sys::rand::hex(12)?
-    )))
-}
-
-fn run_curl(ctx: &Ctx, t: &Transfer, output: &Path) -> Result<()> {
-    let out = ctx.run(&curl_cmd(t, output))?;
-    if out.ok() {
-        Ok(())
-    } else {
-        Err(curl_error(t, &out))
-    }
-}
-
-/// A Chinese message for a failed curl run (exit codes from curl(1)).
-fn curl_error(t: &Transfer, out: &Output) -> Error {
-    let via = if t.target != t.url {
-        "（经 GH_PROXY）"
-    } else {
-        ""
-    };
-    let detail = last_line(&out.stderr);
-    let message = match out.code {
-        63 => format!(
-            "下载内容超过大小上限（{} 字节）: {}{via}",
-            t.max_bytes, t.url
-        ),
-        28 => format!("下载超时: {}{via}", t.url),
-        crate::sys::exec::TIMEOUT_EXIT => format!("下载超时（已终止 curl）: {}{via}", t.url),
-        _ if detail.is_empty() => format!("下载失败 (curl {}): {}{via}", out.code, t.url),
-        _ => format!("下载失败: {}{via}: {detail}", t.url),
-    };
-    Error::msg(message)
-}
-
-fn last_line(text: &str) -> String {
-    let line = text
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
-    line.chars()
-        .filter(|c| !c.is_control())
-        .take(300)
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
-/// Size checks, then rename the temp file into place.
-fn finish(tmp: &Path, t: &Transfer) -> Result<u64> {
-    let size = match std::fs::symlink_metadata(tmp) {
-        Ok(m) if m.is_file() => m.len(),
-        Ok(_) => return Err(Error::msg("下载结果不是普通文件")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-        Err(e) => return Err(Error::io(tmp, e)),
-    };
-    ensure!(size > 0, "下载内容为空: {}", t.url);
-    ensure!(
-        size <= t.max_bytes,
-        "下载内容超过大小上限（{} 字节）: {}",
-        t.max_bytes,
-        t.url
-    );
-    if let Some(check) = t.check {
-        check(tmp)?;
-    }
-    // Durable before it becomes visible under the final name.
-    std::fs::File::open(tmp)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| Error::io(tmp, e))?;
-    std::fs::rename(tmp, t.dest).map_err(|e| Error::io(t.dest, e))?;
-    if let Some(parent) = t.dest.parent() {
-        fs::fsync_dir(parent).map_err(|e| Error::io(parent, e))?;
-    }
-    Ok(size)
 }
 
 /// Add a rate-limit hint to API failures.

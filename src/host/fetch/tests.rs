@@ -1,8 +1,10 @@
 use super::testing::{output_arg, routes, serve, url_arg, Reply};
 use super::*;
-use crate::sys::exec::{FakeExec, Stdin};
+use crate::sys::exec::{FakeExec, Output, Stdin};
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 const ONEBOX_RELEASE: &str = include_str!("fixtures/onebox-v2.0.1.json");
 const ONEBOX_SUMS: &str = include_str!("fixtures/onebox-v2.0.1.SHA256SUMS");
@@ -431,8 +433,10 @@ fn download_failures_leave_nothing_behind() {
 fn download_preconditions() {
     let (_d, ctx, exec) = setup();
     let dest = ctx.paths.bin.join("pkg");
+    // Without curl and without a package manager: as root the install is
+    // attempted (and fails here), otherwise the user is asked (G14).
     let err = download_with(&ctx, &no_env, ASSET_URL, &dest, 10, true).unwrap_err();
-    assert_eq!(err.to_string(), "请先安装 curl");
+    assert!(err.to_string().ends_with("请先安装 curl"), "{err}");
     exec.provide("curl");
     let cases = [
         (
@@ -449,6 +453,86 @@ fn download_preconditions() {
         assert_eq!(err.to_string(), want);
     }
     assert!(exec.history().is_empty());
+}
+
+#[test]
+fn curl_is_installed_on_demand() {
+    // Present: nothing runs, whoever we are.
+    let (_d, ctx, exec) = setup();
+    exec.provide("curl");
+    ensure_curl_as(&ctx, false).unwrap();
+    assert!(exec.history().is_empty());
+
+    // Missing and not root: ask for it, install nothing.
+    let (_d, ctx, exec) = setup();
+    exec.provide("apt-get");
+    let err = ensure_curl_as(&ctx, false).unwrap_err();
+    assert_eq!(err.to_string(), "请先安装 curl");
+    assert!(exec.history().is_empty());
+
+    // Missing as root: the distro package is installed.
+    let (_d, ctx, exec) = setup();
+    exec.provide("apt-get")
+        .on("apt-get", &["update"], Output::success(""));
+    let fake = Arc::clone(&exec);
+    exec.on_fn(
+        |c| c.program == "apt-get" && c.args.last().is_some_and(|a| a == "curl"),
+        move |_| {
+            fake.provide("curl");
+            Ok(Output::success(""))
+        },
+    );
+    ensure_curl_as(&ctx, true).unwrap();
+    let history = exec.history();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(history[0], "apt-get update");
+    assert!(history[1].ends_with("install -y curl"), "{}", history[1]);
+    assert!(ctx.has("curl"));
+
+    // A failed install is reported as such.
+    let (_d, ctx, exec) = setup();
+    exec.provide("apk").on("apk", &[], Output::failure(1, ""));
+    let err = ensure_curl_as(&ctx, true).unwrap_err();
+    assert_eq!(err.to_string(), "安装 curl 失败: apk 执行失败 (1)");
+}
+
+#[test]
+fn progress_pace_streams_without_a_total_time_limit() {
+    let (_d, ctx, exec) = setup();
+    let env = env_with(&[("GH_PROXY", "https://ghproxy.example")]);
+    let dest = ctx.paths.bin.join("pkg.deb");
+    let proxied_url = format!("https://ghproxy.example/{ASSET_URL}");
+    serve(&exec, vec![(proxied_url.clone(), Reply::body("kernel"))]);
+    let size = download_paced_with(
+        &ctx,
+        &env,
+        ASSET_URL,
+        &dest,
+        100 << 20,
+        true,
+        Pace::Progress,
+    )
+    .unwrap();
+    assert_eq!(size, 6);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"kernel");
+    let cmd = &exec.calls()[0];
+    let tmp = output_arg(cmd).unwrap();
+    assert_eq!(
+        cmd.display(),
+        format!(
+            "curl --proto =https --proto-redir =https --tlsv1.2 -fL --progress-bar \
+             --connect-timeout 15 --speed-limit 1024 --speed-time 60 --retry 2 \
+             --max-filesize {} --output {} {proxied_url}",
+            100u64 << 20,
+            tmp.display()
+        )
+    );
+    assert!(cmd.stream, "the progress bar reaches the terminal");
+    // The hard bound only backs up curl's own low-speed abort.
+    let slowest = (100u64 << 20) / 1024 + 60 + 60;
+    assert_eq!(cmd.timeout, Some(Duration::from_secs(slowest * 3 + 30)));
+    // The default pace keeps the quiet, time-limited transfer.
+    assert_eq!(Pace::default(), Pace::Bounded);
 }
 
 // ---- GitHub API -----------------------------------------------------------
@@ -473,6 +557,62 @@ fn github_release_fetches_directly_with_api_headers() {
     assert_eq!(cmd.stdin, Stdin::Null);
     // The private response directory is gone.
     assert!(!output_arg(cmd).unwrap().parent().unwrap().exists());
+}
+
+#[test]
+fn raw_api_documents_share_the_api_transport() {
+    let (_d, ctx, exec) = setup();
+    let list = "https://api.github.com/repos/o/r/releases?per_page=100&page=2";
+    let tag = "https://api.github.com/repos/o/r/releases/tags/x86_64-7.2.8-max";
+    let limited = "https://api.github.com/repos/o/r/releases/tags/v9";
+    serve(
+        &exec,
+        vec![
+            (list.into(), Reply::body("[{\"tag_name\":\"x\"}]")),
+            (tag.into(), Reply::body("not json")),
+            (limited.into(), Reply::http(429)),
+        ],
+    );
+    let env = env_with(&[("GH_PROXY", "https://ghproxy.example"), ("GH_TOKEN", "t0k")]);
+    let doc = github_api_json_with(&ctx, &env, "o/r", list).unwrap();
+    assert_eq!(doc[0]["tag_name"], "x");
+    let cmd = &exec.calls()[0];
+    assert_eq!(url_arg(cmd), list, "never proxied");
+    assert!(cmd
+        .display()
+        .contains("-H X-GitHub-Api-Version: 2022-11-28"));
+    assert!(cmd.display().contains("--config -"), "token on stdin");
+    let err = github_api_json_with(&ctx, &env, "o/r", tag).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("o/r 的 GitHub API 响应不是有效 JSON"),
+        "{err}"
+    );
+    let err = github_api_json_with(&ctx, &env, "o/r", limited).unwrap_err();
+    assert!(err.to_string().contains("可设置 GH_TOKEN 后重试"), "{err}");
+
+    // Only plain paths below the repository; nothing is requested.
+    exec.clear_history();
+    let refused = [
+        "https://api.github.com/repos/o/other/releases",
+        "https://api.github.com/repos/o/r/../../x/y/releases",
+        "https://api.github.com/repos/o/r/releases/./latest",
+        "https://api.github.com/repos/o/r/",
+        "https://api.github.com/repos/o/r/releases?page=1#x",
+        "https://github.com/repos/o/r/releases",
+        "http://api.github.com/repos/o/r/releases",
+    ];
+    for url in refused {
+        let err = github_api_json_with(&ctx, &no_env, "o/r", url).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "元信息必须来自 api.github.com/repos/o/r/",
+            "{url}"
+        );
+    }
+    let err = github_api_json_with(&ctx, &no_env, "o/../r", list).unwrap_err();
+    assert_eq!(err.to_string(), "GitHub 仓库名无效: o/../r");
+    assert!(exec.history().is_empty());
 }
 
 #[test]
