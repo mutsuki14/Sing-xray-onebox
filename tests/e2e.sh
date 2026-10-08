@@ -11,6 +11,7 @@
 #   SB=/path/sing-box XR=/path/xray MH=/path/mihomo bash tests/e2e.sh [轮次...]
 #   轮次: sb (优先 sing-box 服务端)  xr (优先 Xray 服务端)  ca-sb / ca-xr (受信任证书, 不跳过验证)
 #         xr-share (Xray: Vision 与 XHTTP 共用端口)  xr-hy2 (Xray 承载 Hysteria2 + 混淆)
+#         anytls-reality (独立 AnyTLS-REALITY 与错误凭据/普通 TLS 降级负向测试)
 #   环境变量 KEEP=1 保留工作目录, VERBOSE=1 打印失败时的日志
 #
 set -u
@@ -49,12 +50,23 @@ export ONEBOX_SOURCE_ONLY=1 ONEBOX_DIR="$WORK/etc" NO_COLOR=1
 SB_BIN=$SB XR_BIN=$XR
 
 MARKER="onebox-e2e-$(rand_hex 6)"
-# 动态分配空闲端口 (TCP 与 UDP 均未被占用), 避免与本机其他程序冲突
+# Avoid the kernel's ephemeral source-port range: a port free now can otherwise
+# be consumed by an outgoing curl/core connection before the listener starts.
+E2E_EPHEMERAL_START=32768 E2E_EPHEMERAL_END=60999
+if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
+	read -r E2E_EPHEMERAL_START E2E_EPHEMERAL_END </proc/sys/net/ipv4/ip_local_port_range || true
+fi
+if ! [[ "$E2E_EPHEMERAL_START" =~ ^[1-9][0-9]{0,4}$ && "$E2E_EPHEMERAL_END" =~ ^[1-9][0-9]{0,4}$ ]] ||
+	[ "$E2E_EPHEMERAL_START" -gt "$E2E_EPHEMERAL_END" ] || [ "$E2E_EPHEMERAL_END" -gt 65535 ]; then
+	E2E_EPHEMERAL_START=32768 E2E_EPHEMERAL_END=60999
+fi
+# 动态分配非临时源端口范围内的空闲端口 (TCP 与 UDP 均未被占用)。
 USED_PORTS=" "
 free_port() {
 	local p i
 	for i in $(seq 1 200); do
-		p=$(((RANDOM * 32768 + RANDOM) % 20000 + 40000))
+		p=$(((RANDOM * 32768 + RANDOM) % 55296 + 10240))
+		[ "$p" -ge "$E2E_EPHEMERAL_START" ] && [ "$p" -le "$E2E_EPHEMERAL_END" ] && continue
 		case "$USED_PORTS" in *" $p "*) continue ;; esac
 		port_in_use "$p" tcp && continue
 		port_in_use "$p" udp && continue
@@ -386,7 +398,7 @@ run_client() {
 udp_expected() {
 	local c=$1 p=$2
 	case "$p" in
-	vless-ws | vmess-ws | vless-grpc | vless-xhttp | vless-reality | trojan | shadowsocks | hysteria2 | tuic | anytls | shadowtls) return 0 ;;
+	vless-ws | vmess-ws | vless-grpc | vless-xhttp | vless-reality | trojan | shadowsocks | hysteria2 | tuic | anytls | anytls-reality | shadowtls) return 0 ;;
 	esac
 	return 1
 }
@@ -451,10 +463,66 @@ run_round() {
 	stop_all_round
 }
 
+# A failed handshake only counts if the configuration was accepted, the client
+# remained alive, and the same server passed a positive control before/after.
+# The HTTP target name exists only in server routing, ruling out direct access.
+run_anytls_reality_negative() {
+	local p=anytls-reality mode port dir pid status response rc wrong_key wrong_sid
+	export SSL_CERT_FILE="$WORK/pki/bundle.pem"
+	setup_round anytls-reality-auth singbox self "$p"
+	if ! start_servers; then
+		TOTAL=$((TOTAL + 1)) FAILED=$((FAILED + 1))
+		RESULTS+=("anytls-reality-auth server-start FAIL")
+		stop_all_round
+		return
+	fi
+	wrong_key=$(gen_reality_keypair; printf '%s' "$REALITY_PUBLIC_KEY")
+	if [ "${REALITY_SHORT_ID:0:1}" = 0 ]; then wrong_sid="1${REALITY_SHORT_ID:1}"; else wrong_sid="0${REALITY_SHORT_ID:1}"; fi
+	for mode in positive-before wrong-public-key wrong-short-id wrong-password ordinary-tls positive-after; do
+		free_port
+		port=$FREE_PORT dir="$RDIR/$mode"
+		mkdir -p "$dir"
+		client_config_singbox "$p" "$port" >"$dir/original.json"
+		case "$mode" in
+		wrong-public-key) jq --arg key "$wrong_key" '.outbounds[0].tls.reality.public_key=$key' "$dir/original.json" >"$dir/config.json" ;;
+		wrong-short-id) jq --arg sid "$wrong_sid" '.outbounds[0].tls.reality.short_id=$sid' "$dir/original.json" >"$dir/config.json" ;;
+		wrong-password) jq '.outbounds[0].password += "-incorrect"' "$dir/original.json" >"$dir/config.json" ;;
+		ordinary-tls) jq 'del(.outbounds[0].tls.reality) | .outbounds[0].tls.insecure=true' "$dir/original.json" >"$dir/config.json" ;;
+		*) cp "$dir/original.json" "$dir/config.json" ;;
+		esac
+		status=FAIL
+		if "$SB" check -c "$dir/config.json" >"$dir/check.log" 2>&1; then
+			bg "$dir/client.log" "$SB" run -c "$dir/config.json" >/dev/null
+			pid=${PIDS[${#PIDS[@]}-1]}
+			if wait_tcp "$port"; then
+				response=$(curl --silent --show-error --fail --noproxy '' --max-time 6 \
+					-x "socks5h://127.0.0.1:$port" "http://e2e.target:$HTTP_PORT/" 2>"$dir/curl.log")
+				rc=$?
+				if kill -0 "$pid" 2>/dev/null; then
+					case "$mode" in
+					positive-*) [ "$rc" = 0 ] && [ "$response" = "$MARKER" ] && status=PASS ;;
+					*) [ "$rc" != 0 ] && [ "$response" != "$MARKER" ] && status=PASS ;;
+					esac
+				fi
+			fi
+			kill "$pid" 2>/dev/null
+			wait "$pid" 2>/dev/null
+		fi
+		TOTAL=$((TOTAL + 1))
+		[ "$status" = PASS ] || FAILED=$((FAILED + 1))
+		printf '  %-10s AnyTLS-REALITY authentication: %s\n' "$status" "$mode"
+		RESULTS+=("anytls-reality-auth $mode $status")
+		if [ "$status" != PASS ]; then
+			tail -n 8 "$dir/check.log" "$dir/client.log" "$dir/curl.log" 2>/dev/null | sed 's/^/    /'
+		fi
+	done
+	stop_all_round
+}
+
 setup_fixtures
 
 ROUNDS=("$@")
-[ ${#ROUNDS[@]} -gt 0 ] || ROUNDS=(sb xr ca-sb ca-xr xr-share xr-hy2)
+[ ${#ROUNDS[@]} -gt 0 ] || ROUNDS=(sb xr ca-sb ca-xr xr-share xr-hy2 anytls-reality)
 for r in "${ROUNDS[@]}"; do
 	case "$r" in
 	sb) run_round sb singbox self ;;
@@ -463,6 +531,10 @@ for r in "${ROUNDS[@]}"; do
 	ca-xr) run_round ca-xr xray custom "vless-ws vmess-ws trojan" ;;
 	xr-share) SHARE_XHTTP_PORT=1 run_round xr-share xray self "vless-reality vless-xhttp" ;;
 	xr-hy2) OPT_HY2_CORE=xray HY2_OBFS_TEST=1 run_round xr-hy2 xray self "hysteria2" ;;
+	anytls-reality)
+		run_round anytls-reality singbox self anytls-reality
+		run_anytls_reality_negative
+		;;
 	*) echo "未知轮次: $r" >&2 ;;
 	esac
 done

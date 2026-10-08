@@ -2,11 +2,11 @@
 
 **sing-box / Xray 多协议组合 · 交互式一键安装与管理脚本**
 
-当前版本：**v1.6.1**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+当前版本：**v1.7.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
 
-适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
-服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），并自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
-分享链接、Base64 订阅与二维码。
+适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、AnyTLS-REALITY、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
+服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），按协议支持情况自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
+分享链接、Base64 订阅与二维码。AnyTLS-REALITY 仅提供 sing-box 完整配置。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
@@ -18,7 +18,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 
 ## 特性
 
-- **协议组合随心选**：7 套预设组合 + 自定义组合，11 种协议可自由搭配。
+- **协议组合随心选**：预设与自定义组合，12 种协议可自由搭配。
 - **双内核**：sing-box 与 Xray 可单独使用，也可同时使用（例如 Xray 跑 Reality/XHTTP，sing-box 跑 Hysteria2/TUIC/AnyTLS）。
 - **四类客户端输出**：
   - 分享链接 + Base64 订阅 + 终端二维码（v2rayN / v2rayNG / NekoBox / Shadowrocket / Hiddify / Karing 等）
@@ -30,6 +30,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
   sing-box 优先使用 musl 静态构建，老旧 glibc 与 Alpine 均可运行。
 - **证书**：自签证书（客户端自动固定证书指纹，无需关闭校验即可安全连接）/ Let's Encrypt（HTTP 验证或 Cloudflare DNS 验证，acme.sh 自动续期）/ 自有证书。
 - **自有域名 REALITY 网站**：使用自己的域名一键生成可编辑的主页、申请 Let's Encrypt 证书并自动续期，普通浏览器与 REALITY 客户端共用公网入口。
+- **AnyTLS-REALITY**：sing-box 服务端与客户端支持 AnyTLS + REALITY，可选择外部握手目标或自有域名网站；与普通 AnyTLS 分开配置。
 - **管理与恢复**：只读安装预演、一键体检、证书状态、稳定/测试更新渠道、本机快照与手动恢复、静态网站模板和内容导入、本地脱敏诊断包。
 - **链路与性能**：真实客户端链路测试、Hysteria2 拥塞与接收窗口调优、REALITY 一致性检查，以及带连续失败阈值、恢复冷却期的客户端多入口回退。
 - **BBR 管理**：启用系统自带 TCP BBR，选择默认队列；集成 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 的标准版 / Max 版内核 Release，支持安装预览、指定版本与下载校验，保留旧内核。
@@ -68,7 +69,9 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 | 4 | Reality / gRPC-Reality / Trojan / SS-2022 / Hysteria2 / TUIC / AnyTLS / ShadowTLS / VMess-WS | sing-box | 全家桶 |
 | 5 | VLESS-WS-TLS + VMess-WS | sing-box | 可套 CDN，建议使用域名 |
 | 6 | VLESS-Reality-Vision | Xray | 极简单协议 |
-| 7 | 自定义 | 任选 | 从 11 种协议中任意组合，并选择优先内核 |
+| 7 | 自定义 | 任选 | 从 12 种协议中任意组合，并选择优先内核 |
+
+AnyTLS-REALITY 可在自定义组合中选择，或安装后执行 `onebox add anytls-reality` 添加；现有预设仍使用普通 AnyTLS。
 
 ## 协议 / 内核 / 客户端 支持矩阵
 
@@ -85,6 +88,7 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 | TUIC-v5 | sing-box | ✅ | ✅ | ✅ | ❌ | 自签 / ACME |
 | AnyTLS | sing-box | ✅ | ✅ | ✅ | ❌ | 自签 / ACME |
 | ShadowTLS-v3 | sing-box | ❌ (无通用链接格式) | ✅ | ✅ | ❌ | 借用大站握手 |
+| AnyTLS-REALITY | sing-box ≥ 1.12.0 | ❌ (仅完整 JSON) | ❌ | ✅ (≥ 1.12.0) | ❌ | 无需 (REALITY) |
 
 > Xray 26 起对 gRPC / WebSocket / VMess / Trojan / Shadowsocks 输出“已弃用”警告，这些协议默认建议由 sing-box 承载；
 > REALITY 建议使用 443 端口（Xray 会对非 443 端口给出警告）；两者都由 Xray 承载时，VLESS-XHTTP-Reality 默认与 Vision 共用 443 端口。
@@ -92,6 +96,32 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 >
 > **关于 Xray 版本**：脚本默认安装经过测试的 Xray 26.3.27。更新的 Xray（26.4 之后）REALITY 服务端要求客户端支持
 > X25519MLKEM768，会拒绝 sing-box 客户端，因此 `onebox update xray` 会先提示确认；也可用 `--xray-version latest` 显式指定。
+
+## AnyTLS-REALITY（1.7.0）
+
+`anytls` 使用普通 TLS，需要自签、ACME 或自备证书；新增的 `anytls-reality` 使用 REALITY 密钥、short ID、SNI 和握手目标，默认无需自备域名或证书。两者可同时安装，分别使用独立端口。AnyTLS-REALITY 沿用现有 REALITY 目标选择、密钥管理与自有域名建站功能。
+
+```bash
+# 已安装：更新脚本后添加协议，再导出 sing-box 配置
+onebox update-script
+onebox add anytls-reality
+onebox client singbox
+
+# 只使用本地代理端口的客户端配置
+onebox client singbox-notun
+
+# 新安装：指定外部 REALITY 握手目标
+bash onebox.sh install --protocols anytls-reality --core singbox --sni www.microsoft.com -y
+
+# 可选：添加协议时，使用自己的域名一键建站并开启 HTTPS 443 入口
+onebox add anytls-reality --reality-site www.example.com --site-https on
+```
+
+服务端与客户端均需 **sing-box ≥ 1.12.0** 且使用带 `with_utls` 的构建（官方发行包已包含）。请导入生成的 `sing-box.json` 或 `sing-box-notun.json`；其他应用是否可用，取决于其内置 sing-box 版本和是否支持完整配置导入。
+
+**AnyTLS-REALITY 不支持 mihomo / Xray，也不提供通用分享链接、Base64 节点订阅或二维码。** 不要把普通 `anytls://` 链接用于此协议。普通 AnyTLS 的分享与 mihomo 支持保持不变。兼容性依据：[sing-box AnyTLS](https://sing-box.sagernet.org/configuration/inbound/anytls/)、[sing-box TLS / REALITY](https://sing-box.sagernet.org/configuration/shared/tls/)、[mihomo AnyTLS](https://wiki.metacubex.one/en/config/proxies/anytls/)。
+
+选择自有域名网站时，脚本仍会为网站申请和续期证书；域名解析、端口与证书要求见下一节。
 
 ## 使用自己的域名作为 REALITY 网站
 
@@ -173,6 +203,7 @@ onebox qr                    # 终端二维码
 ```
 
 **客户端版本要求**：mihomo 内核需 ≥ 1.19.3（含 VLESS-XHTTP 时需 ≥ 1.19.22），sing-box 客户端需 ≥ 1.12。
+AnyTLS-REALITY 仅包含在 sing-box 完整配置中，不会加入 mihomo / Xray 配置或分享链接；上表其他客户端的链接导入方式不适用于该协议。
 生成的 mihomo / sing-box 配置为本地控制面板 (127.0.0.1:9090) 设置了密钥（`onebox info` 中显示），DNS 仅监听本机。
 Stash 的部分字段名与 mihomo 不同（如证书指纹、Hysteria2 密码），Shadowrocket 建议直接导入分享链接或订阅。
 
@@ -206,7 +237,7 @@ onebox frps                FRP 服务端与域名管理
 onebox uninstall           卸载
 ```
 
-协议名称：`vless-reality` `vless-xhttp` `vless-grpc` `vless-ws` `vmess-ws` `trojan` `shadowsocks` `hysteria2` `tuic` `anytls` `shadowtls`
+协议名称：`vless-reality` `vless-xhttp` `vless-grpc` `vless-ws` `vmess-ws` `trojan` `shadowsocks` `hysteria2` `tuic` `anytls` `shadowtls` `anytls-reality`
 
 ## BBR / BBRv3 管理
 

@@ -20,6 +20,7 @@ jobs:
         run: |
           bash tests/unit.sh
           timeout 30 bash tests/interaction.sh
+          timeout 60 bash tests/anytls-reality.sh
       - name: Embedded client runtime and policy tests
         run: |
           python3 scripts/embed-runtime.py --check
