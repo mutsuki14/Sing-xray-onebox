@@ -3,7 +3,7 @@ name: Native release
 on:
   workflow_dispatch:
   push:
-    tags: [v2.0.0]
+    tags: [v2.0.1]
   workflow_run:
     workflows: [Native CI]
     types: [completed]
@@ -14,11 +14,11 @@ permissions:
   actions: read
 
 concurrency:
-  group: native-release-v2.0.0
+  group: native-release-v2.0.1
   cancel-in-progress: false
 
 env:
-  RELEASE_VERSION: 2.0.0
+  RELEASE_VERSION: 2.0.1
   RUST_TOOLCHAIN: 1.99.0
   # Official cross main, pinned after verifying the upstream Git reference.
   CROSS_REV: 74e99b2223de06166f8cdcc1af7f1308ec52baf4
@@ -115,7 +115,7 @@ jobs:
           with open('Cargo.toml', 'rb') as f:
               assert tomllib.load(f)['package']['version'] == os.environ['RELEASE_VERSION']
           PY
-          grep -qx 'readonly SCRIPT_VERSION="2.0.0"' scripts/bootstrap.sh
+          grep -qx 'readonly SCRIPT_VERSION="2.0.1"' scripts/bootstrap.sh
       - name: Install the pinned Rust toolchain and cross source revision
         run: |
           set -euo pipefail

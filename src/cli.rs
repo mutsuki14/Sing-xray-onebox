@@ -342,9 +342,11 @@ fn port_available(
     }
     if tcp
         && s.flag("SUBSCRIPTION_ENABLED")
-        && s.get("SUBSCRIPTION_MODE") == "standalone"
+        && matches!(s.get("SUBSCRIPTION_MODE"), "standalone" | "ip")
         && (port == s.number("SUBSCRIPTION_PORT", 8448)
-            || (port == 80 && s.flag("SUBSCRIPTION_HTTP")))
+            || (port == 80
+                && s.get("SUBSCRIPTION_MODE") == "standalone"
+                && s.flag("SUBSCRIPTION_HTTP")))
     {
         return Ok(false);
     }
@@ -605,7 +607,7 @@ fn credentials(ctx: &Context, s: &mut State, reset: bool) -> Result<()> {
                         ]
                         .contains(p))
                     && !(s.flag("SUBSCRIPTION_ENABLED")
-                        && s.get("SUBSCRIPTION_MODE") == "standalone"
+                        && matches!(s.get("SUBSCRIPTION_MODE"), "standalone" | "ip")
                         && *p == s.number("SUBSCRIPTION_PORT", 8448))
             })
             .ok_or("没有空闲的 REALITY guard 端口")?;
@@ -1114,7 +1116,7 @@ fn uninstall(ctx: &Context) -> Result<()> {
     Ok(())
 }
 fn help() {
-    println!("Onebox v{VERSION} — Rust 原生管理程序\n\n用法: onebox [命令] [选项]\n  install | plan [--protocols 列表 --core singbox|xray --addr IP或域名 --port 协议=端口]\n  add 协议 | del 协议 | port 协议 端口 | addr | reset | sni | regen\n  info | client mihomo|provider|singbox|singbox-notun|xray|links|sub|qr\n  subscription enable|info|add 名称|revoke ID|reset ID|disable\n  site info|https|template|title|import|restore|preview|renew\n  cert status|set|renew | cert-renew proxy|site|subscription\n  start|stop|restart|status|log | update [singbox|xray] [版本]\n  update-script|update-check|update-channel [stable|testing]\n  backup [标签] | backups | restore ID|latest | recover | doctor | support\n  bbr | frps | tune | probe | bench | failover | reality-check\n  uninstall | version | help\n\n通用选项: -y/--yes 使用明确的默认值；EOF 取消操作。\nREALITY选项: --sni 域名 或 --reality-site 自有域名 [--site-https on|off]\n证书选项: --tls self|acme|cf|custom --domain 域名 [--cert 文件 --key 文件]\n协议: {}",PROTOCOLS.iter().map(|p|p.as_str()).collect::<Vec<_>>().join(", "));
+    println!("Onebox v{VERSION} — Rust 原生管理程序\n\n用法: onebox [命令] [选项]\n  install | plan [--protocols 列表 --core singbox|xray --addr IP或域名 --port 协议=端口]\n  add 协议 | del 协议 | port 协议 端口 | addr | reset | sni | regen\n  info | client mihomo|provider|singbox|singbox-notun|xray|links|sub|qr\n  subscription enable|info|add 名称|revoke ID|reset ID|disable\n  subscription enable --mode ip --address IP [--port 8448]（HTTP，无需域名）\n  site info|https|template|title|import|restore|preview|renew\n  cert status|set|renew | cert-renew proxy|site|subscription\n  start|stop|restart|status|log | update [singbox|xray] [版本]\n  update-script|update-check|update-channel [stable|testing]\n  backup [标签] | backups | restore ID|latest | recover | doctor | support\n  bbr | frps | tune | probe | bench | failover | reality-check\n  uninstall | version | help\n\n通用选项: -y/--yes 使用明确的默认值；EOF 取消操作。\nREALITY选项: --sni 域名 或 --reality-site 自有域名 [--site-https on|off]\n证书选项: --tls self|acme|cf|custom --domain 域名 [--cert 文件 --key 文件]\n协议: {}",PROTOCOLS.iter().map(|p|p.as_str()).collect::<Vec<_>>().join(", "));
 }
 fn words(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).to_owned()).collect()
@@ -1184,17 +1186,33 @@ fn subscription_menu(ctx: &Context) -> Result<Vec<String>> {
         1 => args.push("info".into()),
         2 => {
             let s = state::load(ctx)?;
-            let mode = if s.site_enabled() {
-                ui::ask(
+            let mode = loop {
+                let value = ui::ask(
                     ctx,
-                    "托管方式 site(复用自建站) / standalone(独立域名)",
-                    "site",
-                )?
-            } else {
-                "standalone".into()
+                    "托管方式 ip(IP直连 HTTP) / site(复用自建站 HTTPS) / standalone(独立域名 HTTPS)",
+                    if s.site_enabled() { "site" } else { "ip" },
+                )?;
+                if matches!(value.as_str(), "ip" | "standalone")
+                    || value == "site" && s.site_enabled()
+                {
+                    break value;
+                }
+                eprintln!("请选择 ip、standalone，或已启用自建站时选择 site。");
             };
             args.extend(words(&["enable", "--mode", &mode]));
-            if mode == "standalone" {
+            if mode == "ip" {
+                eprintln!("HTTP 不加密订阅内容和令牌；需要加密传输时请选择 HTTPS 托管方式。");
+                args.extend(words(&[
+                    "--address",
+                    &ui::ask(
+                        ctx,
+                        "订阅 IP（IPv4 或 IPv6，无需方括号）",
+                        &subscription::default_address(&s).unwrap_or_default(),
+                    )?,
+                    "--port",
+                    &ui::ask(ctx, "HTTP 订阅端口", "8448")?,
+                ]));
+            } else if mode == "standalone" {
                 args.extend(words(&[
                     "--domain",
                     &ui::ask(ctx, "订阅域名（已解析到本机）", "")?,
@@ -1670,6 +1688,16 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ip_subscription_port_is_reserved_for_tcp_proxies() {
+        let mut s = State::default();
+        s.set("SUBSCRIPTION_ENABLED", 1);
+        s.set("SUBSCRIPTION_MODE", "ip");
+        s.set("SUBSCRIPTION_PORT", 18448);
+        for protocol in [Protocol::Anytls, Protocol::VlessReality, Protocol::Trojan] {
+            assert!(!port_available(&Context::default(), &s, protocol, 18448, None).unwrap());
+        }
+    }
     #[test]
     fn options_reject_typos_duplicates_invalid_ports() {
         for a in [

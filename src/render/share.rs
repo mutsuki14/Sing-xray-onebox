@@ -1,5 +1,5 @@
 //! Share formats are rendered directly from state; JSON is also valid YAML.
-use super::{certificate_pin, direct_domains, hy2_windows, pinned, tls_name};
+use super::{certificate_pin, direct_domains, direct_ip_cidrs, hy2_windows, pinned, tls_name};
 use crate::{
     context::Context,
     model::{Protocol, State},
@@ -339,6 +339,14 @@ pub(super) fn mihomo(ctx: &Context, s: &State, provider: bool) -> Result<String>
             .iter()
             .map(|domain| json!(format!("DOMAIN,{domain},DIRECT")))
             .collect();
+        rules.extend(direct_ip_cidrs(s).into_iter().map(|cidr| {
+            let kind = if cidr.contains(':') {
+                "IP-CIDR6"
+            } else {
+                "IP-CIDR"
+            };
+            json!(format!("{kind},{cidr},DIRECT,no-resolve"))
+        }));
         rules.extend(document["rules"].as_array().unwrap().iter().cloned());
         document["rules"] = json!(rules);
         for domain in domains {
@@ -632,6 +640,33 @@ mod tests {
         s.set("REALITY_SITE_DOMAIN", "invalid-domain");
         let document: Value = serde_json::from_str(&mihomo(&ctx, &s, false).unwrap()).unwrap();
         assert_eq!(document["rules"][0], "GEOSITE,private,DIRECT");
+    }
+
+    #[test]
+    fn ip_subscription_uses_precise_direct_cidr_without_dns_policy() {
+        let mut s = state();
+        let ctx = Context::default();
+        s.set("REALITY_SITE_DOMAIN", "site.example.com");
+        for (address, expected) in [
+            ("203.0.113.42", "IP-CIDR,203.0.113.42/32,DIRECT,no-resolve"),
+            (
+                "2001:db8:0:0::42",
+                "IP-CIDR6,2001:db8::42/128,DIRECT,no-resolve",
+            ),
+        ] {
+            s.set("SUBSCRIPTION_DOMAIN", address);
+            let document: Value = serde_json::from_str(&mihomo(&ctx, &s, false).unwrap()).unwrap();
+            assert_eq!(document["rules"][0], "DOMAIN,site.example.com,DIRECT");
+            assert_eq!(document["rules"][1], expected);
+            assert_eq!(document["rules"][2], "GEOSITE,private,DIRECT");
+            assert!(document["dns"]["nameserver-policy"].get(address).is_none());
+            assert!(!document["dns"]["fake-ip-filter"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(address)));
+            let provider: Value = serde_json::from_str(&mihomo(&ctx, &s, true).unwrap()).unwrap();
+            assert_eq!(provider.as_object().unwrap().len(), 1);
+        }
     }
 
     #[test]

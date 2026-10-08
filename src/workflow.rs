@@ -379,10 +379,14 @@ fn validate_ports(ctx: &Context, s: &State) -> Result<()> {
         {
             return Err("REALITY guard 端口与网站监听冲突".into());
         }
+        let subscription_mode = s.get("SUBSCRIPTION_MODE");
+        let subscription_default_port = if subscription_mode == "ip" { 8448 } else { 443 };
         if s.flag("SUBSCRIPTION_ENABLED")
-            && s.get("SUBSCRIPTION_MODE") == "standalone"
-            && (guard == s.number("SUBSCRIPTION_PORT", 443)
-                || (guard == 80 && s.flag("SUBSCRIPTION_HTTP")))
+            && matches!(subscription_mode, "standalone" | "ip")
+            && (guard == s.number("SUBSCRIPTION_PORT", subscription_default_port)
+                || (guard == 80
+                    && subscription_mode == "standalone"
+                    && s.flag("SUBSCRIPTION_HTTP")))
         {
             return Err("REALITY guard 端口与订阅监听冲突".into());
         }
@@ -744,6 +748,24 @@ mod tests {
             .contains("订阅"));
         s.set("SUBSCRIPTION_PORT", 9443);
         assert!(validate_ports(&ctx, &s).is_ok());
+        s.set("SUBSCRIPTION_MODE", "ip");
+        s.set("SUBSCRIPTION_PORT", 8443);
+        assert!(validate_ports(&ctx, &s)
+            .unwrap_err()
+            .to_string()
+            .contains("订阅"));
+        s.set("SUBSCRIPTION_HTTP", 1);
+        s.set("REALITY_GUARD_PORT", 80);
+        assert!(validate_ports(&ctx, &s).is_ok());
+        assert!(!acme_http(&s));
+        s.set_port(Protocol::VlessReality, 80);
+        s.set("REALITY_GUARD_PORT", 18000);
+        assert!(validate_ports(&ctx, &s).is_ok());
+        s.set("SUBSCRIPTION_MODE", "standalone");
+        assert!(validate_ports(&ctx, &s)
+            .unwrap_err()
+            .to_string()
+            .contains("HTTP-01"));
     }
 
     struct RuntimeState {

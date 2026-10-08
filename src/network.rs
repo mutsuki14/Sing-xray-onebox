@@ -983,9 +983,18 @@ pub fn desired_ports(state: &State) -> Result<Vec<(u16, bool)>> {
             ports.insert((state.port(p), true));
         }
     }
-    if state.flag("SUBSCRIPTION_ENABLED") && state.get("SUBSCRIPTION_MODE") == "standalone" {
-        ports.insert((state.number("SUBSCRIPTION_PORT", 443), false));
-        if state.flag("SUBSCRIPTION_HTTP") {
+    if state.flag("SUBSCRIPTION_ENABLED")
+        && matches!(state.get("SUBSCRIPTION_MODE"), "standalone" | "ip")
+    {
+        let default_port = if state.get("SUBSCRIPTION_MODE") == "ip" {
+            8448
+        } else {
+            443
+        };
+        ports.insert((state.number("SUBSCRIPTION_PORT", default_port), false));
+        // SUBSCRIPTION_HTTP records HTTP-01 validation for domain mode; an
+        // IP subscription has no certificate challenge or extra listener.
+        if state.get("SUBSCRIPTION_MODE") == "standalone" && state.flag("SUBSCRIPTION_HTTP") {
             ports.insert((80, false));
         }
     }
@@ -1168,7 +1177,7 @@ mod failure_tests {
         assert!(!exists(&ctx, &rule(443)).unwrap());
     }
     #[test]
-    fn subscription_ports_are_included_only_for_standalone() {
+    fn subscription_ports_follow_mode_and_certificate_requirements() {
         let mut s = State::default();
         s.set("SUBSCRIPTION_ENABLED", "1");
         s.set("SUBSCRIPTION_MODE", "standalone");
@@ -1176,6 +1185,12 @@ mod failure_tests {
         s.set("SUBSCRIPTION_HTTP", "1");
         assert_eq!(desired_ports(&s).unwrap(), vec![(80, false), (8443, false)]);
         s.set("SUBSCRIPTION_MODE", "site");
+        assert!(desired_ports(&s).unwrap().is_empty());
+        s.set("SUBSCRIPTION_MODE", "ip");
+        assert_eq!(desired_ports(&s).unwrap(), vec![(8443, false)]);
+        s.set("SUBSCRIPTION_PORT", "");
+        assert_eq!(desired_ports(&s).unwrap(), vec![(8448, false)]);
+        s.set("SUBSCRIPTION_ENABLED", "0");
         assert!(desired_ports(&s).unwrap().is_empty());
     }
 }

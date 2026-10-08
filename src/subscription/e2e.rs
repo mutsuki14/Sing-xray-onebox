@@ -645,3 +645,184 @@ fn native_site_subscription() -> Result<()> {
     println!("HTTP, TLS1.3, REALITY443, HTTPS reverse proxy, standalone subscription, atomic update and revoke verified");
     Ok(())
 }
+
+fn fetch_ip(settings: &Settings, path: &str, method: &str) -> Result<(u16, String, String)> {
+    let address = std::net::SocketAddr::new(settings.domain.parse()?, settings.port);
+    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(Duration::from_secs(8)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let url = endpoint(settings);
+    let host = url
+        .strip_prefix("http://")
+        .ok_or("IP subscription must use HTTP")?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or("missing HTTP headers")?;
+    let status = headers
+        .split_whitespace()
+        .nth(1)
+        .ok_or("missing HTTP status")?
+        .parse()?;
+    Ok((status, body.into(), headers.into()))
+}
+
+fn ip_subscription_case(address: &str) -> Result<()> {
+    let nginx =
+        PathBuf::from(env::var("ONEBOX_NGINX_BIN").unwrap_or_else(|_| "/usr/sbin/nginx".into()));
+    let temp = Temp(env::temp_dir().join(format!("onebox-ip-e2e-{}", util::random_hex(8)?)));
+    fs::create_dir(&temp.0)?;
+    fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o755))?;
+    let ctx = Context {
+        paths: Paths::isolated(&temp.0),
+        ..Context::default()
+    };
+    for path in [&ctx.paths.root, &ctx.paths.run, &ctx.paths.log] {
+        fs::create_dir_all(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    let mut state = State::default();
+    for (key, value) in [
+        ("PROTOCOLS", "vless-reality"),
+        ("SERVER_ADDR", address),
+        ("UUID", "11111111-2222-4333-8444-555555555555"),
+        ("NODE_NAME", "ip-first-node"),
+        ("REALITY_SNI", "example.com"),
+        ("REALITY_SHORT_ID", "0123456789abcdef"),
+        (
+            "REALITY_PRIVATE_KEY",
+            "never-publish-this-server-private-key",
+        ),
+        (
+            "REALITY_PUBLIC_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+    ] {
+        state.set(key, value);
+    }
+    state.set_core(Protocol::VlessReality, Core::Singbox);
+    state.set_port(Protocol::VlessReality, 443);
+    let mut settings = Settings {
+        enabled: true,
+        mode: "ip".into(),
+        domain: address.into(),
+        port: port(),
+        method: "none".into(),
+        ..Settings::default()
+    };
+    let (device, token) = new_device(&mut settings, "ip-client")?;
+    // Use the production transaction preparation path to enable IP hosting.
+    state.set("SUBSCRIPTION_SETTINGS_EXPECTED", "absent");
+    state.set(
+        "SUBSCRIPTION_SETTINGS_PENDING",
+        serde_json::to_string(&settings)?,
+    );
+    prepare(&ctx, &mut state)?;
+    assert_eq!(load(&ctx)?.mode, "ip");
+    let first = write_generation(&ctx, &state)?;
+    assert_eq!(first.formats.len(), FORMATS.len());
+    let expected_host = if address.contains(':') {
+        format!("[{address}]")
+    } else {
+        address.into()
+    };
+    assert_eq!(
+        endpoint(&settings),
+        format!("http://{expected_host}:{}", settings.port)
+    );
+    let config = web_config(&ctx, &settings, false)?;
+    assert!(!config.contains("ssl_certificate"));
+    assert!(!config.contains("acme-challenge"));
+    let conf = check_nginx(&ctx, &nginx, &dir(&ctx), config)?;
+    assert!(!dir(&ctx).join("tls").exists());
+    assert!(!ctx.paths.site().exists());
+    assert!(!ctx.paths.site_root.exists());
+    if env::var("ONEBOX_SITE_CONFIG_ONLY").as_deref() == Ok("1") {
+        println!("IP {address} nginx configuration verified without DNS/certificates");
+        return Ok(());
+    }
+    let binary = PathBuf::from(env::var("ONEBOX_TEST_BINARY").expect("set ONEBOX_TEST_BINARY"));
+    let mut worker = start(
+        &ctx,
+        &binary,
+        &["subscription".into(), "serve".into()],
+        "subscription",
+    )?;
+    let until = Instant::now() + Duration::from_secs(5);
+    while !socket_path(&ctx).exists() && Instant::now() < until {
+        assert!(worker.0.try_wait()?.is_none());
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(socket_path(&ctx).exists());
+    let mut web = start_nginx(&ctx, &nginx, &dir(&ctx), &conf)?;
+    wait_tcp(&mut web, settings.port)?;
+    for format in FORMATS {
+        let path = format!("/sub/{token}/{format}");
+        let (status, body, headers) = fetch_ip(&settings, &path, "GET")?;
+        assert_eq!(status, 200, "{address}/{format}");
+        assert_eq!(body, first.formats[format]);
+        assert!(headers.to_ascii_lowercase().contains("no-store"));
+        assert!(!body.contains(state.get("REALITY_PRIVATE_KEY")));
+        let (status, body, headers) = fetch_ip(&settings, &path, "HEAD")?;
+        assert_eq!(status, 200);
+        assert!(body.is_empty());
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains(&format!("content-length: {}", first.formats[format].len())));
+    }
+    let path = format!("/sub/{token}/singbox");
+    assert_eq!(fetch_ip(&settings, &path, "POST")?.0, 403);
+    for invalid in [
+        format!("/sub/{}/singbox", "0".repeat(64)),
+        format!("/sub/{token}/state.json"),
+        format!("/sub/{token}/singbox?extra=1"),
+        "/".into(),
+    ] {
+        assert_eq!(fetch_ip(&settings, &invalid, "GET")?.0, 404);
+    }
+    state.set("NODE_NAME", "ip-refreshed-node");
+    state.set_port(Protocol::VlessReality, 14443);
+    let second = write_generation(&ctx, &state)?;
+    assert_ne!(first.formats["singbox"], second.formats["singbox"]);
+    assert_eq!(
+        fetch_ip(&settings, &path, "GET")?.1,
+        second.formats["singbox"]
+    );
+    // The same URL pauses and resumes across disabled/enabled settings.
+    settings.enabled = false;
+    save(&ctx, &settings)?;
+    assert_eq!(fetch_ip(&settings, &path, "GET")?.0, 404);
+    settings.enabled = true;
+    save(&ctx, &settings)?;
+    assert_eq!(fetch_ip(&settings, &path, "GET")?.0, 200);
+    command(&ctx, &["revoke".into(), device])?;
+    assert_eq!(fetch_ip(&settings, &path, "GET")?.0, 404);
+    drop(web);
+    drop(worker);
+    for name in ["nginx.log", "subscription.log"] {
+        assert!(
+            !fs::read_to_string(ctx.paths.log.join(name))?.contains(&token),
+            "IP request token leaked into runtime logs"
+        );
+    }
+    assert!(!dir(&ctx).join("tls").exists());
+    println!("IP {address}: HTTP GET/HEAD, all formats, authorization, stable refresh URL and revoke verified without DNS/certificates");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires real nginx and onebox; starts isolated HTTP listeners"]
+fn native_ip_subscription() -> Result<()> {
+    ip_subscription_case("127.0.0.1")?;
+    if site::ipv6_available() {
+        ip_subscription_case("::1")?;
+    } else {
+        println!("IPv6 loopback unavailable; IPv4 IP subscription verified");
+    }
+    Ok(())
+}

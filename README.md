@@ -2,11 +2,11 @@
 
 **sing-box / Xray 多协议组合 · Rust 原生安装与管理工具**
 
-当前版本：**v2.0.0**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
+当前版本：**v2.0.1**。默认分支：[`main`](https://github.com/mutsuki14/Sing-xray-onebox/tree/main)。
 
 适用于各类 Linux VPS，一条命令部署 VLESS-Reality、XHTTP、Hysteria2、TUIC、AnyTLS、AnyTLS-REALITY、Trojan、SS-2022、ShadowTLS 等协议的任意组合，
 服务端可选 **sing-box** 或 **Xray** 内核（也可双内核共存），按协议支持情况自动生成适用于 **sing-box / Xray / mihomo (Clash Meta)** 客户端的完整配置、
-分享链接、Base64 订阅与二维码。支持通过 HTTPS 发布按设备授权的远程订阅；AnyTLS-REALITY 仅提供 sing-box 完整配置。
+分享链接、Base64 订阅与二维码。支持通过 IP 直连 HTTP 或域名 HTTPS 发布按设备授权的远程订阅；AnyTLS-REALITY 仅提供 sing-box 完整配置。
 
 2.0 将协议配置、服务管理、证书、FRP、BBR、更新、恢复和客户端链路工具迁移到 Rust。`onebox.sh` 只负责检测 Linux 架构、下载固定版本的原生程序、校验 SHA-256 并启动；不再包含或调用旧版 Bash / Python 业务实现。
 
@@ -31,7 +31,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 - **证书**：自签证书（完整客户端配置固定证书信任）/ Let's Encrypt（HTTP 验证或 Cloudflare DNS 验证，acme.sh 自动续期）/ 自有证书。
 - **自有域名 REALITY 网站**：使用自己的域名一键生成可编辑的主页、申请 Let's Encrypt 证书并自动续期，普通浏览器与 REALITY 客户端共用公网入口。
 - **AnyTLS-REALITY**：sing-box 服务端与客户端支持 AnyTLS + REALITY，可选择外部握手目标或自有域名网站；与普通 AnyTLS 分开配置。
-- **HTTPS 远程订阅**：复用自建网站或独立域名入口，按设备创建、撤销、重置订阅链接；提供 Base64、mihomo 完整配置 / provider、sing-box 和 Xray 配置。
+- **远程订阅**：无需域名即可用 IP 直连 HTTP，也可复用自建网站或使用独立域名 HTTPS；按设备创建、撤销、重置链接，提供 Base64、mihomo 完整配置 / provider、sing-box 和 Xray 配置。
 - **管理与恢复**：只读安装预演、一键体检、证书状态、稳定/测试更新渠道、本机快照与手动恢复、静态网站模板和内容导入、本地脱敏诊断包。
 - **链路与性能**：真实客户端链路测试、Hysteria2 拥塞与接收窗口调优、REALITY 一致性检查，以及带连续失败阈值、恢复冷却期的客户端多入口回退。
 - **BBR 管理**：启用系统自带 TCP BBR，选择默认队列；集成 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 的标准版 / Max 版内核 Release，支持安装预览、指定版本与下载校验，保留旧内核。
@@ -69,7 +69,7 @@ GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.gi
 | i586 / i686 | `onebox-linux-386-musl` | `i586-unknown-linux-musl` |
 | ARMv7 | `onebox-linux-armv7-musl` | `armv7-unknown-linux-musleabihf` |
 
-引导固定下载 **v2.0.0** 的资产并验证同一 Release 的 `SHA256SUMS`，下载或校验失败即退出。没有预编译资产的架构（如 ARMv6、s390x、riscv64、loongarch64）不会自动选择不匹配的程序。可在支持 Rust 的 Linux 环境构建：
+引导固定下载 **v2.0.1** 的资产并验证同一 Release 的 `SHA256SUMS`，下载或校验失败即退出。没有预编译资产的架构（如 ARMv6、s390x、riscv64、loongarch64）不会自动选择不匹配的程序。可在支持 Rust 的 Linux 环境构建：
 
 ```bash
 git clone https://github.com/mutsuki14/Sing-xray-onebox.git
@@ -259,17 +259,31 @@ sing-box 直接内嵌证书；分享链接同时附带 `allowInsecure=1`/`insecu
 已知限制：mihomo 通过订阅链接导入 **TUIC + 自签证书** 时无法跳过验证（其链接解析器不支持），请改用 `mihomo.yaml`；
 mihomo 链接导入会忽略 Hysteria2 端口跳跃参数 `mport`。
 
-## HTTPS 远程订阅
+## 远程订阅（IP 直连 / HTTPS）
 
-`onebox client sub` 输出的是本地 Base64 内容；2.0 新增的 **`onebox subscription`** 将客户端配置托管为可更新的 HTTPS URL。首次启用会创建设备 `default`，之后可为手机、电脑等分别创建链接。配置成功应用后会同步发布，失败时保留旧的可用版本。
+`onebox client sub` 输出的是本地 Base64 内容；**`onebox subscription`** 将客户端配置托管为可更新的 URL。2.0.1 新增 IP 直连 HTTP，无需购买域名、配置 DNS 或申请证书；原有域名 HTTPS 入口仍可使用。首次启用会创建设备 `default`，之后可为手机、电脑等分别创建链接。配置成功应用后会同步发布，失败时保留旧的可用版本。
 
 ### 选择订阅入口
+
+首次启用时，已有自建站默认复用网站；没有自建站默认选择 IP 直连。可在菜单 **10 订阅** 中选择，或使用命令明确指定入口。
+
+**IP 直连使用 HTTP 明文传输：沿途可见订阅令牌和包含节点凭据的订阅内容。** 需要加密传输时，请选择下方的域名 HTTPS 入口。设备令牌仍用于访问授权，但不能为 HTTP 传输加密。
+
+```bash
+# IPv4 直连：替换为客户端可达的 VPS IP，并在云安全组放行 TCP 8448
+onebox subscription enable --mode ip --address 203.0.113.10 --port 8448
+
+# IPv6 直连：--address 使用不带方括号的 IPv6；客户端也需具备 IPv6 连通性
+onebox subscription enable --mode ip --address 2001:db8::10 --port 8448
+```
+
+IP 入口不使用证书，无需执行证书续期。生成的链接分别形如 `http://203.0.113.10:8448/sub/TOKEN/singbox` 和 `http://[2001:db8::10]:8448/sub/TOKEN/singbox`；IPv6 在 URL 中自动加方括号。`TOKEN` 是设备令牌，末段可换为下表支持的格式。
 
 ```bash
 # 已启用自有域名 REALITY 网站：复用其证书、域名和公网端口
 onebox subscription enable --mode site
 
-# 没有自建站，或需要独立入口：先把 sub.example.com 直接解析到 VPS
+# 独立域名 HTTPS 入口：先把 sub.example.com 直接解析到 VPS
 # 默认独立 HTTPS 端口为 8448，需在云安全组放行；CF Token 可由隐藏输入提供
 onebox subscription enable --mode standalone --domain sub.example.com --port 8448 --tls cf
 
@@ -281,7 +295,7 @@ onebox subscription enable --mode standalone --domain sub.example.com --port 844
   --tls custom --cert /root/fullchain.pem --key /root/privkey.pem
 ```
 
-独立入口检查 DNS、证书与端口，不接管已有服务；可用端口允许时可选择 `--port 443`。复用自建站时不增加公网端口，普通网页和 `/sub/…` 使用同一个 HTTPS 入口。订阅不通过 FRP 入口发布；FRP 配置继续单独导出。
+独立 HTTPS 入口检查 DNS、证书与端口，不接管已有服务；可用端口允许时可选择 `--port 443`。复用自建站时不增加公网端口，普通网页和 `/sub/…` 使用同一个 HTTPS 入口。IP 和独立 HTTPS 入口都需要空闲的监听端口及相应的云安全组 TCP 放行规则。订阅不通过 FRP 入口发布；FRP 配置继续单独导出。
 
 ### 设备与导入格式
 
@@ -292,7 +306,7 @@ onebox subscription add laptop
 onebox subscription reset DEVICE_ID       # 换新令牌，旧链接立即失效
 onebox subscription revoke DEVICE_ID      # 撤销该设备的后续订阅下载
 onebox subscription publish              # 重新生成、校验并发布当前配置
-onebox subscription renew                # 续期订阅使用的证书
+onebox subscription renew                # 续期 HTTPS 订阅使用的证书；IP 模式无需续期
 onebox subscription disable              # 停止全部远程订阅访问
 ```
 
@@ -305,9 +319,13 @@ onebox subscription disable              # 停止全部远程订阅访问
 | `singbox-notun` | sing-box 完整 JSON，仅本地代理端口 | 下载并交给 sing-box 使用 |
 | `xray` | Xray 客户端 JSON | 交给支持完整 Xray 配置的客户端 |
 
-链接形如 `https://域名[:端口]/sub/设备令牌/singbox`。令牌仅在创建或重置时显示，服务器保存其哈希；忘记链接应执行 `reset`，`info` 不会还原令牌。不要把链接、二维码或包含链接的截图公开。撤销订阅只能阻止后续下载，**不会撤销已下载的节点密码**；如需使旧节点配置失效，使用 `onebox reset` 轮换节点凭据后重新分发。
+HTTPS 链接形如 `https://域名[:端口]/sub/设备令牌/singbox`；IP 入口使用前述 `http://IP:端口/…` 格式。令牌仅在创建或重置时显示，服务器保存其哈希；忘记链接应执行 `reset`，`info` 不会还原令牌。不要把链接、二维码或包含链接的截图公开。撤销订阅只能阻止后续下载，**不会撤销已下载的节点密码**；如需使旧节点配置失效，使用 `onebox reset` 轮换节点凭据后重新分发。
 
 每种格式只包含它支持的协议，没有可用节点的格式不会发布。**AnyTLS-REALITY 仍仅进入 `singbox` / `singbox-notun`**，不会因为使用远程订阅而获得 mihomo、Xray 或通用节点链接支持。混合部署时，Base64 和 mihomo 订阅会缺少不兼容节点。ShadowTLS 也应使用完整客户端配置。
+
+IP 入口与 HTTPS 入口提供相同的配置格式和设备授权方式；客户端还需允许导入 HTTP 订阅或远程配置。若客户端要求 HTTPS，请改用域名 HTTPS 入口。IPv6 订阅地址不能在仅有 IPv4 连通性的网络中访问。订阅入口的 HTTP / HTTPS 只影响配置下载，不改变已配置的节点协议。
+
+从 2.0.0 升级后，已有 HTTPS 订阅可继续使用。要改用 IP，执行上述 `enable --mode ip` 命令；切换入口会保留设备及其令牌，但需要在客户端更新 URL 的协议、地址和端口，原 `/sub/令牌/格式` 路径不变。服务器无法还原遗失的令牌，可用 `onebox subscription reset DEVICE_ID` 换新链接；重置后旧令牌失效。
 
 从 1.x 升级后，原有本地客户端文件仍可使用；远程订阅默认关闭，需自行启用并把设备 URL 添加到客户端。设备链接不替代内核版本要求，客户端是否支持自动刷新、TUN 或远程配置导入以该客户端能力为准。
 
@@ -318,7 +336,7 @@ onebox                     打开交互式管理菜单
 onebox install             安装 / 重装
 onebox info                查看节点信息与分享链接
 onebox client <类型>       输出配置: mihomo | provider | singbox | singbox-notun | xray | links | sub | qr
-onebox subscription ...    HTTPS 订阅: enable | info | add | reset | revoke | publish | disable
+onebox subscription ...    IP / HTTPS 订阅: enable | info | add | reset | revoke | publish | renew | disable
 onebox add <协议>          添加协议            例: onebox add hysteria2
 onebox del <协议>          删除协议
 onebox port <协议> <端口>  修改端口            例: onebox port vless-reality 8443
@@ -557,7 +575,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `/etc/onebox/sing-box.json`、`/etc/onebox/xray.json` | 服务端配置 |
 | `/etc/onebox/tls/` | 证书 |
 | `/etc/onebox/client/` | 客户端配置、分享链接、本地 Base64 内容与探测配置 |
-| `/etc/onebox/subscription/` | HTTPS 订阅设置、设备令牌哈希、已发布客户端快照与独立入口证书 |
+| `/etc/onebox/subscription/` | 远程订阅设置、设备令牌哈希、已发布客户端快照与独立 HTTPS 入口证书 |
 | `/etc/onebox/backups/` | 手动节点快照 |
 | `/var/lib/onebox-site/index.html` | 自有域名网站主页，可直接编辑；具体管理路径见 `onebox site info` |
 | `/opt/onebox/bin/` | sing-box / xray 内核 |
@@ -566,7 +584,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 | `/var/lib/onebox-frp/`、`/var/log/onebox-frp/` | FRP 网站验证目录、运行数据与日志 |
 | `onebox-frps`、`onebox-frp-web` | FRP 控制服务与独立网站入口的系统服务名 |
 | `onebox-sing-box`、`onebox-xray` | 代理系统服务名 |
-| `onebox-subscription`、`onebox-subscription-web` | 订阅服务与独立 HTTPS 入口（启用时） |
+| `onebox-subscription`、`onebox-subscription-web` | 订阅服务与独立 HTTP / HTTPS 入口（启用时） |
 | `/usr/local/bin/onebox` | 管理命令 |
 
 ## 常见问题
@@ -649,7 +667,7 @@ onebox update-channel stable
 
 发布工作流仅为默认分支 `main` 的已通过 Native CI 的提交构建四个 musl 资产。检查构建与版本后，先上传草稿、下载复核 `SHA256SUMS`，再公开 Release；`BUILD-INFO.json` 记录源码 SHA、CI 与构建工具信息。`workflow_dispatch`、版本标签或成功的 Native CI 可触发检查，未通过 CI、主分支已变化或已有不匹配版本时不会发布。
 
-**使用已有证书（certbot 等）？** 2.0 将校验后的证书和私钥复制到各自受管目录，保留源路径供后续部署。更新源文件后执行 `onebox cert-renew proxy`（网站用 `onebox site renew`，独立订阅用 `onebox subscription renew`），或配置相应的续期部署钩子。只重启核心不会重新复制外部证书。面向浏览器的网站和订阅需公有可信证书；代理自签证书通过完整客户端配置固定信任。
+**使用已有证书（certbot 等）？** 2.0 将校验后的证书和私钥复制到各自受管目录，保留源路径供后续部署。更新源文件后执行 `onebox cert-renew proxy`（网站用 `onebox site renew`，独立 HTTPS 订阅用 `onebox subscription renew`），或配置相应的续期部署钩子。只重启核心不会重新复制外部证书。面向浏览器的 HTTPS 网站和订阅需公有可信证书；IP 直连 HTTP 订阅不使用证书。代理自签证书通过完整客户端配置固定信任。
 
 **修改失败如何恢复？** 应用过程先记录持久事务并校验新配置，失败尝试恢复旧配置、证书、程序、服务及受管防火墙规则。Ctrl+C / TERM 也进入取消与回滚流程；进程被强制杀死或系统断电后，保留的事务可用 `onebox recover` 继续恢复。若恢复仍失败，保留错误与事务目录，处理问题后再次运行，不要直接删除回滚文件。
 
@@ -763,7 +781,7 @@ ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
 sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
   ONEBOX_TEST_SINGBOX=/path/sing-box python3 tests/native_lifecycle.py --require-full
 
-# 原生运行时、FRP、HTTPS 订阅等标记为 ignored 的真实进程测试
+# 原生运行时、FRP、远程订阅等标记为 ignored 的真实进程测试
 ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
   ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray \
   ONEBOX_FRPS_BIN=/path/frps ONEBOX_FRPC_BIN=/path/frpc \

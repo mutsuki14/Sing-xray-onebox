@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BOOTSTRAP=${ONEBOX_BOOTSTRAP_TEST_PATH:-$ROOT/scripts/bootstrap.sh}
 # 1.x validates this marker before it accepts an update launcher.
 head -n 5 "$BOOTSTRAP" | grep -q 'Sing-Xray-Onebox'
-grep -qx 'readonly SCRIPT_VERSION="2.0.0"' "$BOOTSTRAP"
+grep -qx 'readonly SCRIPT_VERSION="2.0.1"' "$BOOTSTRAP"
 WORK=$(mktemp -d)
 trap 'rm -rf -- "$WORK"' EXIT
 mkdir -p "$WORK/bin" "$WORK/assets" "$WORK/tmp"
@@ -22,7 +22,7 @@ EOF
 cat > "$WORK/native" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = --version ]; then
-    printf '%s\n' "${MOCK_NATIVE_VERSION:-2.0.0}"
+    printf '%s\n' "${MOCK_NATIVE_VERSION:-2.0.1}"
     exit 0
 fi
 printf '%s\0' "$@" > "$MOCK_NATIVE_ARGS"
@@ -78,7 +78,7 @@ clean_tmp() { [[ -z $(find "$WORK/tmp" -mindepth 1 -print -quit) ]]; }
 
 sh -n "$BOOTSTRAP"
 bash -n "$BOOTSTRAP"
-grep -qx 'readonly SCRIPT_VERSION="2.0.0"' "$BOOTSTRAP"
+grep -qx 'readonly SCRIPT_VERSION="2.0.1"' "$BOOTSTRAP"
 
 # Explicit offline execution preserves arguments and status without downloading.
 run_status env ONEBOX_NATIVE_BIN="$WORK/native" MOCK_NATIVE_RC=37 sh "$BOOTSTRAP" 'hello world' '' '--flag=literal$()'
@@ -106,7 +106,7 @@ for pair in x86_64:amd64 aarch64:arm64 i686:386 armv7l:armv7; do
     rm -f "$WORK/fetch.log" "$WORK/executed"
     run_status env -u ONEBOX_NATIVE_BIN MOCK_ARCH="$arch" MOCK_NATIVE_RC=19 GH_PROXY=https://mirror.example/ sh "$BOOTSTRAP" version
     [[ $STATUS == 19 && -f "$WORK/executed" ]]
-    grep -qx "https://mirror.example/https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.0/onebox-linux-$asset-musl" "$WORK/fetch.log"
+    grep -qx "https://mirror.example/https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/onebox-linux-$asset-musl" "$WORK/fetch.log"
     [[ $(wc -l < "$WORK/fetch.log") == 2 ]]
     clean_tmp
 done
