@@ -32,7 +32,7 @@ mod logs;
 mod manager;
 mod render;
 
-pub use manager::Services;
+pub use manager::{Services, WAIT_RUNNING};
 pub use render::{render_openrc, render_systemd, NOFILE_LIMIT};
 
 use crate::domain::protocol::Core;

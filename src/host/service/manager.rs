@@ -18,6 +18,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// How long callers usually give a service to come up (v2: 20 × 100 ms).
+pub const WAIT_RUNNING: Duration = Duration::from_secs(2);
 /// Queries (`is-active`, `is-enabled`, `status`, journal reads).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Actions; a oneshot start runs the whole network restore.

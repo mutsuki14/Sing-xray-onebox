@@ -468,6 +468,7 @@ fn real_daemons_are_started_identified_and_stopped() {
 /// Real nginx (set `ONEBOX_TEST_NGINX` to its path): the master renames
 /// itself, and the site is still recognized by its title.
 #[test]
+#[ignore = "needs a real nginx in ONEBOX_TEST_NGINX"]
 fn real_nginx_is_recognized_by_its_title() {
     let Some(nginx) = std::env::var_os("ONEBOX_TEST_NGINX").map(PathBuf::from) else {
         return;
