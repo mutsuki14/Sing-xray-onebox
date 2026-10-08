@@ -89,6 +89,26 @@ impl FileLock {
         }
     }
 
+    /// [`acquire`](FileLock::acquire), retrying every `poll` for up to
+    /// `wait` while another holder has it (short critical sections such as
+    /// one crontab edit or one service start).
+    pub fn acquire_waiting(
+        path: &Path,
+        busy_message: &str,
+        wait: std::time::Duration,
+        poll: std::time::Duration,
+    ) -> Result<FileLock> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match Self::acquire(path, busy_message) {
+                Err(Error::Busy(_)) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(poll);
+                }
+                other => return other,
+            }
+        }
+    }
+
     /// Adopt the lock a parent passed on fd 198 (see module docs).
     pub fn from_inherited(expected_path: &Path) -> Result<FileLock> {
         if std::env::var(INHERITED_LOCK_ENV).ok().as_deref() != Some("198") {
@@ -195,6 +215,30 @@ mod tests {
             again.verify(&path).unwrap_err().to_string(),
             "配置锁不属于当前实例"
         );
+    }
+
+    #[test]
+    fn waiting_acquire_gets_a_released_lock_or_reports_busy() {
+        use std::time::Duration;
+        let dir = TempDir::new("lock-wait").unwrap();
+        let path = dir.join("x.lock");
+        let held = FileLock::acquire(&path, BUSY_MESSAGE).unwrap();
+        let short = Duration::from_millis(30);
+        let err =
+            FileLock::acquire_waiting(&path, "忙", short, Duration::from_millis(5)).unwrap_err();
+        assert!(matches!(err, Error::Busy(ref m) if m == "忙"), "{err}");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drop(held);
+        });
+        FileLock::acquire_waiting(
+            &path,
+            "忙",
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+        release.join().unwrap();
     }
 
     #[test]

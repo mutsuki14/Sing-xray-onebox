@@ -35,6 +35,7 @@ impl Exec for SystemExec {
             new_group: cmd.timeout.is_some(),
             new_session: false,
             lock_fd,
+            nofile: cmd.nofile,
         };
         match cmd.timeout {
             None => Proc::start(cmd, base_command(cmd), setup, None)?.wait_untimed(cmd),
@@ -48,6 +49,7 @@ impl Exec for SystemExec {
             new_group: false,
             new_session: true,
             lock_fd: None,
+            nofile: cmd.nofile,
         };
         let proc = Proc::start(cmd, base_command(cmd), setup, Some(SPAWN_CAPTURE_LIMIT))?;
         Ok(Box::new(SystemChild {
@@ -79,6 +81,7 @@ impl Exec for SystemExec {
             new_group: false,
             new_session: true,
             lock_fd: None,
+            nofile: cmd.nofile,
         };
         setup.install(&mut command);
         // The Child handle is dropped without waiting: the daemon lives on in

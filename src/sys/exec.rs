@@ -60,6 +60,9 @@ pub struct Cmd {
     /// Inherit stdout/stderr (long installs show progress) instead of capturing.
     pub stream: bool,
     pub cwd: Option<PathBuf>,
+    /// Raise the child's open-files soft limit to this value (and its hard
+    /// limit when allowed); see [`Cmd::nofile_limit`].
+    pub nofile: Option<u64>,
 }
 
 impl Cmd {
@@ -125,6 +128,15 @@ impl Cmd {
     }
     pub fn inherit_lock(mut self, fd: RawFd) -> Self {
         self.inherit_lock_fd = Some(fd);
+        self
+    }
+    /// Give the child at least `limit` open files where the host allows
+    /// it: like systemd's `LimitNOFILE`, the hard limit is raised when we
+    /// may (CAP_SYS_RESOURCE), else the soft limit goes up to the current
+    /// hard limit (unprivileged containers). A higher soft limit is kept.
+    /// Never fails the spawn.
+    pub fn nofile_limit(mut self, limit: u64) -> Self {
+        self.nofile = Some(limit);
         self
     }
     /// Program file name for messages (`/usr/bin/nginx` → `nginx`).

@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+export ONEBOX_DIR='/etc/onebox'
+export ONEBOX_BIN_DIR='/opt/onebox/bin'
+export ONEBOX_LOG_DIR='/var/log/onebox'
+export ONEBOX_RUN_DIR='/run/onebox'
+export ONEBOX_SITE_ROOT='/var/lib/onebox-site'
+export ONEBOX_SYSTEMD_DIR='/etc/systemd/system'
+export ONEBOX_INITD_DIR='/etc/init.d'
+export ONEBOX_EXE='/usr/local/bin/onebox'
+export ONEBOX_FRPS_DIR='/etc/onebox-frp'
+export ONEBOX_FRPS_BIN_DIR='/opt/onebox-frp'
+export ONEBOX_FRPS_WEB_VAR='/var/lib/onebox-frp'
+export ONEBOX_FRPS_LOG_DIR='/var/log/onebox-frp'
+export ONEBOX_FRPS_RUN_DIR='/run/onebox-frp'
+export ONEBOX_INIT='openrc'
+name='onebox-subscription-web'
+supervisor=supervise-daemon
+command='/usr/sbin/nginx'
+command_args=''\''-p'\'' '\''/etc/onebox/subscription'\'' '\''-c'\'' '\''/etc/onebox/subscription/nginx.conf'\'' '\''-g'\'' '\''daemon off;'\'''
+output_log='/var/log/onebox/onebox-subscription-web.log'
+error_log='/var/log/onebox/onebox-subscription-web.log'
+respawn_delay=5
+respawn_max=10
+respawn_period=120
+depend() { want net; after net firewall dns onebox-subscription; }
+start_pre() {
+  ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || :
+  mkdir -p -m 0755 /run/onebox/nginx-subscription || return 1
+}

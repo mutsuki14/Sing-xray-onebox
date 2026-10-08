@@ -1,0 +1,90 @@
+{
+  "url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/releases/406854307",
+  "html_url": "https://github.com/mutsuki14/Sing-xray-onebox/releases/tag/v2.0.1",
+  "id": 406854307,
+  "tag_name": "v2.0.1",
+  "target_commitish": "4249053c380e8e83caac0e8d78e04880d6a8f84d",
+  "name": "Onebox v2.0.1",
+  "draft": false,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2026-10-08T13:16:34Z",
+  "published_at": "2026-10-08T13:22:40Z",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/releases/assets/621902151",
+      "id": 621902151,
+      "name": "BUILD-INFO.json",
+      "label": "",
+      "content_type": "application/json",
+      "state": "uploaded",
+      "size": 1581,
+      "digest": "sha256:169b9ff53609fc450810fe2c4ff4566cf84641579c0066a33a4891b40c14c56a",
+      "download_count": 0,
+      "browser_download_url": "https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/BUILD-INFO.json"
+    },
+    {
+      "url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/releases/assets/621902119",
+      "id": 621902119,
+      "name": "onebox-linux-386-musl",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 2603648,
+      "digest": "sha256:937e82d1b46cea9ce59f420ee38dd1efd5c5d1fd0e0076fd20249c84c1c77a6f",
+      "download_count": 1,
+      "browser_download_url": "https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/onebox-linux-386-musl"
+    },
+    {
+      "url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/releases/assets/621902121",
+      "id": 621902121,
+      "name": "onebox-linux-amd64-musl",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 2843504,
+      "digest": "sha256:df929290d37855b5547940ce2b4b062f667526028b55351d901074d28cef881d",
+      "download_count": 2,
+      "browser_download_url": "https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/onebox-linux-amd64-musl"
+    },
+    {
+      "url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/releases/assets/621902128",
+      "id": 621902128,
+      "name": "onebox-linux-arm64-musl",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 2371840,
+      "digest": "sha256:37e1b7b77ebcee9e826bc90047d4eae2831a894272262f2f4c781b7a5ba20876",
+      "download_count": 1,
+      "browser_download_url": "https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/onebox-linux-arm64-musl"
+    },
+    {
+      "url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/releases/assets/621902126",
+      "id": 621902126,
+      "name": "onebox-linux-armv7-musl",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 2435856,
+      "digest": "sha256:15d15e7c1d9b2022d841fb07a600413f7becf1b2d55c4782247dc4b478d18b33",
+      "download_count": 1,
+      "browser_download_url": "https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/onebox-linux-armv7-musl"
+    },
+    {
+      "url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/releases/assets/621902123",
+      "id": 621902123,
+      "name": "SHA256SUMS",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 358,
+      "digest": "sha256:04dfbee7b13c9ecc3c91bbf7dd162a49779b3427308e56b4b8c345f890ed5a77",
+      "download_count": 1,
+      "browser_download_url": "https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/SHA256SUMS"
+    }
+  ],
+  "tarball_url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/tarball/v2.0.1",
+  "zipball_url": "https://api.github.com/repos/mutsuki14/Sing-xray-onebox/zipball/v2.0.1",
+  "body": "Rust native release from tested main commit `4249053c380e8e83caac0e8d78e04880d6a8f84d`.\n\nNative CI: https://github.com/mutsuki14/Sing-xray-onebox/actions/runs/37783083128\n\nLinux static executables: amd64, arm64, 32-bit x86 (i586 or newer), ARMv7 hard-float. Verify downloads with SHA256SUMS. Other CPUs require a source build.\n"
+}
