@@ -966,6 +966,11 @@ fn web_config(ctx: &Context, cfg: &Config, bootstrap: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn test_web_config(ctx: &Context, cfg: &Config) -> Result<()> {
+    web_config(ctx, cfg, false)
+}
+
 fn write_services(ctx: &Context, cfg: &Config) -> Result<()> {
     platform::write_service(
         ctx,

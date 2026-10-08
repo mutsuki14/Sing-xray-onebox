@@ -86,7 +86,7 @@ ONEBOX_NATIVE_BIN=/absolute/path/onebox sh onebox.sh --version
 
 ### 从 1.x 迁移
 
-先在旧版保存备份，然后下载新入口执行 **`regen`**；已有协议、端口、UUID、密码、REALITY 密钥和网站内容沿用原状态。不要用 `install` 代替迁移，重装会生成新凭据。
+先退出旧版菜单，在终端保存备份，然后下载新入口执行 **`regen`**；已有协议、端口、UUID、密码、REALITY 密钥和网站内容沿用原状态。不要用 `install` 代替迁移，重装会生成新凭据。
 
 ```bash
 # 仍在旧版时保存一份本机备份

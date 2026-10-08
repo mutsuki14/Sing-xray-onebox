@@ -1,5 +1,5 @@
 #!/bin/sh
-# Thin Linux launcher. All installation and management logic lives in Rust.
+# Sing-Xray-Onebox: thin Linux launcher; all management logic lives in Rust.
 set -u
 umask 077
 readonly SCRIPT_VERSION="2.0.0"

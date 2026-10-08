@@ -5,7 +5,7 @@ use crate::{
     context::Context,
     model::{Core, Protocol, State},
     network, platform, render, site, state, subscription,
-    transaction::{self, Journal, SERVICES},
+    transaction::{self, Journal, LEGACY_NETWORK_SERVICES, SERVICES},
     util, Result,
 };
 use serde_json::Value;
@@ -64,7 +64,7 @@ fn cancelled() -> Result<()> {
 fn service_exists(ctx: &Context, name: &str) -> bool {
     platform::exists(ctx, name)
 }
-fn owned_cron(line: &str) -> bool {
+fn owned_cron(ctx: &Context, line: &str) -> bool {
     line.rsplit_once("# onebox-rust:")
         .map(|(_, name)| SERVICES.contains(&name.trim()))
         .unwrap_or(false)
@@ -75,6 +75,7 @@ fn owned_cron(line: &str) -> bool {
         ]
         .iter()
         .any(|m| line.trim_end().ends_with(m))
+        || platform::boot::legacy_cron(ctx, line)
 }
 fn cron_snapshot(ctx: &Context) -> Result<(Vec<String>, bool)> {
     if !platform::has("crontab") {
@@ -87,7 +88,7 @@ fn cron_snapshot(ctx: &Context) -> Result<(Vec<String>, bool)> {
     Ok((
         out.stdout
             .lines()
-            .filter(|l| owned_cron(l))
+            .filter(|l| owned_cron(ctx, l))
             .map(str::to_owned)
             .collect(),
         true,
@@ -131,7 +132,7 @@ fn restore_cron(ctx: &Context, j: &Journal) -> Result<()> {
     let mut lines = out
         .stdout
         .lines()
-        .filter(|l| !owned_cron(l))
+        .filter(|l| !owned_cron(ctx, l))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     lines.extend(j.cron_lines.clone());
@@ -145,7 +146,7 @@ fn snapshot_running(ctx: &Context) -> Result<RuntimeSnapshot> {
     let (cron, available) = cron_snapshot(ctx)?;
     let mut active = Vec::new();
     let mut auto = Vec::new();
-    for name in SERVICES {
+    for name in SERVICES.iter().chain(LEGACY_NETWORK_SERVICES) {
         if platform::running(ctx, name) {
             active.push((*name).into());
         }
@@ -175,6 +176,13 @@ fn stop_current(ctx: &Context, disable: bool) -> Result<()> {
                     errors.push(format!("停用 {name}: {e}"));
                 }
             }
+        }
+    }
+    // Disabling an enabled unit only removes its future boot hook. Do not
+    // stop this oneshot: it may be the process performing this rollback.
+    if disable && service_exists(ctx, "onebox-network") {
+        if let Err(e) = platform::service(ctx, "onebox-network", "disable") {
+            errors.push(format!("停用 onebox-network: {e}"));
         }
     }
     if errors.is_empty() {
@@ -211,11 +219,11 @@ fn rollback(ctx: &Context, j: &mut Journal) -> Result<()> {
     }
     j.set_phase(ctx, "rollback-services")?;
     if let Some(old) = &j.old_state {
-        // Old ledgers refer to the rules just removed. network::apply checks
-        // each exact owned rule and reinstates anything missing.
-        network::apply(ctx, old)?;
+        // Rebuild rules only. Reinstalling persistence here would immediately
+        // retire the legacy hooks that the file snapshot just restored.
+        network::apply_rules(ctx, old)?;
     }
-    for name in SERVICES {
+    for name in SERVICES.iter().chain(LEGACY_NETWORK_SERVICES) {
         if service_exists(ctx, name) {
             platform::service(
                 ctx,
@@ -277,7 +285,9 @@ pub fn restore_network(ctx: &Context) -> Result<()> {
             return apply_locked(ctx, &current, &lock);
         }
     }
-    network::apply(ctx, &current)
+    // This path has no configuration journal. Leave persistence untouched;
+    // hook migration belongs to a full apply transaction.
+    network::apply_rules(ctx, &current)
 }
 
 /// Inventory is captured before rendering, including secondary global
@@ -675,15 +685,30 @@ mod tests {
     }
     #[test]
     fn unrelated_cron_jobs_are_not_owned() {
+        let (ctx, _) = fixture("");
         assert!(owned_cron(
+            &ctx,
             "17 4 * * * onebox cert renew site # onebox-native-cert-site"
         ));
         assert!(owned_cron(
+            &ctx,
             "@reboot onebox service onebox-xray start # onebox-rust:onebox-xray"
         ));
-        assert!(!owned_cron("* * * * * admin-command # other"));
+        assert!(!owned_cron(&ctx, "* * * * * admin-command # other"));
         assert!(!owned_cron(
+            &ctx,
             "@reboot onebox frps start # onebox-rust:onebox-frps"
+        ));
+        let legacy = format!(
+            "@reboot {} net-apply >/dev/null 2>&1; {} start >/dev/null 2>&1",
+            ctx.paths.executable.display(),
+            ctx.paths.executable.display()
+        );
+        assert!(owned_cron(&ctx, &legacy));
+        assert!(!owned_cron(&ctx, &format!("{legacy}; admin-command")));
+        assert!(!owned_cron(
+            &ctx,
+            "@reboot /opt/unrelated/onebox net-apply >/dev/null 2>&1; /opt/unrelated/onebox start >/dev/null 2>&1"
         ));
     }
     #[test]
@@ -724,6 +749,7 @@ mod tests {
     struct RuntimeState {
         active: BTreeSet<String>,
         enabled: BTreeSet<String>,
+        cron: String,
         commands: Vec<String>,
         fault: String,
         fired: bool,
@@ -754,6 +780,17 @@ mod tests {
             }
             if !runtime.fired {
                 let fault = runtime.fault.clone();
+                if fault == "legacy-second-disable"
+                    && p == "systemctl"
+                    && a == ["disable", "onebox-hop"]
+                {
+                    runtime.fired = true;
+                    return Ok(CommandOutput {
+                        code: 1,
+                        stderr: "injected partial legacy retirement".into(),
+                        ..Default::default()
+                    });
+                }
                 if !fault.is_empty() && fault == phase {
                     runtime.fired = true;
                     return Ok(CommandOutput {
@@ -800,6 +837,16 @@ mod tests {
                     ..Default::default()
                 });
             }
+            if p == "crontab" {
+                if command == "-l" {
+                    return Ok(CommandOutput {
+                        stdout: runtime.cron.clone(),
+                        ..Default::default()
+                    });
+                }
+                runtime.cron = fs::read_to_string(command)?;
+                return Ok(CommandOutput::default());
+            }
             if p == "systemctl" {
                 let name = a.last().cloned().unwrap_or_default();
                 let success = match command {
@@ -840,6 +887,7 @@ mod tests {
             state: Mutex::new(RuntimeState {
                 active: BTreeSet::new(),
                 enabled: BTreeSet::new(),
+                cron: String::new(),
                 commands: vec![],
                 fault: String::new(),
                 fired: false,
@@ -920,6 +968,81 @@ mod tests {
             assert!(runtime.enabled.contains(service), "{service} not enabled");
         }
         assert!(!transaction::directory(ctx).exists());
+    }
+    #[test]
+    fn legacy_boot_retirement_rolls_back_files_cron_and_enabled_units() {
+        const CHILD: &str = "ONEBOX_WORKFLOW_LEGACY_BOOT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let path = std::env::temp_dir().join(format!(
+                "onebox-boot-test-path-{}",
+                util::random_hex(8).unwrap()
+            ));
+            fs::create_dir(&path).unwrap();
+            // Presence is used for capability detection; commands are handled
+            // by the Runner, never by a host crontab.
+            util::atomic_write(&path.join("crontab"), b"fixture", 0o755).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "workflow::tests::legacy_boot_retirement_rolls_back_files_cron_and_enabled_units", "--nocapture"])
+                .env(CHILD, "1").env("ONEBOX_INIT", "systemd").env("PATH", &path).output().unwrap();
+            fs::remove_dir_all(path).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // One failure interrupts retirement halfway through; the other occurs
+        // after all old hooks were removed and the replacement was enabled.
+        for fault in ["legacy-second-disable", "start-cores"] {
+            let (ctx, old, runner, root) = runtime_fixture();
+            let hooks = platform::boot::legacy_paths(&ctx).unwrap();
+            for path in &hooks {
+                util::atomic_write(path, b"old-owned-boot-hook\n", 0o755).unwrap();
+            }
+            let unrelated = root.join("local.d/admin.start");
+            util::atomic_write(&unrelated, b"unrelated-local-hook\n", 0o755).unwrap();
+            let legacy = format!(
+                "@reboot {} net-apply >/dev/null 2>&1; {} start >/dev/null 2>&1",
+                ctx.paths.executable.display(),
+                ctx.paths.executable.display()
+            );
+            let original_cron = format!("17 4 * * * admin-backup\n{legacy}\n");
+            {
+                let mut runtime = runner.state.lock().unwrap();
+                runtime.cron = original_cron.clone();
+                runtime
+                    .enabled
+                    .extend(LEGACY_NETWORK_SERVICES.iter().map(|name| (*name).into()));
+                runtime.fault = fault.into();
+                runtime.commands.clear();
+            }
+            let error = apply(&ctx, &old).unwrap_err().to_string();
+            assert!(error.contains("已恢复原状态"), "{fault}: {error}");
+            assert_old_generation(&ctx, &old, &runner);
+            for path in &hooks {
+                assert_eq!(fs::read(path).unwrap(), b"old-owned-boot-hook\n");
+            }
+            assert_eq!(fs::read(&unrelated).unwrap(), b"unrelated-local-hook\n");
+            let runtime = runner.state.lock().unwrap();
+            assert!(runtime.fired, "{fault} was not reached");
+            assert_eq!(runtime.cron, original_cron);
+            for name in LEGACY_NETWORK_SERVICES {
+                assert!(runtime.enabled.contains(*name));
+            }
+            assert!(!runtime.enabled.contains("onebox-network"));
+            assert!(!ctx.paths.systemd.join("onebox-network.service").exists());
+            assert!(!runtime
+                .commands
+                .iter()
+                .any(|command| command.contains("stop onebox-net")
+                    || command.contains("stop onebox-hop")
+                    || command.contains("start onebox-net")
+                    || command.contains("start onebox-hop")));
+            drop(runtime);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
     #[test]
     fn runner_failures_restore_each_commit_stage_and_recovery_is_repeatable() {

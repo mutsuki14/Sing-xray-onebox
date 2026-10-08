@@ -1011,9 +1011,8 @@ pub fn desired_ports(state: &State) -> Result<Vec<(u16, bool)>> {
     Ok(ports.into_iter().collect())
 }
 pub fn apply(ctx: &Context, state: &State) -> Result<()> {
-    migrate_legacy(ctx)?;
-    apply_ports(ctx, "proxy", &desired_ports(state)?)?;
-    configure_hops(ctx, state)?;
+    apply_rules(ctx, state)?;
+    platform::boot::migrate(ctx)?;
     platform::write_service(
         ctx,
         "onebox-network",
@@ -1023,10 +1022,18 @@ pub fn apply(ctx: &Context, state: &State) -> Result<()> {
     )?;
     platform::service(ctx, "onebox-network", "enable")
 }
+/// Restore owned network rules without changing any boot hooks. Rollback must
+/// retain the exact legacy/native hooks restored from its file snapshot.
+pub fn apply_rules(ctx: &Context, state: &State) -> Result<()> {
+    migrate_legacy(ctx)?;
+    apply_ports(ctx, "proxy", &desired_ports(state)?)?;
+    configure_hops(ctx, state)
+}
 pub fn clear(ctx: &Context) -> Result<()> {
     let rules = clear_rules(ctx);
     let service = platform::service(ctx, "onebox-network", "remove");
-    rules.and(service)
+    let legacy = platform::boot::migrate(ctx);
+    rules.and(service).and(legacy)
 }
 /// Remove owned rules without stopping a network-restoration process that may
 /// currently be rolling its own transaction back during boot.

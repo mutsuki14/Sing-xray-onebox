@@ -24,6 +24,10 @@ pub const SERVICES: &[&str] = &[
     "onebox-subscription",
     "onebox-subscription-web",
 ];
+// Legacy network units are snapshotted and their enablement is restored, but
+// must never be started/stopped as normal services during migration: the old
+// oneshot may itself be running this transaction.
+pub const LEGACY_NETWORK_SERVICES: &[&str] = &["onebox-net", "onebox-hop"];
 const ROOT_ITEMS: &[&str] = &[
     "state.json",
     "onebox.conf",
@@ -155,6 +159,11 @@ fn targets(ctx: &Context) -> Result<Vec<PathBuf>> {
     for name in SERVICES {
         out.push(ctx.paths.systemd.join(format!("{name}.service")));
         out.push(ctx.paths.initd.join(name));
+    }
+    for path in crate::platform::boot::legacy_paths(ctx)? {
+        if !out.contains(&path) {
+            out.push(path);
+        }
     }
     for path in crate::cert::legacy_deployment_paths(ctx)? {
         if !out.iter().any(|owned| path.starts_with(owned)) {
@@ -469,7 +478,7 @@ pub fn load(ctx: &Context) -> Result<Option<Journal>> {
         return Err("不支持的事务日志版本".into());
     }
     for name in j.active_services.iter().chain(&j.enabled_services) {
-        if !SERVICES.contains(&name.as_str()) {
+        if !SERVICES.contains(&name.as_str()) && !LEGACY_NETWORK_SERVICES.contains(&name.as_str()) {
             return Err("事务日志含未知服务".into());
         }
     }
@@ -734,5 +743,54 @@ mod tests {
         assert_eq!(fs::read(c.paths.state()).unwrap(), b"live-generation");
         assert!(directory(&c).exists());
         fs::remove_dir_all(r).unwrap();
+    }
+    #[test]
+    fn legacy_boot_snapshot_restores_only_exact_hooks_after_removal() {
+        let (ctx, root) = fixture();
+        let hooks = crate::platform::boot::legacy_paths(&ctx).unwrap();
+        assert_eq!(hooks.len(), 6);
+        for (index, path) in hooks.iter().enumerate() {
+            util::atomic_write(path, format!("old-hook-{index}\n").as_bytes(), 0o755).unwrap();
+        }
+        let unrelated = ctx
+            .paths
+            .initd
+            .parent()
+            .unwrap()
+            .join("local.d/admin.start");
+        util::atomic_write(&unrelated, b"admin-original\n", 0o755).unwrap();
+        let journal = begin(&ctx, None, vec![], vec![], vec![], false).unwrap();
+        assert!(hooks.iter().all(|path| journal
+            .snapshot
+            .entries
+            .iter()
+            .filter(|entry| entry.target == *path)
+            .count()
+            == 1));
+        assert!(!journal
+            .snapshot
+            .entries
+            .iter()
+            .any(|entry| unrelated.starts_with(&entry.target)));
+        for path in &hooks {
+            fs::remove_file(path).unwrap();
+        }
+        fs::write(&unrelated, b"admin-concurrent-change\n").unwrap();
+        // The allowlist must remain stable after migration removed every hook.
+        journal.validate_files(&ctx).unwrap();
+        journal.restore_files(&ctx).unwrap();
+        for (index, path) in hooks.iter().enumerate() {
+            assert_eq!(
+                fs::read(path).unwrap(),
+                format!("old-hook-{index}\n").as_bytes()
+            );
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert_eq!(fs::read(unrelated).unwrap(), b"admin-concurrent-change\n");
+        journal.finish(&ctx).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

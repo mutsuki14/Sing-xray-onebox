@@ -1,15 +1,21 @@
 //! Opt-in tests using official FRP binaries, entirely on loopback addresses.
+#[path = "e2e_udp.rs"]
+mod udp;
+#[path = "e2e_web.rs"]
+mod web;
+
 use super::*;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    os::unix::process::CommandExt,
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 struct Lab {
@@ -21,8 +27,7 @@ struct Lab {
 impl Drop for Lab {
     fn drop(&mut self) {
         for child in &mut self.children {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_process(child);
         }
         self.stop.store(true, Ordering::Relaxed);
         if let Some(origin) = self.origin.take() {
@@ -31,11 +36,31 @@ impl Drop for Lab {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
+fn stop_process(child: &mut Child) {
+    // nginx owns worker children; stopping only its master leaks listeners.
+    // Every process below is started in its own process group.
+    let group = -(child.id() as i32);
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    unsafe { libc::kill(group, libc::SIGKILL) };
+    let _ = child.kill();
+    let _ = child.wait();
+}
 impl Lab {
     fn spawn(&mut self, binary: &Path, config: &Path, name: &str) {
         let log = fs::File::create(self.root.join(format!("{name}.log"))).unwrap();
         let child = Command::new(binary)
             .args(["-c", config.to_str().unwrap()])
+            .env_remove("HTTP_PROXY")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("ALL_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("https_proxy")
+            .env_remove("all_proxy")
+            .process_group(0)
             .current_dir(config.parent().unwrap())
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
@@ -46,8 +71,7 @@ impl Lab {
     }
     fn stop_client(&mut self) {
         let mut child = self.children.pop().unwrap();
-        child.kill().ok();
-        child.wait().unwrap();
+        stop_process(&mut child);
     }
     fn logs(&self) -> String {
         ["server", "client", "bad-token", "bad-host"]

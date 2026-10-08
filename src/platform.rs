@@ -1,4 +1,5 @@
 //! Linux integration. Policy stays in Rust; subprocesses are bounded tools.
+pub mod boot;
 use crate::{
     context::Context,
     model::{Core, State},
@@ -743,6 +744,16 @@ pub fn write_service(
     args: &[String],
     after: &[String],
 ) -> Result<()> {
+    write_service_for_init(ctx, name, exe, args, after, init_system())
+}
+fn write_service_for_init(
+    ctx: &Context,
+    name: &str,
+    exe: &Path,
+    args: &[String],
+    after: &[String],
+    init: &str,
+) -> Result<()> {
     valid_service(name)?;
     for dep in after {
         valid_dependency(dep)?;
@@ -752,15 +763,22 @@ pub fn write_service(
     for a in args {
         argv.push(quote_unit(a)?)
     }
-    let spec = ServiceSpec {
+    let mut spec = ServiceSpec {
         program: program.into(),
         args: args.into(),
         after: after.into(),
         environment: service_environment(ctx)?,
     };
+    // Tests can select the renderer without changing process-wide env; the
+    // persisted init always matches the renderer used for this service.
+    for (key, value) in &mut spec.environment {
+        if key == "ONEBOX_INIT" {
+            *value = init.into();
+        }
+    }
     let sp = service_spec_path(ctx, name);
     util::safe_path(&sp)?;
-    match init_system() {
+    match init {
         "systemd" => {
             let deps = after
                 .iter()
@@ -800,7 +818,11 @@ pub fn write_service(
                     )
                 })
                 .collect::<String>();
-            let unit=format!("[Unit]\nDescription=Onebox {name}\nAfter=network-online.target nss-lookup.target {deps}\nWants=network-online.target {deps}\n[Service]\nType=simple\n{environment}{pre}ExecStart={}\nRestart=on-failure\nRestartSec=5s\nLimitNOFILE=1048576\n{extra}[Install]\nWantedBy=multi-user.target\n",argv.join(" "));
+            let unit = if name == "onebox-network" {
+                format!("[Unit]\nDescription=Onebox network rule restoration\nAfter=network-online.target netfilter-persistent.service iptables.service ip6tables.service nftables.service firewalld.service ufw.service\nWants=network-online.target\n[Service]\nType=oneshot\nRemainAfterExit=yes\n{environment}ExecStart={}\n[Install]\nWantedBy=multi-user.target\n", argv.join(" "))
+            } else {
+                format!("[Unit]\nDescription=Onebox {name}\nAfter=network-online.target nss-lookup.target {deps}\nWants=network-online.target {deps}\n[Service]\nType=simple\n{environment}{pre}ExecStart={}\nRestart=on-failure\nRestartSec=5s\nLimitNOFILE=1048576\n{extra}[Install]\nWantedBy=multi-user.target\n",argv.join(" "))
+            };
             util::atomic_write(
                 &ctx.paths.systemd.join(format!("{name}.service")),
                 unit.as_bytes(),
@@ -816,7 +838,11 @@ pub fn write_service(
                 .join(" ");
             let log = log_root(ctx, name).join(format!("{name}.log"));
             fs::create_dir_all(log_root(ctx, name))?;
-            let unit=format!("#!/sbin/openrc-run\nname={}\nsupervisor=supervise-daemon\ncommand={}\ncommand_args={}\noutput_log={}\nerror_log={}\nrespawn_delay=5\nrespawn_max=10\nrespawn_period=120\nrc_ulimit='-n 65535'\ndepend() {{ want net; after net firewall dns {}; }}\n",quote_shell(name),quote_shell(program),quote_shell(&command_args),quote_shell(util::path_str(&log)?),quote_shell(util::path_str(&log)?),after.iter().filter(|s|s.starts_with("onebox-")).cloned().collect::<Vec<_>>().join(" "));
+            let unit = if name == "onebox-network" {
+                format!("#!/sbin/openrc-run\nname={}\ndepend() {{ want net; after net firewall dns iptables ip6tables nftables firewalld ufw; }}\nstart() {{\n  ebegin 'Restoring Onebox network rules'\n  {} {}\n  eend $?\n}}\nstop() {{ return 0; }}\n", quote_shell(name), quote_shell(program), command_args)
+            } else {
+                format!("#!/sbin/openrc-run\nname={}\nsupervisor=supervise-daemon\ncommand={}\ncommand_args={}\noutput_log={}\nerror_log={}\nrespawn_delay=5\nrespawn_max=10\nrespawn_period=120\nrc_ulimit='-n 65535'\ndepend() {{ want net; after net firewall dns {}; }}\n",quote_shell(name),quote_shell(program),quote_shell(&command_args),quote_shell(util::path_str(&log)?),quote_shell(util::path_str(&log)?),after.iter().filter(|s|s.starts_with("onebox-")).cloned().collect::<Vec<_>>().join(" "))
+            };
             let unit = if name == "onebox-frps" {
                 format!(
                     "{unit}start_pre() {{ {} frps net-apply; }}\n",
@@ -1330,6 +1356,12 @@ pub fn service(ctx: &Context, name: &str, action: &str) -> Result<()> {
                 }
             }
             if matches!(action, "start" | "restart" | "reload") && !running(ctx, name) {
+                if name == "onebox-network" {
+                    // A finite restoration action is not a supervised daemon.
+                    // Run it synchronously and retain its failure status rather
+                    // than creating a stale PID file after a successful exit.
+                    return crate::workflow::restore_network(ctx);
+                }
                 let spec = load_spec(ctx, name)?;
                 if name == "onebox-frps" {
                     ctx.run(
@@ -1410,6 +1442,75 @@ pub fn wait_running(ctx: &Context, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_boot_service_is_ordered_oneshot_on_each_init() {
+        struct Recorder(std::sync::Mutex<Vec<Vec<String>>>);
+        impl crate::context::Runner for Recorder {
+            fn output(
+                &self,
+                program: &str,
+                args: &[String],
+            ) -> Result<crate::context::CommandOutput> {
+                self.0.lock().unwrap().push(
+                    std::iter::once(program.to_owned())
+                        .chain(args.iter().cloned())
+                        .collect(),
+                );
+                Ok(Default::default())
+            }
+        }
+        let mut fixture = Fixture::new();
+        let recorder = std::sync::Arc::new(Recorder(Default::default()));
+        fixture.ctx.runner = recorder.clone();
+        for init in ["systemd", "openrc"] {
+            write_service_for_init(
+                &fixture.ctx,
+                "onebox-network",
+                &fixture.ctx.paths.executable,
+                &["net-apply".into()],
+                &[],
+                init,
+            )
+            .unwrap();
+            let unit = if init == "systemd" {
+                fs::read_to_string(fixture.ctx.paths.systemd.join("onebox-network.service"))
+                    .unwrap()
+            } else {
+                fs::read_to_string(fixture.ctx.paths.initd.join("onebox-network")).unwrap()
+            };
+            let ordering = unit
+                .lines()
+                .find(|line| {
+                    if init == "systemd" {
+                        line.starts_with("After=")
+                    } else {
+                        line.starts_with("depend()")
+                    }
+                })
+                .unwrap();
+            for firewall in ["iptables", "ip6tables", "nftables", "firewalld", "ufw"] {
+                assert!(
+                    ordering.contains(firewall),
+                    "{init} must wait for {firewall}"
+                );
+            }
+            assert!(unit.contains("net-apply"));
+            assert!(!unit.contains("supervisor="));
+            assert!(!unit.contains("Restart="));
+            if init == "systemd" {
+                assert!(ordering.contains("netfilter-persistent.service"));
+                assert!(unit.contains("Type=oneshot\nRemainAfterExit=yes\n"));
+                assert!(!unit.contains("Type=simple"));
+            } else {
+                assert!(unit.contains("start() {"));
+                assert!(unit.contains("eend $?"));
+            }
+        }
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![vec!["systemctl".to_owned(), "daemon-reload".to_owned()]]
+        );
+    }
     struct Fixture {
         root: PathBuf,
         ctx: Context,

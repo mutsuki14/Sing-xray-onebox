@@ -3,6 +3,9 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BOOTSTRAP=${ONEBOX_BOOTSTRAP_TEST_PATH:-$ROOT/scripts/bootstrap.sh}
+# 1.x validates this marker before it accepts an update launcher.
+head -n 5 "$BOOTSTRAP" | grep -q 'Sing-Xray-Onebox'
+grep -qx 'readonly SCRIPT_VERSION="2.0.0"' "$BOOTSTRAP"
 WORK=$(mktemp -d)
 trap 'rm -rf -- "$WORK"' EXIT
 mkdir -p "$WORK/bin" "$WORK/assets" "$WORK/tmp"
