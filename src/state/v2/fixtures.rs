@@ -77,6 +77,33 @@ pub(crate) fn preset1() -> BTreeMap<String, String> {
     values
 }
 
+/// Migrate without subscription settings, deterministic randomness.
+pub(crate) fn run(values: &BTreeMap<String, String>) -> crate::Result<super::Migrated> {
+    super::migrate(values, None, &mut crate::sys::rand::SeqRandom(42))
+}
+
+pub(crate) fn err(values: &BTreeMap<String, String>) -> String {
+    match run(values) {
+        Ok(_) => String::from("<ok>"),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// `values` with `pairs` applied; an empty value removes the key.
+pub(crate) fn with(
+    mut values: BTreeMap<String, String>,
+    pairs: &[(&str, &str)],
+) -> BTreeMap<String, String> {
+    for (k, v) in pairs {
+        if v.is_empty() {
+            values.remove(*k);
+        } else {
+            values.insert(k.to_string(), v.to_string());
+        }
+    }
+    values
+}
+
 /// The v2 file shape of `values`.
 pub(crate) fn file(values: &BTreeMap<String, String>) -> Vec<u8> {
     let doc = serde_json::json!({ "values": values });
