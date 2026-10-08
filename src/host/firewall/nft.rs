@@ -1,13 +1,28 @@
 //! Native nftables input chains: rules tagged with a comment token.
+//!
+//! Only chains that can actually block a port get an Onebox rule: a
+//! `type filter hook input` base chain with `policy drop`, or one holding
+//! an unconditional `drop`/`reject` rule. In nftables an `accept` ends only
+//! the chain it is in, so inserting one at the head of a chain whose drops
+//! are all conditional (crowdsec's `ip saddr @crowdsec-blacklists drop`,
+//! fail2ban's `f2b-chain`) would not open anything — it would only let
+//! blocklisted sources skip that chain.
+//!
+//! Names Onebox cannot pass to nft safely (`[A-Za-z0-9_-]` only) are
+//! skipped instead of failing the scan: LXD/Incus create `inet lxd
+//! in.lxdbr0`. A skipped chain that can block is reported once per scan.
 
 use super::{failure, safe_word, Backend, Rule};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::exec::{Cmd, Output};
+use crate::sys::text::sanitize_input;
+use crate::ui::out;
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 /// One base chain hooked on `input`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Nft {
     pub family: String,
     pub table: String,
@@ -17,8 +32,11 @@ pub struct Nft {
 /// What `nft -j list ruleset` revealed about input base chains.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Scan {
-    /// Chains Onebox may edit with nft.
+    /// Chains Onebox edits with nft: they can block, and their names are safe.
     pub native: Vec<Nft>,
+    /// Chains that can block but whose table or chain name cannot be
+    /// managed safely: left alone (the port may stay blocked there).
+    pub skipped: Vec<Nft>,
     /// `ip filter INPUT` / `ip6 filter INPUT` exist: tables owned by
     /// iptables-nft, managed through iptables / ip6tables instead.
     pub compat_v4: bool,
@@ -34,49 +52,117 @@ fn iptables_table(family: &str, table: &str, chain: &str) -> bool {
         && chain == "INPUT"
 }
 
+/// A `type filter hook input` base chain of family ip/ip6/inet, with
+/// whether its policy drops. Other chains are `None`.
+fn input_chain(chain: &Value) -> Result<Option<(Nft, bool)>> {
+    if chain["hook"] != "input" || chain["type"].as_str().is_some_and(|t| t != "filter") {
+        return Ok(None);
+    }
+    let family = chain["family"]
+        .as_str()
+        .ok_or_else(|| Error::msg("缺少 nft family"))?;
+    if !matches!(family, "ip" | "ip6" | "inet") {
+        return Ok(None);
+    }
+    let field = |name: &str, missing: &str| {
+        chain[name]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| Error::msg(missing.to_string()))
+    };
+    let found = Nft {
+        family: family.into(),
+        table: field("table", "缺少 nft table")?,
+        chain: field("name", "缺少 nft chain")?,
+    };
+    Ok(Some((found, chain["policy"] == "drop")))
+}
+
+/// A rule without any match that ends in `drop` or `reject` (counters and
+/// log statements allowed): every packet reaching it is refused.
+fn unconditional_block(rule: &Value) -> bool {
+    let Some(exprs) = rule["expr"].as_array() else {
+        return false;
+    };
+    let mut refuses = false;
+    for expr in exprs {
+        match statement(expr) {
+            Some("drop" | "reject") => refuses = true,
+            Some("counter" | "log") => {}
+            _ => return false,
+        }
+    }
+    refuses
+}
+
+/// The only key of a one-key JSON object (`{"drop": null}` → `drop`).
+fn statement(expr: &Value) -> Option<&str> {
+    expr.as_object()
+        .filter(|o| o.len() == 1)
+        .and_then(|o| o.keys().next())
+        .map(String::as_str)
+}
+
+/// `(family, table, chain)` of every chain holding an unconditional block.
+fn blocking_rules(entries: &[Value]) -> BTreeSet<(String, String, String)> {
+    entries
+        .iter()
+        .map(|e| &e["rule"])
+        .filter(|rule| unconditional_block(rule))
+        .filter_map(|rule| {
+            let text = |name: &str| rule[name].as_str().map(String::from);
+            Some((text("family")?, text("table")?, text("chain")?))
+        })
+        .collect()
+}
+
 /// Classify the input base chains of a `nft -j list ruleset` document.
 /// Only `type filter` chains can accept or drop; nat/route chains are
-/// ignored.
+/// ignored, and so are filter chains that cannot block (module docs).
 pub(super) fn parse_ruleset(doc: &Value) -> Result<Scan> {
     let entries = doc["nftables"]
         .as_array()
         .ok_or_else(|| Error::msg("nft ruleset 格式无效"))?;
+    let blocking = blocking_rules(entries);
     let mut scan = Scan::default();
     for chain in entries.iter().map(|e| &e["chain"]) {
-        if chain["hook"] != "input" || chain["type"].as_str().is_some_and(|t| t != "filter") {
+        let Some((found, policy_drop)) = input_chain(chain)? else {
             continue;
-        }
-        let family = chain["family"]
-            .as_str()
-            .ok_or_else(|| Error::msg("缺少 nft family"))?;
-        if !matches!(family, "ip" | "ip6" | "inet") {
-            continue;
-        }
-        let table = chain["table"]
-            .as_str()
-            .ok_or_else(|| Error::msg("缺少 nft table"))?;
-        let name = chain["name"]
-            .as_str()
-            .ok_or_else(|| Error::msg("缺少 nft chain"))?;
-        if !safe_word(table) || !safe_word(name) {
-            return Err(Error::msg("nft 表或链名无法安全管理"));
-        }
-        if iptables_table(family, table, name) {
-            let filter = table == "filter";
-            scan.compat_v4 |= filter && family == "ip";
-            scan.compat_v6 |= filter && family == "ip6";
-            continue;
-        }
-        let found = Nft {
-            family: family.into(),
-            table: table.into(),
-            chain: name.into(),
         };
-        if !scan.native.contains(&found) {
-            scan.native.push(found);
+        if iptables_table(&found.family, &found.table, &found.chain) {
+            let filter = found.table == "filter";
+            scan.compat_v4 |= filter && found.family == "ip";
+            scan.compat_v6 |= filter && found.family == "ip6";
+            continue;
+        }
+        let key = (
+            found.family.clone(),
+            found.table.clone(),
+            found.chain.clone(),
+        );
+        if !policy_drop && !blocking.contains(&key) {
+            continue;
+        }
+        let list = if safe_word(&found.table) && safe_word(&found.chain) {
+            &mut scan.native
+        } else {
+            &mut scan.skipped
+        };
+        if !list.contains(&found) {
+            list.push(found);
         }
     }
     Ok(scan)
+}
+
+/// The warning for a blocking chain Onebox cannot edit.
+pub(super) fn skipped_notice(chain: &Nft) -> String {
+    format!(
+        "nft 链 {} {} {} 名称无法安全管理，已跳过；该链会拦截未放行的流量，Onebox 端口可能无法访问，请手动放行",
+        chain.family,
+        sanitize_input(&chain.table),
+        sanitize_input(&chain.chain)
+    )
 }
 
 /// Input chains on this host. Without nft, or when the ruleset cannot be
@@ -89,7 +175,11 @@ pub(super) fn scan(ctx: &Ctx) -> Result<Scan> {
     if !out.ok() {
         return Ok(Scan::default());
     }
-    parse_ruleset(&serde_json::from_str(&out.stdout)?)
+    let scan = parse_ruleset(&serde_json::from_str(&out.stdout)?)?;
+    for chain in &scan.skipped {
+        out::warn(skipped_notice(chain));
+    }
+    Ok(scan)
 }
 
 /// One rule of a chain listing.

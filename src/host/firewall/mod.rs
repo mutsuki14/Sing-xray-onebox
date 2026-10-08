@@ -11,8 +11,10 @@
 //! Backend selection ([`detect`], first match wins):
 //! 1. ufw, only while `ufw status` reports `Status: active`;
 //! 2. firewalld, while running: every active zone, runtime and permanent;
-//! 3. native nft input chains (family ip/ip6/inet), plus iptables/ip6tables
-//!    for the families whose `filter INPUT` chain belongs to iptables-nft;
+//! 3. native nft input chains (family ip/ip6/inet) that can block a port
+//!    (`policy drop`, or an unconditional drop/reject rule), plus
+//!    iptables/ip6tables for the families whose `filter INPUT` chain belongs
+//!    to iptables-nft;
 //! 4. iptables / ip6tables, inserting at `INPUT` position 1 so a trailing
 //!    `REJECT` (Oracle Cloud images) cannot win.
 //!
@@ -31,6 +33,14 @@
 //! - an nft chain that no longer exists counts as "rule gone"; iptables-nft's
 //!   `nat`/`mangle`/`raw`/`security` INPUT chains and non-filter chains are
 //!   never edited;
+//! - v2 inserted an accept at the head of every native filter input chain,
+//!   including security chains whose drops are all conditional (crowdsec's
+//!   `crowdsec-chain`, fail2ban's `f2b-chain`), where it only let blocked
+//!   sources bypass them; v3 edits only chains that can block a port, and
+//!   reconcile removes the rules v2 left in the others;
+//! - an input chain whose name nft cannot be given safely (LXD/Incus
+//!   `inet lxd in.lxdbr0`) is skipped, with a warning when it can block,
+//!   instead of failing every apply;
 //! - ufw specs held by an administrator rule are no longer re-commented
 //!   (ufw merges identical rules, so v2 adopted and later deleted them);
 //! - firewalld/ufw ports wanted by two owners (`proxy` and `acme` on TCP

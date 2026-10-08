@@ -411,10 +411,29 @@ fn nft_chain_that_vanished_means_rule_gone() {
     assert!(chain.remove(&ctx, &r).is_err());
 }
 
+/// A filter base chain with `policy drop` (one that can block a port).
 fn chain_json(family: &str, table: &str, name: &str, hook: &str) -> String {
+    policy_chain(family, table, name, hook, "drop")
+}
+
+fn policy_chain(family: &str, table: &str, name: &str, hook: &str, policy: &str) -> String {
     format!(
-        r#"{{"chain":{{"family":"{family}","table":"{table}","name":"{name}","handle":1,"type":"filter","hook":"{hook}","prio":0,"policy":"accept"}}}}"#
+        r#"{{"chain":{{"family":"{family}","table":"{table}","name":"{name}","handle":1,"type":"filter","hook":"{hook}","prio":0,"policy":"{policy}"}}}}"#
     )
+}
+
+fn rule_json(family: &str, table: &str, chain: &str, expr: &str) -> String {
+    format!(
+        r#"{{"rule":{{"family":"{family}","table":"{table}","chain":"{chain}","handle":9,"expr":{expr}}}}}"#
+    )
+}
+
+fn nft_chain(family: &str, table: &str, chain: &str) -> Nft {
+    Nft {
+        family: family.into(),
+        table: table.into(),
+        chain: chain.into(),
+    }
 }
 
 fn ruleset(chains: &[String]) -> String {
@@ -462,15 +481,109 @@ fn ruleset_classification_keeps_iptables_nft_tables_out_of_nft() {
         serde_json::from_str(&ruleset(&[chain_json("ip", "mangle", "INPUT", "input")])).unwrap();
     let scan = nft::parse_ruleset(&mangle_only).unwrap();
     assert!(!scan.compat_v4 && scan.native.is_empty());
-    let unsafe_doc: serde_json::Value = serde_json::from_str(&ruleset(&[chain_json(
-        "inet", "my table", "input", "input",
-    )]))
-    .unwrap();
-    assert_eq!(
-        nft::parse_ruleset(&unsafe_doc).unwrap_err().to_string(),
-        "nft 表或链名无法安全管理"
-    );
     assert!(nft::parse_ruleset(&serde_json::json!({})).is_err());
+}
+
+#[test]
+fn only_chains_that_can_block_get_rules() {
+    const SET_DROP: &str = r#"[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":"@crowdsec-blacklists"}},{"drop":null}]"#;
+    let doc: serde_json::Value = serde_json::from_str(&ruleset(&[
+        // crowdsec-firewall-bouncer: accept policy, only set-matched drops.
+        policy_chain("ip", "crowdsec", "crowdsec-chain", "input", "accept"),
+        rule_json("ip", "crowdsec", "crowdsec-chain", SET_DROP),
+        // fail2ban: a rate-limited drop is conditional too.
+        policy_chain("inet", "f2b-table", "f2b-chain", "input", "accept"),
+        rule_json(
+            "inet",
+            "f2b-table",
+            "f2b-chain",
+            r#"[{"limit":{"rate":10,"per":"second"}},{"drop":null}]"#,
+        ),
+        // The admin's filter: policy drop.
+        chain_json("inet", "filter", "input", "input"),
+        // Accept policy ending in an unconditional `counter reject`.
+        policy_chain("inet", "guard", "input", "input", "accept"),
+        rule_json(
+            "inet",
+            "guard",
+            "input",
+            r#"[{"counter":{"packets":0,"bytes":0}},{"reject":{"type":"icmpx","expr":"admin-prohibited"}}]"#,
+        ),
+        // Accept policy whose only rule accepts.
+        policy_chain("inet", "open", "input", "input", "accept"),
+        rule_json("inet", "open", "input", r#"[{"accept":null}]"#),
+    ]))
+    .unwrap();
+    let scan = nft::parse_ruleset(&doc).unwrap();
+    assert_eq!(
+        scan.native,
+        [
+            nft_chain("inet", "filter", "input"),
+            nft_chain("inet", "guard", "input")
+        ],
+        "an accept in crowdsec/f2b chains would only bypass their drops"
+    );
+    assert!(scan.skipped.is_empty());
+}
+
+#[test]
+fn hosts_with_only_non_blocking_nft_chains_use_iptables() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("nft").provide("iptables");
+    exec.on(
+        "nft",
+        &["-j", "list", "ruleset"],
+        Output::success(ruleset(&[policy_chain(
+            "ip",
+            "crowdsec",
+            "crowdsec-chain",
+            "input",
+            "accept",
+        )])),
+    )
+    .on("iptables", &["-w", "5", "-S", "INPUT"], Output::success(""));
+    assert_eq!(
+        detect(&ctx).unwrap(),
+        [Location::Iptables(Iptables { v6: false })],
+        "an accept in a separate table never bypasses crowdsec's drops"
+    );
+}
+
+#[test]
+fn unsafe_chain_names_are_skipped_not_fatal() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("nft");
+    exec.on(
+        "nft",
+        &["-j", "list", "ruleset"],
+        Output::success(ruleset(&[
+            // LXD / Incus (nftables driver).
+            policy_chain("inet", "lxd", "in.lxdbr0", "input", "accept"),
+            rule_json(
+                "inet",
+                "lxd",
+                "in.lxdbr0",
+                r#"[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"lxdbr0"}},{"accept":null}]"#,
+            ),
+            chain_json("inet", "filter", "input", "input"),
+            chain_json("inet", "my table", "in.put", "input"),
+        ])),
+    );
+    assert_eq!(
+        detect(&ctx).unwrap(),
+        [Location::Nft(nft_chain("inet", "filter", "input"))]
+    );
+    let listed = ruleset(&[
+        policy_chain("inet", "lxd", "in.lxdbr0", "input", "drop"),
+        chain_json("inet", "filter", "input", "input"),
+    ]);
+    let scan = nft::parse_ruleset(&serde_json::from_str(&listed).unwrap()).unwrap();
+    assert_eq!(scan.native, [nft_chain("inet", "filter", "input")]);
+    assert_eq!(scan.skipped, [nft_chain("inet", "lxd", "in.lxdbr0")]);
+    assert_eq!(
+        nft::skipped_notice(&scan.skipped[0]),
+        "nft 链 inet lxd in.lxdbr0 名称无法安全管理，已跳过；该链会拦截未放行的流量，Onebox 端口可能无法访问，请手动放行"
+    );
 }
 
 #[test]
