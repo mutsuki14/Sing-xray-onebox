@@ -26,7 +26,8 @@ ALLOWED_DIFFS.md               accepted v2 → v3 differences
 newline after the rendered text): `render-server-<core>.json`,
 `render-inbound-<protocol>.json`, `render-outbound-<protocol>-<core>.json`,
 `render-probe.json` and `client-<format>.out`. A command v2 refused leaves a
-`.err` file with its stderr instead; v3 must refuse it too.
+`.err` file with its stderr instead; v3 must refuse it with the message of
+its final `[错误]` line (see `ALLOWED_DIFFS.md` for the exceptions).
 
 ## Cases
 

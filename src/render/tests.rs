@@ -68,6 +68,19 @@ fn a_format_without_nodes_names_itself_and_the_usable_formats() {
             format!("当前协议组合没有支持 {id} 格式的节点，请改用 singbox / singbox-notun")
         );
     }
+    let s = spec_with(&[(VlessXhttp, 443, XR)]);
+    for (format, id) in [
+        (ClientFormat::Singbox, "singbox"),
+        (ClientFormat::SingboxNoTun, "singbox-notun"),
+    ] {
+        let err = client(&s, format).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!(
+                "当前协议组合没有支持 {id} 格式的节点，请改用 links / base64 / mihomo / provider / xray"
+            )
+        );
+    }
 }
 
 #[test]

@@ -51,7 +51,12 @@ pub fn server(spec: &NodeSpec) -> Result<Value> {
 /// Full sing-box client: `proxy` selector over an `auto` url-test of every
 /// node, a local mixed port, and the TUN inbound when `tun`.
 pub fn client(spec: &NodeSpec, tun: bool) -> Result<Value> {
-    let nodes = super::nodes_for(spec, ClientFormat::Singbox)?;
+    let format = if tun {
+        ClientFormat::Singbox
+    } else {
+        ClientFormat::SingboxNoTun
+    };
+    let nodes = super::nodes_for(spec, format)?;
     let names: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
     let mut selection = vec!["auto"];
     selection.extend(&names);

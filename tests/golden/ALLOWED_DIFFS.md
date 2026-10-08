@@ -1,10 +1,11 @@
 # Allowed differences between v2.0.1 and v3 render output
 
 The golden test (`src/render/golden.rs`) requires every v3 output to equal the
-v2 output of the same case. The differences below are deliberate. Each one
-is a named transformation in the test (`ALLOWED`), applied to the v2 value
-before the comparison; the test fails when a listed difference stops
-occurring or occurs in any file not listed here.
+v2 output of the same case, and every v2 refusal (`.err`) to be a v3 refusal
+with the same message. The differences below are deliberate. Each one is a
+named rule in the test (`ALLOWED`), applied only where it is listed; the test
+fails when a listed difference stops occurring or occurs in any file not
+listed here.
 
 ## Differences exercised by the golden cases
 
@@ -22,6 +23,34 @@ Files:
 - `c06-custom-pinned-ipv6/render-server-xray.json`
 - `c06-custom-pinned-ipv6/render-inbound-hysteria2.json`
 
+### D2-no-node-message
+
+A client format without any supported node is refused with
+`当前协议组合没有支持 {format} 格式的节点，请改用 {usable formats}` (spec C
+§8.1 #17). v2 said `当前协议组合没有 links 支持的节点` for the Base64
+subscription (`sub`), `没有可导出到 mihomo 的协议；AnyTLS-REALITY 需要 sing-box
+JSON` for mihomo and the provider, and never named a format that works. The
+rule applies only to `client-*.err` files whose v2 message is one of those
+no-node texts, and requires the v3 message to start with the no-node text
+of the same format; every other refusal must keep the v2 text exactly.
+
+Files:
+- `c09-anytls-reality-only/client-links.err`
+- `c09-anytls-reality-only/client-mihomo.err`
+- `c09-anytls-reality-only/client-provider.err`
+- `c09-anytls-reality-only/client-sub.err`
+- `c09-anytls-reality-only/client-xray.err`
+- `c10-xhttp-only/client-singbox-notun.err`
+- `c10-xhttp-only/client-singbox.err`
+
+## Refusals: only the error line
+
+A `.err` file is v2's whole stderr. Only its final `[错误] …` line is the
+renderer's message. The one other line v2 printed there,
+`此格式不包含 AnyTLS-REALITY，请使用 singbox 远程配置或完整 JSON`, came from the
+`client` command before rendering and belongs to the CLI; the test accepts
+exactly that line and no other.
+
 ## Differences handled by comparing structure
 
 ### mihomo.yaml and provider.yaml are YAML
@@ -38,9 +67,6 @@ compared as text.
 These are covered by unit tests in `src/render/` instead; the fixtures avoid
 them so the parity comparison stays exact.
 
-- Error texts are not compared, only that v2 and v3 both fail. A format
-  without supported nodes now names itself and the usable formats (v2 said
-  `links` for `base64`, spec C §8.1 #17).
 - `render inbound|outbound` for a protocol that is not enabled is an error
   (`未启用协议 …`); v2 rendered it with port 443.
 - The probe bundle's loopback view (`reality-check` on the server) connects

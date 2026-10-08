@@ -7,7 +7,8 @@
 //! - links and Base64 subscriptions byte for byte;
 //! - mihomo documents by structure (v3 writes YAML, v2 wrote JSON), with the
 //!   emitted YAML parsed back by the test reader;
-//! - a v2 failure (`.err`) must be a v3 failure.
+//! - a v2 failure (`.err`) must be a v3 failure with the same message (the
+//!   final `[错误]` line of v2's stderr).
 //!
 //! The only accepted differences are the transformations in [`ALLOWED`],
 //! each documented in `tests/golden/ALLOWED_DIFFS.md`; the test fails if a
@@ -43,11 +44,47 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "c06-custom-pinned-ipv6",
         "render-inbound-hysteria2.json",
     ),
+    (
+        NO_NODE_MESSAGE,
+        "c09-anytls-reality-only",
+        "client-links.err",
+    ),
+    (
+        NO_NODE_MESSAGE,
+        "c09-anytls-reality-only",
+        "client-mihomo.err",
+    ),
+    (
+        NO_NODE_MESSAGE,
+        "c09-anytls-reality-only",
+        "client-provider.err",
+    ),
+    (NO_NODE_MESSAGE, "c09-anytls-reality-only", "client-sub.err"),
+    (
+        NO_NODE_MESSAGE,
+        "c09-anytls-reality-only",
+        "client-xray.err",
+    ),
+    (
+        NO_NODE_MESSAGE,
+        "c10-xhttp-only",
+        "client-singbox-notun.err",
+    ),
+    (NO_NODE_MESSAGE, "c10-xhttp-only", "client-singbox.err"),
 ];
 
 /// C-8.1 #3: an Xray Hysteria2 server with Salamander obfuscation no longer
 /// also sets a masquerade site.
 const XRAY_HY2_MASQUERADE: &str = "D1-xray-hy2-obfs-masquerade";
+
+/// C-8.1 #17: a client format without supported nodes names itself and the
+/// usable formats (v2 named `links` for `sub` and had a mihomo variant).
+const NO_NODE_MESSAGE: &str = "D2-no-node-message";
+
+/// The stderr notice v2's `client` command (not its renderer) printed before
+/// a non-sing-box export of a node with AnyTLS-REALITY; it belongs to the CLI.
+const CLI_ANYTLS_REALITY_NOTICE: &str =
+    "此格式不包含 AnyTLS-REALITY，请使用 singbox 远程配置或完整 JSON";
 
 pub(crate) struct Case {
     pub name: String,
@@ -195,12 +232,15 @@ fn check_file(case: &Case, file: &Path) -> Vec<&'static str> {
     let target = target(stem);
     let label = format!("{}/{name}", case.name);
     let actual = render(&case.spec, &target);
+    let text = fs::read_to_string(file).unwrap();
     if ext == "err" {
-        assert!(actual.is_err(), "{label}: v2 failed but v3 rendered");
-        return Vec::new();
+        let Err(error) = actual else {
+            panic!("{label}: v2 failed but v3 rendered");
+        };
+        return refusal_diffs(&target, &text, &error.to_string())
+            .unwrap_or_else(|why| panic!("{label}: {why}"));
     }
     let actual = actual.unwrap_or_else(|e| panic!("{label}: {e}"));
-    let text = fs::read_to_string(file).unwrap();
     match (&target, actual) {
         (Target::Client(ClientFormat::Mihomo | ClientFormat::Provider), Actual::Text(yaml)) => {
             let format = match target {
@@ -241,6 +281,81 @@ fn check_file(case: &Case, file: &Path) -> Vec<&'static str> {
             applied
         }
         (_, Actual::Text(_)) => panic!("{label}: unexpected text output"),
+    }
+}
+
+/// v2 refused a target (`text` is its stderr); v3 must refuse it for the
+/// same reason: its message equals v2's final `[错误] ` line, except for the
+/// no-node messages of client formats ([`NO_NODE_MESSAGE`]). Returns the
+/// allowed differences used, or why the refusals differ.
+fn refusal_diffs(target: &Target, text: &str, actual: &str) -> Result<Vec<&'static str>, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let (last, notices) = lines.split_last().ok_or("empty stderr")?;
+    if let Some(notice) = notices.iter().find(|n| **n != CLI_ANYTLS_REALITY_NOTICE) {
+        return Err(format!("unexpected v2 stderr line {notice:?}"));
+    }
+    let expected = last
+        .strip_prefix("[错误] ")
+        .ok_or_else(|| format!("no error line in {text:?}"))?;
+    if actual == expected {
+        return Ok(Vec::new());
+    }
+    match target {
+        Target::Client(format) if is_v2_no_node_message(expected) => {
+            let prefix = format!("当前协议组合没有支持 {} 格式的节点，请改用 ", format.id());
+            if actual.starts_with(&prefix) {
+                Ok(vec![NO_NODE_MESSAGE])
+            } else {
+                Err(format!(
+                    "v3 refused with {actual:?}, not the no-node message"
+                ))
+            }
+        }
+        _ => Err(format!("v3 refused with {actual:?}, v2 with {expected:?}")),
+    }
+}
+
+/// v2's two texts for a client format without supported nodes.
+fn is_v2_no_node_message(message: &str) -> bool {
+    let generic = message
+        .strip_prefix("当前协议组合没有 ")
+        .is_some_and(|rest| rest.ends_with(" 支持的节点"));
+    generic || message == "没有可导出到 mihomo 的协议；AnyTLS-REALITY 需要 sing-box JSON"
+}
+
+#[test]
+fn refusals_must_fail_for_the_v2_reason() {
+    let client = Target::Client(ClientFormat::Base64);
+    let v2 = "[错误] 当前协议组合没有 links 支持的节点\n";
+    let v3 = "当前协议组合没有支持 base64 格式的节点，请改用 singbox";
+    assert_eq!(refusal_diffs(&client, v2, v3), Ok(vec![NO_NODE_MESSAGE]));
+    let noticed = format!("{CLI_ANYTLS_REALITY_NOTICE}\n{v2}");
+    assert_eq!(
+        refusal_diffs(&client, &noticed, v3),
+        Ok(vec![NO_NODE_MESSAGE])
+    );
+    let tuic = "[错误] xray 客户端不支持 tuic\n";
+    let outbound = Target::Outbound(Protocol::Tuic, Core::Xray);
+    let same = refusal_diffs(&outbound, tuic, "xray 客户端不支持 tuic");
+    assert_eq!(same, Ok(Vec::new()));
+    let wrong_reason = [
+        (&outbound, tuic, "未启用协议 tuic"),
+        (&client, v2, "缺少 REALITY 密钥"),
+        (
+            &client,
+            v2,
+            "当前协议组合没有支持 links 格式的节点，请改用 singbox",
+        ),
+        (&client, "[错误] 未启用协议 trojan\n", v3),
+        (
+            &client,
+            "notice\n[错误] 当前协议组合没有 links 支持的节点\n",
+            v3,
+        ),
+        (&client, "当前协议组合没有 links 支持的节点\n", v3),
+    ];
+    for (target, v2, v3) in wrong_reason {
+        assert!(refusal_diffs(target, v2, v3).is_err(), "{v2:?} / {v3:?}");
     }
 }
 
