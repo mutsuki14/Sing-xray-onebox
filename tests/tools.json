@@ -1,0 +1,26 @@
+[
+  {
+    "repo": "SagerNet/sing-box",
+    "tag": "v1.14.2",
+    "asset": "sing-box-1.14.2-linux-amd64.tar.gz",
+    "binaries": ["sing-box"]
+  },
+  {
+    "repo": "XTLS/Xray-core",
+    "tag": "v26.3.27",
+    "asset": "Xray-linux-64.zip",
+    "binaries": ["xray"]
+  },
+  {
+    "repo": "MetaCubeX/mihomo",
+    "tag": "v1.19.32",
+    "asset": "mihomo-linux-amd64-v1.19.32.gz",
+    "binaries": ["mihomo"]
+  },
+  {
+    "repo": "fatedier/frp",
+    "tag": "v0.71.0",
+    "asset": "frp_0.71.0_linux_amd64.tar.gz",
+    "binaries": ["frps", "frpc"]
+  }
+]
