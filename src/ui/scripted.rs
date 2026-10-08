@@ -11,8 +11,8 @@
 //!   EOF → `Error::Cancelled`.
 
 use super::{
-    format_menu, parse_confirm, parse_select, parse_select_many, select_hint, AutoPrompter,
-    Prompter,
+    check_many_defaults, format_menu, parse_confirm, parse_select, parse_select_many, select_hint,
+    AutoPrompter, Prompter,
 };
 use crate::error::{Error, Result};
 use crate::sys::text::sanitize_input;
@@ -215,6 +215,7 @@ impl Prompter for ScriptedPrompter {
         if let Some(auto) = self.auto() {
             return auto.select_many(title, items, default);
         }
+        check_many_defaults(items.len(), default)?;
         self.ask_until("编号无效", |a| {
             parse_select_many(a, items.len(), default)
         })

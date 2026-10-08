@@ -2,8 +2,9 @@
 //! scripted implementations, output conventions, secret input and QR codes.
 //!
 //! Changes from v2: one shared buffered reader per session (B-9.1#22, v2
-//! lost read-ahead by building a reader per question); prompts always go to
-//! the terminal stream the answer is read from; validation errors re-ask
+//! lost read-ahead by building a reader per question); prompts go to the
+//! controlling terminal whenever there is one, so redirecting stderr cannot
+//! hide a question that is waiting for input; validation errors re-ask
 //! instead of aborting; `-y` keeps v2's "confirm → yes" rule except for
 //! [`confirm_danger`], which requires an explicit `--force` (B-9.1#10).
 
@@ -46,6 +47,7 @@ pub trait Prompter: Send + Sync {
         back: bool,
     ) -> Result<Option<usize>>;
     /// Numbered multi choice ("1 3 5" / "1,3"); returns sorted, deduplicated 0-based indexes.
+    /// Every implementation rejects a `default` index `>= items.len()` with [`BAD_DEFAULT`].
     fn select_many(&self, title: &str, items: &[String], default: &[usize]) -> Result<Vec<usize>>;
     /// No-echo input from the controlling terminal. Under `-y` → error.
     fn secret(&self, prompt: &str) -> Result<String>;
@@ -57,6 +59,15 @@ pub const NO_TERMINAL: &str = "当前没有交互终端，请通过参数提供�
 pub const UNATTENDED_SECRET: &str = "无人值守模式请通过环境变量提供凭据";
 /// Error when an unattended selection's default is out of range.
 pub const BAD_DEFAULT: &str = "默认选项无效";
+
+/// `select_many` defaults must index `items` (a caller bug otherwise; the
+/// result would be used to index the same list).
+pub fn check_many_defaults(count: usize, default: &[usize]) -> Result<()> {
+    if default.iter().any(|&i| i >= count) {
+        return Err(Error::msg(BAD_DEFAULT));
+    }
+    Ok(())
+}
 
 /// Confirmation for destructive actions that `-y` alone must not approve
 /// (e.g. reinstalling over a node, which regenerates every credential):
@@ -163,9 +174,9 @@ pub fn parse_select(
     }
 }
 
-/// `"选择编号，以空格或逗号分隔 [默认: 1 3]: "`.
-pub fn select_many_prompt(default: &[usize]) -> String {
-    let shown: Vec<String> = normalize(default)
+/// `"选择编号，以空格或逗号分隔 [默认: 1 3]: "` (only defaults below `count`).
+pub fn select_many_prompt(count: usize, default: &[usize]) -> String {
+    let shown: Vec<String> = valid_defaults(count, default)
         .iter()
         .map(|i| (i + 1).to_string())
         .collect();
@@ -177,14 +188,15 @@ pub fn select_many_prompt(default: &[usize]) -> String {
 }
 
 /// Interpret a multi-choice answer ("1 3", "1,3", "1，3"); an empty answer
-/// selects `default`. `None` = some number is invalid.
+/// selects `default` (indexes `>= count` are never returned). `None` = some
+/// number is invalid.
 pub fn parse_select_many(answer: &str, count: usize, default: &[usize]) -> Option<Vec<usize>> {
     let tokens: Vec<&str> = answer
         .split(|c: char| c.is_whitespace() || matches!(c, ',' | '，' | '、'))
         .filter(|t| !t.is_empty())
         .collect();
     if tokens.is_empty() {
-        return Some(normalize(default));
+        return Some(valid_defaults(count, default));
     }
     let mut picked = Vec::with_capacity(tokens.len());
     for token in tokens {
@@ -194,6 +206,12 @@ pub fn parse_select_many(answer: &str, count: usize, default: &[usize]) -> Optio
         }
     }
     Some(normalize(&picked))
+}
+
+/// Sorted, deduplicated defaults below `count`.
+fn valid_defaults(count: usize, default: &[usize]) -> Vec<usize> {
+    let valid: Vec<usize> = default.iter().copied().filter(|&i| i < count).collect();
+    normalize(&valid)
 }
 
 /// Sorted, deduplicated copy.
@@ -226,10 +244,15 @@ mod tests {
         assert_eq!(select_hint(5, false), "请输入 1–5");
         assert_eq!(select_hint(5, true), "请输入 0–5");
         assert_eq!(
-            select_many_prompt(&[2, 0, 2]),
+            select_many_prompt(3, &[2, 0, 2]),
             "选择编号，以空格或逗号分隔 [默认: 1 3]: "
         );
-        assert_eq!(select_many_prompt(&[]), "选择编号，以空格或逗号分隔: ");
+        assert_eq!(select_many_prompt(3, &[]), "选择编号，以空格或逗号分隔: ");
+        assert_eq!(
+            select_many_prompt(2, &[0, 5]),
+            "选择编号，以空格或逗号分隔 [默认: 1]: ",
+            "invalid defaults are never shown"
+        );
     }
 
     #[test]
@@ -304,6 +327,32 @@ mod tests {
                 "{answer:?}"
             );
         }
+        assert_eq!(parse_select_many("", 2, &[0, 5]), Some(vec![0]));
+    }
+
+    #[test]
+    fn out_of_range_multi_defaults_are_rejected_by_every_prompter() {
+        let tty = TtyPrompter::from_streams(std::io::Cursor::new(b"\n".to_vec()), std::io::sink());
+        let scripted = ScriptedPrompter::new([""]);
+        let auto = AutoPrompter { assume_yes: true };
+        let unattended = ScriptedPrompter::unattended();
+        let prompters: [(&str, &dyn Prompter); 4] = [
+            ("tty", &tty),
+            ("scripted", &scripted),
+            ("auto", &auto),
+            ("scripted -y", &unattended),
+        ];
+        for (name, ui) in prompters {
+            let err = ui.select_many("协议", &items(2), &[1, 5]).unwrap_err();
+            assert_eq!(err.to_string(), BAD_DEFAULT, "{name}");
+            assert_eq!(
+                ui.select_many("协议", &items(2), &[1]).unwrap(),
+                [1],
+                "{name}: valid defaults still work"
+            );
+        }
+        assert!(check_many_defaults(2, &[0, 1]).is_ok());
+        assert!(check_many_defaults(0, &[]).is_ok());
     }
 
     #[test]

@@ -1,17 +1,21 @@
 //! Terminal prompter. One buffered reader serves the whole session, so
 //! pasted multi-line input is never lost between questions (v2 created a
-//! new reader per question on /dev/tty). Prompts are written to the stream
-//! paired with the reader: stderr when answering from a stdin TTY, the tty
-//! itself otherwise.
+//! new reader per question on /dev/tty). Prompts, menus and re-ask hints go
+//! to the controlling terminal (`/dev/tty`) whenever it can be opened —
+//! also when answers come from a stdin TTY — so `onebox install 2>log`
+//! cannot hide a question that is waiting for input (B-9.1#22). Without a
+//! controlling terminal they go to stderr.
 
 use super::{
-    confirm_prompt, format_menu, input_prompt, parse_confirm, parse_select, parse_select_many,
-    select_hint, select_many_prompt, select_prompt, Prompter,
+    check_many_defaults, confirm_prompt, format_menu, input_prompt, parse_confirm, parse_select,
+    parse_select_many, select_hint, select_many_prompt, select_prompt, Prompter,
 };
 use crate::error::{Error, Result};
 use crate::sys::text::sanitize_input;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
+use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Longest accepted answer line; longer input is refused, not truncated.
@@ -27,20 +31,23 @@ pub struct TtyPrompter {
 }
 
 impl TtyPrompter {
-    /// stdin when it is a terminal (prompts on stderr), else `/dev/tty`;
-    /// `None` when neither is available.
+    /// Answers from stdin when it is a terminal, else from `/dev/tty`;
+    /// prompts to `/dev/tty` when it is that same terminal (stderr
+    /// otherwise). `None` when no terminal is available.
     pub fn open() -> Option<TtyPrompter> {
-        if io::stdin().is_terminal() {
-            return Some(Self::from_streams(
-                BufReader::new(io::stdin()),
-                io::stderr(),
-            ));
-        }
         let tty = OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
-            .ok()?;
+            .ok();
+        if io::stdin().is_terminal() {
+            let writer: Box<dyn Write + Send> = match tty {
+                Some(tty) if is_stdin_device(&tty) => Box::new(tty),
+                _ => Box::new(io::stderr()),
+            };
+            return Some(Self::from_streams(BufReader::new(io::stdin()), writer));
+        }
+        let tty = tty?;
         let reader = tty.try_clone().ok()?;
         Some(Self::from_streams(BufReader::new(reader), tty))
     }
@@ -100,6 +107,20 @@ impl Terminal {
             }
             self.say(hint)?;
         }
+    }
+}
+
+/// Whether `tty` is the terminal device stdin refers to (so prompts written
+/// there appear where the user types the answers).
+fn is_stdin_device(tty: &File) -> bool {
+    let stdin = io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(File::from)
+        .and_then(|f| f.metadata());
+    match (stdin, tty.metadata()) {
+        (Ok(a), Ok(b)) => a.rdev() == b.rdev(),
+        _ => false,
     }
 }
 
@@ -202,11 +223,14 @@ impl Prompter for TtyPrompter {
     }
 
     fn select_many(&self, title: &str, items: &[String], default: &[usize]) -> Result<Vec<usize>> {
+        check_many_defaults(items.len(), default)?;
         let mut terminal = self.terminal();
         terminal.say(&format_menu(title, items, false))?;
-        terminal.ask_until(&select_many_prompt(default), "编号无效", |a| {
-            parse_select_many(a, items.len(), default)
-        })
+        terminal.ask_until(
+            &select_many_prompt(items.len(), default),
+            "编号无效",
+            |a| parse_select_many(a, items.len(), default),
+        )
     }
 
     fn secret(&self, prompt: &str) -> Result<String> {
@@ -332,6 +356,58 @@ mod tests {
         let long = "x".repeat(MAX_LINE + 10) + "\n";
         let (ui, _) = prompter(&long);
         assert_eq!(ui.input("a", "").unwrap_err().to_string(), "输入过长");
+    }
+
+    /// A reader whose first `interrupts` fills fail with EINTR.
+    struct Interrupting {
+        interrupts: usize,
+        inner: Cursor<Vec<u8>>,
+    }
+
+    impl io::Read for Interrupting {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl BufRead for Interrupting {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.interrupts > 0 {
+                self.interrupts -= 1;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.inner.fill_buf()
+        }
+        fn consume(&mut self, amount: usize) {
+            self.inner.consume(amount)
+        }
+    }
+
+    fn interrupting(interrupts: usize) -> Interrupting {
+        Interrupting {
+            interrupts,
+            inner: Cursor::new(b"answer\n".to_vec()),
+        }
+    }
+
+    #[test]
+    fn interrupted_reads_retry_or_cancel() {
+        use crate::sys::signal;
+        let _g = signal::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        signal::clear();
+        // EINTR without a cancellation signal (e.g. SIGWINCH) just retries.
+        let line = read_line(&mut interrupting(2)).unwrap();
+        assert_eq!(line.as_deref(), Some("answer"));
+        // EINTR caused by Ctrl+C cancels the prompt (exit 130).
+        let _scope = signal::SignalScope::install().unwrap();
+        // SAFETY: raising a signal whose recording handler is installed.
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+        let err = read_line(&mut interrupting(1)).unwrap_err();
+        assert!(err.is_cancelled());
+        assert_eq!(err.exit_code(), 130);
+        signal::clear();
     }
 
     #[test]

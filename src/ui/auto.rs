@@ -1,7 +1,7 @@
 //! Non-interactive prompter: `-y` answers every question with its default;
 //! without `-y` (and without a terminal) every question fails with a hint.
 
-use super::{Prompter, BAD_DEFAULT, NO_TERMINAL, UNATTENDED_SECRET};
+use super::{check_many_defaults, Prompter, BAD_DEFAULT, NO_TERMINAL, UNATTENDED_SECRET};
 use crate::error::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,9 +68,7 @@ impl Prompter for AutoPrompter {
 
     fn select_many(&self, _title: &str, items: &[String], default: &[usize]) -> Result<Vec<usize>> {
         self.require_yes()?;
-        if default.iter().any(|&i| i >= items.len()) {
-            return Err(Error::msg(BAD_DEFAULT));
-        }
+        check_many_defaults(items.len(), default)?;
         let mut picked = default.to_vec();
         picked.sort_unstable();
         picked.dedup();
