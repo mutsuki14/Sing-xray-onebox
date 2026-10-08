@@ -217,7 +217,7 @@ fn migrate_v2(
     rng: &mut dyn Random,
 ) -> Result<(NodeConfig, Origin)> {
     let values = v2::v2_values_from_json(original)?;
-    let settings_path = paths.subscription().join("settings.json");
+    let settings_path = paths.subscription_v2_settings();
     let settings = match read_state(&settings_path)? {
         Some(bytes) => Some(
             serde_json::from_slice::<Value>(&bytes).context("v2 订阅设置 settings.json 无效")?,
