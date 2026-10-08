@@ -181,7 +181,7 @@ impl<'a> ContentStore<'a> {
 
     /// Publish a local directory (`site import`).
     pub fn import(&self, source: &Path) -> Result<String> {
-        let source = self.check_import_source(source)?;
+        let source = self.check_import(source)?;
         self.publish(&source, false)
     }
 
@@ -251,8 +251,8 @@ impl<'a> ContentStore<'a> {
     }
 
     /// The canonical import source, refusing recursion, system and private
-    /// configuration directories.
-    fn check_import_source(&self, source: &Path) -> Result<PathBuf> {
+    /// configuration directories (the CLI checks this before an apply).
+    pub fn check_import(&self, source: &Path) -> Result<PathBuf> {
         let canonical = fs::canonicalize(source)
             .ok()
             .filter(|p| p.is_dir())

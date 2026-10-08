@@ -41,6 +41,7 @@ use crate::error::{Error, Result};
 use crate::host::fetch;
 use crate::sys::exec::{Cmd, Output, SAFE_PATH};
 use crate::sys::fs::{ensure_dir, read_bounded, remove_tree_if_exists, sha256_file};
+use crate::ui::out;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -262,11 +263,18 @@ pub fn obtain(
         request,
         credentials,
     );
-    let out = with_challenge(engine, dir, challenge, || engine.ctx.run(&cmd))?;
-    match (out.code, request) {
+    let action = match request {
+        Request::Issue => "申请",
+        Request::Renew { .. } => "续期",
+    };
+    out::info(format!(
+        "正在通过 Let's Encrypt {action}证书 {primary}（可能需要几分钟）"
+    ));
+    let output = with_challenge(engine, dir, challenge, || engine.ctx.run(&cmd))?;
+    match (output.code, request) {
         (0, _) => Ok(true),
         (2, Request::Renew { force: false }) => Ok(false),
-        (code, _) => Err(failure(code, &out, credentials)),
+        (code, _) => Err(failure(code, &output, credentials)),
     }
 }
 
