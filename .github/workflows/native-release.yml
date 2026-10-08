@@ -1,0 +1,238 @@
+name: Native release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [v2.0.0]
+  workflow_run:
+    workflows: [Native CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: native-release-v2.0.0
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: 2.0.0
+  RUST_TOOLCHAIN: 1.99.0
+  # Official cross main, pinned after verifying the upstream Git reference.
+  CROSS_REV: 74e99b2223de06166f8cdcc1af7f1308ec52baf4
+
+jobs:
+  gate:
+    if: >-
+      github.repository == 'mutsuki14/Sing-xray-onebox' &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.verify.outputs.ready }}
+      sha: ${{ steps.verify.outputs.sha }}
+      ci_run: ${{ steps.verify.outputs.ci_run }}
+    steps:
+      - name: Require successful Native CI for the current default main commit
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ $(gh api "repos/$REPOSITORY" --jq .default_branch) == main ]]
+          source_sha=$(gh api "repos/$REPOSITORY/branches/main" --jq .commit.sha)
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$EVENT_NAME" == workflow_run && "$EVENT_SHA" != "$source_sha" ]]; then
+            echo 'Ignoring a CI result for a superseded main commit.'
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$EVENT_NAME" == push ]]; then
+            [[ "$EVENT_REF" == "refs/tags/v$RELEASE_VERSION" ]]
+            [[ $(gh api "repos/$REPOSITORY/commits/v$RELEASE_VERSION" --jq .sha) == "$source_sha" ]]
+          fi
+          workflow_id=$(gh api "repos/$REPOSITORY/actions/workflows?per_page=100" --jq '[.workflows[] | select(.name == "Native CI")] | if length == 1 then .[0].id else error("Native CI workflow must be unique") end')
+          gh api --method GET "repos/$REPOSITORY/actions/workflows/$workflow_id/runs" \
+            -f branch=main -f head_sha="$source_sha" -f per_page=100 > "$RUNNER_TEMP/ci-runs.json"
+          ci_run=$(jq -er --arg sha "$source_sha" --arg repo "$REPOSITORY" '
+            [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and
+              .head_repository.full_name == $repo and (.event == "push" or .event == "workflow_dispatch"))]
+            | sort_by(.run_number, .run_attempt) | last
+            | select(.status == "completed" and .conclusion == "success") | .id
+          ' "$RUNNER_TEMP/ci-runs.json")
+          if gh release view "v$RELEASE_VERSION" --repo "$REPOSITORY" --json isDraft,assets,url > "$RUNNER_TEMP/existing-release.json" 2>/dev/null; then
+            if [[ $(jq -r .isDraft "$RUNNER_TEMP/existing-release.json") == false ]]; then
+              jq -e '[.assets[].name] as $names |
+                ["onebox-linux-amd64-musl", "onebox-linux-arm64-musl", "onebox-linux-386-musl", "onebox-linux-armv7-musl", "SHA256SUMS"] |
+                all(. as $name | $names | index($name) != null)' "$RUNNER_TEMP/existing-release.json" >/dev/null
+              echo 'This version is already published; assets will not be overwritten.'
+              echo 'ready=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          printf 'sha=%s\nci_run=%s\nready=true\n' "$source_sha" "$ci_run" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+          # "386" is the conventional 32-bit asset name; minimum CPU is i586.
+          - target: i586-unknown-linux-musl
+            arch: '386'
+          - target: armv7-unknown-linux-musleabihf
+            arch: armv7
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - name: Verify source and fixed release version
+        env:
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "$SOURCE_SHA" ]]
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as f:
+              assert tomllib.load(f)['package']['version'] == os.environ['RELEASE_VERSION']
+          PY
+          grep -qx 'readonly SCRIPT_VERSION="2.0.0"' scripts/bootstrap.sh
+      - name: Install the pinned Rust toolchain and cross source revision
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          cargo +"$RUST_TOOLCHAIN" install cross --locked --git https://github.com/cross-rs/cross --rev "$CROSS_REV"
+      - name: Resolve the official build image to an immutable digest
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/cross-rs/$TARGET"
+          docker pull "$image:main"
+          digest=$(docker image inspect "$image:main" --format '{{index .RepoDigests 0}}')
+          [[ "$digest" == "$image@sha256:"* ]]
+          [[ "${digest##*@sha256:}" =~ ^[0-9a-f]{64}$ ]]
+          printf '[target.%s]\nimage = "%s"\n' "$TARGET" "$digest" > "$RUNNER_TEMP/Cross.toml"
+          printf 'CROSS_CONFIG=%s\nBUILD_IMAGE=%s\n' "$RUNNER_TEMP/Cross.toml" "$digest" >> "$GITHUB_ENV"
+      - name: Build static executable and run its version command for this CPU
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+          CI_RUN: ${{ needs.gate.outputs.ci_run }}
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          set -euo pipefail
+          cross +"$RUST_TOOLCHAIN" build --release --locked --target "$TARGET"
+          cross +"$RUST_TOOLCHAIN" run --release --locked --target "$TARGET" -- --version > "$RUNNER_TEMP/version.txt"
+          [[ $(cat "$RUNNER_TEMP/version.txt") == "$RELEASE_VERSION" ]]
+          binary="target/$TARGET/release/onebox"
+          readelf --file-header "$binary"
+          readelf --program-headers "$binary" > "$RUNNER_TEMP/program-headers.txt"
+          if grep -q INTERP "$RUNNER_TEMP/program-headers.txt"; then
+            echo 'Release binary unexpectedly requires a dynamic loader.' >&2
+            exit 1
+          fi
+          mkdir -p dist
+          install -m 755 "$binary" "dist/onebox-linux-$ARCH-musl"
+          python3 - <<'PY'
+          import json, os, pathlib
+          data = {key: os.environ[key] for key in ('SOURCE_SHA', 'CI_RUN', 'RUST_TOOLCHAIN', 'CROSS_REV', 'TARGET', 'ARCH', 'BUILD_IMAGE')}
+          pathlib.Path(f'dist/build-info-{os.environ["ARCH"]}.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    needs: [gate, build]
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: native-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+      - name: Verify all four outputs and assemble the checksum manifest
+        env:
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release-assets"
+          python3 - <<'PY'
+          import json, os, pathlib
+          archs = ('amd64', 'arm64', '386', 'armv7')
+          records = []
+          for arch in archs:
+              binary = pathlib.Path(f'onebox-linux-{arch}-musl')
+              assert binary.is_file() and binary.read_bytes()[:4] == b'\x7fELF', binary
+              record = json.loads(pathlib.Path(f'build-info-{arch}.json').read_text())
+              assert record['SOURCE_SHA'] == os.environ['SOURCE_SHA'] and record['ARCH'] == arch
+              records.append(record)
+          pathlib.Path('BUILD-INFO.json').write_text(json.dumps(records, indent=2) + '\n')
+          PY
+          sha256sum onebox-linux-amd64-musl onebox-linux-arm64-musl onebox-linux-386-musl onebox-linux-armv7-musl > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Recheck main and CI, then publish a complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+          CI_RUN: ${{ needs.gate.outputs.ci_run }}
+        run: |
+          set -euo pipefail
+          [[ $(gh api "repos/$REPOSITORY" --jq .default_branch) == main ]]
+          [[ $(gh api "repos/$REPOSITORY/branches/main" --jq .commit.sha) == "$SOURCE_SHA" ]]
+          gh api "repos/$REPOSITORY/actions/runs/$CI_RUN" > "$RUNNER_TEMP/verified-ci.json"
+          jq -e --arg sha "$SOURCE_SHA" --arg repo "$REPOSITORY" '
+            .head_sha == $sha and .head_branch == "main" and .head_repository.full_name == $repo and
+            .status == "completed" and .conclusion == "success"
+          ' "$RUNNER_TEMP/verified-ci.json" >/dev/null
+          tag="v$RELEASE_VERSION"
+          if gh api "repos/$REPOSITORY/git/ref/tags/$tag" > /dev/null 2>&1; then
+            [[ $(gh api "repos/$REPOSITORY/commits/$tag" --jq .sha) == "$SOURCE_SHA" ]]
+          fi
+          printf 'Rust native release from tested main commit `%s`.\n\nNative CI: https://github.com/%s/actions/runs/%s\n\nLinux static executables: amd64, arm64, 32-bit x86 (i586 or newer), ARMv7 hard-float. Verify downloads with SHA256SUMS. Other CPUs require a source build.\n' \
+            "$SOURCE_SHA" "$REPOSITORY" "$CI_RUN" > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$tag" --repo "$REPOSITORY" --json isDraft,targetCommitish > "$RUNNER_TEMP/draft.json" 2>/dev/null; then
+            jq -e --arg sha "$SOURCE_SHA" '.isDraft == true and .targetCommitish == $sha' "$RUNNER_TEMP/draft.json" >/dev/null
+          else
+            gh release create "$tag" --repo "$REPOSITORY" --target "$SOURCE_SHA" --draft \
+              --title "Onebox $tag" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          cd "$RUNNER_TEMP/release-assets"
+          assets=(onebox-linux-amd64-musl onebox-linux-arm64-musl onebox-linux-386-musl onebox-linux-armv7-musl SHA256SUMS BUILD-INFO.json)
+          gh release upload "$tag" "${assets[@]}" --repo "$REPOSITORY" --clobber
+          mkdir "$RUNNER_TEMP/release-verification"
+          gh release download "$tag" --repo "$REPOSITORY" --dir "$RUNNER_TEMP/release-verification" \
+            --pattern 'onebox-linux-*-musl' --pattern SHA256SUMS
+          (cd "$RUNNER_TEMP/release-verification" && sha256sum --check SHA256SUMS)
+          [[ $(gh api "repos/$REPOSITORY/branches/main" --jq .commit.sha) == "$SOURCE_SHA" ]]
+          gh release edit "$tag" --repo "$REPOSITORY" --draft=false --latest

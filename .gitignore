@@ -2,3 +2,4 @@ cache.db
 *.new.json
 __pycache__/
 *.pyc
+/target/
