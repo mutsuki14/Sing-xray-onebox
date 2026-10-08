@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    # Branches only: a release tag points at a main commit CI has already tested.
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
