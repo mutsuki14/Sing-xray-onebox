@@ -11,6 +11,13 @@
 //! `ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN` replace the download with a
 //! local file (offline installs, tests).
 //!
+//! Replacing a working core is the update path (`onebox update CORE [VER]`):
+//! [`resolve`] with `Some(VER)` or `Some("latest")` (strict, never falls
+//! back), compare [`Resolved::version`] with the installed one (downgrade and
+//! Xray-version policy), then [`download`] into a staging directory and hand
+//! the staged binary to the apply engine (`Intents.replace_cores`) together
+//! with the new pin. [`download_to`] is resolve + download in one call.
+//!
 //! Changes from v2:
 //! - prereleases are refused (E-8.1#15); a failed `latest` lookup for
 //!   sing-box falls back to 1.14.2 only when installing without a specific
@@ -26,15 +33,18 @@
 //! - Xray zips are read in-process (no `unzip` package); only the core
 //!   binary is extracted from either package.
 //! - `check_config` errors carry the core's own message (ANSI colors and
-//!   Xray's banner removed).
+//!   Xray's banner removed); [`check_config_in`] checks with a caller's work
+//!   dir so `doctor` creates nothing under the run root (D-8.1#30).
 //! - staging directories are `onebox-core-*` temp dirs removed on drop;
 //!   crash leftovers in the bin directory are swept, v2's `.core-*` too.
 //! - archive errors name the binary instead of saying "内核" (reused for
 //!   FRP packages).
 
 mod archive;
+mod check;
 
 pub use archive::{extract_tar_gz, extract_zip};
+pub use check::{check_config, check_config_in, check_config_with, check_summary};
 
 use crate::ctx::Ctx;
 use crate::domain::config::CoreVersions;
@@ -56,7 +66,6 @@ pub const BINARY_MAX: u64 = 512 * 1024 * 1024;
 /// Name prefix (inside `{bin}` or a caller's staging dir) of work dirs.
 pub const WORK_PREFIX: &str = "onebox-core-";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
-const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 /// v2's staging dirs beside the core binaries (`.core-<24hex>`).
 const V2_STAGING_PREFIX: &str = ".core-";
 /// Work dirs older than this are crash leftovers.
@@ -290,7 +299,9 @@ fn stage_binary(
     finish_binary(ctx, resolved, &binary, staging_dir)
 }
 
-/// `resolve(Some(version))` + [`download`].
+/// The update path in one call: `resolve(Some(version))` (`version` may be
+/// `latest`; strict) + [`download`] into `staging_dir`. The live binary is
+/// never touched; returns `{staging_dir}/{binary}`.
 pub fn download_to(ctx: &Ctx, core: Core, version: &str, staging_dir: &Path) -> Result<PathBuf> {
     let resolved = resolve(ctx, core, Some(version))?;
     download(ctx, &resolved, staging_dir)
@@ -388,86 +399,6 @@ pub fn parse_version(core: Core, output: &str) -> Option<String> {
     version_valid(version).then(|| version.to_owned())
 }
 
-/// Validate `config` with the installed core binary.
-pub fn check_config(ctx: &Ctx, core: Core, config: &Path) -> Result<()> {
-    check_config_with(ctx, core, &ctx.paths.core_bin(core), config)
-}
-
-/// Validate `config` with `binary` (e.g. a staged update candidate):
-/// `sing-box check -D {run}/check -c FILE` / `xray run -test -c FILE`.
-pub fn check_config_with(ctx: &Ctx, core: Core, binary: &Path, config: &Path) -> Result<()> {
-    let program = binary.to_string_lossy();
-    let config_arg = config.to_string_lossy();
-    let cmd = match core {
-        Core::Singbox => {
-            // The run root stays traversable (0755, as v2 created it) for
-            // other users of it such as nginx workers; only `check` is private.
-            if !ctx.paths.run.exists() {
-                sysfs::ensure_dir(&ctx.paths.run, 0o755)?;
-            }
-            let dir = ctx.paths.run.join("check");
-            sysfs::ensure_dir(&dir, 0o700)?;
-            Cmd::new(program).args(["check", "-D", &dir.to_string_lossy(), "-c", &config_arg])
-        }
-        Core::Xray => Cmd::new(program).args(["run", "-test", "-c", &config_arg]),
-    };
-    let result = ctx.run(&cmd.timeout(CHECK_TIMEOUT))?;
-    if result.ok() {
-        return Ok(());
-    }
-    let text = if result.stderr.trim().is_empty() {
-        &result.stdout
-    } else {
-        &result.stderr
-    };
-    let detail = check_summary(core, text);
-    let detail = if detail.is_empty() {
-        format!("退出码 {}", result.code)
-    } else {
-        detail
-    };
-    Err(Error::msg(format!(
-        "{} 配置校验失败: {detail}",
-        core.title()
-    )))
-}
-
-/// The meaningful tail of a core's check output: ANSI sequences, info
-/// logs and Xray's banner removed, at most 8 lines / 2000 characters.
-pub fn check_summary(core: Core, text: &str) -> String {
-    let lines: Vec<String> = text
-        .lines()
-        .map(strip_ansi)
-        .map(|l| l.trim().to_owned())
-        .filter(|l| !l.is_empty() && !l.contains("[Info]") && !l.contains("[Debug]"))
-        .filter(|l| {
-            core != Core::Xray || !(l.starts_with("Xray ") || l.starts_with("A unified platform"))
-        })
-        .collect();
-    let tail = &lines[lines.len().saturating_sub(8)..];
-    tail.join("\n").chars().take(2000).collect()
-}
-
-fn strip_ansi(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // CSI: ESC [ params final-byte(@..~).
-            if chars.next() == Some('[') {
-                for x in chars.by_ref() {
-                    if ('@'..='~').contains(&x) {
-                        break;
-                    }
-                }
-            }
-        } else if !c.is_control() {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// Make sure the core binary exists and return its version (the apply
 /// engine's prepare-cores hook).
 ///
@@ -498,13 +429,9 @@ pub fn ensure_installed_with(
     sweep_leftovers(&ctx.paths.bin);
     let live = ctx.paths.core_bin(core);
     if let Some(current) = current_version(ctx, core, &live)? {
-        match &wish {
-            Some(Wanted::Exact(v)) if *v != current => out::warn(format!(
-                "已安装 {} {current}；更换指定版本请执行 onebox update {} {v}",
-                core.title(),
-                core.id()
-            )),
-            _ => out::info(format!("{} {current} 已安装", core.title())),
+        match pin_hint(core, &current, wish.as_ref()) {
+            Some(hint) => out::warn(hint),
+            None => out::info(format!("{} {current} 已安装", core.title())),
         }
         return Ok(current);
     }
@@ -522,6 +449,19 @@ pub fn ensure_installed_with(
     sysfs::fsync_dir(&ctx.paths.bin).map_err(|e| Error::io(&ctx.paths.bin, e))?;
     out::ok(format!("已安装 {} {}", core.title(), resolved.version));
     Ok(resolved.version)
+}
+
+/// v2's hint when a working core differs from the exact version wished
+/// (pin or environment); `None` when it satisfies the wish.
+pub fn pin_hint(core: Core, current: &str, wish: Option<&Wanted>) -> Option<String> {
+    match wish {
+        Some(Wanted::Exact(v)) if v != current => Some(format!(
+            "已安装 {} {current}；更换指定版本请执行 onebox update {} {v}",
+            core.title(),
+            core.id()
+        )),
+        _ => None,
+    }
 }
 
 /// Environment variable naming the version to install when nothing is

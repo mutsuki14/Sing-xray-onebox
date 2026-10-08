@@ -87,6 +87,31 @@ fn ensure_installed_never_replaces_a_working_core() {
 }
 
 #[test]
+fn pin_mismatch_hint_names_the_update_command() {
+    let exact = |v: &str| Wanted::Exact(v.into());
+    let cases = [
+        (
+            Core::Singbox,
+            Some(exact("1.12.0")),
+            Some("已安装 sing-box 1.14.2；更换指定版本请执行 onebox update singbox 1.12.0"),
+        ),
+        (
+            Core::Xray,
+            Some(exact("25.1.1")),
+            Some("已安装 Xray 1.14.2；更换指定版本请执行 onebox update xray 25.1.1"),
+        ),
+        (Core::Singbox, Some(exact("1.14.2")), None),
+        (Core::Singbox, Some(Wanted::Latest), None),
+        (Core::Singbox, Some(Wanted::Default), None),
+        (Core::Singbox, None, None),
+    ];
+    for (core, wish, want) in cases {
+        let hint = pin_hint(core, "1.14.2", wish.as_ref());
+        assert_eq!(hint.as_deref(), want, "{core:?} {wish:?}");
+    }
+}
+
+#[test]
 fn a_broken_core_is_downloaded_in_the_pinned_version() {
     let mut f = fixture();
     let binary = serve_singbox(&mut f, "1.14.2", &format!("{SB_API}/tags/v1.14.2"));
