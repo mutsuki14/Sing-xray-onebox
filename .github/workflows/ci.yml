@@ -11,8 +11,9 @@ permissions:
   contents: read
 
 concurrency:
-  # Superseded pull-request runs are cancelled; pushes always finish because a
-  # green run of the current main HEAD gates release.yml.
+  # Superseded pull-request runs are cancelled. Push runs are never cancelled
+  # once started, and the newest push of a branch always runs to completion (a
+  # pending older one may be dropped); release.yml only needs the run for main HEAD.
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -42,7 +43,7 @@ jobs:
       - run: cargo test --all-targets --locked
       - run: cargo test --doc --locked
       # The script checks below also run when a Rust step failed.
-      - name: Install busybox so the launcher is also tested with ash (Alpine)
+      - name: Install busybox so the launcher is also tested with its ash and applets (Alpine)
         if: ${{ !cancelled() }}
         run: |
           sudo apt-get update
@@ -52,6 +53,8 @@ jobs:
         env:
           # shellcheck aborts when printing the Chinese messages under a non-UTF-8 locale.
           LC_ALL: C.UTF-8
+          # Listed explicitly, so a shell that cannot be tested fails the job instead of being skipped.
+          ONEBOX_BOOTSTRAP_TEST_SHELLS: sh bash dash busybox
         run: |
           set -euo pipefail
           sh -n onebox.sh
@@ -69,8 +72,6 @@ jobs:
     name: Integration with real cores, FRP and nginx
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -85,6 +86,9 @@ jobs:
           cargo test --locked --all-targets --no-run
       - name: Fetch official cores and FRP (pinned in tests/tools.json, SHA-256 verified)
         id: tools
+        env:
+          # Only the fetcher calls the GitHub API: builds and tests never see the token.
+          GH_TOKEN: ${{ github.token }}
         run: python3 tests/fetch_tools.py "$RUNNER_TEMP/bin"
       - name: Extract nginx without starting a system service
         id: nginx
@@ -97,36 +101,66 @@ jobs:
           dpkg-deb -x nginx_*.deb "$RUNNER_TEMP/nginx-root"
           test -x "$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
           "$RUNNER_TEMP/nginx-root/usr/sbin/nginx" -v
-      - name: Export the real tool paths for the test runs
+      - name: Check the real tool paths and record them for the test steps
+        id: paths
         run: |
+          # The paths stay out of GITHUB_ENV: only the two test steps below get
+          # them, explicitly, from real-tools.env (one KEY=VALUE per line).
+          # ONEBOX_TEST_REQUIRE_FULL=1 is the contract for every test that needs
+          # root or one of these tools (Rust helpers that look a tool variable up,
+          # every e2e suite): a missing variable, tool or privilege is a failure
+          # (Rust: panic), never a skip.
           set -euo pipefail
-          {
-            echo "ONEBOX_TEST_BINARY=$GITHUB_WORKSPACE/target/debug/onebox"
-            echo "ONEBOX_TEST_SINGBOX=$RUNNER_TEMP/bin/sing-box"
-            echo "ONEBOX_TEST_XRAY=$RUNNER_TEMP/bin/xray"
-            echo "ONEBOX_TEST_MIHOMO=$RUNNER_TEMP/bin/mihomo"
-            echo "ONEBOX_FRPS_BIN=$RUNNER_TEMP/bin/frps"
-            echo "ONEBOX_FRPC_BIN=$RUNNER_TEMP/bin/frpc"
-            echo "ONEBOX_NGINX_BIN=$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
-            # Suites must fail instead of skipping parts that need root or real tools.
-            echo "ONEBOX_TEST_REQUIRE_FULL=1"
-          } >> "$GITHUB_ENV"
+          tools=(
+            "ONEBOX_TEST_BINARY=$GITHUB_WORKSPACE/target/debug/onebox"
+            "ONEBOX_TEST_SINGBOX=$RUNNER_TEMP/bin/sing-box"
+            "ONEBOX_TEST_XRAY=$RUNNER_TEMP/bin/xray"
+            "ONEBOX_TEST_MIHOMO=$RUNNER_TEMP/bin/mihomo"
+            "ONEBOX_FRPS_BIN=$RUNNER_TEMP/bin/frps"
+            "ONEBOX_FRPC_BIN=$RUNNER_TEMP/bin/frpc"
+            "ONEBOX_NGINX_BIN=$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
+          )
+          for entry in "${tools[@]}"; do
+            if [[ ! -f "${entry#*=}" || ! -x "${entry#*=}" ]]; then
+              echo "::error::${entry%%=*} is not an executable file: ${entry#*=}"
+              exit 1
+            fi
+          done
+          # Each tool must also run on this runner (right architecture, complete).
+          "$RUNNER_TEMP/bin/sing-box" version
+          "$RUNNER_TEMP/bin/xray" version
+          "$RUNNER_TEMP/bin/mihomo" -v
+          "$RUNNER_TEMP/bin/frps" --version
+          "$RUNNER_TEMP/bin/frpc" --version
+          "$RUNNER_TEMP/nginx-root/usr/sbin/nginx" -v
+          "$GITHUB_WORKSPACE/target/debug/onebox" --version
+          printf '%s\n' "${tools[@]}" ONEBOX_TEST_REQUIRE_FULL=1 > "$RUNNER_TEMP/real-tools.env"
       - name: Unit, ignored and real-process Rust tests (root, one thread)
         # --all-targets leaves out doctests (lint runs them): --include-ignored
         # would otherwise try to run `ignore` code blocks.
         run: |
+          set -euo pipefail
+          mapfile -t tools < "$RUNNER_TEMP/real-tools.env"
           sudo -E env PATH="$PATH" RUSTUP_HOME="$(rustup show home)" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-            cargo test --locked --all-targets --no-fail-fast -- --include-ignored --test-threads=1
+            "${tools[@]}" cargo test --locked --all-targets --no-fail-fast -- --include-ignored --test-threads=1
       - name: Return build outputs to the runner user
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" target "${CARGO_HOME:-$HOME/.cargo}"
       - name: Black-box suites (tests/e2e/*.py, root)
-        if: ${{ !cancelled() && steps.tools.outcome == 'success' && steps.nginx.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.paths.outcome == 'success' }}
         run: |
-          # Every tests/e2e/*.py is a self-contained suite run as root with the
-          # tool paths above (RUSTC for compiling fake cores); helper modules
-          # are named _*.py and are not run directly.
+          # Contract for every tests/e2e/*.py (helper modules are named _*.py
+          # and are not run directly):
+          # - the suite runs ONCE, as root, with RUSTC (for compiling fake
+          #   cores) and every KEY=VALUE of real-tools.env: the real-core and
+          #   tool variables are ALWAYS set, and ONEBOX_TEST_REQUIRE_FULL=1
+          #   turns every skip (not root, missing tool) into a failure;
+          # - a suite with a fake-core mode still runs its fake-core cases in
+          #   that same run: the start-failure injection, retained journal and
+          #   `recover` cases of the lifecycle suite exist only with the fake
+          #   core. The real core adds a pass; it never replaces the fake one.
           set -uo pipefail
+          mapfile -t tools < "$RUNNER_TEMP/real-tools.env" || exit 1
           shopt -s nullglob
           suites=()
           for suite in tests/e2e/*.py; do
@@ -139,7 +173,7 @@ jobs:
           failed=()
           for suite in "${suites[@]}"; do
             echo "::group::$suite"
-            sudo -E env PATH="$PATH" RUSTC="$(rustup which rustc)" python3 "$suite" || failed+=("$suite")
+            sudo -E env PATH="$PATH" RUSTC="$(rustup which rustc)" "${tools[@]}" python3 "$suite" || failed+=("$suite")
             echo '::endgroup::'
           done
           for suite in "${failed[@]}"; do
