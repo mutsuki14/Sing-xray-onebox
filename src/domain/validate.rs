@@ -109,11 +109,13 @@ impl NodeConfig {
         Ok(())
     }
 
+    /// REALITY keys are required while a REALITY inbound exists and may
+    /// outlive the last one (v2 parity, K12: re-adding REALITY keeps the
+    /// clients' public key); kept keys must still be a valid pair.
     fn check_reality(&self) -> Result<()> {
         match (&self.creds.reality, self.any_reality()) {
-            (Some(keys), true) => creds::check_reality_keys(keys)?,
+            (Some(keys), _) => creds::check_reality_keys(keys)?,
             (None, true) => bail!("缺少 REALITY 密钥"),
-            (Some(_), false) => bail!("未启用 REALITY 协议时不应保留 REALITY 密钥"),
             (None, false) => {}
         }
         ensure!(valid_domain(&self.reality.sni), "REALITY SNI 域名无效");

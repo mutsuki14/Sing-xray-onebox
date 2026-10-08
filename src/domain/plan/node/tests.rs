@@ -380,10 +380,12 @@ fn remove_rules() {
     // Dropping the last certificate protocol drops the certificate.
     let next = remove(&remove(&p1, Tuic).unwrap(), Hysteria2).unwrap();
     assert!(next.tls.is_none());
-    // Dropping the last REALITY inbound drops site, keys and site target.
+    // Dropping the last REALITY inbound drops site and site target; the
+    // keys stay (v2 parity, K12).
     let site = with_site(p1.clone(), "www.example.com", true);
     let next = remove(&site, VlessReality).unwrap();
-    assert!(next.site.is_none() && next.creds.reality.is_none());
+    assert!(next.site.is_none());
+    assert_eq!(next.creds.reality, site.creds.reality);
     assert_eq!(next.reality.dest.to_string(), "www.microsoft.com:443");
     // Removing VMess clears vmess_tls.
     let mut vm = add_default(&acme_trojan(), VmessWs).unwrap();
@@ -479,8 +481,29 @@ fn credential_reset() {
     let next = reset_credentials(&p1, &mut SeqRandom(77)).unwrap();
     assert_ne!(next.creds.uuid, p1.creds.uuid);
     assert_ne!(next.creds.reality, p1.creds.reality);
+    assert!(next.creds.reality.is_some());
     assert_eq!(next.creds.ws_path, p1.creds.ws_path);
     assert_eq!(next.reality.guard_port, p1.reality.guard_port);
+    // Keys kept from a removed REALITY inbound are discarded (v2 reset).
+    let without = remove(&p1, VlessReality).unwrap();
+    assert!(without.creds.reality.is_some());
+    let next = reset_credentials(&without, &mut SeqRandom(78)).unwrap();
+    assert!(next.creds.reality.is_none());
+}
+
+#[test]
+fn re_adding_reality_reuses_the_kept_keys() {
+    let p1 = preset1();
+    let keys = p1.creds.reality.clone();
+    let without = remove(&p1, VlessReality).unwrap();
+    let back = add_default(&without, VlessReality).unwrap();
+    assert_eq!(back.creds.reality, keys, "clients keep their public key");
+    // Without kept keys the first REALITY inbound gets fresh ones.
+    let mut fresh = without.clone();
+    fresh.creds.reality = None;
+    let back = add_default(&fresh, VlessReality).unwrap();
+    assert!(back.creds.reality.is_some());
+    assert_ne!(back.creds.reality, keys);
 }
 
 #[test]

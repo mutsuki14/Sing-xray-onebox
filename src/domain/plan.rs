@@ -26,7 +26,8 @@
 //! use (`NodeConfig::validate`), so a configuration never carries settings
 //! that look active but are not. Website content and its backups live on
 //! disk and are untouched; `vmess_host` is kept because it is only a
-//! client-side header.
+//! client-side header, and the REALITY keys are kept (v2 parity, K12) so a
+//! re-added REALITY inbound keeps the public key clients already have.
 //!
 //! Contract with the apply engine: a custom proxy certificate's
 //! `ProxyTls::pinned` is provisional ([`PROVISIONAL_CUSTOM_PIN`]) until the

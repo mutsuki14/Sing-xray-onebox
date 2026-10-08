@@ -285,15 +285,17 @@ impl<'a> V2<'a> {
         generate(rng)
     }
 
-    /// REALITY keys while a REALITY inbound exists. The public key is always
-    /// derived from the private key (a mismatch is reported).
+    /// REALITY keys. The public key is always derived from the private key
+    /// (a mismatch is reported). Keys v2 kept after the last REALITY inbound
+    /// was removed are kept too (K12), unless they are unusable: no client
+    /// depends on them, so they are then dropped with a warning.
     fn reality_keys(
         &mut self,
         any_reality: bool,
         rng: &mut dyn Random,
     ) -> Result<Option<RealityKeys>> {
         if !any_reality {
-            return Ok(None);
+            return Ok(self.dormant_reality_keys());
         }
         let Some(private_key) = self.nonempty("REALITY_PRIVATE_KEY") else {
             self.warn("v2 状态缺少 REALITY 密钥，已生成新密钥；请更新客户端");
@@ -317,6 +319,26 @@ impl<'a> V2<'a> {
             public_key,
             short_id,
         }))
+    }
+
+    /// Complete, valid keys of a node without a REALITY inbound.
+    fn dormant_reality_keys(&mut self) -> Option<RealityKeys> {
+        let private_key = self.nonempty("REALITY_PRIVATE_KEY")?;
+        let public_key = creds::public_key_for(private_key).ok();
+        let short_id = self
+            .nonempty("REALITY_SHORT_ID")
+            .filter(|id| creds::valid_short_id(id));
+        match (public_key, short_id) {
+            (Some(public_key), Some(short_id)) => Some(RealityKeys {
+                private_key: private_key.to_owned(),
+                public_key,
+                short_id: short_id.to_owned(),
+            }),
+            _ => {
+                self.warn("未使用的 v2 REALITY 密钥不完整或无效，已忽略");
+                None
+            }
+        }
     }
 
     /// `REALITY_SNI` / `REALITY_DEST` / `REALITY_GUARD_PORT` (0 = allocate).

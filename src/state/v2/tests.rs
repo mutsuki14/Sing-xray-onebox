@@ -249,9 +249,10 @@ fn custom_cert() -> BTreeMap<String, String> {
 fn custom_certificate() {
     let m = run(&custom_cert()).unwrap();
     let c = &m.config;
-    assert!(
-        c.creds.reality.is_none(),
-        "keys only exist with a REALITY inbound"
+    assert_eq!(
+        c.creds.reality.as_ref().map(|k| k.public_key.clone()),
+        Some(reality_pair().1),
+        "keys v2 kept without a REALITY inbound survive (K12)"
     );
     assert_eq!(
         c.tls,
@@ -313,6 +314,36 @@ fn custom_certificate() {
         err(&with(custom_cert(), &[("TLS_MODE", "magic")])),
         "v2 字段 TLS_MODE 无效: magic"
     );
+}
+
+#[test]
+fn dormant_reality_keys() {
+    const DROPPED: &str = "未使用的 v2 REALITY 密钥不完整或无效，已忽略";
+    type Changes = &'static [(&'static str, &'static str)];
+    // (changes to a node without REALITY, keys kept, warning)
+    let cases: [(Changes, bool, Option<&str>); 5] = [
+        (&[], true, None),
+        // A stale public key is recomputed silently: no client uses it.
+        (&[("REALITY_PUBLIC_KEY", "stale")], true, None),
+        (&[("REALITY_PRIVATE_KEY", "")], false, None),
+        (
+            &[("REALITY_PRIVATE_KEY", "not-a-key")],
+            false,
+            Some(DROPPED),
+        ),
+        (&[("REALITY_SHORT_ID", "")], false, Some(DROPPED)),
+    ];
+    for (changes, kept, warning) in cases {
+        let m = run(&with(custom_cert(), changes)).unwrap();
+        let keys = m.config.creds.reality.as_ref();
+        assert_eq!(keys.is_some(), kept, "{changes:?}");
+        if let Some(keys) = keys {
+            assert_eq!(keys.public_key, reality_pair().1, "{changes:?}");
+            assert_eq!(keys.short_id, "0123456789abcdef");
+        }
+        let want: Vec<&str> = warning.into_iter().collect();
+        assert_eq!(m.warnings, want, "{changes:?}");
+    }
 }
 
 #[test]

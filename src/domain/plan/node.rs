@@ -106,7 +106,9 @@ fn first_reality_choice<'a>(
 }
 
 /// Remove an inbound. Dropping the last REALITY inbound also drops the own
-/// site, the REALITY keys and the site-specific handshake target.
+/// site and its site-specific handshake target; the REALITY keys stay (v2
+/// parity, K12), so adding REALITY back keeps the public key and short id
+/// clients already have.
 pub fn remove(cfg: &NodeConfig, protocol: Protocol) -> Result<NodeConfig> {
     ensure!(cfg.has(protocol), "协议未启用");
     ensure!(
@@ -119,7 +121,6 @@ pub fn remove(cfg: &NodeConfig, protocol: Protocol) -> Result<NodeConfig> {
         if next.site.is_some() {
             external_target(&mut next, defaults::REALITY_SNI);
         }
-        next.creds.reality = None;
         check_site_subscription(cfg, &next)?;
     }
     settle_tls(&mut next, None, false)?;
@@ -172,8 +173,14 @@ pub fn set_address(
     finish_local(next)
 }
 
+/// Rotate every secret (`onebox reset`). REALITY keys kept from a removed
+/// REALITY inbound are discarded instead of rotated, as v2 did: a later
+/// REALITY inbound gets fresh keys either way.
 pub fn reset_credentials(cfg: &NodeConfig, rng: &mut dyn Random) -> Result<NodeConfig> {
     let mut next = cfg.clone();
+    if !next.any_reality() {
+        next.creds.reality = None;
+    }
     credentials::reset(&mut next.creds, rng)?;
     finish_local(next)
 }

@@ -33,6 +33,18 @@ fn fixtures_are_valid() {
 }
 
 #[test]
+fn reality_keys_may_outlive_the_last_reality_inbound() {
+    // v2 parity (K12): kept keys let a re-added REALITY inbound reuse the
+    // public key clients already have.
+    let mut kept = base();
+    kept.inbounds.remove(0);
+    assert!(!kept.any_reality() && kept.creds.reality.is_some());
+    kept.validate().unwrap();
+    kept.creds.reality = None;
+    kept.validate().unwrap();
+}
+
+#[test]
 fn negative_table() {
     type Mutation = fn(&mut NodeConfig);
     let cases: Vec<(&str, Mutation)> = vec![
@@ -92,12 +104,13 @@ fn negative_table() {
             c.creds.grpc_service = "/svc".into()
         }),
         ("缺少 REALITY 密钥", |c| c.creds.reality = None),
-        (
-            "未启用 REALITY 协议时不应保留 REALITY 密钥",
-            |c| {
-                c.inbounds.remove(0);
-            },
-        ),
+        // Keys kept after the last REALITY inbound must still be a pair.
+        ("REALITY 公钥与私钥不匹配", |c| {
+            c.inbounds.remove(0);
+            if let Some(k) = c.creds.reality.as_mut() {
+                std::mem::swap(&mut k.private_key, &mut k.public_key);
+            }
+        }),
         ("REALITY 公钥与私钥不匹配", |c| {
             if let Some(k) = c.creds.reality.as_mut() {
                 std::mem::swap(&mut k.private_key, &mut k.public_key);

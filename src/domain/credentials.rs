@@ -36,7 +36,8 @@ const X25519_BYTES: usize = 32;
 
 /// Fresh credentials for every protocol (v2 generates all of them on every
 /// install, whichever protocols use them). REALITY keys are left out: they
-/// exist only while a REALITY inbound does (see [`reality_keys`]).
+/// are created with the first REALITY inbound (see [`reality_keys`]) and
+/// then kept, also after that inbound is removed (v2 parity).
 pub fn generate(rng: &mut dyn Random, ss_method: &str) -> Result<Credentials> {
     Ok(Credentials {
         uuid: rng.uuid()?,
