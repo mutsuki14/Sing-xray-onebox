@@ -53,7 +53,8 @@ pub fn doctor(ctx: &Context) -> Result<()> {
             );
         }
     }
-    if crate::transaction::load(ctx)?.is_some() {
+    if crate::transaction::load(ctx)?.is_some() || ctx.paths.root.join(".self-update.json").exists()
+    {
         println!("[警告] 有未完成事务；执行 onebox recover");
         failures += 1;
     }
@@ -67,7 +68,7 @@ pub fn support(ctx: &Context) -> Result<()> {
     let s = state::load(ctx)?;
     let entries=s.protocols().iter().map(|p|json!({"protocol":p.as_str(),"core":s.core(*p).as_str(),"port":s.port(*p),"network":p.network()})).collect::<Vec<_>>();
     let cores=[Core::Singbox,Core::Xray].into_iter().filter(|c|s.uses(*c)).map(|c|json!({"core":c.as_str(),"running":platform::running(ctx,c.service()),"version":platform::installed_version(ctx,c).unwrap_or_default()})).collect::<Vec<_>>();
-    let report = json!({"program_version":crate::VERSION,"host":platform::host_info(ctx)?,"protocols":entries,"cores":cores,"certificate_mode":s.get("TLS_MODE"),"owned_site":s.site_enabled(),"subscription":s.flag("SUBSCRIPTION_ENABLED"),"pending_recovery":crate::transaction::load(ctx)?.is_some(),"note":"No credentials, IP addresses, domain names, logs or certificate contents are included."});
+    let report = json!({"program_version":crate::VERSION,"host":platform::host_info(ctx)?,"protocols":entries,"cores":cores,"certificate_mode":s.get("TLS_MODE"),"owned_site":s.site_enabled(),"subscription":s.flag("SUBSCRIPTION_ENABLED"),"pending_recovery":(crate::transaction::load(ctx)?.is_some() || ctx.paths.root.join(".self-update.json").exists()),"note":"No credentials, IP addresses, domain names, logs or certificate contents are included."});
     let path = ctx.paths.root.join(format!("support-{}.json", util::now()));
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = fs::OpenOptions::new()

@@ -67,7 +67,8 @@ if name=="ip" and a==["-j","address","show","scope","global"]:
     print('[{"addr_info":[{"local":"198.18.0.1"}]}]');sys.exit(0)
 if name=="ufw" and a[:1]==["status"]:print("Status: inactive");sys.exit(0)
 if name=="firewall-cmd" and a==["--state"]:sys.exit(1)
-if name=="nft" and a==["-j","list","ruleset"]:print('{"nftables":[]}');sys.exit(0)
+if name=="nft" and a in (["-j","list","ruleset"],["-j","-a","list","ruleset"]):
+    print('{"nftables":[]}');sys.exit(0)
 if name in ("iptables","ip6tables"):
     if a[:2]==["-w","5"]:a=a[2:]
     table="filter"

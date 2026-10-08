@@ -60,7 +60,7 @@ jobs:
         run: |
           testbin=$(find target/debug/deps -maxdepth 1 -type f -executable -name 'onebox-*' | while read -r b; do "$b" --list 2>/dev/null | grep -q 'subscription::e2e::' && { echo "$b"; break; }; done)
           test -n "$testbin"
-          sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
+          sudo env RUSTC="$(rustup which rustc)" ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
             ONEBOX_TEST_SINGBOX="$RUNNER_TEMP/bin/sing-box" ONEBOX_TEST_XRAY="$RUNNER_TEMP/bin/xray" \
             ONEBOX_FRPS_BIN="$RUNNER_TEMP/bin/frps" ONEBOX_FRPC_BIN="$RUNNER_TEMP/bin/frpc" \
             ONEBOX_NGINX_BIN="$RUNNER_TEMP/nginx-root/usr/sbin/nginx" \

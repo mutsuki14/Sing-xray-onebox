@@ -574,7 +574,7 @@ CF_Token=xxxxxxxx bash onebox.sh install --preset 5 --tls cf --domain v.example.
 **安装成功但连不上？**
 1. 在云服务商控制台的安全组 / 防火墙中放行对应端口（TCP 与 UDP 分别放行，Hysteria2 / TUIC 使用 UDP；
    启用了 Hysteria2 端口跳跃时还需放行整个 UDP 端口范围；使用 ACME HTTP 验证时需放行 TCP 80，续期同样需要）。
-   本机防火墙（ufw / firewalld / iptables / nftables）由程序自动放行，并在开机时由 `onebox-net` 服务自动恢复。
+   本机防火墙（ufw / firewalld / iptables / nftables）由程序自动放行，并在开机时由 `onebox-network` 服务自动恢复。
 2. `onebox status` 与 `onebox log` 检查服务状态。
 3. REALITY 连接失败时尝试更换伪装站点：`onebox sni`（或菜单 19，UUID 与密钥保持不变），站点需支持 TLS 1.3，且尽量与服务器地理位置接近。
 
@@ -636,7 +636,7 @@ onebox site restore latest
 
 `onebox update` 只更新 sing-box / Xray 内核，可指定版本，例如 `onebox update singbox 1.14.2`。新内核不接受配置或启动失败时尝试恢复旧版本。
 
-`onebox update-script` 保留了旧命令名，2.0 中更新的是**原生管理程序**。下载时校验 Release 资产大小和 SHA-256，核验 ELF 与版本，之后原子替换并重新生成配置；失败恢复旧程序和配置。拒绝降级，相同内容跳过替换。更新后用 `onebox version` 核验，并重新打开菜单。
+`onebox update-script` 保留了旧命令名，2.0 中更新的是**原生管理程序**。下载时校验 Release 资产大小和 SHA-256，核验 ELF 与版本，之后原子替换并重新生成配置；失败恢复旧程序和配置。拒绝降级，相同内容跳过替换。更新会结束当前菜单；用 `onebox version` 核验后，重新执行 `onebox` 打开新版本。
 
 ```bash
 onebox update-check

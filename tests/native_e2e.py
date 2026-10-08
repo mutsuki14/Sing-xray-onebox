@@ -290,7 +290,14 @@ def socks(port, command, target, target_port, timeout=5):
         raise
 
 
-def tcp_marker(proxy, fixture, timeout=5):
+def tcp_marker(proxy, fixture, timeout=10):
+    # Xray's REALITY library samples post-handshake target records for five
+    # seconds on cold start, then polls that cache in five-second intervals.
+    # A five-second request deadline races the documented implementation;
+    # retain the old matrix's ten-second single-attempt budget, without
+    # warming the connection or retrying a failed request.
+    # https://github.com/XTLS/REALITY/blob/9234c772ba8f/record_detect.go
+    # https://github.com/XTLS/REALITY/blob/9234c772ba8f/tls.go
     stream, _, _ = socks(proxy, 1, TARGET_NAME, fixture.http_port, timeout)
     with stream:
         stream.sendall(f"GET / HTTP/1.1\r\nHost: {TARGET_NAME}:{fixture.http_port}\r\nUser-Agent: onebox-native-e2e/2\r\nAccept: */*\r\nConnection: close\r\n\r\n".encode())

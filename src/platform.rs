@@ -1449,6 +1449,41 @@ mod tests {
             let _ = self.0.wait();
         }
     }
+    fn spawn_ready(command: &mut std::process::Command) -> Child {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let mut child = Child(
+            command
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut stdout = child.0.stdout.take().unwrap();
+        let mut descriptor = libc::pollfd {
+            fd: stdout.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = loop {
+            let result = unsafe { libc::poll(&mut descriptor, 1, 5000) };
+            if result >= 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                break result;
+            }
+        };
+        assert!(
+            ready > 0,
+            "fixture did not acknowledge userspace startup: {:?}",
+            child.0.try_wait()
+        );
+        let mut acknowledgement = [0];
+        stdout
+            .read_exact(&mut acknowledgement)
+            .expect("fixture exited before readiness acknowledgement");
+        assert_eq!(acknowledgement, [b'R']);
+        child
+    }
     fn cmdline(args: &[&str]) -> Vec<u8> {
         let mut result = Vec::new();
         for arg in args {
@@ -1569,9 +1604,7 @@ mod tests {
     }
     #[test]
     fn legacy_pid_checks_executable_config_start_time_and_deleted_inode() {
-        if !visible_proc_namespace() {
-            return;
-        }
+        let visible = visible_proc_namespace();
         let f = Fixture::new();
         let core = Core::Singbox;
         fs::write(f.ctx.paths.core_config(core), b"{}").unwrap();
@@ -1581,18 +1614,22 @@ mod tests {
         let source = f.root.join("process.rs");
         fs::write(
             &source,
-            "fn main() { loop { std::thread::sleep(std::time::Duration::from_secs(60)); } }",
+            "use std::io::Write; fn main() { std::io::stdout().write_all(b\"R\").unwrap(); std::io::stdout().flush().unwrap(); loop { std::thread::sleep(std::time::Duration::from_secs(60)); } }",
         )
         .unwrap();
         let compiler = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-        let built = std::process::Command::new(compiler)
+        let built = std::process::Command::new(&compiler)
             .arg(&source)
             .arg("--crate-name")
             .arg("onebox_process_fixture")
             .arg("-o")
             .arg(f.ctx.paths.core_bin(core))
             .output()
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!(
+                    "could not launch Rust compiler {compiler:?}: {error}; direct test-binary execution must preserve RUSTC or the toolchain PATH"
+                )
+            });
         assert!(
             built.status.success(),
             "{}",
@@ -1600,13 +1637,18 @@ mod tests {
         );
         let binary = f.ctx.paths.core_bin(core);
         let config = f.ctx.paths.core_config(core);
-        let own = Child(
+        // spawn() synchronizes exec's close-on-exec pipe, not execution of
+        // main(). Reading proc argv/exe in that window can observe the kernel's
+        // still-incomplete exec state. A userspace acknowledgement establishes
+        // readiness before both positive and negative identity assertions.
+        let own = spawn_ready(
             std::process::Command::new(&binary)
                 .args(["run", "--disable-color", "-c"])
-                .arg(&config)
-                .spawn()
-                .unwrap(),
+                .arg(&config),
         );
+        if !visible {
+            return;
+        }
         let own_pid = own.0.id() as i32;
         let start = process_start(own_pid).unwrap();
         let pf = f.ctx.paths.run.join(format!("{}.pid", core.service()));
@@ -1634,12 +1676,10 @@ mod tests {
         .unwrap();
         assert_eq!(pid_matches(&f.ctx, core.service()), Some(own_pid));
 
-        let mut other_config = Child(
+        let mut other_config = spawn_ready(
             std::process::Command::new(&binary)
                 .args(["run", "-c"])
-                .arg(format!("{}.other", config.display()))
-                .spawn()
-                .unwrap(),
+                .arg(format!("{}.other", config.display())),
         );
         fs::write(&pf, other_config.0.id().to_string()).unwrap();
         assert_eq!(pid_matches(&f.ctx, core.service()), None);
@@ -1647,12 +1687,10 @@ mod tests {
 
         let different = f.root.join("different-program");
         fs::copy(&binary, &different).unwrap();
-        let mut other_exe = Child(
+        let mut other_exe = spawn_ready(
             std::process::Command::new(&different)
                 .args(["run", "-c"])
-                .arg(&config)
-                .spawn()
-                .unwrap(),
+                .arg(&config),
         );
         fs::write(&pf, other_exe.0.id().to_string()).unwrap();
         assert_eq!(pid_matches(&f.ctx, core.service()), None);
