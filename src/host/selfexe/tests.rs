@@ -1,7 +1,7 @@
 use super::*;
 use crate::sys::exec::{FakeExec, Output};
 use crate::sys::fs::TempDir;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -61,23 +61,91 @@ fn installs_when_missing() {
     assert!(f.exec.history().is_empty(), "nothing to ask a missing EXE");
 }
 
+impl Fixture {
+    fn set_mode(&self, mode: u32) {
+        std::fs::set_permissions(self.exe(), std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn inode(&self) -> u64 {
+        std::fs::metadata(self.exe()).unwrap().ino()
+    }
+}
+
 #[test]
 fn the_same_program_is_left_alone() {
     // Same inode: the program runs from EXE itself.
     let f = fixture();
     f.installed(&elf("3.0.0"));
+    f.set_mode(0o755);
     let exe = f.exe().to_path_buf();
     assert!(!install_from(&f.ctx, &exe, "3.0.0").unwrap());
     // Same bytes in another file (e.g. a copy run from /root).
     let image = f.image(&elf("3.0.0"));
-    std::fs::set_permissions(f.exe(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inode = f.inode();
     assert!(!install_from(&f.ctx, &image, "3.0.0").unwrap());
-    assert_eq!(f.mode(), 0o700, "untouched");
+    assert_eq!(f.inode(), inode, "not rewritten");
     assert!(f.exec.history().is_empty(), "no version probe needed");
     // A hard link is the same file too.
     let link = f.dir.join("link");
     std::fs::hard_link(f.exe(), &link).unwrap();
     assert!(!install_from(&f.ctx, &link, "3.0.0").unwrap());
+}
+
+#[test]
+fn the_same_program_without_mode_0755_is_repaired() {
+    // Identical bytes left 0644 by a manual `cp` / `install -m644` /
+    // restore: units and cron could not run it.
+    for mode in [0o644, 0o700, 0o4755] {
+        let f = fixture();
+        f.installed(&elf("3.0.0"));
+        f.set_mode(mode);
+        let inode = f.inode();
+        let image = f.image(&elf("3.0.0"));
+        assert!(install_from(&f.ctx, &image, "3.0.0").unwrap(), "{mode:o}");
+        assert_eq!(f.mode(), 0o755);
+        let full = std::fs::metadata(f.exe()).unwrap().permissions().mode();
+        assert_eq!(full & 0o7777, 0o755, "setuid cleared too");
+        assert_eq!(f.inode(), inode, "only the mode changes");
+        assert_eq!(std::fs::read(f.exe()).unwrap(), elf("3.0.0"));
+        assert!(!install_from(&f.ctx, &image, "3.0.0").unwrap(), "now done");
+    }
+    // The same inode (running from EXE) is repaired the same way.
+    let f = fixture();
+    f.installed(&elf("3.0.0"));
+    f.set_mode(0o744);
+    let exe = f.exe().to_path_buf();
+    assert!(install_from(&f.ctx, &exe, "3.0.0").unwrap());
+    assert_eq!(f.mode(), 0o755);
+    assert!(f.exec.history().is_empty());
+}
+
+#[test]
+fn a_symlink_to_the_running_program_is_accepted() {
+    // v2 canonicalized both paths: a packaged or hand-made link from EXE
+    // to the program actually run worked, and must keep working.
+    let f = fixture();
+    let image = f.image(&elf("3.0.0"));
+    std::os::unix::fs::symlink(&image, f.exe()).unwrap();
+    assert!(!install_from(&f.ctx, &image, "3.0.0").unwrap());
+    assert!(f.exe().is_symlink(), "link kept");
+    assert_eq!(std::fs::read(&image).unwrap(), elf("3.0.0"));
+    assert!(f.exec.history().is_empty());
+
+    // A link to another copy (even with the same bytes) or a dangling
+    // link is refused, with a hint.
+    let other = f.dir.join("copy");
+    std::fs::write(&other, elf("3.0.0")).unwrap();
+    let dangling = f.dir.join("gone");
+    for target in [&other, &dangling] {
+        std::fs::remove_file(f.exe()).unwrap();
+        std::os::unix::fs::symlink(target, f.exe()).unwrap();
+        let err = install_from(&f.ctx, &image, "3.0.0").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("不允许符号链接: {}；请删除该链接后重试", f.exe().display())
+        );
+    }
+    assert_eq!(std::fs::read(&other).unwrap(), elf("3.0.0"));
 }
 
 #[test]
@@ -143,7 +211,7 @@ fn refusals_leave_exe_untouched() {
     let err = install_from(&f.ctx, &image, "3.0.0").unwrap_err();
     assert_eq!(
         err.to_string(),
-        format!("不允许符号链接: {}", f.exe().display())
+        format!("不允许符号链接: {}；请删除该链接后重试", f.exe().display())
     );
     assert_eq!(std::fs::read(&target).unwrap(), elf("x"));
 

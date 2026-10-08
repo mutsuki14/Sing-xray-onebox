@@ -12,7 +12,10 @@
 //! Changes from v2:
 //! - "already this program" means the same file (device and inode) or
 //!   identical bytes; v2 compared canonical paths only and rewrote `EXE`
-//!   on every apply when run from another copy.
+//!   on every apply when run from another copy. Such an `EXE` still gets
+//!   mode 0755 when it lost it (v2 rewrote such a copy with 0755).
+//! - like v2, `EXE` may be a symlink to the running program; any other
+//!   symlink is refused with a hint to remove it.
 //! - a semver-newer installed program (`EXE version`) is kept with a
 //!   warning instead of being overwritten.
 //! - the image is size-capped before it is read into memory, and a missing
@@ -34,7 +37,7 @@ use crate::sys::fs as sysfs;
 use crate::ui::out;
 use std::fs::{File, Metadata};
 use std::io::Read;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::Duration;
 
@@ -45,8 +48,9 @@ pub const MAX_EXE_BYTES: u64 = 256 * 1024 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Install the running program as `EXE`. `Ok(true)` when `EXE` was
-/// written; `Ok(false)` when it already is this program or holds a newer
-/// version (kept, with a warning).
+/// written or its mode repaired; `Ok(false)` when it already is this
+/// program with mode 0755, or holds a newer version (kept, with a
+/// warning).
 pub fn install_self(ctx: &Ctx) -> Result<bool> {
     install_from(ctx, Path::new(SELF_EXE), crate::VERSION)
 }
@@ -55,22 +59,21 @@ pub fn install_self(ctx: &Ctx) -> Result<bool> {
 /// (tests; `running` is what this program reports as `version`).
 pub fn install_from(ctx: &Ctx, image: &Path, running: &str) -> Result<bool> {
     let exe = &ctx.paths.executable;
-    let installed = installed_metadata(exe)?;
     let mut source = File::open(image)
         .map_err(|e| Error::io(image, e))
         .context("无法读取当前程序")?;
     let source_meta = source.metadata().map_err(|e| Error::io(image, e))?;
-    if installed
-        .as_ref()
-        .is_some_and(|m| same_file(m, &source_meta))
-    {
-        return Ok(false);
-    }
+    let installed = match installed(exe, &source_meta)? {
+        Installed::Missing => None,
+        Installed::LinkToImage => return Ok(false),
+        Installed::Image(meta) => return repair_mode(exe, &meta),
+        Installed::Other(meta) => Some(meta),
+    };
     let bytes = read_image(&mut source, image)?;
     ensure!(is_elf(&bytes), "当前程序不是有效 Linux 二进制");
     if let Some(meta) = &installed {
         if same_bytes(exe, meta, &bytes)? {
-            return Ok(false);
+            return repair_mode(exe, meta);
         }
         if let Some(newer) = newer_installed(ctx, exe, running) {
             out::warn(format!(
@@ -85,18 +88,60 @@ pub fn install_from(ctx: &Ctx, image: &Path, running: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// `EXE`'s metadata; `None` when absent. A symlink or a non-file is
-/// refused: `EXE` is an Onebox-owned file replaced by rename.
-fn installed_metadata(exe: &Path) -> Result<Option<Metadata>> {
-    match std::fs::symlink_metadata(exe) {
-        Ok(m) if m.file_type().is_symlink() => {
-            bail!("不允许符号链接: {}", exe.display())
-        }
-        Ok(m) if !m.is_file() => bail!("程序路径不是普通文件: {}", exe.display()),
-        Ok(m) => Ok(Some(m)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(Error::io(exe, e)),
+/// What `EXE` is, compared with the running image.
+enum Installed {
+    Missing,
+    /// The running image itself (same device and inode).
+    Image(Metadata),
+    /// A symlink whose target is the running image (a manual `ln -s` or a
+    /// package's link): v2 accepted it, and it already runs this program.
+    LinkToImage,
+    /// Another regular file.
+    Other(Metadata),
+}
+
+/// Classify `EXE`. Any other symlink, and a non-file, is refused: `EXE`
+/// is an Onebox-owned file replaced by rename, and writing through a link
+/// would replace a file Onebox does not own.
+fn installed(exe: &Path, image: &Metadata) -> Result<Installed> {
+    let meta = match std::fs::symlink_metadata(exe) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Installed::Missing),
+        Err(e) => return Err(Error::io(exe, e)),
+    };
+    if meta.file_type().is_symlink() {
+        let target = std::fs::metadata(exe).ok();
+        ensure!(
+            target.is_some_and(|t| same_file(&t, image)),
+            "不允许符号链接: {}；请删除该链接后重试",
+            exe.display()
+        );
+        return Ok(Installed::LinkToImage);
     }
+    ensure!(meta.is_file(), "程序路径不是普通文件: {}", exe.display());
+    Ok(if same_file(&meta, image) {
+        Installed::Image(meta)
+    } else {
+        Installed::Other(meta)
+    })
+}
+
+/// `EXE` already holds this program: make sure every unit and cron line
+/// can run it (0755; a manual `cp`, `install -m644` or a restore may have
+/// left it 0644). The chmod goes through an `O_NOFOLLOW` descriptor.
+/// `Ok(true)` when the mode was changed.
+fn repair_mode(exe: &Path, meta: &Metadata) -> Result<bool> {
+    if meta.mode() & 0o7777 == 0o755 {
+        return Ok(false);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(exe)
+        .map_err(|e| Error::io(exe, e))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| Error::io(exe, e))?;
+    Ok(true)
 }
 
 fn same_file(a: &Metadata, b: &Metadata) -> bool {
