@@ -127,8 +127,8 @@ impl CertDir {
         if old_cert.as_deref() == Some(chain) && old_key.as_deref() == Some(key) {
             return Ok(false);
         }
-        let result =
-            atomic_write(&key_path, key, 0o600).and_then(|()| atomic_write(&cert_path, chain, 0o600));
+        let result = atomic_write(&key_path, key, 0o600)
+            .and_then(|()| atomic_write(&cert_path, chain, 0o600));
         if let Err(e) = result {
             for (path, old) in [(&cert_path, old_cert), (&key_path, old_key)] {
                 let _ = match old {

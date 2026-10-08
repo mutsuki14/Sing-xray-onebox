@@ -134,7 +134,9 @@ impl CertScopes {
 
     /// Members in the fixed order proxy, site, subscription.
     pub fn iter(self) -> impl Iterator<Item = CertScope> {
-        CertScope::ALL.into_iter().filter(move |s| self.contains(*s))
+        CertScope::ALL
+            .into_iter()
+            .filter(move |s| self.contains(*s))
     }
 
     fn slot(&mut self, scope: CertScope) -> &mut bool {

@@ -33,7 +33,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Every credential key acme.sh's `dns_cf` reads.
-pub const KEYS: [&str; 5] = ["CF_Token", "CF_Key", "CF_Email", "CF_Account_ID", "CF_Zone_ID"];
+pub const KEYS: [&str; 5] = [
+    "CF_Token",
+    "CF_Key",
+    "CF_Email",
+    "CF_Account_ID",
+    "CF_Zone_ID",
+];
 pub const STORE_FILE: &str = "acme/onebox-dns.json";
 /// Error when DNS validation is chosen without usable credentials (v2 text).
 pub const MISSING: &str =
@@ -148,7 +154,11 @@ pub fn parse_account_conf(text: &str) -> BTreeMap<String, String> {
         let quoted = value.len() >= 2
             && ((value.starts_with('\'') && value.ends_with('\''))
                 || (value.starts_with('"') && value.ends_with('"')));
-        let value = if quoted { &value[1..value.len() - 1] } else { value };
+        let value = if quoted {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
         if valid_conf_value(value) {
             values.insert(key.to_owned(), value.to_owned());
         }
@@ -172,14 +182,18 @@ pub fn lookup_with(ctx: &Ctx, dir: &Path, env: EnvLookup) -> Result<Option<CfCre
     let mut merged = CfCredentials::default();
     for conf in account_files(ctx, dir, env) {
         if let Ok(bytes) = read_bounded(&conf, FILE_MAX) {
-            merged.absorb(parse_account_conf(&String::from_utf8_lossy(&bytes)), valid_conf_value);
+            merged.absorb(
+                parse_account_conf(&String::from_utf8_lossy(&bytes)),
+                valid_conf_value,
+            );
         }
     }
     let stored = store_path(dir);
     if std::fs::symlink_metadata(&stored).is_ok() {
         let bytes = read_bounded(&stored, FILE_MAX)?;
-        let saved: BTreeMap<String, String> = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::msg(format!("Cloudflare 凭据文件无效 {}: {e}", stored.display())))?;
+        let saved: BTreeMap<String, String> = serde_json::from_slice(&bytes).map_err(|e| {
+            Error::msg(format!("Cloudflare 凭据文件无效 {}: {e}", stored.display()))
+        })?;
         merged.absorb(saved, valid_value);
     }
     let from_env: BTreeMap<String, String> = KEYS

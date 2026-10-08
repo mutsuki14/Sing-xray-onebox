@@ -22,7 +22,10 @@ fn saved_cloudflare_credentials_are_data_not_shell() {
          CF_Key=$(touch /tmp/forbidden)\nCF_Email='admin@example.test'; run_something\n\
          OTHER=1\n  SAVED_CF_Zone_ID=\"abcdef\"  \nCF_Email\n",
     );
-    assert_eq!(parsed.get("CF_Token").map(String::as_str), Some("valid-token_123"));
+    assert_eq!(
+        parsed.get("CF_Token").map(String::as_str),
+        Some("valid-token_123")
+    );
     assert!(parsed.contains_key("CF_Account_ID"));
     assert_eq!(parsed.get("CF_Zone_ID").map(String::as_str), Some("abcdef"));
     assert!(!parsed.contains_key("CF_Key"));
@@ -44,7 +47,11 @@ fn lookup_merges_sources_in_v2_order() {
         "SAVED_CF_Key='legacykey'\nSAVED_CF_Email='a@b.c'\nSAVED_CF_Zone_ID='z1'\n",
     )
     .unwrap();
-    std::fs::write(ctx.paths.root.join("acme/account.conf"), "SAVED_CF_Zone_ID='z2'\n").unwrap();
+    std::fs::write(
+        ctx.paths.root.join("acme/account.conf"),
+        "SAVED_CF_Zone_ID='z2'\n",
+    )
+    .unwrap();
     std::fs::write(tls.join("acme/account.conf"), "SAVED_CF_Zone_ID='z3'\n").unwrap();
     let legacy_s = legacy.display().to_string();
     let env = env_of(&[("ACME_HOME", &legacy_s)]);
@@ -61,7 +68,10 @@ fn lookup_merges_sources_in_v2_order() {
     )
     .unwrap();
     let found = lookup_with(&ctx, &tls, &env).unwrap().unwrap();
-    assert_eq!((found.get("CF_Token"), found.get("CF_Zone_ID")), (Some("stored"), Some("z4")));
+    assert_eq!(
+        (found.get("CF_Token"), found.get("CF_Zone_ID")),
+        (Some("stored"), Some("z4"))
+    );
     assert_eq!(found.get("CF_Email"), Some("a@b.c"));
     assert_eq!(found.get("Junk"), None);
     let env = env_of(&[("CF_Token", "from-env"), ("CF_Account_ID", "bad\nid")]);
@@ -81,7 +91,10 @@ fn incomplete_credentials_are_not_returned() {
     let key_only = env_of(&[("CF_Key", "k")]);
     assert_eq!(lookup_with(&ctx, &site, &key_only).unwrap(), None);
     let pair = env_of(&[("CF_Key", "k"), ("CF_Email", "a@b.c")]);
-    assert!(lookup_with(&ctx, &site, &pair).unwrap().unwrap().is_complete());
+    assert!(lookup_with(&ctx, &site, &pair)
+        .unwrap()
+        .unwrap()
+        .is_complete());
     assert_eq!(
         resolve(&ctx, &site, None, &no_env).unwrap_err().to_string(),
         MISSING
@@ -105,12 +118,18 @@ fn persist_writes_sorted_compact_json_privately() {
     assert_eq!(
         creds.env(),
         [
-            ("CF_Account_ID".to_owned(), "0123456789abcdef0123456789abcdef".to_owned()),
+            (
+                "CF_Account_ID".to_owned(),
+                "0123456789abcdef0123456789abcdef".to_owned()
+            ),
             ("CF_Token".to_owned(), "tok".to_owned())
         ]
     );
     let debug = format!("{creds:?}");
-    assert!(!debug.contains("tok\"") && debug.contains("CF_Token"), "{debug}");
+    assert!(
+        !debug.contains("tok\"") && debug.contains("CF_Token"),
+        "{debug}"
+    );
 }
 
 #[test]
@@ -137,7 +156,10 @@ fn prompt_asks_for_a_secret_token_and_an_optional_account() {
     );
     let ui = ScriptedPrompter::new(["tok", "0123456789ABCDEF0123456789abcdef"]);
     let creds = prompt(&ui).unwrap();
-    assert_eq!(creds.get("CF_Account_ID"), Some("0123456789ABCDEF0123456789abcdef"));
+    assert_eq!(
+        creds.get("CF_Account_ID"),
+        Some("0123456789ABCDEF0123456789abcdef")
+    );
     let ui = ScriptedPrompter::new(["", "", ""]);
     assert_eq!(prompt(&ui).unwrap_err().to_string(), BAD_TOKEN);
     let unattended = ScriptedPrompter::unattended();
@@ -146,7 +168,9 @@ fn prompt_asks_for_a_secret_token_and_an_optional_account() {
         crate::ui::UNATTENDED_SECRET
     );
     assert_eq!(
-        CfCredentials::token("t", Some("short")).unwrap_err().to_string(),
+        CfCredentials::token("t", Some("short"))
+            .unwrap_err()
+            .to_string(),
         BAD_ACCOUNT
     );
 }

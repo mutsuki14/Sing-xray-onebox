@@ -103,7 +103,10 @@ pub enum Source {
     Acme(Challenge),
     /// A pair the user supplied; copied (chain re-ordered leaf first) into
     /// the directory.
-    Custom { cert: PathBuf, key: PathBuf },
+    Custom {
+        cert: PathBuf,
+        key: PathBuf,
+    },
 }
 
 /// What a certificate directory must hold.
@@ -207,8 +210,16 @@ mod tests {
     fn method_rules_for_wildcards_and_ips() {
         use MethodId::*;
         let cases: &[(&[&str], MethodId, Option<&str>)] = &[
-            (&["*.example.com"], Http, Some("泛域名需要 DNS 验证或自备证书")),
-            (&["*.example.com"], Standalone, Some("泛域名需要 DNS 验证或自备证书")),
+            (
+                &["*.example.com"],
+                Http,
+                Some("泛域名需要 DNS 验证或自备证书"),
+            ),
+            (
+                &["*.example.com"],
+                Standalone,
+                Some("泛域名需要 DNS 验证或自备证书"),
+            ),
             (&["example.com", "*.example.com"], Cloudflare, None),
             (&["*.example.com"], Custom, None),
             (&["*.example.com"], SelfSigned, None),

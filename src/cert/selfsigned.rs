@@ -19,7 +19,11 @@ pub fn openssl_cnf(names: &[String]) -> String {
     let alt = names
         .iter()
         .map(|n| {
-            let kind = if n.parse::<IpAddr>().is_ok() { "IP" } else { "DNS" };
+            let kind = if n.parse::<IpAddr>().is_ok() {
+                "IP"
+            } else {
+                "DNS"
+            };
             format!("{kind}:{n}")
         })
         .collect::<Vec<_>>()
@@ -44,7 +48,12 @@ pub fn generate(ctx: &Ctx, dir: &CertDir, names: &[String]) -> Result<bool> {
     result
 }
 
-fn generate_in(ctx: &Ctx, dir: &CertDir, stage: &std::path::Path, names: &[String]) -> Result<bool> {
+fn generate_in(
+    ctx: &Ctx,
+    dir: &CertDir,
+    stage: &std::path::Path,
+    names: &[String],
+) -> Result<bool> {
     ensure_dir(stage, 0o700)?;
     let cnf = stage.join("openssl.cnf");
     atomic_write(&cnf, openssl_cnf(names).as_bytes(), 0o600)?;
@@ -105,8 +114,15 @@ mod tests {
         for name in &names {
             validate_pair(&f.ctx, &dir.cert(), &dir.key(), name, Trust::Pinned).unwrap();
         }
-        assert!(!publicly_trusted(&f.ctx, &dir.cert(), &dir.key(), "www.bing.com"));
-        assert!(validate_pair(&f.ctx, &dir.cert(), &dir.key(), "other.com", Trust::Pinned).is_err());
+        assert!(!publicly_trusted(
+            &f.ctx,
+            &dir.cert(),
+            &dir.key(),
+            "www.bing.com"
+        ));
+        assert!(
+            validate_pair(&f.ctx, &dir.cert(), &dir.key(), "other.com", Trust::Pinned).is_err()
+        );
         let mode = std::fs::metadata(dir.key()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
@@ -117,7 +133,10 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
         let first = TlsMaterial::deployed(&f.ctx.paths).unwrap();
         assert!(generate(&f.ctx, &dir, &names).unwrap());
-        assert_ne!(TlsMaterial::deployed(&f.ctx.paths).unwrap().pin(), first.pin());
+        assert_ne!(
+            TlsMaterial::deployed(&f.ctx.paths).unwrap().pin(),
+            first.pin()
+        );
         let days = crate::cert::store::days_left(&f.ctx, &dir).unwrap();
         assert!((3648..=3650).contains(&days), "{days}");
     }

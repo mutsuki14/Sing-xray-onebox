@@ -17,11 +17,19 @@ fn text(bytes: Vec<u8>) -> String {
 #[test]
 fn serves_only_challenge_files() {
     let root = webroot_with("tok-EN_1", "tok-EN_1.thumb");
-    let ok = text(respond(root.path(), "GET", "/.well-known/acme-challenge/tok-EN_1"));
+    let ok = text(respond(
+        root.path(),
+        "GET",
+        "/.well-known/acme-challenge/tok-EN_1",
+    ));
     assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"), "{ok}");
     assert!(ok.contains("Content-Length: 14\r\n"));
     assert!(ok.ends_with("\r\n\r\ntok-EN_1.thumb"));
-    let head = text(respond(root.path(), "HEAD", "/.well-known/acme-challenge/tok-EN_1"));
+    let head = text(respond(
+        root.path(),
+        "HEAD",
+        "/.well-known/acme-challenge/tok-EN_1",
+    ));
     assert!(head.starts_with("HTTP/1.1 200 OK") && head.ends_with("\r\n\r\n"));
     assert!(head.contains("Content-Length: 14\r\n"));
     for (method, path) in [
@@ -35,7 +43,10 @@ fn serves_only_challenge_files() {
         ("GET", "/"),
     ] {
         let reply = text(respond(root.path(), method, path));
-        assert!(reply.starts_with("HTTP/1.1 404 Not Found\r\n"), "{method} {path}");
+        assert!(
+            reply.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{method} {path}"
+        );
     }
 }
 
@@ -46,13 +57,18 @@ fn symlinked_and_large_challenge_files_are_refused() {
     std::os::unix::fs::symlink("/etc/hostname", challenges.join("link")).unwrap();
     for token in ["big", "link"] {
         let path = format!("/.well-known/acme-challenge/{token}");
-        assert!(text(respond(root.path(), "GET", &path)).contains("404"), "{token}");
+        assert!(
+            text(respond(root.path(), "GET", &path)).contains("404"),
+            "{token}"
+        );
     }
 }
 
 fn get(port: u16, request: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.write_all(request.as_bytes()).unwrap();
     let mut reply = String::new();
     stream.read_to_string(&mut reply).unwrap();
@@ -70,7 +86,10 @@ fn answers_real_connections_and_stops_cleanly() {
         port,
         "GET /.well-known/acme-challenge/abc HTTP/1.1\r\nHost: a.example.com\r\n\r\n",
     );
-    assert!(reply.starts_with("HTTP/1.1 200 OK") && reply.ends_with("abc.key"), "{reply}");
+    assert!(
+        reply.starts_with("HTTP/1.1 200 OK") && reply.ends_with("abc.key"),
+        "{reply}"
+    );
     let reply = get(port, "GET /secret HTTP/1.1\r\nHost: x\r\n\r\n");
     assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
     // Garbage and early hang-ups get no response and do not hurt.
@@ -78,10 +97,15 @@ fn answers_real_connections_and_stops_cleanly() {
     let hangup = TcpStream::connect(("127.0.0.1", port)).unwrap();
     hangup.shutdown(Shutdown::Both).unwrap();
     // A second responder cannot take the same port.
-    let err = Responder::start(root.path(), port, Path::new("/")).err().unwrap();
+    let err = Responder::start(root.path(), port, Path::new("/"))
+        .err()
+        .unwrap();
     assert!(err.to_string().starts_with(PORT_BUSY), "{err}");
     responder.stop();
-    assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "port released");
+    assert!(
+        TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "port released"
+    );
 }
 
 #[test]
@@ -89,7 +113,13 @@ fn ipv4_only_hosts_bind_one_listener() {
     let root = webroot_with("t", "t.k");
     let fixture = TempDir::new("http01-noipv6").unwrap();
     let responder = Responder::start(root.path(), 0, fixture.path()).unwrap();
-    let reply = get(responder.port(), "HEAD /.well-known/acme-challenge/t HTTP/1.0\r\n\r\n");
-    assert!(reply.starts_with("HTTP/1.1 200 OK") && reply.ends_with("\r\n\r\n"), "{reply}");
+    let reply = get(
+        responder.port(),
+        "HEAD /.well-known/acme-challenge/t HTTP/1.0\r\n\r\n",
+    );
+    assert!(
+        reply.starts_with("HTTP/1.1 200 OK") && reply.ends_with("\r\n\r\n"),
+        "{reply}"
+    );
     drop(responder);
 }

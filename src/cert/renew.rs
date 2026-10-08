@@ -104,7 +104,12 @@ pub fn renew_all_with(
 }
 
 /// Renew one target; true when the deployed pair changed.
-fn renew_target(engine: &Engine, t: &Target, opts: &RenewOptions, report: &mut RenewReport) -> bool {
+fn renew_target(
+    engine: &Engine,
+    t: &Target,
+    opts: &RenewOptions,
+    report: &mut RenewReport,
+) -> bool {
     let label = t.scope.label();
     let due = opts.force || engine.due(&t.dir, &t.spec).unwrap_or(true);
     if !due {
@@ -119,7 +124,9 @@ fn renew_target(engine: &Engine, t: &Target, opts: &RenewOptions, report: &mut R
     } else {
         RenewKind::Scheduled
     };
-    let result = with_acme_port(engine, &t.spec, || engine.renew(&t.dir, &t.spec, kind, None));
+    let result = with_acme_port(engine, &t.spec, || {
+        engine.renew(&t.dir, &t.spec, kind, None)
+    });
     match result {
         Ok(true) => {
             report.renewed.push(t.scope);
@@ -154,11 +161,22 @@ fn targets(engine: &Engine, cfg: &NodeConfig, scopes: CertScopes) -> Vec<Target>
         }
     }
     let sub_mode = cfg.subscription.as_ref().map(|s| &s.mode);
-    let site_wanted = scopes.site || (scopes.subscription && sub_mode == Some(&SubscriptionMode::Site));
+    let site_wanted =
+        scopes.site || (scopes.subscription && sub_mode == Some(&SubscriptionMode::Site));
     if let Some(site) = cfg.site_active().filter(|_| site_wanted) {
         let http01 = served_by(engine, SITE, paths.site_root.clone());
-        let spec = web_spec(&[site.domain.clone()], &site.cert, http01, Trust::Public);
-        out.push(target(CertScope::Site, CertDir::site(paths), spec, vec![SITE]));
+        let spec = web_spec(
+            std::slice::from_ref(&site.domain),
+            &site.cert,
+            http01,
+            Trust::Public,
+        );
+        out.push(target(
+            CertScope::Site,
+            CertDir::site(paths),
+            spec,
+            vec![SITE],
+        ));
     }
     if let Some(SubscriptionMode::Standalone {
         domain,
@@ -172,8 +190,13 @@ fn targets(engine: &Engine, cfg: &NodeConfig, scopes: CertScopes) -> Vec<Target>
         } else {
             Challenge::Responder(dir.responder_webroot())
         };
-        let spec = web_spec(&[domain.clone()], cert, http01, Trust::Public);
-        out.push(target(CertScope::Subscription, dir, spec, vec![SUBSCRIPTION_WEB]));
+        let spec = web_spec(std::slice::from_ref(domain), cert, http01, Trust::Public);
+        out.push(target(
+            CertScope::Subscription,
+            dir,
+            spec,
+            vec![SUBSCRIPTION_WEB],
+        ));
     }
     out
 }
@@ -206,12 +229,18 @@ fn restart(engine: &Engine, t: &Target, report: &mut RenewReport) {
 }
 
 /// Open TCP `http01_port` for the built-in responder around `call`.
-fn with_acme_port<T>(engine: &Engine, spec: &CertSpec, call: impl FnOnce() -> Result<T>) -> Result<T> {
+fn with_acme_port<T>(
+    engine: &Engine,
+    spec: &CertSpec,
+    call: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     if !spec.uses_responder() {
         return call();
     }
     let port = engine.http01_port;
-    if let Err(e) = firewall::reconcile_owner(engine.ctx, ACME_OWNER, &[(port, port, Transport::Tcp)]) {
+    if let Err(e) =
+        firewall::reconcile_owner(engine.ctx, ACME_OWNER, &[(port, port, Transport::Tcp)])
+    {
         out::warn(format!("无法临时放行 TCP {port}: {e}"));
     }
     let result = call();
@@ -231,7 +260,9 @@ struct Identity {
 fn identity(engine: &Engine, t: &Target) -> Identity {
     let paths = &engine.ctx.paths;
     Identity {
-        pin: TlsMaterial::deployed(paths).ok().map(|m| m.pin().to_owned()),
+        pin: TlsMaterial::deployed(paths)
+            .ok()
+            .map(|m| m.pin().to_owned()),
         trusted: publicly_trusted(engine.ctx, &t.dir.cert(), &t.dir.key(), t.spec.primary()),
     }
 }

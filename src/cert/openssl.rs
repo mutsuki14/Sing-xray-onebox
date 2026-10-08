@@ -71,7 +71,8 @@ pub fn validate_pair(ctx: &Ctx, cert: &Path, key: &Path, name: &str, trust: Trus
         return Err(Error::msg("证书或私钥文件不存在"));
     }
     let cert_s = path_arg(cert);
-    let unexpired = ctx.run(&openssl().args(["x509", "-in", &cert_s, "-noout", "-checkend", "0"]))?;
+    let unexpired =
+        ctx.run(&openssl().args(["x509", "-in", &cert_s, "-noout", "-checkend", "0"]))?;
     if !unexpired.ok() {
         return Err(Error::msg("证书已过期或无法读取"));
     }
@@ -128,7 +129,14 @@ pub fn publicly_trusted(ctx: &Ctx, cert: &Path, key: &Path, name: &str) -> bool 
 /// `openssl x509 -checkend SECS`: true when the certificate expires within
 /// `secs` seconds, or cannot be read at all (it is not usable either way).
 pub fn expires_within(ctx: &Ctx, cert: &Path, secs: u64) -> bool {
-    let cmd = openssl().args(["x509", "-in", &path_arg(cert), "-noout", "-checkend", &secs.to_string()]);
+    let cmd = openssl().args([
+        "x509",
+        "-in",
+        &path_arg(cert),
+        "-noout",
+        "-checkend",
+        &secs.to_string(),
+    ]);
     !ctx.run(&cmd).is_ok_and(|out| out.ok())
 }
 

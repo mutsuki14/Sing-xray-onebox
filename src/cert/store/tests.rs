@@ -49,9 +49,15 @@ fn metadata_reads_v2_and_writes_the_same_shape() {
     std::fs::write(cert_dir.metadata_file(), v2).unwrap();
     let m = cert_dir.metadata().unwrap().unwrap();
     assert_eq!(m.method, MethodId::Http);
-    assert_eq!(m.webroot.as_deref(), Some(Path::new("/var/lib/onebox-site")));
+    assert_eq!(
+        m.webroot.as_deref(),
+        Some(Path::new("/var/lib/onebox-site"))
+    );
     cert_dir.save_metadata(&m).unwrap();
-    assert_eq!(std::fs::read_to_string(cert_dir.metadata_file()).unwrap(), v2);
+    assert_eq!(
+        std::fs::read_to_string(cert_dir.metadata_file()).unwrap(),
+        v2
+    );
     assert_eq!(mode(&cert_dir.metadata_file()), 0o600);
     // Older files without the counters still load.
     std::fs::write(
@@ -106,7 +112,10 @@ fn metadata_records_the_attempt_without_secrets() {
     };
     let m = Metadata::attempt(&http, None, 1);
     assert_eq!(m.webroot.as_deref(), Some(Path::new("/w")));
-    assert!(m.matches(&responder), "the responder does not force a reissue");
+    assert!(
+        m.matches(&responder),
+        "the responder does not force a reissue"
+    );
     let renamed = CertSpec {
         domains: vec!["b.example.com".into()],
         ..http
@@ -204,24 +213,46 @@ fn installs_custom_chains_leaf_first() {
     assert!(install_pair(&f.ctx, &dir, &chain, &key, &names, Trust::Public).unwrap());
     let deployed = TlsMaterial::deployed(&f.ctx.paths).unwrap();
     let given = TlsMaterial::load(&chain).unwrap();
-    assert_eq!(deployed.pems(), [given.pems()[1].clone(), given.pems()[0].clone()]);
-    assert_eq!(std::fs::read(dir.key()).unwrap(), std::fs::read(&key).unwrap());
+    assert_eq!(
+        deployed.pems(),
+        [given.pems()[1].clone(), given.pems()[0].clone()]
+    );
+    assert_eq!(
+        std::fs::read(dir.key()).unwrap(),
+        std::fs::read(&key).unwrap()
+    );
     assert!(valid_for(&f.ctx, &dir, &names, Trust::Public, 30 * 86_400));
-    assert!(!valid_for(&f.ctx, &dir, &names, Trust::Public, 100 * 86_400));
+    assert!(!valid_for(
+        &f.ctx,
+        &dir,
+        &names,
+        Trust::Public,
+        100 * 86_400
+    ));
     // Re-installing the same source changes nothing; installing the
     // deployed files onto themselves is a validated no-op.
     assert!(!install_pair(&f.ctx, &dir, &chain, &key, &names, Trust::Public).unwrap());
     assert!(!install_pair(&f.ctx, &dir, &dir.cert(), &dir.key(), &names, Trust::Public).unwrap());
-    assert!(std::fs::read_dir(dir.path())
+    assert!(std::fs::read_dir(dir.path()).unwrap().all(|e| !e
         .unwrap()
-        .all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".stage-")));
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".stage-")));
 
     // A pair for another name is refused and the deployed one stays.
-    let (other, other_key) = f.ca.leaf(&f.dir.join("other"), &["b.example.com"], 90, false);
+    let (other, other_key) =
+        f.ca.leaf(&f.dir.join("other"), &["b.example.com"], 90, false);
     let before = std::fs::read(dir.cert()).unwrap();
     assert!(install_pair(&f.ctx, &dir, &other, &other_key, &names, Trust::Public).is_err());
     assert_eq!(std::fs::read(dir.cert()).unwrap(), before);
-    let missing = install_pair(&f.ctx, &dir, &f.dir.join("nope"), &key, &names, Trust::Public);
+    let missing = install_pair(
+        &f.ctx,
+        &dir,
+        &f.dir.join("nope"),
+        &key,
+        &names,
+        Trust::Public,
+    );
     assert_eq!(missing.unwrap_err().to_string(), "证书或私钥文件不存在");
 
     let status = status(&f.ctx, &dir).unwrap().unwrap();

@@ -119,7 +119,11 @@ pub fn install(engine: &Engine, home: &Path) -> Result<PathBuf> {
     ensure_dir(&home.join("dnsapi"), 0o700)?;
     let script = home.join("acme.sh");
     fetch_pinned(engine, &engine.release.script, &script)?;
-    fetch_pinned(engine, &engine.release.dns_cf, &home.join("dnsapi/dns_cf.sh"))?;
+    fetch_pinned(
+        engine,
+        &engine.release.dns_cf,
+        &home.join("dnsapi/dns_cf.sh"),
+    )?;
     Ok(script)
 }
 
@@ -129,8 +133,15 @@ fn fetch_pinned(engine: &Engine, file: &PinnedFile, dest: &Path) -> Result<()> {
     let current = std::fs::symlink_metadata(dest).is_ok_and(|m| m.is_file())
         && sha256_file(dest).is_ok_and(|h| h == file.sha256);
     if !current {
-        fetch::download_pinned(engine.ctx, &file.url, dest, file.max_bytes, &file.sha256, false)
-            .map_err(|e| e.wrap("下载 acme.sh 失败"))?;
+        fetch::download_pinned(
+            engine.ctx,
+            &file.url,
+            dest,
+            file.max_bytes,
+            &file.sha256,
+            false,
+        )
+        .map_err(|e| e.wrap("下载 acme.sh 失败"))?;
     }
     std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| Error::io(dest, e))
@@ -144,7 +155,10 @@ pub fn issued_dir(dir: &CertDir, primary: &str) -> PathBuf {
 /// `(fullchain.cer, {primary}.key)` written by acme.sh.
 pub fn issued_pair(dir: &CertDir, primary: &str) -> (PathBuf, PathBuf) {
     let issued = issued_dir(dir, primary);
-    (issued.join("fullchain.cer"), issued.join(format!("{primary}.key")))
+    (
+        issued.join("fullchain.cer"),
+        issued.join(format!("{primary}.key")),
+    )
 }
 
 /// The `Le_Webroot` acme.sh recorded for the primary name (a path,
@@ -171,7 +185,12 @@ fn challenge_marker(challenge: &Challenge) -> String {
 }
 
 /// The argument list (module docs).
-pub fn args(home: &Path, domains: &[String], challenge: &Challenge, request: Request) -> Vec<String> {
+pub fn args(
+    home: &Path,
+    domains: &[String],
+    challenge: &Challenge,
+    request: Request,
+) -> Vec<String> {
     let home_s = home.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec![
         "--home".into(),
@@ -227,13 +246,22 @@ pub fn obtain(
     let primary = domains.first().map(String::as_str).unwrap_or("");
     let request = match request {
         Request::Renew { .. }
-            if recorded_challenge(dir, primary).as_deref() != Some(&challenge_marker(challenge)) =>
+            if recorded_challenge(dir, primary).as_deref()
+                != Some(&challenge_marker(challenge)) =>
         {
             Request::Issue
         }
         other => other,
     };
-    let cmd = command(engine, &script, &home, domains, challenge, request, credentials);
+    let cmd = command(
+        engine,
+        &script,
+        &home,
+        domains,
+        challenge,
+        request,
+        credentials,
+    );
     let out = with_challenge(engine, dir, challenge, || engine.ctx.run(&cmd))?;
     match (out.code, request) {
         (0, _) => Ok(true),
@@ -281,7 +309,14 @@ fn with_challenge(
     let Challenge::Responder(webroot) = challenge else {
         return call();
     };
-    ensure_dir(webroot, if webroot.starts_with(dir.path()) { 0o700 } else { 0o755 })?;
+    ensure_dir(
+        webroot,
+        if webroot.starts_with(dir.path()) {
+            0o700
+        } else {
+            0o755
+        },
+    )?;
     let responder = Responder::start(webroot, engine.http01_port, &engine.ctx.paths.system_root)?;
     let result = call();
     responder.stop();

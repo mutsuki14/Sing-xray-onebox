@@ -108,7 +108,12 @@ fn real_pairs_validate_like_v2() {
         return;
     }
     let f = Fixture::new("cert-openssl");
-    let (chain, key) = f.ca.leaf(&f.dir.join("leaf"), &["a.example.com", "*.example.com"], 90, false);
+    let (chain, key) = f.ca.leaf(
+        &f.dir.join("leaf"),
+        &["a.example.com", "*.example.com"],
+        90,
+        false,
+    );
     let ctx = &f.ctx;
     validate_pair(ctx, &chain, &key, "a.example.com", Trust::Public).unwrap();
     validate_pair(ctx, &chain, &key, "*.example.com", Trust::Public).unwrap();
@@ -119,7 +124,12 @@ fn real_pairs_validate_like_v2() {
 
     // Without the test CA in the store the chain is only good when pinned.
     let untrusting = f.untrusting_ctx();
-    assert!(!publicly_trusted(&untrusting, &chain, &key, "a.example.com"));
+    assert!(!publicly_trusted(
+        &untrusting,
+        &chain,
+        &key,
+        "a.example.com"
+    ));
     validate_pair(&untrusting, &chain, &key, "a.example.com", Trust::Pinned).unwrap();
 
     // A foreign key, a CA-first chain (first block is the CA) and a
@@ -127,11 +137,29 @@ fn real_pairs_validate_like_v2() {
     let (other, other_key) = self_signed(&f.dir.join("self"), &["a.example.com"], 30);
     let err = validate_pair(ctx, &chain, &other_key, "a.example.com", Trust::Pinned).unwrap_err();
     assert_eq!(err.to_string(), "证书与私钥不匹配");
-    validate_pair(&untrusting, &other, &other_key, "a.example.com", Trust::Pinned).unwrap();
-    assert!(!publicly_trusted(&untrusting, &other, &other_key, "a.example.com"));
+    validate_pair(
+        &untrusting,
+        &other,
+        &other_key,
+        "a.example.com",
+        Trust::Pinned,
+    )
+    .unwrap();
+    assert!(!publicly_trusted(
+        &untrusting,
+        &other,
+        &other_key,
+        "a.example.com"
+    ));
     let (ca_first, ca_first_key) =
         f.ca.leaf(&f.dir.join("cafirst"), &["a.example.com"], 90, true);
-    let err = validate_pair(ctx, &ca_first, &ca_first_key, "a.example.com", Trust::Public);
+    let err = validate_pair(
+        ctx,
+        &ca_first,
+        &ca_first_key,
+        "a.example.com",
+        Trust::Public,
+    );
     assert_eq!(err.unwrap_err().to_string(), "证书与私钥不匹配");
 
     // A wildcard needs the literal SAN, the apex alone does not cover it.
@@ -145,7 +173,8 @@ fn real_expiry_and_facts() {
         return;
     }
     let f = Fixture::new("cert-expiry");
-    let (chain, key) = f.ca.leaf(&f.dir.join("short"), &["a.example.com"], 10, false);
+    let (chain, key) =
+        f.ca.leaf(&f.dir.join("short"), &["a.example.com"], 10, false);
     assert!(expires_within(&f.ctx, &chain, 30 * 86_400));
     assert!(!expires_within(&f.ctx, &chain, 86_400));
     assert!(expires_within(&f.ctx, &f.dir.join("missing.pem"), 1));

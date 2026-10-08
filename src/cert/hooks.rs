@@ -276,7 +276,10 @@ pub fn spec_from_metadata(dir: &CertDir, m: &Metadata) -> Result<CertSpec> {
     let (source, trust) = match m.method {
         MethodId::SelfSigned => (Source::SelfSigned, Trust::Pinned),
         MethodId::Http => {
-            let webroot = m.webroot.clone().ok_or_else(|| missing("HTTP 验证缺少网站目录"))?;
+            let webroot = m
+                .webroot
+                .clone()
+                .ok_or_else(|| missing("HTTP 验证缺少网站目录"))?;
             (Source::Acme(Challenge::Webroot(webroot)), Trust::Public)
         }
         MethodId::Standalone => {
@@ -286,8 +289,14 @@ pub fn spec_from_metadata(dir: &CertDir, m: &Metadata) -> Result<CertSpec> {
         MethodId::Cloudflare => (Source::Acme(Challenge::Cloudflare), Trust::Public),
         MethodId::Custom => (
             Source::Custom {
-                cert: m.source_cert.clone().ok_or_else(|| missing("未记录外部证书路径"))?,
-                key: m.source_key.clone().ok_or_else(|| missing("未记录外部私钥路径"))?,
+                cert: m
+                    .source_cert
+                    .clone()
+                    .ok_or_else(|| missing("未记录外部证书路径"))?,
+                key: m
+                    .source_key
+                    .clone()
+                    .ok_or_else(|| missing("未记录外部私钥路径"))?,
             },
             Trust::Pinned,
         ),

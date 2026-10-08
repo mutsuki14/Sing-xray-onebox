@@ -60,7 +60,9 @@ impl Responder {
         let active = Arc::new(AtomicUsize::new(0));
         let mut threads = Vec::new();
         for listener in listeners {
-            listener.set_nonblocking(true).map_err(|e| Error::io(webroot, e))?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|e| Error::io(webroot, e))?;
             let server = Server {
                 webroot: webroot.to_path_buf(),
                 stop: stop.clone(),
