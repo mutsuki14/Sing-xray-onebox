@@ -19,8 +19,10 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+mod exchange;
 mod tree;
 
+pub use exchange::rename_exchange;
 pub use tree::{copy_tree, remove_tree_contents, CopyLimits, CopyStats};
 
 /// Name prefix of every temp file created by [`atomic_write`] and
