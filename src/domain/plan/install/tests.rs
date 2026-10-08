@@ -274,6 +274,16 @@ fn certificates() {
     let mut reality_only = request(ProtocolChoice::Preset(6));
     reality_only.cert = Some(acme);
     assert!(plan(&reality_only).unwrap().tls.is_none());
+
+    // CDN fronting: self-signed VLESS-WS, plain VMess with a Host header.
+    let mut cdn = request(ProtocolChoice::Preset(5));
+    cdn.vmess_host = Some("CDN.Example.com".into());
+    let cfg = plan(&cdn).unwrap();
+    assert!(!cfg.vmess_tls);
+    assert_eq!(cfg.vmess_host.as_deref(), Some("cdn.example.com"));
+    assert_eq!(cfg.tls.unwrap().mode.server_name(), "www.bing.com");
+    cdn.vmess_host = Some("bad".into());
+    assert_eq!(err(&cdn), "VMess Host 域名无效");
 }
 
 #[test]

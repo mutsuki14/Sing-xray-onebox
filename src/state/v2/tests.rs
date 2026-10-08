@@ -265,7 +265,12 @@ fn custom_certificate() {
         })
     );
     assert!(!c.vmess_tls, "an explicit VMESS_TLS=0 stays");
-    assert!(m.warnings[0].contains("DOMAIN=proxy.example.com"));
+    assert_eq!(
+        c.vmess_host.as_deref(),
+        Some("proxy.example.com"),
+        "plain VMess keeps sending Host: DOMAIN"
+    );
+    assert!(m.warnings.is_empty());
 
     let upgraded = run(&with(custom_cert(), &[("VMESS_TLS", "")])).unwrap();
     assert!(upgraded.config.vmess_tls);

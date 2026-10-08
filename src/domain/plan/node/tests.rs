@@ -79,22 +79,164 @@ fn add_assigns_core_port_and_certificate() {
     );
     let next = add_default(&reality, Hysteria2).unwrap();
     assert_eq!(next.core_of(Hysteria2), Some(SB));
+    let next = add(
+        &reality,
+        Hysteria2,
+        &opts_core(XR),
+        &env(),
+        &mut SeqRandom(1),
+    )
+    .unwrap();
+    assert_eq!(
+        next.core_of(Hysteria2),
+        Some(SB),
+        "--core does not move Hysteria2 off sing-box (v2 and install rule)"
+    );
     let opts = AddOptions {
-        core: Some(XR),
+        hy2_core: Some(XR),
         ..AddOptions::default()
     };
     let next = add(&reality, Hysteria2, &opts, &env(), &mut SeqRandom(1)).unwrap();
-    assert_eq!(
-        next.core_of(Hysteria2),
-        Some(XR),
-        "explicit core overrides the Hysteria2 rule"
-    );
+    assert_eq!(next.core_of(Hysteria2), Some(XR), "--hy2-core does");
     let next = add_default(&reality, VlessXhttp).unwrap();
     assert_eq!(
         next.inbound(VlessXhttp).unwrap().port,
         443,
         "XHTTP joins Vision on Xray"
     );
+}
+
+#[test]
+fn add_hysteria2_options() {
+    let reality = config(&[(VlessReality, 443, SB), (Tuic, 8443, SB)]);
+    let hop = PortRange {
+        start: 20000,
+        end: 30000,
+    };
+    let opts = AddOptions {
+        hy2_obfs: true,
+        hy2_hop: Some(hop),
+        ..AddOptions::default()
+    };
+    let next = add(&reality, Hysteria2, &opts, &env(), &mut SeqRandom(1)).unwrap();
+    assert!(next.hy2.obfs);
+    assert_eq!(next.hy2.hop, Some(hop));
+    assert_eq!(next.inbound(Hysteria2).unwrap().port, 443);
+    // Without options the stored settings stay as they are.
+    let next = add_default(&reality, Hysteria2).unwrap();
+    assert_eq!(next.hy2, Hy2Settings::default());
+
+    // Hysteria2 options need Hysteria2.
+    let only = |opts: AddOptions| {
+        add(&reality, Trojan, &opts, &env(), &mut SeqRandom(1))
+            .unwrap_err()
+            .to_string()
+    };
+    for opts in [
+        AddOptions {
+            hy2_obfs: true,
+            ..AddOptions::default()
+        },
+        AddOptions {
+            hy2_hop: Some(hop),
+            ..AddOptions::default()
+        },
+        AddOptions {
+            hy2_core: Some(SB),
+            ..AddOptions::default()
+        },
+    ] {
+        assert_eq!(only(opts), "未选择 hysteria2");
+    }
+    // The hop range must not cover another UDP inbound (TUIC on 8443).
+    let opts = AddOptions {
+        hy2_hop: Some(PortRange {
+            start: 8000,
+            end: 9000,
+        }),
+        ..AddOptions::default()
+    };
+    let e = add(&reality, Hysteria2, &opts, &env(), &mut SeqRandom(1)).unwrap_err();
+    assert_eq!(e.to_string(), "Hysteria2 跳跃范围与 tuic UDP 端口冲突");
+    let opts = AddOptions {
+        hy2_hop: Some(PortRange {
+            start: 100,
+            end: 200,
+        }),
+        ..AddOptions::default()
+    };
+    let e = add(&reality, Hysteria2, &opts, &env(), &mut SeqRandom(1)).unwrap_err();
+    assert_eq!(e.to_string(), "跳跃端口范围无效");
+}
+
+#[test]
+fn hysteria2_options_after_install() {
+    let p1 = preset1();
+    let hop = PortRange {
+        start: 20000,
+        end: 30000,
+    };
+    let next = set_hy2(&p1, true, Some(hop), &env()).unwrap();
+    assert!(next.hy2.obfs);
+    assert_eq!(next.hy2.hop, Some(hop));
+    let off = set_hy2(&next, false, None, &env()).unwrap();
+    assert_eq!(off.hy2, Hy2Settings::default());
+    let e = set_hy2(&config(&[(Tuic, 443, SB)]), true, None, &env()).unwrap_err();
+    assert_eq!(e.to_string(), "未启用 Hysteria2");
+    // Checked against other UDP listeners and FRP reservations.
+    let e = set_hy2(
+        &p1,
+        false,
+        Some(PortRange {
+            start: 8000,
+            end: 9000,
+        }),
+        &env(),
+    )
+    .unwrap_err();
+    assert_eq!(e.to_string(), "Hysteria2 跳跃范围与 tuic UDP 端口冲突");
+    let reserved = [crate::domain::ports::Reservation {
+        start: 25000,
+        end: 25010,
+        transport: Transport::Udp,
+        label: "game".into(),
+    }];
+    let with_frp = PlanEnv {
+        frp: &reserved,
+        ..env()
+    };
+    let e = set_hy2(&p1, false, Some(hop), &with_frp).unwrap_err();
+    assert_eq!(e.to_string(), "端口 25000/udp 已保留给 FRP");
+}
+
+#[test]
+fn vmess_host_header() {
+    let cdn = config(&[(VlessWs, 443, SB), (VmessWs, 8080, SB)]);
+    let next = set_vmess_host(&cdn, Some(" CDN.Example.com ")).unwrap();
+    assert_eq!(next.vmess_host.as_deref(), Some("cdn.example.com"));
+    assert_eq!(set_vmess_host(&next, Some("")).unwrap().vmess_host, None);
+    assert_eq!(set_vmess_host(&next, None).unwrap().vmess_host, None);
+    assert_eq!(
+        set_vmess_host(&cdn, Some("1.2.3.4"))
+            .unwrap_err()
+            .to_string(),
+        "VMess Host 域名无效"
+    );
+    // `add vmess-ws --domain …` sets it too.
+    let opts = AddOptions {
+        vmess_host: Some("cdn.example.com".into()),
+        ..AddOptions::default()
+    };
+    let base = config(&[(VlessWs, 443, SB)]);
+    let next = add(&base, VmessWs, &opts, &env(), &mut SeqRandom(1)).unwrap();
+    assert_eq!(next.vmess_host.as_deref(), Some("cdn.example.com"));
+    assert!(
+        !next.vmess_tls,
+        "self-signed: plain VMess sends the Host header"
+    );
+    // Removing VMess keeps it (v2 kept DOMAIN).
+    let next = remove(&next, VmessWs).unwrap();
+    assert_eq!(next.vmess_host.as_deref(), Some("cdn.example.com"));
 }
 
 #[test]

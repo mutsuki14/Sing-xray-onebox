@@ -35,6 +35,14 @@ pub struct NodeConfig {
     pub tls: Option<ProxyTls>,
     #[serde(default)]
     pub vmess_tls: bool,
+    /// `Host` header plain (non-TLS) VMess-WS clients send: v2's `DOMAIN` in
+    /// plain mode, i.e. CDN fronting where `server.addr` is a CDN IP and the
+    /// VMess candidate ports 8080/2082/8880 are Cloudflare HTTP ports. `None`
+    /// sends no `Host` header. Unused while `vmess_tls` is on (TLS clients use
+    /// the certificate name) and kept when VMess-WS is removed, as v2 kept
+    /// `DOMAIN`.
+    #[serde(default)]
+    pub vmess_host: Option<String>,
     #[serde(default)]
     pub hy2: Hy2Settings,
     #[serde(default)]

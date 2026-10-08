@@ -43,6 +43,7 @@ pub(crate) fn config(inbounds: &[(Protocol, u16, Core)]) -> NodeConfig {
         site: None,
         tls: None,
         vmess_tls: false,
+        vmess_host: None,
         hy2: Hy2Settings::default(),
         resource_profile: ResourceProfile::Balanced,
         routing: Routing::default(),

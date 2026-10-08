@@ -34,6 +34,7 @@
 
 mod features;
 mod fields;
+mod subscription;
 
 use crate::domain::config::{Device, NodeConfig, SCHEMA};
 use crate::domain::ports::{NoProbe, PortPlan};
@@ -129,6 +130,7 @@ pub fn migrate(
         site: None,
         tls: None,
         vmess_tls: false,
+        vmess_host: None,
         hy2: Default::default(),
         resource_profile: Default::default(),
         routing: v.routing(),

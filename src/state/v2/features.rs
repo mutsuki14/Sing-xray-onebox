@@ -1,14 +1,12 @@
 //! Typed readers over the v2 key/value bag: website, proxy certificate,
-//! tuning, routing, versions, subscription settings and unknown keys.
+//! tuning, routing, versions and unknown keys.
 
 use super::fields::{protocol_key, V2};
 use crate::domain::config::*;
 use crate::domain::defaults;
 use crate::domain::protocol::{Core, Protocol};
 use crate::domain::validate::{valid_cidr, valid_domain, valid_label, valid_text, valid_version};
-use crate::error::{Error, Result};
-use serde::Deserialize;
-use serde_json::Value;
+use crate::error::Result;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -87,21 +85,6 @@ const KNOWN_KEYS: &[&str] = &[
     "SUBSCRIPTION_HTTP",
     "XR_XHTTP_SOCK",
 ];
-
-/// v2 `subscription/settings.json` (spec G §3.2). Fields default leniently;
-/// the values are validated below.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct Settings {
-    enabled: bool,
-    mode: String,
-    domain: String,
-    port: u16,
-    method: String,
-    custom_cert: Option<PathBuf>,
-    custom_key: Option<PathBuf>,
-    devices: Vec<Device>,
-}
 
 impl V2<'_> {
     /// `REALITY_SITE_*` / `SITE_*` → `SiteConfig` while a REALITY inbound
@@ -259,7 +242,7 @@ impl V2<'_> {
                 "" => matches!(mode, "acme" | "custom"),
                 _ => false,
             };
-        self.vmess_host_note(cfg);
+        self.vmess_host(cfg);
         if !cfg.needs_cert() {
             return Ok(());
         }
@@ -283,14 +266,24 @@ impl V2<'_> {
         Ok(())
     }
 
-    /// v2 sent `DOMAIN` as the Host header of plain VMess-WS; v3 does not.
-    fn vmess_host_note(&mut self, cfg: &NodeConfig) {
-        if cfg.has(Protocol::VmessWs) && !cfg.vmess_tls {
-            if let Some(domain) = self.nonempty("DOMAIN") {
-                self.warn(format!(
-                    "VMess-WS 明文模式不再使用 DOMAIN={domain} 作为 Host 头"
-                ));
-            }
+    /// v2 plain VMess-WS clients send `Host: DOMAIN` (spec C §3.2, §3.3,
+    /// §3.5); `DOMAIN` keeps that role in `vmess_host` while VMess-WS is
+    /// enabled (also on TLS, where it applies again once VMess turns plain,
+    /// as in v2).
+    fn vmess_host(&mut self, cfg: &mut NodeConfig) {
+        if !cfg.has(Protocol::VmessWs) {
+            return;
+        }
+        let Some(raw) = self.nonempty("DOMAIN") else {
+            return;
+        };
+        let host = raw.to_ascii_lowercase();
+        if valid_domain(&host) {
+            cfg.vmess_host = Some(host);
+        } else if !cfg.vmess_tls {
+            self.warn(format!(
+                "v2 字段 DOMAIN 不是有效域名，VMess-WS 不再发送该 Host 头: {raw}"
+            ));
         }
     }
 
@@ -462,81 +455,6 @@ impl V2<'_> {
         self.version(key).filter(|v| v != "latest")
     }
 
-    /// v2 `settings.json` → endpoint settings (only when enabled) and the
-    /// device list (always, so tokens survive a later re-enable).
-    pub(super) fn subscription(
-        &mut self,
-        cfg: &NodeConfig,
-        settings: &Value,
-    ) -> Result<(Option<SubscriptionConfig>, Vec<Device>)> {
-        let s = Settings::deserialize(settings)
-            .map_err(|e| Error::msg(format!("v2 订阅设置无效: {e}")))?;
-        let devices = self.devices(&s.devices);
-        if !s.enabled {
-            return Ok((None, devices));
-        }
-        let mode = match s.mode.as_str() {
-            "ip" => SubscriptionMode::Ip {
-                address: s
-                    .domain
-                    .trim()
-                    .parse::<IpAddr>()
-                    .map_err(|_| Error::msg(format!("v2 订阅地址无效: {}", s.domain)))?
-                    .to_canonical(),
-            },
-            "site" if cfg.site_active().is_none() => {
-                self.warn("v2 订阅复用的网站未启用，订阅已关闭（设备保留）");
-                return Ok((None, devices));
-            }
-            "site" => SubscriptionMode::Site,
-            "standalone" => self.standalone(&s)?,
-            other => bail!("v2 订阅托管模式无效: {other}"),
-        };
-        let port = if mode == SubscriptionMode::Site {
-            cfg.site_public_port()
-        } else {
-            s.port
-        };
-        Ok((Some(SubscriptionConfig { mode, port }), devices))
-    }
-
-    fn devices(&mut self, list: &[Device]) -> Vec<Device> {
-        let mut out: Vec<Device> = Vec::new();
-        for device in list {
-            let duplicate = out.iter().any(|d| d.id == device.id);
-            if valid_device(device) && !duplicate {
-                out.push(device.clone());
-            } else {
-                self.warn(format!("v2 订阅设备数据无效，已忽略: {:?}", device.id));
-            }
-        }
-        out
-    }
-
-    fn standalone(&mut self, s: &Settings) -> Result<SubscriptionMode> {
-        let domain = s.domain.trim().to_ascii_lowercase();
-        ensure!(valid_domain(&domain), "v2 订阅域名无效: {}", s.domain);
-        let cert = match s.method.as_str() {
-            "cf" => WebCert::Cloudflare,
-            "http" => WebCert::Http01,
-            "custom" => {
-                let sources = [
-                    ("custom_cert", path_text(s.custom_cert.as_deref())),
-                    ("custom_key", path_text(s.custom_key.as_deref())),
-                ];
-                let deployed = deployed_pair(&self.deployed.subscription);
-                let (cert, key) = self.source_pair("订阅", sources, deployed);
-                WebCert::Custom { cert, key }
-            }
-            other => bail!("v2 订阅证书方式无效: {other}"),
-        };
-        Ok(SubscriptionMode::Standalone {
-            domain,
-            http01_port80: cert == WebCert::Http01,
-            cert,
-        })
-    }
-
     pub(super) fn report_unknown_keys(&mut self) {
         let unknown: Vec<&str> = self
             .values()
@@ -550,34 +468,14 @@ impl V2<'_> {
     }
 }
 
-fn path_text(path: Option<&Path>) -> Option<&str> {
-    path.and_then(Path::to_str)
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-}
-
 /// `cert.pem` / `key.pem` in a v2 deployment directory.
-fn deployed_pair(dir: &Path) -> (PathBuf, PathBuf) {
+pub(super) fn deployed_pair(dir: &Path) -> (PathBuf, PathBuf) {
     (dir.join("cert.pem"), dir.join("key.pem"))
 }
 
 /// Absolute and printable, as `NodeConfig::validate` requires.
 fn usable_path(path: &Path) -> bool {
     path.is_absolute() && path.to_str().is_some_and(valid_text)
-}
-
-/// v2 `validate_settings` device rules.
-fn valid_device(d: &Device) -> bool {
-    let lower_hex = |s: &str, n: usize| {
-        s.len() == n
-            && s.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
-    lower_hex(&d.id, 16)
-        && lower_hex(&d.hash, 64)
-        && !d.name.is_empty()
-        && d.name.len() <= 80
-        && valid_text(&d.name)
 }
 
 /// Entries of `OWN_IP_CIDRS`: JSON array, bracket-less JSON list, or a plain

@@ -7,11 +7,13 @@ use crate::domain::presets;
 use crate::domain::protocol::Core;
 use crate::sys::rand::Random;
 
-/// Options of `onebox add PROTO`.
+/// Options of `onebox add PROTO` (the v2 `apply_options` that `add` ran,
+/// spec B §3.4 step 7).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AddOptions {
-    /// Preferred core (default: the core of the first inbound). For
-    /// Hysteria2 it overrides the sing-box default.
+    /// `--core`: preferred core (default: the core of the first inbound).
+    /// Hysteria2 follows the install rule and stays on sing-box; only
+    /// `hy2_core` moves it (v2 parity).
     pub core: Option<Core>,
     pub port: Option<u16>,
     /// Applied when not `Default` (typically chosen for the first REALITY inbound).
@@ -19,6 +21,14 @@ pub struct AddOptions {
     /// Certificate to use; a self-signed one is created when the new
     /// protocol needs a certificate and none exists.
     pub cert: Option<ProxyCertChoice>,
+    /// `--hy2-obfs`: Salamander obfuscation on (Hysteria2 only).
+    pub hy2_obfs: bool,
+    /// `--hy2-hop A-B`: UDP port hopping range (Hysteria2 only).
+    pub hy2_hop: Option<PortRange>,
+    /// `--hy2-core`: core for Hysteria2 (Hysteria2 only).
+    pub hy2_core: Option<Core>,
+    /// `--domain` as the plain VMess-WS `Host` header ([`NodeConfig::vmess_host`]).
+    pub vmess_host: Option<String>,
 }
 
 pub fn add(
@@ -29,17 +39,26 @@ pub fn add(
     rng: &mut dyn Random,
 ) -> Result<NodeConfig> {
     ensure!(!cfg.has(protocol), "协议已存在");
+    let hy2 = protocol == Protocol::Hysteria2;
+    let hy2_options = opts.hy2_obfs || opts.hy2_hop.is_some() || opts.hy2_core.is_some();
+    ensure!(hy2 || !hy2_options, "未选择 hysteria2");
     let preferred = opts
         .core
         .or_else(|| cfg.inbounds.first().map(|i| i.core))
         .unwrap_or(presets::CUSTOM_CORE);
-    let over = opts.core.filter(|_| protocol == Protocol::Hysteria2);
     let mut next = cfg.clone();
     next.inbounds.push(Inbound {
         protocol,
         port: opts.port.unwrap_or(0),
-        core: presets::assign_core(protocol, preferred, over),
+        core: presets::assign_core(protocol, preferred, opts.hy2_core),
     });
+    if hy2 {
+        next.hy2.obfs |= opts.hy2_obfs;
+        next.hy2.hop = opts.hy2_hop.or(next.hy2.hop);
+    }
+    if opts.vmess_host.is_some() {
+        next.vmess_host = vmess_host(opts.vmess_host.as_deref())?;
+    }
     let first_reality = protocol.reality() && !cfg.any_reality();
     if first_reality && next.creds.reality.is_none() {
         next.creds.reality = Some(credentials::reality_keys(rng)?);
@@ -217,6 +236,30 @@ pub fn tune_hy2(
         next.hy2.down_mbps = None;
     }
     next.hy2.profile = Some(profile);
+    finish_local(next)
+}
+
+/// Hysteria2 obfuscation and port hopping after install (v2 could set them
+/// only while adding Hysteria2, so changing them meant a reinstall with new
+/// credentials). `hop: None` turns hopping off. The range is checked against
+/// every other UDP listener and FRP.
+pub fn set_hy2(
+    cfg: &NodeConfig,
+    obfs: bool,
+    hop: Option<PortRange>,
+    env: &PlanEnv,
+) -> Result<NodeConfig> {
+    ensure!(cfg.has(Protocol::Hysteria2), "未启用 Hysteria2");
+    let mut next = cfg.clone();
+    next.hy2.obfs = obfs;
+    next.hy2.hop = hop;
+    finish(next, env)
+}
+
+/// Plain VMess-WS `Host` header; `None` or blank sends none.
+pub fn set_vmess_host(cfg: &NodeConfig, host: Option<&str>) -> Result<NodeConfig> {
+    let mut next = cfg.clone();
+    next.vmess_host = vmess_host(host)?;
     finish_local(next)
 }
 

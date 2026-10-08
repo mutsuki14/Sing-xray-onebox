@@ -33,6 +33,9 @@ pub struct InstallRequest {
     /// `None` uses a self-signed certificate when one is needed. A choice is
     /// ignored when no selected protocol needs a certificate (v2 parity).
     pub cert: Option<ProxyCertChoice>,
+    /// `Host` header of plain VMess-WS clients (v2 `--domain` without a
+    /// domain certificate; CDN fronting).
+    pub vmess_host: Option<String>,
     pub hy2_obfs: bool,
     pub hy2_hop: Option<PortRange>,
     pub hy2_core: Option<Core>,
@@ -54,6 +57,7 @@ impl Default for InstallRequest {
             reality: RealityChoice::Default,
             shadowtls_sni: None,
             cert: None,
+            vmess_host: None,
             hy2_obfs: false,
             hy2_hop: None,
             hy2_core: None,
@@ -90,6 +94,7 @@ pub fn install(req: &InstallRequest, env: &PlanEnv, rng: &mut dyn Random) -> Res
         cfg.shadowtls.dest = None;
     }
     settle_tls(&mut cfg, req.cert.as_ref(), true)?;
+    cfg.vmess_host = vmess_host(req.vmess_host.as_deref())?;
     assign_ports(&mut cfg, &req.ports, env)?;
     finish(cfg, env)
 }
@@ -160,6 +165,7 @@ fn skeleton(
         site: None,
         tls: None,
         vmess_tls: false,
+        vmess_host: None,
         hy2: Hy2Settings {
             obfs: req.hy2_obfs,
             hop: req.hy2_hop,

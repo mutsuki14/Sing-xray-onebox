@@ -22,8 +22,9 @@ mod site;
 
 pub use install::{install, InstallRequest, ProtocolChoice};
 pub use node::{
-    add, remove, reset_credentials, set_address, set_port, set_proxy_cert, set_reality_target,
-    set_shadowtls_sni, tune_hy2, tune_reset, tune_resource, AddOptions,
+    add, remove, reset_credentials, set_address, set_hy2, set_port, set_proxy_cert,
+    set_reality_target, set_shadowtls_sni, set_vmess_host, tune_hy2, tune_reset, tune_resource,
+    AddOptions,
 };
 pub use site::{
     default_subscription_address, disable_site, disable_subscription, enable_site,
@@ -373,6 +374,14 @@ fn ensure_guard(cfg: &mut NodeConfig, env: &PlanEnv, previous: &PortPlan) -> Res
         cfg.reality.guard_port = plan.allocate_guard(env.probe, Some(previous))?;
     }
     Ok(())
+}
+
+/// Optional plain VMess-WS `Host` header; empty means none.
+fn vmess_host(value: Option<&str>) -> Result<Option<String>> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(host) => normalize_domain(host, "VMess Host 域名无效").map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Optional core version pin: `latest` / empty mean "no pin".

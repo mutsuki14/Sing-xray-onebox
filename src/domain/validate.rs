@@ -158,6 +158,9 @@ impl NodeConfig {
             !self.vmess_tls || self.has(Protocol::VmessWs),
             "VMess TLS 仅适用于 VMess-WS"
         );
+        if let Some(host) = &self.vmess_host {
+            ensure!(valid_domain(host), "VMess Host 域名无效");
+        }
         let Some(tls) = &self.tls else {
             ensure!(!self.needs_cert(), "当前协议需要代理 TLS 证书");
             return Ok(());

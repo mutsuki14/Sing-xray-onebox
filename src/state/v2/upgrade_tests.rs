@@ -218,3 +218,38 @@ fn handshake_targets_v2_ran_with_migrate() {
         m.config
     );
 }
+
+#[test]
+fn plain_vmess_keeps_its_host_header() {
+    // Preset 5 behind a CDN: SERVER_ADDR is a CDN IP, clients send
+    // `Host: DOMAIN`, the certificate stays self-signed for VLESS-WS.
+    let cdn = with(
+        preset1(),
+        &[
+            ("PROTOCOLS", "vless-ws vmess-ws"),
+            ("PORT_vless_ws", "443"),
+            ("PORT_vmess_ws", "8080"),
+            ("TLS_MODE", "self"),
+            ("DOMAIN", "CDN.Example.com"),
+            ("VMESS_TLS", "0"),
+        ],
+    );
+    let m = run(&cdn).unwrap();
+    assert!(m.warnings.is_empty());
+    assert!(!m.config.vmess_tls);
+    assert_eq!(m.config.vmess_host.as_deref(), Some("cdn.example.com"));
+    assert_eq!(
+        m.config.tls.as_ref().map(|t| t.mode.server_name()),
+        Some("www.bing.com")
+    );
+    // A DOMAIN that is no domain cannot be a Host header any more.
+    let m = run(&with(cdn.clone(), &[("DOMAIN", "203.0.113.9")])).unwrap();
+    assert_eq!(m.config.vmess_host, None);
+    assert_eq!(
+        m.warnings,
+        ["v2 字段 DOMAIN 不是有效域名，VMess-WS 不再发送该 Host 头: 203.0.113.9"]
+    );
+    // Without VMess-WS, DOMAIN only names the certificate.
+    let m = run(&with(cdn, &[("PROTOCOLS", "vless-ws")])).unwrap();
+    assert_eq!(m.config.vmess_host, None);
+}

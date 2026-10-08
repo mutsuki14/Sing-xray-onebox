@@ -153,6 +153,9 @@ fn negative_table() {
             })
         }),
         ("VMess TLS 仅适用于 VMess-WS", |c| c.vmess_tls = true),
+        ("VMess Host 域名无效", |c| {
+            c.vmess_host = Some("CDN.example.com".into())
+        }),
         ("跳跃端口范围无效", |c| {
             c.hy2.hop = Some(PortRange { start: 80, end: 90 })
         }),
