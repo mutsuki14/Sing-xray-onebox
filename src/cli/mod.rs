@@ -3,7 +3,7 @@
 //!
 //! Dispatch order: UTF-8 check → leading `-y`/`--help` → no arguments opens
 //! the menu → `--version`/`-V` → parse against the registry → help pages and
-//! context-free built-ins → root policy → `Ctx::system` → handler.
+//! context-free built-ins → `Ctx::system` → root policy → handler.
 
 pub mod args;
 pub mod help;
@@ -37,13 +37,13 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
     if let Some(result) = registry::builtin(spec, &invocation.matches) {
         return result;
     }
-    if registry::requires_root(spec, &invocation.matches) {
-        registry::require_root()?;
-    }
     let handler = spec
         .handler
         .ok_or_else(|| Error::msg(format!("命令尚未实现: {}", invocation.matches.command())))?;
     let ctx = Ctx::system(invocation.matches.assume_yes)?;
+    if registry::requires_root(spec, &invocation.matches) {
+        registry::require_root()?;
+    }
     handler(&ctx, &invocation.matches)
 }
 
