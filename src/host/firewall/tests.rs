@@ -259,26 +259,109 @@ fn ufw_status_lines_are_parsed() {
         ufw::parse_line(line),
         Some(ufw::Listed {
             number: 10,
-            to: "443/tcp",
+            to: "443/tcp".into(),
+            to_interface: None,
             action: "ALLOW",
-            from: "Anywhere",
+            direction: Some("IN"),
+            from: "Anywhere".into(),
+            from_interface: None,
+            attributes: vec![],
             comment: Some("onebox-proxy-01"),
         })
     );
     let limited =
         ufw::parse_line("[ 3] 22/tcp                     LIMIT IN    203.0.113.0/24").unwrap();
     assert_eq!(
-        (limited.action, limited.from, limited.comment),
+        (limited.action, limited.from.as_str(), limited.comment),
         ("LIMIT", "203.0.113.0/24", None)
     );
+    let old_ufw = ufw::parse_line("[ 1] 443/tcp                    ALLOW       Anywhere").unwrap();
+    assert_eq!((old_ufw.action, old_ufw.direction), ("ALLOW", None));
+    assert!(old_ufw.plain_inbound("443/tcp"));
     for junk in [
         "Status: active",
         "",
         "     To   Action   From",
         "[x] 1/tcp ALLOW IN Anywhere",
+        "[ 1] 443/tcp",
     ] {
         assert_eq!(ufw::parse_line(junk), None, "{junk:?}");
     }
+}
+
+#[test]
+fn ufw_direction_interface_and_attribute_columns() {
+    let route = ufw::parse_line("[ 1] 443/tcp                    ALLOW FWD   Anywhere").unwrap();
+    assert_eq!((route.action, route.direction), ("ALLOW", Some("FWD")));
+    let scoped = ufw::parse_line("[ 2] 443/tcp on eth0            ALLOW IN    Anywhere").unwrap();
+    assert_eq!(
+        (scoped.to.as_str(), scoped.to_interface, scoped.action),
+        ("443/tcp", Some("eth0"), "ALLOW")
+    );
+    let scoped6 =
+        ufw::parse_line("[ 3] 443/tcp (v6) on eth0       ALLOW IN    Anywhere (v6)").unwrap();
+    assert_eq!(scoped6.to_interface, Some("eth0"));
+    let out = ufw::parse_line(
+        "[ 4] 443/tcp                    ALLOW OUT   Anywhere                   (out)",
+    )
+    .unwrap();
+    assert_eq!(
+        (out.direction, out.from.as_str(), out.attributes.clone()),
+        (Some("OUT"), "Anywhere", vec!["out"])
+    );
+    let routed = ufw::parse_line(
+        "[ 5] 443/tcp on eth1            ALLOW FWD   Anywhere on eth0           (out, log)",
+    )
+    .unwrap();
+    assert_eq!(
+        (routed.from_interface, routed.attributes.clone()),
+        (Some("eth0"), vec!["out", "log"])
+    );
+    let host = ufw::parse_line("[ 6] 10.0.0.1 443/tcp           ALLOW IN    Anywhere").unwrap();
+    assert_eq!(host.to, "10.0.0.1 443/tcp");
+    let logged = ufw::parse_line(
+        "[ 7] 443/tcp                    ALLOW IN    Anywhere                   (log)",
+    )
+    .unwrap();
+    for (listed, plain) in [
+        (&route, false),
+        (&scoped, false),
+        (&scoped6, false),
+        (&out, false),
+        (&routed, false),
+        (&host, false),
+        (&logged, true),
+    ] {
+        assert_eq!(listed.plain_inbound("443/tcp"), plain, "{listed:?}");
+    }
+}
+
+#[test]
+fn ufw_route_out_and_interface_rules_do_not_hold_our_port() {
+    let (_dir, ctx, exec) = setup();
+    let status = "Status: active\n\
+[ 1] 443/tcp                    ALLOW FWD   Anywhere\n\
+[ 2] 8443/tcp on eth0           ALLOW IN    Anywhere\n\
+[ 3] 9443/tcp                   ALLOW OUT   Anywhere                   (out)\n\
+[ 4] 2053/tcp                   DENY IN     Anywhere                   (log)\n";
+    exec.on("ufw", &["status", "numbered"], Output::success(status))
+        .on("ufw", &["allow"], Output::success("Rule added\n"));
+    for port in [443, 8443, 9443] {
+        assert!(
+            Ufw.create(&ctx, &rule(Proto::Tcp, port, port)).unwrap(),
+            "{port}: a distinct rule for ufw"
+        );
+    }
+    assert!(
+        !Ufw.create(&ctx, &rule(Proto::Tcp, 2053, 2053)).unwrap(),
+        "a logged admin deny is the same rule"
+    );
+    let allows = exec
+        .history()
+        .into_iter()
+        .filter(|c| c.contains("allow"))
+        .count();
+    assert_eq!(allows, 3);
 }
 
 #[test]
