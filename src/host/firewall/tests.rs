@@ -611,7 +611,7 @@ fn compat_only_hosts_use_iptables_and_ipv6_needs_proc_support() {
     let disable = ctx.paths.system("/proc/sys/net/ipv6/conf/all/disable_ipv6");
     std::fs::create_dir_all(disable.parent().unwrap()).unwrap();
     std::fs::write(&disable, "1\n").unwrap();
-    assert!(!ipv6_enabled(&ctx.paths));
+    assert!(!crate::sys::net::ipv6_available(&ctx.paths.system_root));
 }
 
 #[test]
@@ -636,8 +636,13 @@ fn location_descriptions() {
         zone: "public".into(),
         permanent: true,
     });
-    assert_eq!(zone.describe(), "firewalld public (permanent)");
+    assert_eq!(zone.describe(), "firewalld public（永久）");
     assert_eq!(zone.backend().program(), "firewall-cmd");
+    let runtime = Location::Firewalld(Firewalld {
+        zone: "public".into(),
+        permanent: false,
+    });
+    assert_eq!(runtime.describe(), "firewalld public（运行时）");
     assert_eq!(
         Location::Iptables(Iptables { v6: true }).describe(),
         "ip6tables"

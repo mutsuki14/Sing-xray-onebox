@@ -62,7 +62,6 @@ pub use ufw::Ufw;
 use crate::ctx::Ctx;
 use crate::domain::protocol::Transport;
 use crate::error::{Error, Result};
-use crate::paths::Paths;
 use crate::sys::exec::Output;
 use crate::sys::lock::FileLock;
 use std::path::Path;
@@ -176,12 +175,12 @@ impl Location {
         }
     }
 
-    /// Human-readable place for messages, e.g. `firewalld public (permanent)`.
+    /// Place for user-facing messages, e.g. `firewalld public（永久）`.
     pub fn describe(&self) -> String {
         match self {
             Location::Ufw(_) => "ufw".into(),
-            Location::Firewalld(f) if f.permanent => format!("firewalld {} (permanent)", f.zone),
-            Location::Firewalld(f) => format!("firewalld {}", f.zone),
+            Location::Firewalld(f) if f.permanent => format!("firewalld {}（永久）", f.zone),
+            Location::Firewalld(f) => format!("firewalld {}（运行时）", f.zone),
             Location::Nft(n) => format!("nft {} {} {}", n.family, n.table, n.chain),
             Location::Iptables(i) => i.binary().into(),
         }
@@ -212,16 +211,6 @@ pub fn detect(ctx: &Ctx) -> Result<Vec<Location>> {
         .map(Location::Nft)
         .chain(compat.into_iter().map(Location::Iptables))
         .collect())
-}
-
-/// Whether the host has IPv6 enabled (`/proc/net/if_inet6` exists and
-/// `disable_ipv6` is not `1`; unreadable counts as enabled), read under
-/// `Paths::system_root`. Decides ip6tables rules and ip6 hop tables.
-pub fn ipv6_enabled(paths: &Paths) -> bool {
-    paths.system("/proc/net/if_inet6").exists()
-        && std::fs::read_to_string(paths.system("/proc/sys/net/ipv6/conf/all/disable_ipv6"))
-            .map(|s| s.trim() != "1")
-            .unwrap_or(true)
 }
 
 /// Owner names become file names and tokens: `[A-Za-z0-9-]{1,31}`, and

@@ -28,10 +28,11 @@
 use crate::ctx::Ctx;
 use crate::domain::config::PortRange;
 use crate::error::{Error, Result};
-use crate::host::firewall::{ipv6_enabled, lock_waiting, safe_word};
+use crate::host::firewall::{lock_waiting, safe_word};
 use crate::sys::exec::Cmd;
 use crate::sys::fs::{atomic_write, read_bounded, remove_file_if_exists, write_new_exclusive};
 use crate::sys::lock::FileLock;
+use crate::sys::net::ipv6_available;
 use crate::ui::out;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -200,7 +201,7 @@ fn clear_locked(ctx: &Ctx, path: &Path) -> Result<()> {
 fn iptables_binaries(ctx: &Ctx) -> Vec<&'static str> {
     ["iptables", "ip6tables"]
         .into_iter()
-        .filter(|b| ctx.has(b) && (*b == "iptables" || ipv6_enabled(&ctx.paths)))
+        .filter(|b| ctx.has(b) && (*b == "iptables" || ipv6_available(&ctx.paths.system_root)))
         .collect()
 }
 
@@ -221,7 +222,7 @@ pub fn nft_script(families: &[&str], token: &str, range: PortRange, target: u16)
 /// Load the hop table with `nft -f` (atomic: all families or nothing).
 fn load_nft(ctx: &Ctx, range: PortRange, target: u16) -> Result<Hop> {
     let token = format!("onebox_hop_{}", crate::sys::rand::hex(8)?);
-    let families: &[&str] = if ipv6_enabled(&ctx.paths) {
+    let families: &[&str] = if ipv6_available(&ctx.paths.system_root) {
         &["ip", "ip6"]
     } else {
         &["ip"]

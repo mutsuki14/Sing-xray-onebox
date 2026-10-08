@@ -1,9 +1,10 @@
 //! iptables / ip6tables `INPUT` rules with a comment token.
 
-use super::{failure, ipv6_enabled, Backend, Rule};
+use super::{failure, Backend, Rule};
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::sys::exec::Cmd;
+use crate::sys::net::ipv6_available;
 
 /// One of the two binaries; rules go to the `filter` table's `INPUT` chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +57,10 @@ pub(super) fn detect_families(ctx: &Ctx, v4: bool, v6: bool) -> Result<Vec<Iptab
     let mut found = Vec::new();
     for backend in [Iptables { v6: false }, Iptables { v6: true }] {
         let wanted = if backend.v6 { v6 } else { v4 };
-        if !wanted || !ctx.has(backend.binary()) || (backend.v6 && !ipv6_enabled(&ctx.paths)) {
+        if !wanted
+            || !ctx.has(backend.binary())
+            || (backend.v6 && !ipv6_available(&ctx.paths.system_root))
+        {
             continue;
         }
         ctx.check(&Cmd::new(backend.binary()).args(["-w", "5", "-S", "INPUT"]))?;
