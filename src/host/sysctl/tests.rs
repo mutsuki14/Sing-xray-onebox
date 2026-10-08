@@ -177,18 +177,22 @@ fn unsafe_old_values_abort_before_any_write() {
 }
 
 #[test]
-fn a_hint_replaces_the_raw_error_for_its_key() {
+fn a_hint_explains_a_value_the_kernel_rejects() {
     let f = Fixture::new();
+    f.sysctl.state().write_error = "No such file or directory".into();
     f.sysctl.state().next_write = Some(WriteFault::FailAt(0));
     let txn = f.txn("cake").hint(QDISC, "当前内核不支持队列 cake");
     assert_eq!(
         txn.commit(&f.ctx).unwrap_err().to_string(),
-        "当前内核不支持队列 cake"
+        "当前内核不支持队列 cake（sysctl: setting key \"net.core.default_qdisc\": No such file or directory）"
     );
     f.assert_untouched();
+    f.sysctl.state().write_error = "Invalid argument".into();
+    f.sysctl.state().next_write = Some(WriteFault::FailAt(0));
+    let err = txn.commit(&f.ctx).unwrap_err().to_string();
+    assert!(err.starts_with("当前内核不支持队列 cake（"), "{err}");
     // The qdisc was accepted (and echoed on stdout); another key failed.
     f.sysctl.state().next_write = Some(WriteFault::FailAt(1));
-    let txn = f.txn("cake").hint(QDISC, "当前内核不支持队列 cake");
     let err = txn.commit(&f.ctx).unwrap_err().to_string();
     assert!(
         err.starts_with(
@@ -197,6 +201,45 @@ fn a_hint_replaces_the_raw_error_for_its_key() {
         "{err}"
     );
     f.assert_untouched();
+}
+
+#[test]
+fn other_write_failures_keep_the_raw_error() {
+    for errno in [
+        "Read-only file system",
+        "Operation not permitted",
+        "Permission denied",
+    ] {
+        let f = Fixture::new();
+        f.sysctl.state().write_error = errno.into();
+        f.sysctl.state().next_write = Some(WriteFault::FailAt(0));
+        let txn = f.txn("cake").hint(QDISC, "当前内核不支持队列 cake");
+        assert_eq!(
+            txn.commit(&f.ctx).unwrap_err().to_string(),
+            format!("sysctl 执行失败 (1): sysctl: setting key \"net.core.default_qdisc\": {errno}")
+        );
+        f.assert_untouched();
+    }
+}
+
+#[test]
+fn hint_keys_match_whole_names_in_procps_and_busybox_messages() {
+    let procps = "sysctl: setting key \"net.core.default_qdisc\": No such file or directory";
+    let busybox =
+        "sysctl: error setting key 'net.core.default_qdisc' to 'fq_pie': No such file or directory";
+    assert_eq!(rejected_value(procps, QDISC), Some(procps));
+    assert_eq!(
+        rejected_value(&format!("x\n  {busybox}\n"), QDISC),
+        Some(busybox)
+    );
+    let longer = "sysctl: setting key \"net.core.default_qdisc_x\": No such file or directory";
+    assert_eq!(rejected_value(longer, QDISC), None);
+    let stat = "sysctl: cannot stat /proc/sys/net/core/default_qdisc: No such file or directory";
+    assert_eq!(
+        rejected_value(stat, QDISC),
+        None,
+        "the key itself is missing"
+    );
 }
 
 #[test]

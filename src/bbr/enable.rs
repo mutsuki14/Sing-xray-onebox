@@ -8,8 +8,10 @@
 //! → `modprobe sch_{queue}` (best effort) → transaction → conflict notices.
 //!
 //! Changes from v2: root is checked once by the caller (`geteuid`, no
-//! `id -u`, I-8.1#2); a qdisc the kernel lacks gives a clear message instead
-//! of a raw `sysctl` error (I-8.1#11); the lock no longer validates the
+//! `id -u`, I-8.1#2); a qdisc the kernel lacks gives a clear message (with
+//! the raw `sysctl` line) instead of only a raw error (I-8.1#11), while any
+//! other write failure (read-only `/proc/sys`) keeps the raw error; the
+//! lock no longer validates the
 //! sysctl path for kernel installs (I-8.1#13, the check lives here now).
 
 use super::status::{conflict_notices, conflicts};
@@ -33,14 +35,22 @@ pub fn transaction(ctx: &Ctx, queue: Queue) -> SysctlTxn {
     SysctlTxn::new(&[(QDISC, queue.id()), (CC, "bbr")])
         .persist_to(&ctx.paths.bbr_conf)
         .messages(MESSAGES)
-        .hint(
-            QDISC,
-            format!(
-                "当前内核不支持队列 {}（sch_{} 不可用）；已恢复原参数，请改用 fq 或 fq_codel",
-                queue.id(),
-                queue.id()
-            ),
-        )
+        .hint(QDISC, unsupported_queue(queue))
+}
+
+/// The explanation for a qdisc the running kernel rejects (`host::sysctl`
+/// appends the raw `sysctl` line), suggesting the other common queues.
+pub fn unsupported_queue(queue: Queue) -> String {
+    let others: Vec<&str> = [Queue::Fq, Queue::FqCodel]
+        .into_iter()
+        .filter(|q| *q != queue)
+        .map(Queue::id)
+        .collect();
+    format!(
+        "当前内核不支持队列 {id}（sch_{id} 不可用）；已恢复原参数，请改用 {}",
+        others.join(" 或 "),
+        id = queue.id()
+    )
 }
 
 pub fn enable(ctx: &Ctx, queue: Queue) -> Result<()> {

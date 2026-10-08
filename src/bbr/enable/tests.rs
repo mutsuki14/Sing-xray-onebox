@@ -175,10 +175,38 @@ fn openvz_is_refused_before_anything_changes() {
 #[test]
 fn unsupported_qdisc_gets_a_clear_message() {
     let f = Fixture::new();
+    f.sysctl.state().write_error = "No such file or directory".into();
     f.sysctl.state().next_write = Some(WriteFault::FailAt(0));
     assert_eq!(
         enable(&f.ctx, Queue::FqPie).unwrap_err().to_string(),
-        "当前内核不支持队列 fq_pie（sch_fq_pie 不可用）；已恢复原参数，请改用 fq 或 fq_codel"
+        "当前内核不支持队列 fq_pie（sch_fq_pie 不可用）；已恢复原参数，请改用 fq 或 fq_codel（sysctl: setting key \"net.core.default_qdisc\": No such file or directory）"
+    );
+    f.assert_old_runtime();
+}
+
+#[test]
+fn the_suggestion_never_names_the_failed_queue() {
+    let f = Fixture::new();
+    f.sysctl.state().write_error = "No such file or directory".into();
+    f.sysctl.state().next_write = Some(WriteFault::FailAt(0));
+    let err = enable(&f.ctx, Queue::Fq).unwrap_err().to_string();
+    assert!(
+        err.starts_with("当前内核不支持队列 fq（sch_fq 不可用）；已恢复原参数，请改用 fq_codel（"),
+        "{err}"
+    );
+    assert!(unsupported_queue(Queue::FqCodel).ends_with("请改用 fq"));
+    assert!(unsupported_queue(Queue::Cake).ends_with("请改用 fq 或 fq_codel"));
+    f.assert_old_runtime();
+}
+
+#[test]
+fn a_read_only_proc_sys_is_not_blamed_on_the_qdisc() {
+    let f = Fixture::new();
+    f.sysctl.state().write_error = "Read-only file system".into();
+    f.sysctl.state().next_write = Some(WriteFault::FailAt(0));
+    assert_eq!(
+        enable(&f.ctx, Queue::Fq).unwrap_err().to_string(),
+        "sysctl 执行失败 (1): sysctl: setting key \"net.core.default_qdisc\": Read-only file system"
     );
     f.assert_old_runtime();
 }

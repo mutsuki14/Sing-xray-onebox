@@ -16,8 +16,10 @@
 //!    printed as warnings with the value to fix by hand.
 //!
 //! Changes from v2 (where this lived inside `bbr.rs`): generic over keys so
-//! other features can reuse it; a key-specific hint can replace the raw
-//! `sysctl` error (BBR uses it for qdiscs the kernel lacks, I-8.1#11);
+//! other features can reuse it; a key-specific hint can explain a value the
+//! kernel rejects (BBR uses it for qdiscs the kernel lacks, I-8.1#11) —
+//! only for that kernel answer (`ENOENT`/`EINVAL`), never for a read-only
+//! `/proc/sys` or missing permissions, and always with the raw line;
 //! values may contain spaces (multi-field keys such as `tcp_rmem`).
 
 use crate::ctx::Ctx;
@@ -67,9 +69,38 @@ pub struct SysctlTxn {
     /// The `sysctl.d` file to write; `None` changes runtime values only.
     pub file: Option<PathBuf>,
     pub messages: Messages,
-    /// `(key, message)`: when `sysctl -w` fails naming `key`, report
-    /// `message` instead of the raw error.
+    /// `(key, message)`: when `sysctl -w` reports that the kernel rejected
+    /// the value of `key` ([`UNSUPPORTED_VALUE`]), the error is `message`
+    /// followed by the raw `sysctl` line in parentheses.
     pub hints: Vec<(String, String)>,
+}
+
+/// errno texts with which the kernel refuses a value it does not support
+/// (an unknown qdisc is `ENOENT`, a malformed value `EINVAL`). Any other
+/// failure — `EROFS` for a read-only `/proc/sys` in a container, `EPERM`,
+/// `EACCES` — is not about the value and keeps the raw error.
+pub const UNSUPPORTED_VALUE: [&str; 2] = ["No such file or directory", "Invalid argument"];
+
+fn key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._-/".contains(c)
+}
+
+/// `line` names `key` as a whole word (procps quotes it with `"`, busybox
+/// with `'`).
+fn names_key(line: &str, key: &str) -> bool {
+    line.match_indices(key).any(|(i, _)| {
+        let before = line[..i].chars().next_back();
+        let after = line[i + key.len()..].chars().next();
+        !before.is_some_and(key_char) && !after.is_some_and(key_char)
+    })
+}
+
+/// The stderr line saying the kernel refused the value of `key`.
+fn rejected_value<'a>(stderr: &'a str, key: &str) -> Option<&'a str> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| names_key(line, key) && UNSUPPORTED_VALUE.iter().any(|e| line.contains(e)))
 }
 
 /// The current value of `key` (`sysctl -n`, trimmed).
@@ -215,9 +246,10 @@ impl SysctlTxn {
         if !out.ok() {
             // Only stderr names failing keys; stdout echoes the assignments
             // that succeeded (`net.core.default_qdisc = fq`).
-            let failed = |key: &str| out.stderr.contains(key);
-            if let Some((_, hint)) = self.hints.iter().find(|(key, _)| failed(key)) {
-                return Err(Error::msg(hint.clone()));
+            for (key, hint) in &self.hints {
+                if let Some(line) = rejected_value(&out.stderr, key) {
+                    return Err(Error::msg(format!("{hint}（{line}）")));
+                }
             }
             return Err(Error::Command {
                 program: "sysctl".into(),
