@@ -82,6 +82,20 @@ fn environment_policy() {
 }
 
 #[test]
+fn bare_names_resolve_through_safe_path_and_keep_argv0() {
+    // A useless PATH (as under cron) still finds system programs, exactly
+    // like `which`; argv[0] remains the bare name.
+    let out = run(&Cmd::new("cat")
+        .arg("/proc/self/cmdline")
+        .clear_env()
+        .env("PATH", "/nonexistent"));
+    assert!(out.ok(), "{}", out.stderr);
+    assert_eq!(out.stdout, "cat\0/proc/self/cmdline\0");
+    let missing = SystemExec.run(&Cmd::new("definitely-not-a-program-xyz").clear_env());
+    assert!(missing.is_err());
+}
+
+#[test]
 fn working_directory() {
     let dir = TempDir::new("exec-cwd").unwrap();
     let out = run(&sh("pwd -P").cwd(dir.path()));

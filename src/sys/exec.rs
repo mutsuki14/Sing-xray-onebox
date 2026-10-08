@@ -278,8 +278,31 @@ fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// The PATH the child will see: its own `PATH` entry, else ours unless the
+/// environment is cleared.
+fn child_path(cmd: &Cmd) -> std::ffi::OsString {
+    match cmd.env.iter().rev().find(|(k, _)| k == "PATH") {
+        Some((_, v)) => v.into(),
+        None if cmd.clear_env => std::ffi::OsString::new(),
+        None => std::env::var_os("PATH").unwrap_or_default(),
+    }
+}
+
 fn base_command(cmd: &Cmd) -> Command {
-    let mut command = Command::new(&cmd.program);
+    // Bare names are resolved like `which` (PATH, then SAFE_PATH) so a
+    // program that `which` reports as present can also be run under cron's
+    // minimal PATH. argv[0] stays the name the caller used.
+    let resolved = (!cmd.program.contains('/'))
+        .then(|| which_in(&cmd.program, &child_path(cmd)))
+        .flatten();
+    let mut command = match &resolved {
+        Some(path) => {
+            let mut c = Command::new(path);
+            c.arg0(&cmd.program);
+            c
+        }
+        None => Command::new(&cmd.program),
+    };
     command.args(&cmd.args);
     if cmd.clear_env {
         command.env_clear();
