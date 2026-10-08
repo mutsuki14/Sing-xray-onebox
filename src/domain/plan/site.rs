@@ -27,6 +27,9 @@ pub fn enable_site(
 }
 
 /// Turn the site off; REALITY goes back to the default external target.
+/// The site settings (title, template, theme, description, certificate
+/// method) go with it; a later `enable_site` starts from the defaults
+/// (change from v2, which kept the `SITE_*` keys; see the `plan` module).
 pub fn disable_site(cfg: &NodeConfig) -> Result<NodeConfig> {
     ensure!(cfg.site.is_some(), "网站未启用");
     let mut next = cfg.clone();

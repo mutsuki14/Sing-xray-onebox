@@ -16,6 +16,18 @@
 //! validated once as integer Mbps and switching away from `measured` clears
 //! stale bandwidth (#20, C-8.1 #1).
 //!
+//! Settings exist only while they are in effect (a deliberate change from
+//! v2, which kept `TLS_MODE`/`DOMAIN`/`ACME_METHOD` and the
+//! `REALITY_SITE_*`/`SITE_*` keys dormant and reused them): the proxy
+//! certificate is dropped with the last protocol that needs one, and the
+//! website with `disable_site` or the last REALITY inbound, so adding them
+//! back starts from the defaults (self-signed; `山间手记`, minimal/forest)
+//! unless the request says otherwise. `tls` and `site` are present iff in
+//! use (`NodeConfig::validate`), so a configuration never carries settings
+//! that look active but are not. Website content and its backups live on
+//! disk and are untouched; `vmess_host` is kept because it is only a
+//! client-side header.
+//!
 //! Contract with the apply engine: a custom proxy certificate's
 //! `ProxyTls::pinned` is provisional ([`PROVISIONAL_CUSTOM_PIN`]) until the
 //! prepare-certificates stage records the trust check of the deployed pair

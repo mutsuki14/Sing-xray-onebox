@@ -17,6 +17,22 @@ fn site() -> NodeConfig {
 }
 
 #[test]
+fn settings_do_not_outlive_the_site() {
+    // Documented change from v2: disabled sites keep no dormant settings.
+    let mut custom = site_title(&site(), "我的站").unwrap();
+    custom = site_theme(&custom, SiteTheme::Ocean).unwrap();
+    let off = disable_site(&custom).unwrap();
+    assert!(off.site.is_none());
+    let on = enable_site(&off, "www.example.com", WebCert::Http01, &env()).unwrap();
+    let s = on.site.unwrap();
+    assert_eq!((s.title.as_str(), s.theme), ("山间手记", SiteTheme::Forest));
+    // Re-targeting an active site keeps them.
+    let moved = enable_site(&custom, "new.example.com", WebCert::Http01, &env()).unwrap();
+    let s = moved.site.unwrap();
+    assert_eq!((s.title.as_str(), s.theme), ("我的站", SiteTheme::Ocean));
+}
+
+#[test]
 fn enable_and_disable() {
     let trojan = config(&[(Trojan, 443, SB)]);
     let e = enable_site(&trojan, "www.example.com", WebCert::Http01, &env()).unwrap_err();

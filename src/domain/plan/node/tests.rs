@@ -402,6 +402,24 @@ fn remove_rules() {
 }
 
 #[test]
+fn certificate_does_not_outlive_its_protocols() {
+    // Documented change from v2: no dormant TLS_MODE/DOMAIN.
+    let acme = config(&[(VlessReality, 443, SB), (Trojan, 8443, SB)]);
+    let acme = set_proxy_cert(
+        &acme,
+        &ProxyCertChoice::Acme {
+            domain: "proxy.example.com".into(),
+            method: AcmeMethod::Cloudflare,
+        },
+    )
+    .unwrap();
+    let removed = remove(&acme, Trojan).unwrap();
+    assert!(removed.tls.is_none());
+    let readded = add_default(&removed, Trojan).unwrap();
+    assert_eq!(readded.tls, Some(crate::domain::fixtures::self_signed()));
+}
+
+#[test]
 fn port_changes() {
     let p1 = preset1();
     let next = set_port(&p1, Tuic, 9443, &env()).unwrap();
