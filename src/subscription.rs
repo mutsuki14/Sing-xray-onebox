@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{Read, Write},
-    net::TcpListener,
+    net::{IpAddr, TcpListener},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -92,13 +92,22 @@ fn load_version(ctx: &Context) -> Result<(Settings, String)> {
     Ok((s, util::sha256(&bytes)))
 }
 fn validate_settings(s: &Settings) -> Result<()> {
-    if !matches!(s.mode.as_str(), "site" | "standalone") {
+    if !matches!(s.mode.as_str(), "site" | "standalone" | "ip") {
         return Err("订阅托管模式无效".into());
     }
-    if s.enabled && (!util::valid_domain(&s.domain) || s.port == 0) {
-        return Err("订阅域名或 HTTPS 端口无效".into());
+    if s.enabled {
+        if s.mode == "ip" {
+            parse_address(&s.domain)?;
+        } else if !util::valid_domain(&s.domain) {
+            return Err("订阅域名无效".into());
+        }
+        if s.port == 0 {
+            return Err("订阅端口无效".into());
+        }
     }
-    if !matches!(s.method.as_str(), "cf" | "http" | "custom") {
+    if (s.mode == "ip" && s.method != "none")
+        || (s.mode != "ip" && !matches!(s.method.as_str(), "cf" | "http" | "custom"))
+    {
         return Err("订阅证书方式无效".into());
     }
     if s.devices.len() > 256 {
@@ -114,6 +123,25 @@ fn validate_settings(s: &Settings) -> Result<()> {
         }
     }
     Ok(())
+}
+fn parse_address(value: &str) -> Result<IpAddr> {
+    let ip = value
+        .parse::<IpAddr>()
+        .map_err(|_| "订阅地址必须是 IPv4 或 IPv6 字面地址，不能含域名、端口、路径或 zone ID")?;
+    let effective = match ip {
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip.into()),
+        ip => ip,
+    };
+    if effective.is_unspecified() || effective.is_multicast() {
+        return Err("订阅地址不能是未指定地址或组播地址".into());
+    }
+    Ok(effective)
+}
+/// Reuse the configured server address without DNS or public-IP lookups.
+pub fn default_address(state: &State) -> Option<String> {
+    ["SERVER_ADDR", "SERVER_IPV4", "SERVER_IPV6"]
+        .iter()
+        .find_map(|key| parse_address(state.get(key)).ok().map(|ip| ip.to_string()))
 }
 fn save(ctx: &Context, s: &Settings) -> Result<()> {
     validate_settings(s)?;
@@ -163,7 +191,7 @@ pub fn prepare(ctx: &Context, state: &mut State) -> Result<()> {
         validate_site_endpoint(&settings, state)?;
         settings
     };
-    if settings.enabled && settings.mode == "standalone" {
+    if settings.enabled && matches!(settings.mode.as_str(), "standalone" | "ip") {
         validate_standalone_ports(ctx, &settings, state)?;
     }
     Ok(())
@@ -211,29 +239,53 @@ fn new_device(s: &mut Settings, name: &str) -> Result<(String, String)> {
     });
     Ok((id, token))
 }
+fn endpoint(s: &Settings) -> String {
+    let (scheme, default_port) = if s.mode == "ip" {
+        ("http", 80)
+    } else {
+        ("https", 443)
+    };
+    let host = if s.mode == "ip" {
+        match parse_address(&s.domain) {
+            Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
+            Ok(IpAddr::V4(ip)) => ip.to_string(),
+            Err(_) => s.domain.clone(),
+        }
+    } else {
+        s.domain.clone()
+    };
+    let suffix = if s.port == default_port {
+        String::new()
+    } else {
+        format!(":{}", s.port)
+    };
+    format!("{scheme}://{host}{suffix}")
+}
+fn warn_plaintext(s: &Settings) {
+    if s.mode == "ip" {
+        println!("IP 订阅使用 HTTP 明文传输，链路上的第三方可能读取订阅令牌和节点凭据；需要加密时可选择域名 HTTPS 模式。");
+    }
+}
 fn urls(ctx: &Context, s: &Settings, token: &str) {
     let available = fs::read(published_path(ctx))
         .ok()
         .and_then(|b| serde_json::from_slice::<Published>(&b).ok())
         .map(|p| p.formats)
         .unwrap_or_default();
-    let suffix = if s.port == 443 {
-        String::new()
-    } else {
-        format!(":{}", s.port)
-    };
+    let endpoint = endpoint(s);
     for f in FORMATS {
         if available.contains_key(f) {
-            println!("{f}: https://{}{suffix}/sub/{token}/{f}", s.domain);
+            println!("{f}: {endpoint}/sub/{token}/{f}");
         }
     }
     if available.contains_key("singbox") {
-        let url = format!("https://{}{suffix}/sub/{token}/singbox", s.domain);
+        let url = format!("{endpoint}/sub/{token}/singbox");
         println!(
             "sing-box 导入: sing-box://import-remote-profile?url={}#onebox",
             util::url_encode(&url)
         );
     }
+    warn_plaintext(s);
     println!("令牌仅显示一次，请保存；设备撤销只阻止后续下载，不会收回已获取的代理凭据。");
 }
 
@@ -272,16 +324,27 @@ fn acme_root(ctx: &Context) -> PathBuf {
         .site_root
         .with_file_name("onebox-subscription-acme")
 }
+fn validate_listener_family(s: &Settings, ipv6_available: bool) -> Result<()> {
+    if s.mode == "ip" && parse_address(&s.domain)?.is_ipv6() && !ipv6_available {
+        return Err(
+            "订阅地址为 IPv6，但当前系统无法监听 IPv6；请启用 IPv6 或使用 IPv4 地址".into(),
+        );
+    }
+    Ok(())
+}
 fn web_config(ctx: &Context, s: &Settings, bootstrap: bool) -> Result<String> {
+    validate_settings(s)?;
+    let ipv6_available = site::ipv6_available();
+    validate_listener_family(s, ipv6_available)?;
     let d = dir(ctx);
     let tls = d.join("tls");
     let user = site::worker_identity(ctx)?;
-    let listen6 = if site::ipv6_available() {
+    let listen6 = if ipv6_available {
         "listen [::]:80;".to_string()
     } else {
         String::new()
     };
-    let https6 = if site::ipv6_available() {
+    let https6 = if ipv6_available {
         format!("listen [::]:{} ssl http2;", s.port)
     } else {
         String::new()
@@ -290,10 +353,21 @@ fn web_config(ctx: &Context, s: &Settings, bootstrap: bool) -> Result<String> {
     // only inside /sub/ would still expose a malformed bearer URL globally.
     let temporary = site::nginx_runtime(ctx, "subscription")?;
     let mut config=format!("user {user};\nworker_processes 1;\npid {};\nerror_log /dev/null crit;\nevents {{ worker_connections 256; }}\nhttp {{ {temporary}\naccess_log off; server_tokens off; default_type text/plain; client_max_body_size 1k; keepalive_timeout 10;\n",site::quote_path(&d.join("nginx.pid"))?);
-    if s.method == "http" {
+    if s.mode == "ip" {
+        let http6 = if ipv6_available {
+            format!("listen [::]:{};", s.port)
+        } else {
+            String::new()
+        };
+        config.push_str(&format!(
+            "server {{ listen {}; {http6} server_name _;\n{}\nlocation / {{ return 404; }}\n}}\n",
+            s.port,
+            location(ctx)?
+        ));
+    } else if s.method == "http" {
         config.push_str(&format!("server {{ listen 80; {listen6} server_name {};\nlocation ^~ /.well-known/acme-challenge/ {{ root {}; try_files $uri =404; }}\nlocation / {{ return 404; }}\n}}\n",s.domain,site::quote_path(&acme_root(ctx))?));
     }
-    if !bootstrap {
+    if s.mode != "ip" && !bootstrap {
         config.push_str(&format!("server {{ listen {} ssl http2; {https6} server_name {};\nssl_certificate {}; ssl_certificate_key {}; ssl_protocols TLSv1.2 TLSv1.3;\n{}\nlocation / {{ return 404; }}\n}}\n",s.port,s.domain,site::quote_path(&tls.join("cert.pem"))?,site::quote_path(&tls.join("key.pem"))?,location(ctx)?));
     }
     config.push_str("}\n");
@@ -336,32 +410,44 @@ fn write_web(ctx: &Context, s: &Settings, bootstrap: bool) -> Result<()> {
     )
 }
 fn validate_standalone_ports(ctx: &Context, s: &Settings, state: &State) -> Result<()> {
+    let acme_http = s.mode == "standalone" && s.method == "http";
+    if acme_http && s.port == 80 {
+        return Err("HTTPS 订阅端口不能与 HTTP-01 验证端口 80 相同".into());
+    }
     for p in state.protocols() {
-        if p.network() != "udp"
-            && (state.port(p) == s.port || (s.method == "http" && state.port(p) == 80))
-        {
-            return Err("订阅 HTTPS/验证端口与代理端口冲突".into());
+        if p.network() != "udp" && (state.port(p) == s.port || (acme_http && state.port(p) == 80)) {
+            return Err("订阅或验证端口与代理端口冲突".into());
         }
     }
     if state.site_enabled()
-        && (s.port == state.number("REALITY_SITE_PORT", 8443)
+        && (s.port == 80
+            || s.port == state.number("REALITY_SITE_PORT", 8443)
             || s.port == 443 && state.flag("REALITY_SITE_HTTPS")
-            || s.method == "http")
+            || acme_http)
     {
         return Err("订阅端口与自建站冲突：请复用网站，或为独立站选择其他端口和 DNS 验证".into());
     }
-    if state.number("REALITY_GUARD_PORT", 0) == s.port {
+    if state.number("REALITY_GUARD_PORT", 0) == s.port
+        || acme_http && state.number("REALITY_GUARD_PORT", 0) == 80
+    {
         return Err("订阅端口与 REALITY 防偷跑端口冲突".into());
     }
     for (start, end, network) in crate::frp::reserved_ports(ctx)? {
         if network != "udp"
-            && ((start..=end).contains(&s.port)
-                || s.method == "http" && (start..=end).contains(&80))
+            && ((start..=end).contains(&s.port) || acme_http && (start..=end).contains(&80))
         {
             return Err("订阅端口已保留给 FRP".into());
         }
     }
     Ok(())
+}
+fn prepare_ip(ctx: &Context, s: &Settings, state: &State) -> Result<()> {
+    validate_standalone_ports(ctx, s, state)?;
+    site::cron(ctx, "subscription", false)?;
+    write_web(ctx, s, false)?;
+    platform::service(ctx, WEB_SERVICE, "restart")?;
+    platform::service(ctx, WEB_SERVICE, "enable")?;
+    platform::wait_running(ctx, WEB_SERVICE)
 }
 fn prepare_standalone(ctx: &Context, s: &Settings, state: &State) -> Result<()> {
     validate_standalone_ports(ctx, s, state)?;
@@ -453,6 +539,7 @@ pub fn publish(ctx: &Context, state: &State) -> Result<()> {
     let s = load(ctx)?;
     if !s.enabled {
         if settings_path(ctx).exists() {
+            site::cron(ctx, "subscription", false)?;
             for name in [WEB_SERVICE, SERVICE] {
                 let _ = platform::service(ctx, name, "stop");
                 let _ = platform::service(ctx, name, "disable");
@@ -478,11 +565,14 @@ pub fn publish(ctx: &Context, state: &State) -> Result<()> {
         }
         platform::service(ctx, SERVICE, "enable")?;
         platform::wait_running(ctx, SERVICE)?;
-        if s.mode == "standalone" {
-            prepare_standalone(ctx, &s, state)?;
-        } else {
-            let _ = platform::service(ctx, WEB_SERVICE, "stop");
-            let _ = platform::service(ctx, WEB_SERVICE, "disable");
+        match s.mode.as_str() {
+            "standalone" => prepare_standalone(ctx, &s, state)?,
+            "ip" => prepare_ip(ctx, &s, state)?,
+            _ => {
+                site::cron(ctx, "subscription", false)?;
+                let _ = platform::service(ctx, WEB_SERVICE, "stop");
+                let _ = platform::service(ctx, WEB_SERVICE, "disable");
+            }
         }
         Ok(())
     })();
@@ -635,6 +725,99 @@ fn serve(ctx: &Context) -> Result<()> {
 fn option(args: &[String], key: &str) -> Option<String> {
     args.windows(2).find(|a| a[0] == key).map(|a| a[1].clone())
 }
+fn configure_enable(s: &mut Settings, state: &State, args: &[String]) -> Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut i = usize::from(args.first().is_some_and(|arg| arg == "enable"));
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if matches!(flag, "-y" | "--yes") {
+            i += 1;
+            continue;
+        }
+        if !matches!(
+            flag,
+            "--mode"
+                | "--address"
+                | "--ip"
+                | "--domain"
+                | "--port"
+                | "--tls"
+                | "--cert"
+                | "--key"
+                | "--name"
+        ) {
+            return Err(format!("未知订阅参数: {flag}").into());
+        }
+        let key = if flag == "--ip" { "--address" } else { flag };
+        if !seen.insert(key) {
+            return Err(format!("订阅参数重复: {key}").into());
+        }
+        if !args
+            .get(i + 1)
+            .is_some_and(|value| !value.is_empty() && !value.starts_with("--"))
+        {
+            return Err(format!("订阅参数缺少值: {flag}").into());
+        }
+        i += 2;
+    }
+    s.enabled = true;
+    s.mode = option(args, "--mode").unwrap_or_else(|| {
+        if seen.contains("--address") {
+            "ip".into()
+        } else if seen.contains("--domain") {
+            "standalone".into()
+        } else if state.site_enabled() {
+            "site".into()
+        } else {
+            "ip".into()
+        }
+    });
+    if s.mode != "ip" && seen.contains("--address") {
+        return Err("--address/--ip 仅用于 --mode ip".into());
+    }
+    match s.mode.as_str() {
+        "site" => {
+            if !state.site_enabled() {
+                return Err("没有可复用的自建站，请使用 --mode ip --address IP，或 --mode standalone --domain 域名 --tls cf|http|custom".into());
+            }
+            s.domain = state.get("REALITY_SITE_DOMAIN").into();
+            s.port = site::public_port(state);
+            s.method = "cf".into();
+            s.custom_cert = None;
+            s.custom_key = None;
+        }
+        "ip" => {
+            if ["--domain", "--tls", "--cert", "--key"]
+                .iter()
+                .any(|flag| args.iter().any(|arg| arg == flag))
+            {
+                return Err("IP 订阅不使用域名或证书，请移除 --domain/--tls/--cert/--key，或选择 --mode standalone".into());
+            }
+            let address = option(args, "--address")
+                .or_else(|| option(args, "--ip"))
+                .or_else(|| default_address(state))
+                .ok_or("没有可用的服务器 IP，请用 --address 指定 IPv4 或 IPv6 地址")?;
+            s.domain = parse_address(&address)?.to_string();
+            s.port = option(args, "--port")
+                .unwrap_or_else(|| "8448".into())
+                .parse()?;
+            s.method = "none".into();
+            s.custom_cert = None;
+            s.custom_key = None;
+        }
+        "standalone" => {
+            s.domain = option(args, "--domain").ok_or("独立 HTTPS 订阅需要 --domain")?;
+            s.port = option(args, "--port")
+                .unwrap_or_else(|| "8448".into())
+                .parse()?;
+            s.method = option(args, "--tls").unwrap_or_else(|| "cf".into());
+            s.custom_cert = option(args, "--cert").map(PathBuf::from);
+            s.custom_key = option(args, "--key").map(PathBuf::from);
+        }
+        _ => return Err("订阅托管模式无效，请选择 ip/site/standalone".into()),
+    }
+    validate_settings(s)
+}
 fn apply_settings(ctx: &Context, s: &Settings, expected: &str, mut state: State) -> Result<()> {
     validate_settings(s)?;
     state.set("SUBSCRIPTION_SETTINGS_PENDING", serde_json::to_string(s)?);
@@ -675,12 +858,12 @@ pub fn command(ctx: &Context, args: &[String]) -> Result<()> {
     match action {
         "info" | "status" | "list" => {
             println!(
-                "订阅: {}；托管: {}；HTTPS: {}:{}",
+                "订阅: {}；托管: {}；地址: {}",
                 if s.enabled { "启用" } else { "关闭" },
                 s.mode,
-                s.domain,
-                s.port
+                endpoint(&s)
             );
+            warn_plaintext(&s);
             for d in &s.devices {
                 println!("{}  {}  创建于 {}", d.id, d.name, d.created);
             }
@@ -689,29 +872,9 @@ pub fn command(ctx: &Context, args: &[String]) -> Result<()> {
         }
         "enable" => {
             let state = crate::state::load(ctx)?;
-            s.enabled = true;
-            s.mode = option(args, "--mode").unwrap_or_else(|| {
-                if state.site_enabled() {
-                    "site".into()
-                } else {
-                    "standalone".into()
-                }
-            });
-            if s.mode == "site" {
-                if !state.site_enabled() {
-                    return Err("没有可复用的自建站，请使用 --mode standalone --domain 域名 --port 端口 --tls cf|http|custom".into());
-                }
-                s.domain = state.get("REALITY_SITE_DOMAIN").into();
-                s.port = site::public_port(&state);
-            } else {
-                s.domain = option(args, "--domain").ok_or("独立订阅需要 --domain")?;
-                s.port = option(args, "--port")
-                    .unwrap_or_else(|| "8448".into())
-                    .parse()?;
-                s.method = option(args, "--tls").unwrap_or_else(|| "cf".into());
-                s.custom_cert = option(args, "--cert").map(PathBuf::from);
-                s.custom_key = option(args, "--key").map(PathBuf::from);
-            }
+            let old_endpoint = endpoint(&s);
+            configure_enable(&mut s, &state, args)?;
+            let endpoint_changed = endpoint(&s) != old_endpoint;
             let new = if s.devices.is_empty() {
                 Some(new_device(
                     &mut s,
@@ -725,7 +888,12 @@ pub fn command(ctx: &Context, args: &[String]) -> Result<()> {
                 println!("设备 ID: {id}");
                 urls(ctx, &s, &token);
             } else {
-                println!("订阅已启用；已有设备 URL 保持不变。");
+                if endpoint_changed {
+                    println!("订阅已启用；地址、端口或传输协议已改变，请把客户端已有订阅 URL 的入口改为 {}，保留 /sub/ 后的令牌和格式；若已遗失旧 URL，可执行 subscription reset 设备ID 获取新链接。",endpoint(&s));
+                } else {
+                    println!("订阅已启用；已有设备 URL 保持不变。");
+                }
+                warn_plaintext(&s);
             }
             Ok(())
         }
@@ -776,7 +944,10 @@ pub fn command(ctx: &Context, args: &[String]) -> Result<()> {
             if !s.enabled {
                 return Ok(());
             }
-            if s.mode == "site" {
+            if s.mode == "ip" {
+                println!("IP 订阅使用 HTTP，无需续期证书。");
+                Ok(())
+            } else if s.mode == "site" {
                 site::command(ctx, &["renew".into()])
             } else {
                 if args.iter().any(|a| a == "--cron")
@@ -798,6 +969,227 @@ pub fn command(ctx: &Context, args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn ip_settings(address: &str, port: u16) -> Settings {
+        Settings {
+            enabled: true,
+            mode: "ip".into(),
+            domain: address.into(),
+            port,
+            method: "none".into(),
+            ..Settings::default()
+        }
+    }
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).into()).collect()
+    }
+    #[test]
+    fn ip_literals_reject_non_addresses_and_non_unicast_targets() {
+        for ip in [
+            "127.0.0.1",
+            "192.168.1.1",
+            "192.0.2.5",
+            "::1",
+            "2001:db8::7",
+            "::ffff:192.0.2.5",
+        ] {
+            assert!(validate_settings(&ip_settings(ip, 8448)).is_ok(), "{ip}");
+        }
+        for invalid in [
+            "",
+            "example.com",
+            "http://192.0.2.5",
+            "192.0.2.5:80",
+            "192.0.2.5/x",
+            "192.0.2.5\n",
+            "[::1]",
+            "fe80::1%eth0",
+            "0.0.0.0",
+            "::",
+            "224.0.0.1",
+            "ff02::1",
+            "::ffff:0.0.0.0",
+            "::ffff:224.0.0.1",
+        ] {
+            assert!(
+                validate_settings(&ip_settings(invalid, 8448)).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(validate_settings(&ip_settings("192.0.2.5", 0)).is_err());
+        let mut s = ip_settings("192.0.2.5", 8448);
+        s.method = "http".into();
+        assert!(validate_settings(&s).is_err());
+    }
+    #[test]
+    fn ip_endpoint_brackets_ipv6_and_uses_scheme_specific_default_port() {
+        assert_eq!(endpoint(&ip_settings("192.0.2.5", 80)), "http://192.0.2.5");
+        assert_eq!(
+            endpoint(&ip_settings("192.0.2.5", 443)),
+            "http://192.0.2.5:443"
+        );
+        assert_eq!(
+            endpoint(&ip_settings("2001:db8::7", 8448)),
+            "http://[2001:db8::7]:8448"
+        );
+        assert_eq!(endpoint(&ip_settings("::1", 80)), "http://[::1]");
+        assert_eq!(
+            endpoint(&ip_settings("::ffff:192.0.2.5", 80)),
+            "http://192.0.2.5"
+        );
+        let (mut s, _) = fixture();
+        assert_eq!(endpoint(&s), "https://site.example.com");
+        s.port = 80;
+        assert_eq!(endpoint(&s), "https://site.example.com:80");
+    }
+    #[test]
+    fn ipv6_endpoint_requires_an_available_ipv6_listener() {
+        assert!(validate_listener_family(&ip_settings("::1", 8448), false).is_err());
+        assert!(validate_listener_family(&ip_settings("::1", 8448), true).is_ok());
+        assert!(validate_listener_family(&ip_settings("192.0.2.5", 8448), false).is_ok());
+        assert!(validate_listener_family(&ip_settings("::ffff:192.0.2.5", 8448), false).is_ok());
+    }
+    #[test]
+    fn ip_defaults_reuse_valid_configured_addresses_without_dns() {
+        let mut state = State::default();
+        state.set("SERVER_ADDR", "proxy.example.com");
+        state.set("SERVER_IPV4", "224.0.0.1");
+        state.set("SERVER_IPV6", "2001:0db8::7");
+        assert_eq!(default_address(&state).as_deref(), Some("2001:db8::7"));
+        let mut s = Settings::default();
+        configure_enable(&mut s, &state, &args(&["enable"])).unwrap();
+        assert_eq!(s.mode, "ip");
+        assert_eq!(s.method, "none");
+        assert_eq!(s.port, 8448);
+        state.set("SERVER_ADDR", "192.0.2.5");
+        assert_eq!(default_address(&state).as_deref(), Some("192.0.2.5"));
+        state.set("REALITY_SITE_ENABLED", 1);
+        state.set("REALITY_SITE_DOMAIN", "site.example.com");
+        state.set("PROTOCOLS", "anytls-reality");
+        configure_enable(&mut s, &state, &args(&["enable"])).unwrap();
+        assert_eq!(s.mode, "site");
+        configure_enable(&mut s, &state, &args(&["enable", "--address", "::1"])).unwrap();
+        assert_eq!(s.mode, "ip");
+        assert_eq!(s.domain, "::1");
+        configure_enable(
+            &mut s,
+            &state,
+            &args(&["enable", "--domain", "sub.example.com"]),
+        )
+        .unwrap();
+        assert_eq!(s.mode, "standalone");
+    }
+    #[test]
+    fn ip_mode_migration_preserves_devices_and_clears_certificate_options() {
+        let (mut s, token) = fixture();
+        let old_device = serde_json::to_string(&s.devices).unwrap();
+        let old_endpoint = endpoint(&s);
+        s.custom_cert = Some("old.pem".into());
+        s.custom_key = Some("old.key".into());
+        configure_enable(
+            &mut s,
+            &State::default(),
+            &args(&["enable", "--mode", "ip", "--ip", "192.0.2.5"]),
+        )
+        .unwrap();
+        assert_ne!(old_endpoint, endpoint(&s));
+        assert_eq!(serde_json::to_string(&s.devices).unwrap(), old_device);
+        assert!(s.custom_cert.is_none() && s.custom_key.is_none());
+        assert_eq!(
+            authorize(&s, &format!("/sub/{token}/singbox")),
+            Some("singbox".into())
+        );
+        let restored: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(validate_settings(&restored).is_ok());
+        configure_enable(
+            &mut s,
+            &State::default(),
+            &args(&[
+                "enable",
+                "--mode",
+                "standalone",
+                "--domain",
+                "sub.example.com",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(s.method, "cf");
+        assert_eq!(serde_json::to_string(&s.devices).unwrap(), old_device);
+    }
+    #[test]
+    fn ip_enable_rejects_ambiguous_missing_and_incompatible_options() {
+        let mut state = State::default();
+        state.set("SERVER_ADDR", "192.0.2.5");
+        for values in [
+            vec!["enable", "--address"],
+            vec!["enable", "--address", "--port", "80"],
+            vec!["enable", "--adress", "192.0.2.6"],
+            vec!["enable", "--address", "192.0.2.5", "--ip", "192.0.2.6"],
+            vec!["enable", "--mode", "ip", "--tls", "cf"],
+            vec!["enable", "--mode", "standalone", "--address", "192.0.2.5"],
+            vec!["enable", "--mode", "unknown"],
+        ] {
+            assert!(
+                configure_enable(&mut Settings::default(), &state, &args(&values)).is_err(),
+                "{values:?}"
+            );
+        }
+    }
+    #[test]
+    fn ip_http_port_conflicts_cover_site_proxy_and_guard() {
+        let root = std::env::temp_dir().join(format!(
+            "onebox-sub-ip-ports-{}",
+            util::random_hex(8).unwrap()
+        ));
+        let ctx = Context {
+            paths: crate::context::Paths::isolated(&root),
+            ..Context::default()
+        };
+        let mut state = State::default();
+        let mut s = ip_settings("192.0.2.5", 80);
+        assert!(validate_standalone_ports(&ctx, &s, &state).is_ok());
+        state.set("REALITY_SITE_ENABLED", 1);
+        state.set("PROTOCOLS", "anytls-reality");
+        state.set_port(crate::model::Protocol::AnytlsReality, 9443);
+        assert!(validate_standalone_ports(&ctx, &s, &state).is_err());
+        s.port = 8448;
+        assert!(validate_standalone_ports(&ctx, &s, &state).is_ok());
+        state.set("REALITY_GUARD_PORT", 8448);
+        assert!(validate_standalone_ports(&ctx, &s, &state).is_err());
+        state.set("REALITY_GUARD_PORT", 0);
+        state.set("PROTOCOLS", "anytls-reality");
+        state.set_port(crate::model::Protocol::AnytlsReality, 8448);
+        assert!(validate_standalone_ports(&ctx, &s, &state).is_err());
+        state.set("PROTOCOLS", "hysteria2");
+        state.set_port(crate::model::Protocol::Hysteria2, 8448);
+        assert!(validate_standalone_ports(&ctx, &s, &state).is_ok());
+    }
+    #[test]
+    fn ip_renewal_never_calls_certificate_or_external_commands() {
+        struct NoCommands;
+        impl crate::context::Runner for NoCommands {
+            fn output(&self, program: &str, _: &[String]) -> Result<crate::context::CommandOutput> {
+                panic!("IP renewal unexpectedly called {program}")
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "onebox-sub-ip-renew-{}",
+            util::random_hex(8).unwrap()
+        ));
+        let ctx = Context {
+            paths: crate::context::Paths::isolated(&root),
+            runner: Arc::new(NoCommands),
+            ..Context::default()
+        };
+        save(&ctx, &ip_settings("192.0.2.5", 8448)).unwrap();
+        command(&ctx, &args(&["renew"])).unwrap();
+        command(&ctx, &args(&["renew", "--cron"])).unwrap();
+        let mut state = State::default();
+        state.set("CERT_RENEW_SUBSCRIPTION", 1);
+        prepare_certificates(&ctx, &mut state).unwrap();
+        assert!(state.get("CERT_RENEW_SUBSCRIPTION").is_empty());
+        assert!(!dir(&ctx).join("tls").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
     fn fixture() -> (Settings, String) {
         let mut s = Settings {
             enabled: true,

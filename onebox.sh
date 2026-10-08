@@ -2,7 +2,7 @@
 # Sing-Xray-Onebox: thin Linux launcher; all management logic lives in Rust.
 set -u
 umask 077
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.1"
 readonly ONEBOX_REPOSITORY="mutsuki14/Sing-xray-onebox"
 
 fail() { printf 'onebox: %s\n' "$*" >&2; exit 1; }

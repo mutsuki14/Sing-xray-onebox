@@ -773,8 +773,17 @@ fn client_protocols(s: &State, format: &str) -> Result<Vec<Protocol>> {
 pub(super) fn direct_domains(s: &State) -> Vec<String> {
     [s.get("SUBSCRIPTION_DOMAIN"), s.get("REALITY_SITE_DOMAIN")]
         .into_iter()
-        .filter(|d| util::valid_domain(d))
+        .filter(|d| d.parse::<IpAddr>().is_err() && util::valid_domain(d))
         .map(|d| d.to_lowercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+pub(super) fn direct_ip_cidrs(s: &State) -> Vec<String> {
+    [s.get("SUBSCRIPTION_DOMAIN"), s.get("REALITY_SITE_DOMAIN")]
+        .into_iter()
+        .filter_map(|address| address.parse::<IpAddr>().ok())
+        .map(|ip| format!("{ip}/{}", if ip.is_ipv4() { 32 } else { 128 }))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -823,6 +832,13 @@ fn sb_client(ctx: &Context, s: &State, tun: bool) -> Result<Value> {
             .unwrap()
             .insert(2, json!({"domain":domains,"outbound":"direct"}));
     }
+    let ips = direct_ip_cidrs(s);
+    if !ips.is_empty() {
+        config["route"]["rules"]
+            .as_array_mut()
+            .unwrap()
+            .insert(2, json!({"ip_cidr":ips,"outbound":"direct"}));
+    }
     if s.get("CLASH_SECRET").is_empty() {
         config["experimental"]
             .as_object_mut()
@@ -866,6 +882,13 @@ fn xr_client(ctx: &Context, s: &State) -> Result<Value> {
             0,
             json!({"type":"field","domain":domains,"outboundTag":"direct"}),
         );
+    }
+    let ips = direct_ip_cidrs(s);
+    if !ips.is_empty() {
+        config["routing"]["rules"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"type":"field","ip":ips,"outboundTag":"direct"}));
     }
     Ok(config)
 }
@@ -1196,6 +1219,42 @@ mod tests {
             .unwrap()
             .contains(&json!("full:updates.example.com")));
         assert!(sb["experimental"].get("clash_api").is_none());
+    }
+    #[test]
+    fn ip_subscription_refresh_bypasses_proxy_without_domain_rules() {
+        let (ctx, mut s, _) = fixture(&[Protocol::Trojan]);
+        s.set("REALITY_SITE_DOMAIN", "site.example.com");
+        for (address, cidr) in [
+            ("203.0.113.42", "203.0.113.42/32"),
+            ("2001:db8:0:0::42", "2001:db8::42/128"),
+        ] {
+            s.set("SUBSCRIPTION_DOMAIN", address);
+            for tun in [false, true] {
+                let sb = sb_client(&ctx, &s, tun).unwrap();
+                let rules = sb["route"]["rules"].as_array().unwrap();
+                assert_eq!(rules[2], json!({"ip_cidr":[cidr],"outbound":"direct"}));
+                assert_eq!(rules[3]["domain"], json!(["site.example.com"]));
+                let global = rules
+                    .iter()
+                    .position(|rule| rule["clash_mode"] == "Global")
+                    .unwrap();
+                assert!(global > 2, "IP refresh must bypass global proxy mode");
+                assert_eq!(sb["dns"]["rules"][0]["domain"], json!(["site.example.com"]));
+            }
+            let xr = xr_client(&ctx, &s).unwrap();
+            assert_eq!(
+                xr["routing"]["rules"][0],
+                json!({"type":"field","ip":[cidr],"outboundTag":"direct"})
+            );
+            assert_eq!(
+                xr["routing"]["rules"][1]["domain"],
+                json!(["full:site.example.com"])
+            );
+            assert_eq!(
+                xr["dns"]["servers"][0]["domains"],
+                json!(["full:site.example.com"])
+            );
+        }
     }
     #[test]
     fn pinned_certificate_exports_cannot_leak_concatenated_private_key() {
