@@ -238,3 +238,52 @@ fn parse_enforces_size_and_json() {
     assert_eq!(b.entries[0].reality.as_ref().unwrap().reference_port, 0);
     b.validate().unwrap();
 }
+
+#[test]
+fn load_bounds_the_read_and_keeps_the_v2_messages() {
+    let dir = crate::sys::fs::TempDir::new("probe-load").unwrap();
+    let path = dir.join("probe.json");
+    let b = bundle(&spec_with(&[(Trojan, 443, XR), (Tuic, 8443, SB)]), false).unwrap();
+    std::fs::write(&path, b.to_json().unwrap()).unwrap();
+    assert_eq!(ProbeBundle::load(&path).unwrap(), b);
+    for size in [MAX_BYTES + 1, 64 * MAX_BYTES] {
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(size as u64).unwrap();
+        let err = ProbeBundle::load(&path).unwrap_err().to_string();
+        assert_eq!(err, "探测配置超过 2 MiB", "{size}");
+    }
+    std::fs::write(&path, vec![b' '; MAX_BYTES]).unwrap();
+    let err = ProbeBundle::load(&path).unwrap_err().to_string();
+    assert_eq!(err, "探测配置不是有效 JSON");
+    let link = dir.join("link.json");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    let err = ProbeBundle::load(&link).unwrap_err().to_string();
+    assert_ne!(err, "探测配置超过 2 MiB");
+    assert!(ProbeBundle::load(&dir.join("missing.json")).is_err());
+    assert!(ProbeBundle::load(dir.path()).is_err());
+}
+
+#[test]
+fn merge_prefixes_ids_per_input_and_validates() {
+    let one = bundle(&spec_with(&[(Trojan, 443, XR), (Tuic, 8443, SB)]), false).unwrap();
+    let two = bundle(&spec_with(&[(Trojan, 443, SB)]), false).unwrap();
+    let merged = ProbeBundle::merge(&[one.clone(), two.clone()]).unwrap();
+    let ids: Vec<&str> = merged.entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["n1-trojan", "n1-tuic", "n2-trojan"]);
+    assert_eq!(merged.schema, SCHEMA);
+    assert_eq!(merged.entries[2].outbounds, two.entries[0].outbounds);
+    assert_eq!(merged.entries[1].tag, one.entries[1].tag);
+    // A merged bundle merges again (ids nest like v2's).
+    let again = ProbeBundle::merge(&[merged]).unwrap();
+    assert_eq!(again.entries[0].id, "n1-n1-trojan");
+    let err = |inputs: &[ProbeBundle]| ProbeBundle::merge(inputs).unwrap_err().to_string();
+    assert_eq!(err(&[]), "配置需要 1 至 32 个入口");
+    let all = bundle(&spec(&all_protocols()), false).unwrap();
+    assert_eq!(
+        err(&[all.clone(), all.clone(), all]),
+        "配置需要 1 至 32 个入口"
+    );
+    let mut long = two;
+    long.entries[0].id = "x".repeat(MAX_ID_BYTES);
+    assert_eq!(err(&[long]), "入口 ID 无效或重复");
+}

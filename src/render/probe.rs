@@ -1,6 +1,7 @@
 //! Probe bundle (schema 1): the client outbounds `probe`, `bench`,
 //! `failover` and `reality-check` start local client cores with. The typed
-//! structs are shared with `linktools` (load, merge, export).
+//! structs are shared with `linktools`, which loads ([`ProbeBundle::load`]),
+//! merges ([`ProbeBundle::merge`]) and exports ([`bundle`]) through them.
 //!
 //! JSON shape (keys sorted on output, identical to v2):
 //! `{"schema":1,"entries":[{"id","core","transport","tag","outbounds":[…],"reality"?:{…}}]}`.
@@ -14,15 +15,21 @@
 //! - the client core is chosen by one rule, `policy::client_core` (C-8.1 #18);
 //! - a `reality.reference_*` of the wrong type is rejected on load
 //!   (`REALITY 元数据无效`) instead of failing later at use; unknown keys inside
-//!   `reality` are not kept.
+//!   `reality` are not kept;
+//! - a bundle file must be a regular file (v2 followed symlinks and read
+//!   FIFOs); the size cap still bounds the read itself, as in v2;
+//! - a merge is checked against the size cap too, so it always loads again.
 
 use super::spec::{InboundSpec, NodeSpec};
 use super::{json, policy, singbox, xray};
 use crate::domain::protocol::{Core, Protocol, Transport};
 use crate::error::{Error, Result};
+use crate::sys::fs::read_bounded;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::Path;
 
 pub const SCHEMA: u32 = 1;
 /// Largest bundle file accepted (and produced).
@@ -41,6 +48,7 @@ pub const SINGBOX_KINDS: [&str; 8] = [
     "shadowtls",
 ];
 pub const XRAY_KINDS: [&str; 5] = ["vless", "vmess", "trojan", "shadowsocks", "hysteria"];
+const TOO_LARGE: &str = "探测配置超过 2 MiB";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProbeBundle {
@@ -80,9 +88,48 @@ pub struct RealityProbe {
 }
 
 impl ProbeBundle {
+    /// Read and parse a bundle file. At most [`MAX_BYTES`] are read, so an
+    /// oversized file is refused without loading it.
+    pub fn load(path: &Path) -> Result<ProbeBundle> {
+        let limit = MAX_BYTES as u64;
+        let bytes = read_bounded(path, limit).map_err(|e| {
+            let oversized =
+                fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > limit);
+            if oversized {
+                Error::msg(TOO_LARGE)
+            } else {
+                e
+            }
+        })?;
+        Self::parse(&bytes)
+    }
+
+    /// `probe merge`: the entries of every input in order, each id prefixed
+    /// with `n{i}-` (`i` = 1-based input position, as v2) so equal protocol
+    /// ids of different servers stay distinct; the result is validated like
+    /// any bundle (1–32 entries, id length, size cap).
+    pub fn merge(inputs: &[ProbeBundle]) -> Result<ProbeBundle> {
+        let entries = inputs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, input)| {
+                input.entries.iter().map(move |e| ProbeEntry {
+                    id: format!("n{}-{}", i + 1, e.id),
+                    ..e.clone()
+                })
+            })
+            .collect();
+        let merged = ProbeBundle {
+            schema: SCHEMA,
+            entries,
+        };
+        merged.validate()?;
+        Ok(merged)
+    }
+
     /// Parse a bundle file's bytes (size cap, JSON, v2 validation rules).
     pub fn parse(bytes: &[u8]) -> Result<ProbeBundle> {
-        ensure!(bytes.len() <= MAX_BYTES, "探测配置超过 2 MiB");
+        ensure!(bytes.len() <= MAX_BYTES, "{TOO_LARGE}");
         let value: Value =
             serde_json::from_slice(bytes).map_err(|_| Error::msg("探测配置不是有效 JSON"))?;
         Self::from_value(value)
@@ -100,7 +147,7 @@ impl ProbeBundle {
     /// pretty serialization (so every exported bundle loads again).
     pub fn validate(&self) -> Result<()> {
         check(&self.to_value()?)?;
-        ensure!(self.to_json()?.len() <= MAX_BYTES, "探测配置超过 2 MiB");
+        ensure!(self.to_json()?.len() <= MAX_BYTES, "{TOO_LARGE}");
         Ok(())
     }
 
