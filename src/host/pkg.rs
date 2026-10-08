@@ -137,7 +137,12 @@ fn apt(program: &str) -> Cmd {
 /// Make sure `command` is on PATH, installing `package` when it is not
 /// (root required then).
 pub fn ensure(ctx: &Ctx, command: &str, package: &str) -> Result<()> {
-    ensure_with(ctx, command, package, os::is_root(), &APT_REFRESHED)
+    ensure_as(ctx, command, package, os::is_root())
+}
+
+/// [`ensure`] with the privilege fact injected (callers' tests).
+pub fn ensure_as(ctx: &Ctx, command: &str, package: &str, root: bool) -> Result<()> {
+    ensure_with(ctx, command, package, root, &APT_REFRESHED)
 }
 
 /// [`ensure`] with the privilege fact and the apt-refresh memo injected.
