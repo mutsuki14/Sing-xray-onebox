@@ -293,8 +293,20 @@ fn singbox_latest_with_fallback() {
         release_json("v1.14.2", false, vec![]),
     );
     f.serve();
-    let r = resolve_with(&f.ctx, &no_env, Core::Singbox, Some("latest")).unwrap();
-    assert_eq!(r.version, "1.14.2", "fallback after a failed lookup");
+    let r = resolve_with(&f.ctx, &no_env, Core::Singbox, None).unwrap();
+    assert_eq!(r.version, "1.14.2", "install default falls back");
+
+    // An explicit `latest` (core update) never quietly becomes 1.14.2.
+    f.exec.clear_history();
+    let err = resolve_with(&f.ctx, &no_env, Core::Singbox, Some("latest")).unwrap_err();
+    assert!(err
+        .to_string()
+        .starts_with("获取 SagerNet/sing-box 发行信息失败"));
+    assert_eq!(
+        f.curl_urls(),
+        [format!("{SB_API}/latest")],
+        "no fallback lookup"
+    );
 
     // Xray has no fallback.
     let mut f = fixture();
@@ -665,126 +677,7 @@ fn offline_download_copies_and_probes() {
     assert!(f.curl_urls().is_empty());
 }
 
-// ---- ensure_installed -----------------------------------------------------
-
-#[test]
-fn ensure_installed_downloads_when_missing() {
-    let mut f = fixture();
-    let binary = serve_singbox(&mut f, "1.15.0", &format!("{SB_API}/latest"));
-    f.serve();
-    let bin = f.ctx.paths.bin.clone();
-    versions(&f.exec, vec![(bin.clone(), singbox_says("1.15.0"))]);
-    let v =
-        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &CoreVersions::default()).unwrap();
-    assert_eq!(v, "1.15.0");
-    let live = f.ctx.paths.core_bin(Core::Singbox);
-    assert_eq!(std::fs::read(&live).unwrap(), binary);
-    let names: Vec<String> = std::fs::read_dir(&bin)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(names, ["sing-box"], "staging removed");
-
-    // Installed and unpinned: nothing is fetched again.
-    f.exec.clear_history();
-    let v =
-        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &CoreVersions::default()).unwrap();
-    assert_eq!(v, "1.15.0");
-    assert!(f.curl_urls().is_empty());
-}
-
-#[test]
-fn ensure_installed_follows_the_pin() {
-    let mut f = fixture();
-    let binary = serve_singbox(&mut f, "1.14.2", &format!("{SB_API}/tags/v1.14.2"));
-    f.serve();
-    let live = f.ctx.paths.core_bin(Core::Singbox);
-    std::fs::create_dir_all(live.parent().unwrap()).unwrap();
-    std::fs::write(&live, fake_elf("old")).unwrap();
-    let bin = f.ctx.paths.bin.clone();
-    versions(
-        &f.exec,
-        vec![
-            (live.clone(), singbox_says("1.13.0")),
-            (bin, singbox_says("1.14.2")),
-        ],
-    );
-    let pinned = CoreVersions {
-        singbox_pin: Some("v1.14.2".into()),
-        ..CoreVersions::default()
-    };
-    let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &pinned).unwrap();
-    assert_eq!(v, "1.14.2");
-    assert_eq!(std::fs::read(&live).unwrap(), binary, "replaced in place");
-
-    // `latest` is satisfied by whatever is installed.
-    let f = fixture();
-    f.serve();
-    let live = f.ctx.paths.core_bin(Core::Xray);
-    std::fs::create_dir_all(live.parent().unwrap()).unwrap();
-    std::fs::write(&live, fake_elf("x")).unwrap();
-    versions(&f.exec, vec![(live, xray_says("26.1.1"))]);
-    let latest = CoreVersions {
-        xray_pin: Some("latest".into()),
-        ..CoreVersions::default()
-    };
-    assert_eq!(
-        ensure_installed_with(&f.ctx, &no_env, Core::Xray, &latest).unwrap(),
-        "26.1.1"
-    );
-    assert!(f.curl_urls().is_empty());
-}
-
-#[test]
-fn ensure_installed_replaces_a_broken_binary_and_refuses_odd_paths() {
-    let mut f = fixture();
-    let binary = fake_elf("xray new");
-    let package = xray_zip(&f.dir, &binary);
-    let tag = "v26.3.27";
-    let name = "Xray-linux-64.zip";
-    let asset = asset_json(repo(Core::Xray), tag, name, &package, true);
-    f.route(
-        format!("{XR_API}/tags/{tag}"),
-        release_json(tag, false, vec![asset]),
-    )
-    .route(
-        Asset::expected_url(repo(Core::Xray), tag, name),
-        Reply::body(package),
-    );
-    f.serve();
-    let live = f.ctx.paths.core_bin(Core::Xray);
-    std::fs::create_dir_all(live.parent().unwrap()).unwrap();
-    std::fs::write(&live, b"garbage").unwrap();
-    let bin = f.ctx.paths.bin.clone();
-    versions(
-        &f.exec,
-        vec![
-            (
-                live.clone(),
-                Output::failure(126, "cannot execute binary file"),
-            ),
-            (bin, xray_says("26.3.27")),
-        ],
-    );
-    let v = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &CoreVersions::default()).unwrap();
-    assert_eq!(v, "26.3.27");
-    assert_eq!(std::fs::read(&live).unwrap(), binary);
-
-    std::fs::remove_file(&live).unwrap();
-    std::fs::create_dir(&live).unwrap();
-    let err =
-        ensure_installed_with(&f.ctx, &no_env, Core::Xray, &CoreVersions::default()).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        format!("内核路径不是普通文件: {}", live.display())
-    );
-    let bad_pin = CoreVersions {
-        xray_pin: Some("bad pin".into()),
-        ..CoreVersions::default()
-    };
-    let err = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &bad_pin).unwrap_err();
-    assert_eq!(err.to_string(), "版本格式无效: bad pin");
-}
+mod ensure;
 
 // ---- config checks ----------------------------------------------------------
 

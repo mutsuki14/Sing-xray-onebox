@@ -52,13 +52,16 @@ fn tar_extracts_only_the_named_binary() {
 #[test]
 fn tar_refusals() {
     let cases: [(&[TarMember], &str); 7] = [
-        (&[("dir/LICENSE", b"x", EntryType::Regular)], MISSING),
+        (
+            &[("dir/LICENSE", b"x", EntryType::Regular)],
+            "压缩包未包含 sing-box",
+        ),
         (
             &[
                 ("a/sing-box", BIN, EntryType::Regular),
                 ("b/sing-box", BIN, EntryType::Regular),
             ],
-            DUPLICATE,
+            "压缩包含多个 sing-box",
         ),
         (&[("../sing-box", BIN, EntryType::Regular)], UNSAFE),
         (&[("/usr/bin/sing-box", BIN, EntryType::Regular)], UNSAFE),
@@ -84,7 +87,9 @@ fn tar_size_cap_and_corruption() {
     let package = dir.join("p.tar.gz");
     write_tar_gz(&package, &[("sing-box", &[7u8; 64], EntryType::Regular)]);
     let err = extract_tar_gz(&package, "sing-box", &dir.join("out"), 63).unwrap_err();
-    assert_eq!(err.to_string(), "内核文件超过 0 MiB");
+    assert_eq!(err.to_string(), "sing-box 超过大小上限（63 字节）");
+    let err = extract_tar_gz(&package, "frps", &dir.join("frps"), 1 << 20).unwrap_err();
+    assert_eq!(err.to_string(), "压缩包未包含 frps", "generic for FRP");
     std::fs::write(&package, b"\x1f\x8bnot really gzip").unwrap();
     let err = extract_tar_gz(&package, "sing-box", &dir.join("out2"), MAX).unwrap_err();
     assert!(err.to_string().starts_with(CORRUPT), "{err}");
@@ -110,14 +115,14 @@ fn zip_stored_and_deflated_members() {
 #[test]
 fn zip_refusals() {
     let cases: [(&[ZipEntry], &str); 7] = [
-        (&[("LICENSE", b"x", true, 0o100644)], MISSING),
+        (&[("LICENSE", b"x", true, 0o100644)], "压缩包未包含 xray"),
         (
             &[("dir/", b"", false, 0o40755), ("dir/geo", b"x", false, 0)],
-            MISSING,
+            "压缩包未包含 xray",
         ),
         (
             &[("a/xray", BIN, true, 0), ("b/xray", BIN, false, 0)],
-            DUPLICATE,
+            "压缩包含多个 xray",
         ),
         (&[("../xray", BIN, true, 0)], UNSAFE),
         (&[("/xray", BIN, true, 0)], UNSAFE),
@@ -140,12 +145,19 @@ fn zip_detects_corruption_and_size() {
     bytes[30 + 4 + 3] ^= 0xff;
     std::fs::write(&package, &bytes).unwrap();
     let err = extract_zip(&package, "xray", &dir.join("out"), MAX).unwrap_err();
-    assert_eq!(err.to_string(), "内核压缩包已损坏（CRC 校验失败）");
+    assert_eq!(err.to_string(), "压缩包已损坏（CRC 校验失败）");
     assert!(!dir.join("out").exists(), "bad output removed");
 
     write_zip(&package, &[("xray", &[1u8; 100], true, 0)]);
     let err = extract_zip(&package, "xray", &dir.join("out"), 99).unwrap_err();
-    assert_eq!(err.to_string(), "内核文件超过 0 MiB");
+    assert_eq!(err.to_string(), "xray 超过大小上限（99 字节）");
+    write_zip(&package, &[("xray", &[1u8; 100], false, 0)]);
+    let err = extract_zip(&package, "xray", &dir.join("out"), 99).unwrap_err();
+    assert_eq!(err.to_string(), "xray 超过大小上限（99 字节）");
+    assert_eq!(
+        too_big("sing-box", 512 << 20).to_string(),
+        "sing-box 超过大小上限（512 MiB）"
+    );
 
     for broken in [&b""[..], b"PK\x03\x04short", &bytes[..bytes.len() - 10]] {
         std::fs::write(&package, broken).unwrap();

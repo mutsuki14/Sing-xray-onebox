@@ -6,24 +6,29 @@
 //! release metadata; [`download`] fetches the package for this CPU, checks
 //! URL, size and SHA-256, extracts only the core binary, probes its
 //! version and leaves it at `{staging}/{binary}`; [`ensure_installed`] is
-//! the apply-engine entry (download only when missing or the pin differs).
+//! the apply-engine entry (download only when the binary is missing or
+//! broken; a working core is never replaced there).
 //! `ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN` replace the download with a
 //! local file (offline installs, tests).
 //!
 //! Changes from v2:
-//! - prereleases are refused (E-8.1#15); a `latest` lookup failure for
-//!   sing-box still falls back to 1.14.2, but says so (G-8.1#3).
+//! - prereleases are refused (E-8.1#15); a failed `latest` lookup for
+//!   sing-box falls back to 1.14.2 only when no version was asked for
+//!   (install), and says so; an explicit `latest` fails instead (G-8.1#3).
 //! - the offline override reports the parsed version instead of the first
 //!   output line, refuses symlinks, and warns when it differs from the pin.
-//! - `ensure_installed` replaces the binary when the pinned version differs
-//!   (v2 only printed a hint) and re-downloads a binary that cannot run.
+//! - `ensure_installed` re-downloads a binary that cannot run (v2 only
+//!   checked that the file existed); like v2 it never replaces a working
+//!   core because of a pin (G2).
 //! - the downloaded binary must report the release's version.
 //! - Xray zips are read in-process (no `unzip` package); only the core
 //!   binary is extracted from either package.
 //! - `check_config` errors carry the core's own message (ANSI colors and
 //!   Xray's banner removed).
 //! - staging directories are `onebox-core-*` temp dirs removed on drop;
-//!   crash leftovers in the bin directory are swept.
+//!   crash leftovers in the bin directory are swept, v2's `.core-*` too.
+//! - archive errors name the binary instead of saying "内核" (reused for
+//!   FRP packages).
 
 mod archive;
 
@@ -50,6 +55,8 @@ pub const BINARY_MAX: u64 = 512 * 1024 * 1024;
 pub const WORK_PREFIX: &str = "onebox-core-";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+/// v2's staging dirs beside the core binaries (`.core-<24hex>`).
+const V2_STAGING_PREFIX: &str = ".core-";
 /// Work dirs older than this are crash leftovers.
 const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
@@ -159,13 +166,15 @@ pub fn resolve_with(
     match (wanted, core) {
         (Wanted::Exact(v), _) => resolve_exact(ctx, env, core, &v),
         (Wanted::Default, Core::Xray) => resolve_exact(ctx, env, core, XRAY_TESTED_VERSION),
-        (_, Core::Xray) => resolve_latest(ctx, env, core),
-        (_, Core::Singbox) => resolve_latest(ctx, env, core).or_else(|e| {
+        // Only "no preference" may fall back: an explicit `latest` (core
+        // update) must not quietly become an older version.
+        (Wanted::Default, Core::Singbox) => resolve_latest(ctx, env, core).or_else(|e| {
             out::warn(format!(
                 "无法获取 sing-box 最新版本（{e}），改用 {SINGBOX_FALLBACK_VERSION}"
             ));
             resolve_exact(ctx, env, core, SINGBOX_FALLBACK_VERSION)
         }),
+        (Wanted::Latest, _) => resolve_latest(ctx, env, core),
     }
 }
 
@@ -457,9 +466,21 @@ fn strip_ansi(line: &str) -> String {
     out
 }
 
-/// Make sure the core binary exists in the required version and return
-/// that version. Downloads only when the binary is missing, cannot run, or
-/// differs from the pin (`versions.pin(core)`); prints what happened.
+/// Make sure the core binary exists and return its version (the apply
+/// engine's prepare-cores hook).
+///
+/// The binary is downloaded only when it is missing or cannot report a
+/// version, in the wanted version: the pin (`versions.pin(core)`), else
+/// `ONEBOX_SINGBOX_VERSION` / `ONEBOX_XRAY_VERSION` ([`version_env`], v2
+/// parity for scripted installs), else the default. A working binary is
+/// never replaced here, not even when it differs from the pin (v2 parity;
+/// a migrated v2 pin is often older than the installed core and must not
+/// downgrade it or make an upgrade depend on GitHub): only the hint
+/// `已安装 … ；更换指定版本请执行 onebox update …` is printed.
+///
+/// Changing a working core is `onebox update`'s job: it passes the staged
+/// binary in `Intents.replace_cores` and must store the matching pin (or
+/// clear it) in the same apply, or this hint repeats on every apply.
 pub fn ensure_installed(ctx: &Ctx, core: Core, versions: &CoreVersions) -> Result<String> {
     ensure_installed_with(ctx, &process_env, core, versions)
 }
@@ -471,29 +492,63 @@ pub fn ensure_installed_with(
     core: Core,
     versions: &CoreVersions,
 ) -> Result<String> {
-    let pin = versions.pin(core);
-    let wanted = Wanted::parse(pin)?;
+    let wish = wished_version(env, core, versions)?;
+    sweep_leftovers(&ctx.paths.bin);
     let live = ctx.paths.core_bin(core);
     if let Some(current) = current_version(ctx, core, &live)? {
-        if wanted.satisfied_by(&current) {
-            out::info(format!("{} {current} 已安装", core.title()));
-            return Ok(current);
+        match &wish {
+            Some(Wanted::Exact(v)) if *v != current => out::warn(format!(
+                "已安装 {} {current}；更换指定版本请执行 onebox update {} {v}",
+                core.title(),
+                core.id()
+            )),
+            _ => out::info(format!("{} {current} 已安装", core.title())),
         }
-        out::info(format!(
-            "{} 当前为 {current}，按指定版本更换为 {}",
-            core.title(),
-            pin.unwrap_or_default()
-        ));
+        return Ok(current);
     }
-    let resolved = resolve_with(ctx, env, core, pin)?;
+    let wanted = match &wish {
+        Some(Wanted::Exact(v)) => Some(v.as_str()),
+        Some(Wanted::Latest) => Some("latest"),
+        Some(Wanted::Default) | None => None,
+    };
+    let resolved = resolve_with(ctx, env, core, wanted)?;
     sysfs::ensure_dir(&ctx.paths.bin, 0o755)?;
-    let _ = sysfs::sweep_stale(&ctx.paths.bin, WORK_PREFIX, STALE_AFTER);
     let stage = TempDir::new_in(&ctx.paths.bin, "core-stage")?;
     let staged = download_with(ctx, env, &resolved, stage.path())?;
     std::fs::rename(&staged, &live).map_err(|e| Error::io(&live, e))?;
     sysfs::fsync_dir(&ctx.paths.bin).map_err(|e| Error::io(&ctx.paths.bin, e))?;
     out::ok(format!("已安装 {} {}", core.title(), resolved.version));
     Ok(resolved.version)
+}
+
+/// Environment variable naming the version to install when nothing is
+/// pinned (`ONEBOX_SINGBOX_VERSION` / `ONEBOX_XRAY_VERSION`).
+pub fn version_env(core: Core) -> &'static str {
+    match core {
+        Core::Singbox => "ONEBOX_SINGBOX_VERSION",
+        Core::Xray => "ONEBOX_XRAY_VERSION",
+    }
+}
+
+/// The pin, else the environment's wish; `None` means "no preference".
+fn wished_version(env: EnvLookup, core: Core, versions: &CoreVersions) -> Result<Option<Wanted>> {
+    if let Some(pin) = versions.pin(core) {
+        return Wanted::parse(Some(pin)).map(Some);
+    }
+    let Some(value) = env(version_env(core)) else {
+        return Ok(None);
+    };
+    Wanted::parse(Some(&value))
+        .map(Some)
+        .with_context(|| format!("环境变量 {}", version_env(core)))
+}
+
+/// Remove crash leftovers next to the live cores: v3 work dirs and v2's
+/// `.core-*` staging dirs (with their `.download-*` files; E-8.1#16).
+fn sweep_leftovers(bin: &Path) {
+    for prefix in [WORK_PREFIX, V2_STAGING_PREFIX] {
+        let _ = sysfs::sweep_stale(bin, prefix, STALE_AFTER);
+    }
 }
 
 /// The live binary's version; `None` when it is missing or cannot report

@@ -1,5 +1,7 @@
 //! Extract one named executable from a release package (`.tar.gz` for
-//! sing-box, `.zip` for Xray) without unpacking anything else.
+//! sing-box and frp, `.zip` for Xray) without unpacking anything else.
+//! Messages name the requested binary, so callers other than the cores
+//! (FRP) can reuse them.
 //!
 //! Both readers stream the member into `out` with a byte cap and refuse
 //! packages containing absolute or `..` paths or links (v2 rejected those
@@ -13,10 +15,25 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
 
-const UNSAFE: &str = "内核压缩包含不安全路径";
-const MISSING: &str = "压缩包未包含内核";
-const DUPLICATE: &str = "压缩包含多个内核文件";
-const CORRUPT: &str = "内核压缩包已损坏";
+const UNSAFE: &str = "压缩包含不安全路径";
+const CORRUPT: &str = "压缩包已损坏";
+
+fn missing(binary: &str) -> Error {
+    Error::msg(format!("压缩包未包含 {binary}"))
+}
+
+fn duplicate(binary: &str) -> Error {
+    Error::msg(format!("压缩包含多个 {binary}"))
+}
+
+fn too_big(binary: &str, max: u64) -> Error {
+    let limit = if max >= 1 << 20 {
+        format!("{} MiB", max >> 20)
+    } else {
+        format!("{max} 字节")
+    };
+    Error::msg(format!("{binary} 超过大小上限（{limit}）"))
+}
 
 fn corrupt(detail: &str) -> Error {
     Error::msg(format!("{CORRUPT}（{detail}）"))
@@ -43,12 +60,13 @@ fn create_output(out: &Path) -> Result<File> {
         .map_err(|e| Error::io(out, e))
 }
 
-/// Copy at most `max` bytes from `reader` into `out`; more is an error.
-fn copy_capped(reader: impl Read, out: &Path, max: u64) -> Result<u64> {
+/// Copy at most `max` bytes of `binary` from `reader` into `out`; more is
+/// an error.
+fn copy_capped(reader: impl Read, binary: &str, out: &Path, max: u64) -> Result<u64> {
     let mut file = create_output(out)?;
     let copied = io::copy(&mut reader.take(max + 1), &mut file).map_err(|e| Error::io(out, e))?;
     if copied > max {
-        return Err(Error::msg(format!("内核文件超过 {} MiB", max >> 20)));
+        return Err(too_big(binary, max));
     }
     file.sync_all().map_err(|e| Error::io(out, e))?;
     Ok(copied)
@@ -71,11 +89,11 @@ pub fn extract_tar_gz(package: &Path, binary: &str, out: &Path, max: u64) -> Res
             continue;
         }
         if written.is_some() {
-            return Err(Error::msg(DUPLICATE));
+            return Err(duplicate(binary));
         }
-        written = Some(copy_capped(entry, out, max)?);
+        written = Some(copy_capped(entry, binary, out, max)?);
     }
-    written.ok_or_else(|| Error::msg(MISSING))
+    written.ok_or_else(|| missing(binary))
 }
 
 fn tar_error(e: &io::Error) -> Error {
@@ -196,11 +214,11 @@ fn select_member(members: Vec<ZipMember>, binary: &str) -> Result<ZipMember> {
             continue;
         }
         if found.is_some() {
-            return Err(Error::msg(DUPLICATE));
+            return Err(duplicate(binary));
         }
         found = Some(member);
     }
-    found.ok_or_else(|| Error::msg(MISSING))
+    found.ok_or_else(|| missing(binary))
 }
 
 /// Offset of the member's data (after its local header).
@@ -239,7 +257,7 @@ pub fn extract_zip(package: &Path, binary: &str, out: &Path, max: u64) -> Result
         return Err(Error::msg("不支持加密压缩包"));
     }
     if member.size > max {
-        return Err(Error::msg(format!("内核文件超过 {} MiB", max >> 20)));
+        return Err(too_big(binary, max));
     }
     let start = data_offset(&mut file, &member)?;
     if start + member.compressed > len {
@@ -249,19 +267,31 @@ pub fn extract_zip(package: &Path, binary: &str, out: &Path, max: u64) -> Result
         .map_err(|e| Error::io(package, e))?;
     let raw = BufReader::new(file).take(member.compressed);
     let written = match member.method {
-        0 => write_checked(raw, out, &member, max)?,
-        8 => write_checked(flate2::read::DeflateDecoder::new(raw), out, &member, max)?,
+        0 => write_checked(raw, binary, out, &member, max)?,
+        8 => write_checked(
+            flate2::read::DeflateDecoder::new(raw),
+            binary,
+            out,
+            &member,
+            max,
+        )?,
         m => return Err(Error::msg(format!("不支持的压缩方式 {m}"))),
     };
     Ok(written)
 }
 
-fn write_checked(reader: impl Read, out: &Path, member: &ZipMember, max: u64) -> Result<u64> {
+fn write_checked(
+    reader: impl Read,
+    binary: &str,
+    out: &Path,
+    member: &ZipMember,
+    max: u64,
+) -> Result<u64> {
     let mut crc_reader = CrcReader {
         inner: reader,
         crc: flate2::Crc::new(),
     };
-    let written = copy_capped(&mut crc_reader, out, max)?;
+    let written = copy_capped(&mut crc_reader, binary, out, max)?;
     if written != member.size || crc_reader.crc.sum() != member.crc {
         let _ = std::fs::remove_file(out);
         return Err(corrupt("CRC 校验失败"));
