@@ -65,6 +65,8 @@ Onebox 3.0.0 · sing-box 1.14.2 · Xray 26.3.27
  0) 退出
 ```
 
+<!-- TODO: verify exact menu and header text against the built binary -->
+
 未安装时菜单为 `1) 安装  2) 安装预演  3) FRP 服务端  4) BBR  5) 更新程序  0) 退出`。每个子菜单先显示当前设置，再列出操作（`0) 返回`）；输入有误会提示并重新询问，操作失败显示 `[错误] …` 后回到原菜单；Ctrl+D 退出（退出码 130）。
 
 ## 安装向导

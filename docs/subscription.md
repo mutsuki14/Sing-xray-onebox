@@ -35,7 +35,7 @@ onebox subscription enable --mode standalone --domain sub.example.com \
 ```
 
 - 省略 `--mode` 时：给了 `--address` 为 `ip`，给了 `--domain` 为 `standalone`，否则有网站时为 `site`，再否则为 `ip`。
-- `ip` 模式的地址默认取节点的连接 IP；必须是 IP 字面量（不含端口、路径）。服务在所有地址上监听该端口，由程序直接提供（不需要 nginx）。
+- `ip` 模式的地址默认取节点的连接 IP；必须是 IP 字面量（不含端口、路径）。该端口由程序直接提供（不需要 nginx），并在本机所有地址上监听，便于 NAT 环境使用。<!-- TODO: verify ip-mode bind address -->
 - `standalone` 会检查 DNS、证书与端口，不接管已有服务；端口允许时可用 `--port 443`。
 - 首次启用会创建设备 `default` 并显示其链接。`ip` 和 `standalone` 需要在云安全组放行所用的 TCP 端口（HTTP-01 另需 80）。
 - 订阅不经过 FRP 发布。
