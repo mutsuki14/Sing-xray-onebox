@@ -489,6 +489,38 @@ fn listeners_without_sockets_never_excuse_probed_ports() {
 }
 
 #[test]
+fn proxy_http01_challenges_follow_the_port_80_holder() {
+    let mut cfg = config(&[(VlessReality, 443, SB), (Trojan, 8443, SB)]);
+    assert_eq!(proxy_http01_responder(&cfg), None, "self-signed");
+    acme(&mut cfg, AcmeMethod::Cloudflare);
+    assert_eq!(proxy_http01_responder(&cfg), None, "DNS-01");
+    acme(&mut cfg, AcmeMethod::Http01);
+    assert_eq!(proxy_http01_responder(&cfg), Some(Http01Responder::Builtin));
+
+    let mut sub = cfg.clone();
+    sub.subscription = Some(fixtures::standalone_subscription(
+        "sub.example.com",
+        8448,
+        WebCert::Http01,
+    ));
+    assert_eq!(check(&sub, &[]), Ok(()), "both HTTP-01 users share 80");
+    assert_eq!(
+        proxy_http01_responder(&sub),
+        Some(Http01Responder::Subscription)
+    );
+    sub.subscription = Some(fixtures::standalone_subscription(
+        "sub.example.com",
+        8448,
+        WebCert::Cloudflare,
+    ));
+    assert_eq!(proxy_http01_responder(&sub), Some(Http01Responder::Builtin));
+
+    let site = with_site(cfg, "www.example.com", true);
+    assert_eq!(check(&site, &[]), Ok(()));
+    assert_eq!(proxy_http01_responder(&site), Some(Http01Responder::Site));
+}
+
+#[test]
 fn firewall_ports_are_public_and_merged() {
     let p1 = PortPlan::of(&preset1(), &[]);
     assert_eq!(

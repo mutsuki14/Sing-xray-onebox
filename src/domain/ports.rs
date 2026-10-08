@@ -15,8 +15,12 @@
 //!   ACME port 80, the guard, the site, the subscription and FRP;
 //! - HTTP-01 for the proxy certificate always reserves and opens TCP 80
 //!   (v2 opened it only for the literal method `standalone`, E-8.1 #4);
-//! - port 80 may be shared by HTTP-01 challenge servers (the site's or the
-//!   standalone subscription's nginx serves proxy challenges too).
+//! - port 80 may be shared by HTTP-01 challenge servers: the Onebox nginx
+//!   that holds TCP 80 in steady state (the site's, else the standalone
+//!   subscription's) also answers the proxy certificate's challenges, and
+//!   the built-in responder binds 80 only when neither does
+//!   ([`proxy_http01_responder`] tells the certificate stage which; v2
+//!   tried `--standalone` against a running nginx and failed, F-8.1 #4/#5).
 
 use super::config::{AcmeMethod, NodeConfig, ProxyCertMode, SubscriptionMode};
 use super::defaults;
@@ -381,6 +385,46 @@ impl PortPlan {
     }
 }
 
+/// Who answers HTTP-01 challenges for the proxy certificate on TCP 80.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Http01Responder {
+    /// The website's nginx; challenges go to its webroot.
+    Site,
+    /// The standalone subscription's port-80 nginx server; challenges go to
+    /// its ACME webroot, so that server must answer for any `Host` (it is the
+    /// only port-80 server of its nginx, hence the default server).
+    Subscription,
+    /// No Onebox nginx listens on 80: the built-in responder binds TCP 80 for
+    /// the duration of the acme.sh call.
+    Builtin,
+}
+
+/// The responder for proxy HTTP-01 challenges, `None` when the proxy
+/// certificate is not issued over HTTP-01. This is the contract behind the
+/// `AcmeHttp80` sharing rule in [`compatible`]: the certificate stage must
+/// not start the built-in responder while an Onebox nginx owns port 80.
+pub fn proxy_http01_responder(cfg: &NodeConfig) -> Option<Http01Responder> {
+    if !acme_http01(cfg) {
+        return None;
+    }
+    let subscription_80 = cfg.subscription.as_ref().is_some_and(|s| {
+        matches!(
+            s.mode,
+            SubscriptionMode::Standalone {
+                http01_port80: true,
+                ..
+            }
+        )
+    });
+    Some(if cfg.site_active().is_some() {
+        Http01Responder::Site
+    } else if subscription_80 {
+        Http01Responder::Subscription
+    } else {
+        Http01Responder::Builtin
+    })
+}
+
 /// The proxy certificate is issued over HTTP-01 and therefore needs TCP 80.
 fn acme_http01(cfg: &NodeConfig) -> bool {
     cfg.needs_cert()
@@ -438,7 +482,8 @@ fn compatible(a: &Owner, a_core: Option<Core>, b: &Owner, b_core: Option<Core>) 
         (Inbound(p), SiteHttps443) | (SiteHttps443, Inbound(p)) => p.reality(),
         // The hop range redirects to the Hysteria2 port itself.
         (Inbound(Protocol::Hysteria2), Hy2Hop) | (Hy2Hop, Inbound(Protocol::Hysteria2)) => true,
-        // HTTP-01 challenge servers share 80 (one nginx serves both webroots).
+        // The nginx holding 80 also serves proxy challenges
+        // (`proxy_http01_responder`).
         (AcmeHttp80, SiteHttp80 | SubscriptionHttp80)
         | (SiteHttp80 | SubscriptionHttp80, AcmeHttp80) => true,
         _ => false,
