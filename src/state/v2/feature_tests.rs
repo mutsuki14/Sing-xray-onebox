@@ -3,6 +3,7 @@
 use super::fixtures::*;
 use super::*;
 use crate::domain::config::*;
+use crate::domain::{Core, Protocol};
 use crate::sys::rand::SeqRandom;
 use std::net::IpAddr;
 
@@ -289,4 +290,103 @@ fn values_file_shape() {
     assert!(v2_values_from_json(b"{\"values\":[]}").is_err());
     assert!(v2_values_from_json(b"not json").is_err());
     assert_eq!(err(&BTreeMap::new()), "状态缺少协议列表");
+}
+
+/// The state shape v2's `tests/native_e2e.py` wrote for its protocol × core
+/// matrix (single protocol, loopback targets, custom or self-signed TLS).
+fn e2e_state(protocol: Protocol, core: Core, ca: bool) -> BTreeMap<String, String> {
+    let (private, public) = reality_pair();
+    let key = protocol.id().replace('-', "_");
+    let flag = |on: bool| if on { "1" } else { "0" };
+    let mut values = map(&[
+        ("SERVER_ADDR", "127.0.0.1"),
+        ("SERVER_IPV4", "127.0.0.1"),
+        ("SERVER_IPV6", ""),
+        ("LISTEN_ADDR", "127.0.0.1"),
+        ("NODE_NAME", "native-e2e"),
+        ("UUID", UUID),
+        (
+            "PASSWORD",
+            "0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+        ("SS_METHOD", "2022-blake3-aes-128-gcm"),
+        ("SS_PASSWORD", SS_KEY_16),
+        ("SHADOWTLS_PASSWORD", PASSWORD),
+        ("SHADOWTLS_SS_PASSWORD", SS_KEY_16),
+        ("REALITY_SHORT_ID", "0011223344556677"),
+        ("REALITY_SNI", "reality.test"),
+        ("REALITY_DEST", "127.0.0.1:24443"),
+        ("SHADOWTLS_SNI", "reality.test"),
+        ("SHADOWTLS_DEST", "127.0.0.1:24443"),
+        ("REALITY_GUARD_PORT", "24001"),
+        ("REALITY_SITE_ENABLED", "0"),
+        ("REALITY_SITE_HTTPS", "0"),
+        ("WS_PATH", "/native-ws"),
+        ("VMESS_PATH", "/native-vmess"),
+        ("XHTTP_PATH", "/native-xhttp"),
+        ("GRPC_SERVICE", "native-grpc"),
+        ("VMESS_TLS", flag(ca)),
+        ("HY2_OBFS", flag(ca)),
+        ("HY2_OBFS_PASSWORD", PASSWORD),
+        ("HY2_PROFILE", "auto"),
+        ("RESOURCE_PROFILE", "balanced"),
+        ("TLS_MODE", if ca { "custom" } else { "self" }),
+        ("TLS_SNI", "onebox.test"),
+        ("DOMAIN", "onebox.test"),
+        ("CERT_PINNED", flag(!ca)),
+        ("CERT_FILE", "/tmp/pki/onebox.test.pem"),
+        ("KEY_FILE", "/tmp/pki/onebox.test.key"),
+        ("BLOCK_PRIVATE", "0"),
+        ("BLOCK_BT", "1"),
+        ("SB_VERSION", "latest"),
+        ("XR_VERSION", "latest"),
+        ("PROTOCOLS", protocol.id()),
+    ]);
+    values.insert(format!("PORT_{key}"), "24100".into());
+    values.insert(format!("CORE_{key}"), core.id().into());
+    values.insert("REALITY_PRIVATE_KEY".into(), private);
+    values.insert("REALITY_PUBLIC_KEY".into(), public);
+    values
+}
+
+#[test]
+fn every_v2_e2e_matrix_state_migrates() {
+    for protocol in crate::domain::Protocol::ALL {
+        for &core in protocol.cores() {
+            for ca in [false, true] {
+                let m = run(&e2e_state(protocol, core, ca))
+                    .unwrap_or_else(|e| panic!("{protocol}/{core}/{ca}: {e}"));
+                let c = &m.config;
+                assert_eq!(c.listen.to_string(), "127.0.0.1");
+                assert_eq!(c.reality.dest.to_string(), "127.0.0.1:24443");
+                assert_eq!(
+                    c.shadowtls.effective_dest(),
+                    "127.0.0.1:24443",
+                    "explicit ShadowTLS target kept"
+                );
+                assert!(!c.routing.block_private);
+                if protocol == Protocol::Hysteria2 && core == Core::Xray {
+                    assert_eq!(c.hy2.profile, None, "Xray cannot apply tuning");
+                } else if protocol == Protocol::Hysteria2 {
+                    assert_eq!(c.hy2.profile, Some(Hy2Profile::Auto));
+                }
+                match &c.tls {
+                    Some(ProxyTls {
+                        mode: ProxyCertMode::Custom { cert, .. },
+                        pinned,
+                    }) => {
+                        assert!(ca && !pinned);
+                        assert_eq!(cert.to_str(), Some("/tmp/pki/onebox.test.pem"));
+                    }
+                    Some(ProxyTls {
+                        mode: ProxyCertMode::SelfSigned { sni },
+                        pinned,
+                    }) => assert!(!ca && *pinned && sni == "onebox.test"),
+                    Some(other) => panic!("unexpected {other:?}"),
+                    None => assert!(!c.needs_cert()),
+                }
+                assert_eq!(c.vmess_tls, ca && protocol == Protocol::VmessWs);
+            }
+        }
+    }
 }
