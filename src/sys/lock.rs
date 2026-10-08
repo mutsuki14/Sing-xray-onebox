@@ -12,6 +12,11 @@
 //!    refers to the expected lock file (dev/ino), re-flocks it (succeeds on
 //!    the shared description), closes 198 and removes the variable so
 //!    grandchildren never see it.
+//!
+//! Changes from v2: one lock type for every lock file (node, update, FRP,
+//! BBR) with a caller-supplied contention message; fd 198 is a named
+//! constant (A-8.1#18); `from_inherited` never touches fd 198 unless the
+//! variable is exactly `198`.
 
 use crate::error::{Error, Result};
 use crate::sys::exec::{INHERITED_LOCK_ENV, INHERITED_LOCK_FD};

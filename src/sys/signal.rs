@@ -8,6 +8,11 @@
 //! `Error::Cancelled`, so rollback runs instead of dying mid-write.
 //! Handlers are installed without `SA_RESTART`, so a blocking prompt read
 //! returns `EINTR` and the prompter can cancel promptly.
+//!
+//! Changes from v2: one flag and one scope type shared by apply, update and
+//! BBR (v2 had per-module guards); cancellation surfaces as
+//! `Error::Cancelled`, so it keeps exit code 130 through rollback wrappers
+//! (B-9.1#16).
 
 use crate::error::{Error, Result};
 use std::io;
