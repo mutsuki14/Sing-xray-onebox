@@ -17,6 +17,7 @@ use crate::sys::exec::{Cmd, Exec, FakeExec, Output, RunningChild, SystemExec};
 use crate::sys::fs::{sha256_hex, TempDir};
 use crate::ui::ScriptedPrompter;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Whether a usable `openssl` is installed; tests that need it skip
@@ -45,8 +46,13 @@ impl HybridExec {
         cmd.program_name() == "openssl"
     }
 
+    /// The command as run for real: with the test CA as openssl's default
+    /// store, and without the timeout. Timed commands forward process
+    /// signals to the child, and signal tests raise them in this process
+    /// (`sys::signal::TEST_LOCK`); untimed openssl runs are unaffected.
     fn with_ca(&self, cmd: &Cmd) -> Cmd {
         let mut cmd = cmd.clone();
+        cmd.timeout = None;
         if let Some(ca) = &self.ca_file {
             cmd = cmd.env("SSL_CERT_FILE", ca.to_string_lossy());
         }
@@ -311,13 +317,18 @@ fn no_env(_: &str) -> Option<String> {
     None
 }
 
-/// A free TCP port for the responder (bound and released at once).
+/// A free TCP port for the responder: below the kernel's ephemeral range
+/// (so parallel tests binding port 0 never get it) and unique within this
+/// test process; the offset keeps concurrent test processes apart.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("0.0.0.0:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = 20_000 + (std::process::id() % 400) as u16 * 25;
+    loop {
+        let port = base + NEXT.fetch_add(1, Ordering::SeqCst) % 10_000;
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Engine over `ctx` with the fake release, a free responder port, no
