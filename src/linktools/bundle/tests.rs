@@ -162,6 +162,10 @@ fn export_reads_the_installed_node() {
     let (ctx, _, _) = Ctx::test(dir.path());
     let err = from_node(&ctx, false).unwrap_err();
     assert_eq!(err.to_string(), "尚未安装 Onebox，请先执行 onebox install");
+    assert_eq!(
+        published_path(&ctx.paths),
+        ctx.paths.clients().join("probe.json")
+    );
 
     let cfg = config(&[
         (Protocol::VlessReality, 443, Core::Singbox),

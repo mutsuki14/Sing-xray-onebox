@@ -16,13 +16,15 @@
 use crate::ctx::Ctx;
 use crate::domain::protocol::Transport;
 use crate::error::{Error, Result};
+use crate::paths::Paths;
 use crate::render::probe::{self, ProbeBundle, ProbeEntry, MAX_ID_BYTES};
+use crate::render::publish::PROBE_FILE;
 use crate::render::NodeSpec;
 use crate::state::StateStore;
 use crate::sys::fs::write_new_exclusive;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Mode of every file the tools create for the user (bundles, reports).
 pub const PRIVATE_MODE: u32 = 0o600;
@@ -39,6 +41,12 @@ pub fn from_node(ctx: &Ctx, local: bool) -> Result<ProbeBundle> {
     let loaded = StateStore::load_required(ctx)?;
     let spec = NodeSpec::load(&loaded.config, &ctx.paths)?;
     probe::bundle(&spec, local)
+}
+
+/// The bundle published with the client exports
+/// (`/etc/onebox/client/probe.json`): the menus' default input.
+pub fn published_path(paths: &Paths) -> PathBuf {
+    paths.clients().join(PROBE_FILE)
 }
 
 /// `probe merge`: every input's entries in order, ids prefixed `n<i>-`.

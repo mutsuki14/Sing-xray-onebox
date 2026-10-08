@@ -38,7 +38,9 @@
 //! is a warning; #19 parsed TLS version; #20 parameterized probe errors;
 //! #21 executable check and documented lookup order; #22 over-capacity
 //! clients get `05 FF`; #23 blocking relay without busy polling; #24
-//! explicit cancel token; #25 bounded statistics read.
+//! explicit cancel token; #25 bounded statistics read; #26 dead failover
+//! cores are restarted with backoff. #27–#33 concern doctor/support and
+//! tune (other work packages).
 
 pub mod bench;
 pub mod bundle;
