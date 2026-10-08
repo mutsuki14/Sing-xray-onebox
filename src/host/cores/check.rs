@@ -5,6 +5,10 @@
 //! private `{run}/check`, while read-only callers such as `doctor` pass a
 //! directory of their own ([`check_config_in`]) so a health check never
 //! creates files under the run root (D-8.1#30). Xray needs none.
+//!
+//! Changes from v2: failures carry the meaningful tail of the core's output
+//! (ANSI colors, info logs and Xray's banner removed); a check is bounded
+//! by a 60 s timeout; `doctor` no longer creates `{run}/check`.
 
 use crate::ctx::Ctx;
 use crate::domain::protocol::Core;

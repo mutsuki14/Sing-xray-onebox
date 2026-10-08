@@ -1,5 +1,9 @@
 //! Semantic-version precedence (semver 2.0.0 §11) for program versions:
 //! `MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`, an optional leading `v`.
+//!
+//! Changes from v2: v2 only compared versions for equality, so it could
+//! not tell an upgrade from a downgrade; the self-install (and later the
+//! update checks) order versions with this type.
 
 use std::cmp::Ordering;
 

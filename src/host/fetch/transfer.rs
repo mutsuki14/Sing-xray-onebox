@@ -5,6 +5,11 @@
 //! curl is installed on demand (G14): every download and API call goes
 //! through [`transfer`], which makes sure `curl` exists first — installing
 //! the `curl` package as root, or asking for it otherwise.
+//!
+//! Changes from v2: v2 fell back to wget without curl (E-8.1#7) and used
+//! a fixed 300 s limit; here a missing curl is installed, the result is
+//! size-checked and fsynced before the rename, and [`Pace`] chooses between
+//! a quiet size-scaled time limit and a streamed progress bar.
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
