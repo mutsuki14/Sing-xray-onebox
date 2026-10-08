@@ -1,4 +1,5 @@
 use super::*;
+use crate::linktools::failover::revive::ProxySlot;
 use crate::linktools::socks::USERNAME;
 use crate::linktools::testutil::FakeProxy;
 use std::io::Read;
@@ -199,17 +200,17 @@ fn no_healthy_entry_is_host_unreachable() {
 
 struct Harness {
     ids: Vec<String>,
-    proxies: Vec<Box<dyn Proxy>>,
+    proxies: Vec<ProxySlot>,
     healthy: Vec<AtomicBool>,
     tunnels: Vec<Arc<AtomicUsize>>,
 }
 
 fn harness(count: usize) -> Harness {
-    let mut proxies: Vec<Box<dyn Proxy>> = Vec::new();
+    let mut proxies = Vec::new();
     let mut tunnels = Vec::new();
     for _ in 0..count {
         let (port, counter) = fake_upstream();
-        proxies.push(Box::new(FakeProxy::new(port)));
+        proxies.push(ProxySlot::new(Box::new(FakeProxy::new(port))));
         tunnels.push(counter);
     }
     Harness {
@@ -218,6 +219,10 @@ fn harness(count: usize) -> Harness {
         healthy: (0..count).map(|_| AtomicBool::new(true)).collect(),
         tunnels,
     }
+}
+
+fn no_restart(_: usize) -> Result<Box<dyn Proxy>> {
+    Err(Error::msg("测试中不重启"))
 }
 
 fn wait_for(events: &Mutex<Vec<String>>, needle: &str) {
@@ -242,6 +247,7 @@ fn the_service_switches_on_failure_and_stops_cleanly() {
         ids: &h.ids,
         proxies: &h.proxies,
         health: &health,
+        restart: &no_restart,
         port,
         interval: Duration::from_millis(50),
         upstream_timeout: Duration::from_secs(2),
@@ -282,7 +288,7 @@ fn the_service_switches_on_failure_and_stops_cleanly() {
         served.join().unwrap().unwrap();
     });
     assert!(
-        h.proxies.iter().all(|p| p.exited().is_some()),
+        h.proxies.iter().all(|p| p.get().exited().is_some()),
         "cores stopped"
     );
     assert!(
@@ -300,6 +306,7 @@ fn over_capacity_clients_are_refused_and_bind_errors_reported() {
         ids: &h.ids,
         proxies: &h.proxies,
         health: &health,
+        restart: &no_restart,
         port,
         interval: Duration::from_secs(60),
         upstream_timeout: Duration::from_secs(2),
@@ -349,4 +356,63 @@ fn over_capacity_clients_are_refused_and_bind_errors_reported() {
         cancel.cancel();
         served.join().unwrap().unwrap();
     });
+}
+
+#[test]
+fn a_dead_core_is_restarted_and_routed_to_again() {
+    let h = harness(2);
+    let origin = echo_origin();
+    let port = free_port();
+    let health = |i: usize| h.healthy[i].load(Ordering::SeqCst);
+    let (replacement, replacement_tunnels) = fake_upstream();
+    let restarts = AtomicUsize::new(0);
+    let restart = |i: usize| -> Result<Box<dyn Proxy>> {
+        assert_eq!(i, 0);
+        restarts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FakeProxy::new(replacement)))
+    };
+    let svc = Service {
+        ids: &h.ids,
+        proxies: &h.proxies,
+        health: &health,
+        restart: &restart,
+        port,
+        interval: Duration::from_millis(50),
+        upstream_timeout: Duration::from_secs(2),
+        max_clients: MAX_CLIENTS,
+        idle: relay::IDLE,
+    };
+    let events = Mutex::new(Vec::new());
+    let cancel = CancelToken::manual();
+    thread::scope(|scope| {
+        let served = scope.spawn(|| {
+            let mut emit = |line: &str| {
+                events.lock().unwrap().push(line.to_owned());
+                Ok(())
+            };
+            serve(&svc, FailoverPolicy::new(2, 1, 1, 0), &cancel, &mut emit)
+        });
+        wait_for(&events, "ready");
+        // Entry 0's core crashes: its checks fail and it is restarted.
+        h.healthy[0].store(false, Ordering::SeqCst);
+        h.proxies[0].get().terminate();
+        wait_for(&events, r#""from":"e0","to":"e1""#);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while restarts.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "never restarted");
+            thread::sleep(Duration::from_millis(10));
+        }
+        h.healthy[0].store(true, Ordering::SeqCst);
+        wait_for(&events, r#""from":"e1","to":"e0""#);
+        assert_eq!(ping_via(port, origin).unwrap(), "ping");
+        assert_eq!(replacement_tunnels.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.tunnels[0].load(Ordering::SeqCst),
+            0,
+            "the dead core is unused"
+        );
+        cancel.cancel();
+        served.join().unwrap().unwrap();
+    });
+    assert_eq!(restarts.load(Ordering::SeqCst), 1);
 }

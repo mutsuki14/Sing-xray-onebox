@@ -7,18 +7,21 @@
 //! 0 (deliberate, kept from v2 and now documented, D-8.1#2); a listener
 //! failure exits 1.
 //!
-//! Changes from v2: see [`server`] and [`relay`]; without `--entries` the
-//! entry pair is the first TCP-capable plus the first UDP-only entry (v2).
+//! Changes from v2: see [`server`], [`relay`] and [`revive`] (dead cores
+//! are restarted); without `--entries` the entry pair is the first
+//! TCP-capable plus the first UDP-only entry (v2).
 
 pub mod policy;
 pub mod relay;
+pub mod revive;
 pub mod server;
 
 pub use policy::FailoverPolicy;
+pub use revive::ProxySlot;
 
 use super::bundle::{self, Selection};
 use super::cancel::{CancelToken, SignalCancel};
-use super::core_client::{CoreLauncher, Launcher, Proxy, Timing};
+use super::core_client::{CoreLauncher, Launcher, Timing};
 use super::http_probe::{safe_measure, HttpRequest, Route};
 use super::options::FailoverOptions;
 use crate::ctx::Ctx;
@@ -68,13 +71,14 @@ pub fn failover(
     ensure!(ENTRY_RANGE.contains(&entries.len()), "{COUNT_ERROR}");
     let proxies = entries
         .iter()
-        .map(|entry| launcher.launch(entry))
-        .collect::<Result<Vec<Box<dyn Proxy>>>>()?;
+        .map(|entry| launcher.launch(entry).map(ProxySlot::new))
+        .collect::<Result<Vec<ProxySlot>>>()?;
     let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
     let health = |i: usize| {
+        let endpoint = proxies[i].get().endpoint().clone();
         let req = HttpRequest {
             url: &opts.common.url,
-            route: Route::Proxy(proxies[i].endpoint()),
+            route: Route::Proxy(&endpoint),
             timeout_secs: opts.common.timeout,
             ca: opts.common.ca.as_deref(),
             limit: 0,
@@ -82,10 +86,12 @@ pub fn failover(
         };
         safe_measure(ctx, &req, cancel).ok()
     };
+    let restart = |i: usize| launcher.launch(entries[i]);
     let svc = server::Service {
         ids: &ids,
         proxies: &proxies,
         health: &health,
+        restart: &restart,
         port: opts.port,
         interval: Duration::from_secs(opts.interval),
         upstream_timeout: Duration::from_secs(opts.common.timeout),

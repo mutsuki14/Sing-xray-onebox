@@ -14,17 +14,16 @@
 //! - transient accept errors (EMFILE, ECONNABORTED…) back off and retry
 //!   instead of stopping the service; other accept errors still stop it
 //!   (exit 1) through the run's own cancel token (D-8.1#24);
-//! - a core that exits is reported once on stderr (its entry then fails
-//!   every round and is never routed to);
+//! - a core that exits is reported and restarted (see [`super::revive`]);
 //! - a panicking health check fails only its own entry (v2: the round).
 
 use super::policy::FailoverPolicy;
 use super::relay;
+use super::revive::{revive, Backoff, ProxySlot};
 use crate::error::{Error, Result};
 use crate::linktools::cancel::CancelToken;
 use crate::linktools::core_client::Proxy;
 use crate::linktools::socks::{self, Handshake, SocksEndpoint, REPLY_HOST_UNREACHABLE};
-use crate::ui::out;
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -158,10 +157,12 @@ pub fn ready_event(ids: &[String], port: u16) -> Value {
 pub struct Service<'a> {
     /// Entry ids in priority order (event payloads).
     pub ids: &'a [String],
-    /// One running proxy per entry, same order.
-    pub proxies: &'a [Box<dyn Proxy>],
-    /// One health check through proxy `i`.
+    /// The current proxy of each entry, same order.
+    pub proxies: &'a [ProxySlot],
+    /// One health check through the current proxy of entry `i`.
     pub health: &'a (dyn Fn(usize) -> bool + Sync),
+    /// Start a fresh proxy for entry `i` (after its core died).
+    pub restart: &'a (dyn Fn(usize) -> Result<Box<dyn Proxy>> + Sync),
     pub port: u16,
     /// Pause between the end of a round and the next one.
     pub interval: Duration,
@@ -195,8 +196,8 @@ pub fn serve(
             cancel.cancel();
         }
         // Stopping the cores closes every upstream, which wakes the relays.
-        for proxy in svc.proxies {
-            proxy.terminate();
+        for slot in svc.proxies {
+            slot.get().terminate();
         }
     });
     match failure.into_inner().unwrap_or_else(PoisonError::into_inner) {
@@ -224,7 +225,7 @@ fn accept_loop<'scope>(
         active
             .get()
             .and_then(|i| svc.proxies.get(i))
-            .map(|p| p.endpoint().clone())
+            .map(|slot| slot.get().endpoint().clone())
     };
     while !cancel.is_cancelled() {
         match listener.accept() {
@@ -273,7 +274,8 @@ fn monitor<'scope>(
     let mut next_round = Instant::now();
     let mut running = false;
     let mut ready = false;
-    let mut reported = vec![false; svc.proxies.len()];
+    let mut rounds = 0u64;
+    let mut backoff = vec![Backoff::default(); svc.proxies.len()];
     while !cancel.is_cancelled() {
         if !running && Instant::now() >= next_round {
             running = true;
@@ -297,7 +299,15 @@ fn monitor<'scope>(
             emit(&ready_event(svc.ids, svc.port).to_string())?;
             ready = true;
         }
-        report_exits(svc, &mut reported);
+        revive(
+            svc.ids,
+            svc.proxies,
+            &mut backoff,
+            rounds,
+            svc.restart,
+            cancel,
+        );
+        rounds += 1;
         next_round = Instant::now() + svc.interval;
     }
     Ok(())
@@ -314,22 +324,6 @@ fn round(svc: &Service) -> Vec<bool> {
             .map(|check| check.join().unwrap_or(false))
             .collect()
     })
-}
-
-/// Tell once that a core has exited (its entry stays unhealthy).
-fn report_exits(svc: &Service, reported: &mut [bool]) {
-    for (i, proxy) in svc.proxies.iter().enumerate() {
-        let Some(code) = proxy.exited() else {
-            continue;
-        };
-        if !reported[i] {
-            reported[i] = true;
-            let id = svc.ids.get(i).map_or("?", String::as_str);
-            out::warn(format!(
-                "入口 {id} 的客户端内核已退出（退出码 {code}），该入口不再可用"
-            ));
-        }
-    }
 }
 
 #[cfg(test)]
