@@ -30,77 +30,109 @@ use serde_json::json;
 
 /// Share link of one enabled protocol.
 pub fn link(spec: &NodeSpec, ib: &InboundSpec) -> Result<String> {
-    use Protocol::*;
     let p = ib.protocol;
     ensure!(ClientFormat::Links.supports(p), "{p} 不支持通用分享链接");
-    let at = format!("{}:{}", spec.uri_host(), ib.port);
+    if p == Protocol::VmessWs {
+        return vmess(spec, ib);
+    }
+    let (scheme, user, query) = uri_parts(spec, p)?;
+    let host = spec.uri_host();
     let name = url_encode(&ib.label);
+    Ok(format!(
+        "{scheme}://{user}@{host}:{}{query}#{name}",
+        ib.port
+    ))
+}
+
+/// Scheme, user info and query (with its `?` or `/?`) of a URI link.
+fn uri_parts(spec: &NodeSpec, p: Protocol) -> Result<(&'static str, String, String)> {
+    use Protocol::*;
     let uuid = url_encode(&spec.creds.uuid);
     let password = url_encode(&spec.creds.password);
     Ok(match p {
-        VlessReality => format!(
-            "vless://{uuid}@{at}?encryption=none&flow=xtls-rprx-vision&{}&type=tcp&headerType=none#{name}",
-            reality_query(spec)?
+        VlessReality => (
+            "vless",
+            uuid,
+            format!(
+                "?encryption=none&flow=xtls-rprx-vision&{}&type=tcp&headerType=none",
+                reality_query(spec)?
+            ),
         ),
-        VlessXhttp => format!(
-            "vless://{uuid}@{at}?encryption=none&{}&type=xhttp&path={}&mode=auto#{name}",
-            reality_query(spec)?,
-            url_encode(&spec.creds.xhttp_path)
+        VlessXhttp => (
+            "vless",
+            uuid,
+            format!(
+                "?encryption=none&{}&type=xhttp&path={}&mode=auto",
+                reality_query(spec)?,
+                url_encode(&spec.creds.xhttp_path)
+            ),
         ),
-        VlessGrpc => format!(
-            "vless://{uuid}@{at}?encryption=none&{}&type=grpc&serviceName={}&mode=gun#{name}",
-            reality_query(spec)?,
-            url_encode(&spec.creds.grpc_service)
+        VlessGrpc => (
+            "vless",
+            uuid,
+            format!(
+                "?encryption=none&{}&type=grpc&serviceName={}&mode=gun",
+                reality_query(spec)?,
+                url_encode(&spec.creds.grpc_service)
+            ),
         ),
-        VlessWs => {
-            let tls = spec.tls()?;
-            let sni = url_encode(&tls.server_name);
-            format!(
-                "vless://{uuid}@{at}?encryption=none&security=tls&sni={sni}&fp=chrome&alpn=http%2F1.1{}&type=ws&host={sni}&path={}#{name}",
-                pin_query(tls)?,
-                url_encode(&spec.creds.ws_path)
-            )
-        }
-        VmessWs => vmess(spec, ib)?,
-        Trojan => {
-            let tls = spec.tls()?;
-            format!(
-                "trojan://{password}@{at}?security=tls&sni={}&fp=chrome&alpn=h2%2Chttp%2F1.1{}&type=tcp&headerType=none#{name}",
-                url_encode(&tls.server_name),
-                pin_query(tls)?
-            )
-        }
-        Shadowsocks => {
-            let creds = &spec.creds;
-            let auth = URL_SAFE_NO_PAD.encode(format!("{}:{}", creds.ss_method, creds.ss_password));
-            format!("ss://{auth}@{at}#{name}")
-        }
-        Hysteria2 => format!("hysteria2://{password}@{at}/?{}#{name}", hysteria2_query(spec)?),
-        Tuic => {
-            let tls = spec.tls()?;
-            let trust = if tls.pinned() {
-                "&allow_insecure=1&insecure=1"
-            } else {
-                ""
-            };
-            format!(
-                "tuic://{uuid}:{password}@{at}?sni={}&alpn=h3&congestion_control=bbr&udp_relay_mode=native{trust}#{name}",
-                url_encode(&tls.server_name)
-            )
-        }
-        Anytls => {
-            let tls = spec.tls()?;
-            let trust = match tls.pin()? {
-                Some(m) => format!("&insecure=1&hpkp={}", m.leaf_pin()),
-                None => String::new(),
-            };
-            format!(
-                "anytls://{password}@{at}/?sni={}{trust}#{name}",
-                url_encode(&tls.server_name)
-            )
-        }
-        Shadowtls | AnytlsReality => bail!("{p} 不支持通用分享链接"),
+        VlessWs => ("vless", uuid, vless_ws_query(spec)?),
+        Trojan => ("trojan", password, trojan_query(spec)?),
+        Shadowsocks => ("ss", shadowsocks_user(spec), String::new()),
+        Hysteria2 => ("hysteria2", password, hysteria2_query(spec)?),
+        Tuic => ("tuic", format!("{uuid}:{password}"), tuic_query(spec)?),
+        Anytls => ("anytls", password, anytls_query(spec)?),
+        VmessWs | Shadowtls | AnytlsReality => bail!("{p} 不支持通用分享链接"),
     })
+}
+
+fn vless_ws_query(spec: &NodeSpec) -> Result<String> {
+    let tls = spec.tls()?;
+    let sni = url_encode(&tls.server_name);
+    Ok(format!(
+        "?encryption=none&security=tls&sni={sni}&fp=chrome&alpn=http%2F1.1{}&type=ws&host={sni}&path={}",
+        pin_query(tls)?,
+        url_encode(&spec.creds.ws_path)
+    ))
+}
+
+fn trojan_query(spec: &NodeSpec) -> Result<String> {
+    let tls = spec.tls()?;
+    Ok(format!(
+        "?security=tls&sni={}&fp=chrome&alpn=h2%2Chttp%2F1.1{}&type=tcp&headerType=none",
+        url_encode(&tls.server_name),
+        pin_query(tls)?
+    ))
+}
+
+/// SIP002 user info: base64url (no padding) of `method:password`.
+fn shadowsocks_user(spec: &NodeSpec) -> String {
+    let creds = &spec.creds;
+    URL_SAFE_NO_PAD.encode(format!("{}:{}", creds.ss_method, creds.ss_password))
+}
+
+/// TUIC URIs have no portable pin field: a pinned certificate can only be
+/// expressed as "skip verification" (kept from v2, see module docs).
+fn tuic_query(spec: &NodeSpec) -> Result<String> {
+    let tls = spec.tls()?;
+    let trust = if tls.pinned() {
+        "&allow_insecure=1&insecure=1"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "?sni={}&alpn=h3&congestion_control=bbr&udp_relay_mode=native{trust}",
+        url_encode(&tls.server_name)
+    ))
+}
+
+fn anytls_query(spec: &NodeSpec) -> Result<String> {
+    let tls = spec.tls()?;
+    let trust = match tls.pin()? {
+        Some(m) => format!("&insecure=1&hpkp={}", m.leaf_pin()),
+        None => String::new(),
+    };
+    Ok(format!("/?sni={}{trust}", url_encode(&tls.server_name)))
 }
 
 fn reality_query(spec: &NodeSpec) -> Result<String> {
@@ -123,7 +155,7 @@ fn pin_query(tls: &TlsSpec) -> Result<String> {
 
 fn hysteria2_query(spec: &NodeSpec) -> Result<String> {
     let tls = spec.tls()?;
-    let mut query = format!("sni={}&alpn=h3", url_encode(&tls.server_name));
+    let mut query = format!("/?sni={}&alpn=h3", url_encode(&tls.server_name));
     if let Some(m) = tls.pin()? {
         query.push_str(&format!("&insecure=1&pinSHA256={}", m.leaf_pin()));
     }
