@@ -50,12 +50,23 @@ export ONEBOX_SOURCE_ONLY=1 ONEBOX_DIR="$WORK/etc" NO_COLOR=1
 SB_BIN=$SB XR_BIN=$XR
 
 MARKER="onebox-e2e-$(rand_hex 6)"
-# 动态分配空闲端口 (TCP 与 UDP 均未被占用), 避免与本机其他程序冲突
+# Avoid the kernel's ephemeral source-port range: a port free now can otherwise
+# be consumed by an outgoing curl/core connection before the listener starts.
+E2E_EPHEMERAL_START=32768 E2E_EPHEMERAL_END=60999
+if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
+	read -r E2E_EPHEMERAL_START E2E_EPHEMERAL_END </proc/sys/net/ipv4/ip_local_port_range || true
+fi
+if ! [[ "$E2E_EPHEMERAL_START" =~ ^[1-9][0-9]{0,4}$ && "$E2E_EPHEMERAL_END" =~ ^[1-9][0-9]{0,4}$ ]] ||
+	[ "$E2E_EPHEMERAL_START" -gt "$E2E_EPHEMERAL_END" ] || [ "$E2E_EPHEMERAL_END" -gt 65535 ]; then
+	E2E_EPHEMERAL_START=32768 E2E_EPHEMERAL_END=60999
+fi
+# 动态分配非临时源端口范围内的空闲端口 (TCP 与 UDP 均未被占用)。
 USED_PORTS=" "
 free_port() {
 	local p i
 	for i in $(seq 1 200); do
-		p=$(((RANDOM * 32768 + RANDOM) % 20000 + 40000))
+		p=$(((RANDOM * 32768 + RANDOM) % 55296 + 10240))
+		[ "$p" -ge "$E2E_EPHEMERAL_START" ] && [ "$p" -le "$E2E_EPHEMERAL_END" ] && continue
 		case "$USED_PORTS" in *" $p "*) continue ;; esac
 		port_in_use "$p" tcp && continue
 		port_in_use "$p" udp && continue
