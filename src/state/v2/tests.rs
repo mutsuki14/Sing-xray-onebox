@@ -2,7 +2,6 @@ use super::fixtures::*;
 use super::*;
 use crate::domain::config::*;
 use crate::domain::protocol::{Core, Protocol};
-use crate::sys::rand::SeqRandom;
 use Core::{Singbox as SB, Xray as XR};
 use Protocol::*;
 
@@ -113,7 +112,7 @@ fn preset4_site_and_standalone_subscription() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({"id": "XYZ", "name": "bad", "hash": "00", "created": 1}));
-    let m = migrate(&preset4_site(), Some(&settings), &mut SeqRandom(1)).unwrap();
+    let m = migrate_with(&preset4_site(), Some(&settings)).unwrap();
     let c = &m.config;
     assert_eq!(c.inbounds.len(), 9);
     assert_eq!(
@@ -288,13 +287,23 @@ fn custom_certificate() {
     assert!(fallback
         .warnings
         .iter()
-        .any(|w| w.contains("已使用已部署的文件")));
+        .any(|w| w.contains("已改用已部署的")));
 
+    // Without CERT_FILE the v2 deployment directory is used.
     let missing = with(
         custom_cert(),
         &[("CUSTOM_CERT", ""), ("CERT_FILE", ""), ("VMESS_TLS", "")],
     );
-    assert_eq!(err(&missing), "v2 状态缺少 CUSTOM_CERT");
+    let m = run(&missing).unwrap();
+    let Some(ProxyTls {
+        mode: ProxyCertMode::Custom { cert, key, .. },
+        ..
+    }) = &m.config.tls
+    else {
+        panic!("custom expected");
+    };
+    assert_eq!(cert.to_str(), Some("/etc/onebox/tls/cert.pem"));
+    assert_eq!(key.to_str(), Some("/etc/onebox/tls/key.pem"));
     assert_eq!(
         err(&with(custom_cert(), &[("TLS_MODE", "magic")])),
         "v2 字段 TLS_MODE 无效: magic"
@@ -423,10 +432,6 @@ fn protocol_errors() {
         (
             with(preset1(), &[("REALITY_SHORT_ID", "xyz")]),
             "v2 字段 REALITY_SHORT_ID 无效",
-        ),
-        (
-            with(preset1(), &[("REALITY_DEST", "nohost")]),
-            "v2 字段 REALITY_DEST 无效: nohost",
         ),
         (
             with(preset1(), &[("SERVER_ADDR", "bad host")]),

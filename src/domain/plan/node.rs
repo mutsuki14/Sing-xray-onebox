@@ -40,10 +40,12 @@ pub fn add(
         port: opts.port.unwrap_or(0),
         core: presets::assign_core(protocol, preferred, over),
     });
-    if protocol.reality() && next.creds.reality.is_none() {
+    let first_reality = protocol.reality() && !cfg.any_reality();
+    if first_reality && next.creds.reality.is_none() {
         next.creds.reality = Some(credentials::reality_keys(rng)?);
     }
-    apply_reality(&mut next, &opts.reality)?;
+    let choice = first_reality_choice(cfg, &opts.reality, first_reality);
+    apply_reality(&mut next, choice)?;
     check_site_subscription(cfg, &next)?;
     settle_tls(&mut next, opts.cert.as_ref(), protocol == Protocol::VmessWs)?;
     ensure!(
@@ -59,6 +61,29 @@ pub fn add(
     }
     allocate_missing(&mut next, env, &previous)?;
     finish(next, env)
+}
+
+/// The target for an added REALITY inbound. `Default` keeps the current
+/// target, except that the first REALITY inbound never inherits a loopback
+/// target with no site behind it (a site removed with the last REALITY
+/// inbound, or a v2 leftover): it falls back to the Microsoft default.
+fn first_reality_choice<'a>(
+    cfg: &NodeConfig,
+    choice: &'a RealityChoice,
+    first_reality: bool,
+) -> &'a RealityChoice {
+    let loopback = cfg
+        .reality
+        .dest
+        .host
+        .ip()
+        .is_some_and(|ip| ip.is_loopback());
+    match choice {
+        RealityChoice::Default if first_reality && loopback && cfg.site.is_none() => {
+            &RealityChoice::Microsoft
+        }
+        other => other,
+    }
 }
 
 /// Remove an inbound. Dropping the last REALITY inbound also drops the own

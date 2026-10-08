@@ -1,6 +1,7 @@
 //! Typed readers over the v2 key/value bag: protocols, identity,
 //! credentials and handshake targets.
 
+use super::DeployedCerts;
 use crate::domain::config::*;
 use crate::domain::credentials::{self as creds};
 use crate::domain::defaults;
@@ -14,6 +15,7 @@ use std::str::FromStr;
 
 pub(super) struct V2<'a> {
     values: &'a BTreeMap<String, String>,
+    pub(super) deployed: &'a DeployedCerts,
     warnings: Vec<String>,
 }
 
@@ -23,9 +25,10 @@ pub(super) fn protocol_key(protocol: Protocol) -> String {
 }
 
 impl<'a> V2<'a> {
-    pub(super) fn new(values: &'a BTreeMap<String, String>) -> Self {
+    pub(super) fn new(values: &'a BTreeMap<String, String>, deployed: &'a DeployedCerts) -> Self {
         V2 {
             values,
+            deployed,
             warnings: Vec::new(),
         }
     }
@@ -319,12 +322,9 @@ impl<'a> V2<'a> {
     /// `REALITY_SNI` / `REALITY_DEST` / `REALITY_GUARD_PORT` (0 = allocate).
     pub(super) fn reality_target(&mut self) -> Result<RealityTarget> {
         let sni = self.domain_or_default("REALITY_SNI", defaults::REALITY_SNI)?;
-        let dest = match self.nonempty("REALITY_DEST") {
-            Some(raw) => raw
-                .parse::<HostPort>()
-                .map_err(|_| Error::msg(format!("v2 字段 REALITY_DEST 无效: {raw}")))?,
-            None => defaults::handshake_dest(&sni),
-        };
+        let dest = self
+            .handshake_target("REALITY_DEST", &sni)
+            .unwrap_or_else(|| defaults::handshake_dest(&sni));
         let guard_port = self.parse_lenient::<u16>("REALITY_GUARD_PORT").unwrap_or(0);
         Ok(RealityTarget {
             sni,
@@ -336,16 +336,22 @@ impl<'a> V2<'a> {
     /// `SHADOWTLS_SNI` / `SHADOWTLS_DEST` (dropped when it is the default target).
     pub(super) fn shadowtls(&mut self) -> Result<ShadowTls> {
         let sni = self.domain_or_default("SHADOWTLS_SNI", defaults::SHADOWTLS_SNI)?;
-        let dest = match self.nonempty("SHADOWTLS_DEST") {
-            Some(raw) => {
-                let dest = raw
-                    .parse::<HostPort>()
-                    .map_err(|_| Error::msg(format!("v2 字段 SHADOWTLS_DEST 无效: {raw}")))?;
-                Some(dest).filter(|d| *d != defaults::handshake_dest(&sni))
-            }
-            None => None,
-        };
+        let dest = self
+            .handshake_target("SHADOWTLS_DEST", &sni)
+            .filter(|d| *d != defaults::handshake_dest(&sni));
         Ok(ShadowTls { sni, dest })
+    }
+
+    /// A `*_DEST` handshake target read with v2's own rule (server-side only,
+    /// so a value v2 could not render falls back to `{sni}:443` with a
+    /// warning instead of blocking the upgrade).
+    fn handshake_target(&mut self, key: &str, sni: &str) -> Option<HostPort> {
+        let raw = self.nonempty(key)?;
+        let dest = v2_endpoint(raw);
+        if dest.is_none() {
+            self.warn(format!("v2 字段 {key} 无效，已改为 {sni}:443: {raw}"));
+        }
+        dest
     }
 
     /// Lower-cased domain value, the default when absent; invalid → error.
@@ -363,6 +369,24 @@ impl<'a> V2<'a> {
     pub(super) fn installed_at(&mut self) -> u64 {
         self.parse_lenient("INSTALLED_AT").unwrap_or(0)
     }
+}
+
+/// v2 `render::endpoint`: split at the last `:`, trim `[`/`]` around the
+/// host, non-zero port, non-empty host. Unbracketed IPv6 (`2001:db8::1:443`)
+/// therefore works and becomes the bracketed v3 form; single-label and
+/// underscore hosts are kept ([`Host::target`]).
+pub(super) fn v2_endpoint(raw: &str) -> Option<HostPort> {
+    let (host, port) = raw.trim().rsplit_once(':')?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = port.parse::<u16>().ok().filter(|p| *p != 0)?;
+    if host.is_empty() {
+        return None;
+    }
+    let host = match Host::target(host).ok()? {
+        Host::Ip(ip) => Host::Ip(ip.to_canonical()),
+        name => name,
+    };
+    Some(HostPort { host, port })
 }
 
 fn path(rng: &mut dyn Random) -> Result<String> {

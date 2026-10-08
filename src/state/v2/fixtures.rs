@@ -77,9 +77,28 @@ pub(crate) fn preset1() -> BTreeMap<String, String> {
     values
 }
 
+/// The production v2 layout (`/etc/onebox`).
+pub(crate) fn deployed() -> super::DeployedCerts {
+    super::DeployedCerts::under(std::path::Path::new("/etc/onebox"))
+}
+
 /// Migrate without subscription settings, deterministic randomness.
 pub(crate) fn run(values: &BTreeMap<String, String>) -> crate::Result<super::Migrated> {
-    super::migrate(values, None, &mut crate::sys::rand::SeqRandom(42))
+    let rng = &mut crate::sys::rand::SeqRandom(42);
+    super::migrate(values, None, &deployed(), rng)
+}
+
+/// Migrate with optional subscription settings, deterministic randomness.
+pub(crate) fn migrate_with(
+    values: &BTreeMap<String, String>,
+    settings: Option<&serde_json::Value>,
+) -> crate::Result<super::Migrated> {
+    super::migrate(
+        values,
+        settings,
+        &deployed(),
+        &mut crate::sys::rand::SeqRandom(1),
+    )
 }
 
 pub(crate) fn err(values: &BTreeMap<String, String>) -> String {

@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// Every key v2 persisted on purpose (spec A §3.4.1 and §3.4.2), besides the
@@ -107,11 +107,12 @@ impl V2<'_> {
     /// `REALITY_SITE_*` / `SITE_*` → `SiteConfig` while a REALITY inbound
     /// exists (v2 ignored the site otherwise).
     pub(super) fn site(&mut self, cfg: &mut NodeConfig) -> Result<()> {
-        if !self.flag("REALITY_SITE_ENABLED") {
-            return Ok(());
-        }
-        if !cfg.any_reality() {
-            self.warn("v2 网站已随 REALITY 协议停用，网站设置未迁移");
+        let enabled = self.flag("REALITY_SITE_ENABLED");
+        if !enabled || !cfg.any_reality() {
+            if enabled {
+                self.warn("v2 网站已随 REALITY 协议停用，网站设置未迁移");
+            }
+            self.drop_stale_site_target(cfg);
             return Ok(());
         }
         let raw = self.get("REALITY_SITE_DOMAIN").trim();
@@ -138,6 +139,31 @@ impl V2<'_> {
         Ok(())
     }
 
+    /// v2 `del` of the last REALITY protocol only cleared
+    /// `REALITY_SITE_ENABLED` and left the target on the stopped site
+    /// (`REALITY_SNI` = site domain, `REALITY_DEST` = `127.0.0.1:N`, spec B
+    /// §3.5); a later `add` kept it, so REALITY handshaked against a closed
+    /// loopback port. Such a target goes back to the default. Other loopback
+    /// targets (local test servers) are kept.
+    fn drop_stale_site_target(&mut self, cfg: &mut NodeConfig) {
+        let site_domain = self.get("REALITY_SITE_DOMAIN").trim().to_ascii_lowercase();
+        let loopback = cfg.reality.dest.host == Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        if site_domain.is_empty() || cfg.reality.sni != site_domain || !loopback {
+            return;
+        }
+        let stale = cfg.reality.dest.to_string();
+        cfg.reality = defaults::reality_target(cfg.reality.guard_port);
+        let update = if cfg.any_reality() {
+            "；请更新客户端"
+        } else {
+            ""
+        };
+        self.warn(format!(
+            "v2 REALITY 目标仍指向已停用的自建站 {stale}，已改为默认目标 {}{update}",
+            cfg.reality.dest
+        ));
+    }
+
     /// The port v2 rendered: `REALITY_DEST` `127.0.0.1:N`, else
     /// `REALITY_SITE_PORT`, else the v3 default.
     fn site_port(&mut self, dest: &HostPort) -> u16 {
@@ -149,16 +175,50 @@ impl V2<'_> {
             .unwrap_or(defaults::SITE_INTERNAL_PORT)
     }
 
-    fn site_cert(&self) -> Result<WebCert> {
+    fn site_cert(&mut self) -> Result<WebCert> {
         match self.get("SITE_ACME_METHOD").trim() {
             "" | "http" | "standalone" => Ok(WebCert::Http01),
             "cf" => Ok(WebCert::Cloudflare),
-            "custom" => Ok(WebCert::Custom {
-                cert: self.absolute("SITE_CUSTOM_CERT")?,
-                key: self.absolute("SITE_CUSTOM_KEY")?,
-            }),
+            "custom" => {
+                let sources = [
+                    ("SITE_CUSTOM_CERT", self.nonempty("SITE_CUSTOM_CERT")),
+                    ("SITE_CUSTOM_KEY", self.nonempty("SITE_CUSTOM_KEY")),
+                ];
+                let deployed = deployed_pair(&self.deployed.site);
+                let (cert, key) = self.source_pair("网站", sources, deployed);
+                Ok(WebCert::Custom { cert, key })
+            }
             other => bail!("v2 字段 SITE_ACME_METHOD 无效: {other}"),
         }
+    }
+
+    /// A custom certificate source pair. v2 stored `--cert/--key` verbatim
+    /// and read them relative to the working directory of whichever command
+    /// ran (spec F §3.9), so a missing or relative source is replaced by the
+    /// copy v2 deployed, which is what the node served. The certificate is
+    /// server-side only, so this never blocks the upgrade.
+    pub(super) fn source_pair(
+        &mut self,
+        label: &str,
+        sources: [(&str, Option<&str>); 2],
+        deployed: (PathBuf, PathBuf),
+    ) -> (PathBuf, PathBuf) {
+        let [(cert_key, cert), (key_key, key)] = sources;
+        if let (Some(cert), Some(key)) = (cert, key) {
+            let (cert, key) = (PathBuf::from(cert), PathBuf::from(key));
+            if usable_path(&cert) && usable_path(&key) {
+                return (cert, key);
+            }
+        }
+        let shown = |v: Option<&str>| v.map_or_else(|| "（缺失）".to_owned(), |v| format!("{v:?}"));
+        self.warn(format!(
+            "v2 {label}自备证书路径 {cert_key}={} {key_key}={} 缺失或不是绝对路径，已改用已部署的 {} 和 {}",
+            shown(cert),
+            shown(key),
+            deployed.0.display(),
+            deployed.1.display()
+        ));
+        deployed
     }
 
     fn backup_id(&mut self) -> Option<String> {
@@ -171,15 +231,6 @@ impl V2<'_> {
             ));
             None
         }
-    }
-
-    fn absolute(&self, key: &str) -> Result<PathBuf> {
-        let raw = self
-            .nonempty(key)
-            .ok_or_else(|| Error::msg(format!("v2 状态缺少 {key}")))?;
-        let path = PathBuf::from(raw);
-        ensure!(path.is_absolute(), "v2 字段 {key} 必须是绝对路径: {raw}");
-        Ok(path)
     }
 
     fn text_or(&mut self, key: &str, default: &str, valid: fn(&str) -> bool) -> String {
@@ -220,11 +271,11 @@ impl V2<'_> {
                 domain: self.cert_domain()?,
                 method: self.acme_method()?,
             },
-            "custom" => ProxyCertMode::Custom {
-                domain: self.cert_domain()?,
-                cert: self.custom_source("CUSTOM_CERT", "CERT_FILE")?,
-                key: self.custom_source("CUSTOM_KEY", "KEY_FILE")?,
-            },
+            "custom" => {
+                let domain = self.cert_domain()?;
+                let (cert, key) = self.proxy_custom_pair();
+                ProxyCertMode::Custom { domain, cert, key }
+            }
             other => bail!("v2 字段 TLS_MODE 无效: {other}"),
         };
         let pinned = !mode.is_domain_cert() || self.flag("CERT_PINNED");
@@ -281,19 +332,20 @@ impl V2<'_> {
         }
     }
 
-    /// Custom certificate source; v2 fell back to the deployed copy.
-    fn custom_source(&mut self, key: &str, fallback: &str) -> Result<PathBuf> {
-        if self.nonempty(key).is_some() {
-            return self.absolute(key);
-        }
-        let deployed = self
-            .absolute(fallback)
-            .map_err(|_| Error::msg(format!("v2 状态缺少 {key}")))?;
-        self.warn(format!(
-            "v2 状态缺少 {key}，已使用已部署的文件 {}",
-            deployed.display()
-        ));
-        Ok(deployed)
+    /// `CUSTOM_CERT` / `CUSTOM_KEY`; v2 itself fell back to the deployed
+    /// copy `CERT_FILE` / `KEY_FILE` when they were empty.
+    fn proxy_custom_pair(&mut self) -> (PathBuf, PathBuf) {
+        let recorded = [self.nonempty("CERT_FILE"), self.nonempty("KEY_FILE")]
+            .map(|v| v.map(PathBuf::from).filter(|p| usable_path(p)));
+        let deployed = match recorded {
+            [Some(cert), Some(key)] => (cert, key),
+            _ => deployed_pair(&self.deployed.proxy),
+        };
+        let sources = [
+            ("CUSTOM_CERT", self.nonempty("CUSTOM_CERT")),
+            ("CUSTOM_KEY", self.nonempty("CUSTOM_KEY")),
+        ];
+        self.source_pair("代理", sources, deployed)
     }
 
     /// Hysteria2 options, tuning and the resource profile. Values v2 could
@@ -437,7 +489,7 @@ impl V2<'_> {
                 return Ok((None, devices));
             }
             "site" => SubscriptionMode::Site,
-            "standalone" => standalone(&s)?,
+            "standalone" => self.standalone(&s)?,
             other => bail!("v2 订阅托管模式无效: {other}"),
         };
         let port = if mode == SubscriptionMode::Site {
@@ -461,6 +513,30 @@ impl V2<'_> {
         out
     }
 
+    fn standalone(&mut self, s: &Settings) -> Result<SubscriptionMode> {
+        let domain = s.domain.trim().to_ascii_lowercase();
+        ensure!(valid_domain(&domain), "v2 订阅域名无效: {}", s.domain);
+        let cert = match s.method.as_str() {
+            "cf" => WebCert::Cloudflare,
+            "http" => WebCert::Http01,
+            "custom" => {
+                let sources = [
+                    ("custom_cert", path_text(s.custom_cert.as_deref())),
+                    ("custom_key", path_text(s.custom_key.as_deref())),
+                ];
+                let deployed = deployed_pair(&self.deployed.subscription);
+                let (cert, key) = self.source_pair("订阅", sources, deployed);
+                WebCert::Custom { cert, key }
+            }
+            other => bail!("v2 订阅证书方式无效: {other}"),
+        };
+        Ok(SubscriptionMode::Standalone {
+            domain,
+            http01_port80: cert == WebCert::Http01,
+            cert,
+        })
+    }
+
     pub(super) fn report_unknown_keys(&mut self) {
         let unknown: Vec<&str> = self
             .values()
@@ -474,32 +550,20 @@ impl V2<'_> {
     }
 }
 
-fn standalone(s: &Settings) -> Result<SubscriptionMode> {
-    let domain = s.domain.trim().to_ascii_lowercase();
-    ensure!(valid_domain(&domain), "v2 订阅域名无效: {}", s.domain);
-    let cert = match s.method.as_str() {
-        "cf" => WebCert::Cloudflare,
-        "http" => WebCert::Http01,
-        "custom" => {
-            let (Some(cert), Some(key)) = (&s.custom_cert, &s.custom_key) else {
-                bail!("v2 订阅自备证书缺少 custom_cert/custom_key");
-            };
-            ensure!(
-                cert.is_absolute() && key.is_absolute(),
-                "v2 订阅证书路径必须为绝对路径"
-            );
-            WebCert::Custom {
-                cert: cert.clone(),
-                key: key.clone(),
-            }
-        }
-        other => bail!("v2 订阅证书方式无效: {other}"),
-    };
-    Ok(SubscriptionMode::Standalone {
-        domain,
-        http01_port80: cert == WebCert::Http01,
-        cert,
-    })
+fn path_text(path: Option<&Path>) -> Option<&str> {
+    path.and_then(Path::to_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+}
+
+/// `cert.pem` / `key.pem` in a v2 deployment directory.
+fn deployed_pair(dir: &Path) -> (PathBuf, PathBuf) {
+    (dir.join("cert.pem"), dir.join("key.pem"))
+}
+
+/// Absolute and printable, as `NodeConfig::validate` requires.
+fn usable_path(path: &Path) -> bool {
+    path.is_absolute() && path.to_str().is_some_and(valid_text)
 }
 
 /// v2 `validate_settings` device rules.

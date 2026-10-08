@@ -71,7 +71,9 @@ pub struct ServerAddr {
     pub ipv6_warp: bool,
 }
 
-/// An IP literal or a DNS name (validated, lower-case).
+/// An IP literal or a DNS name (validated, lower-case). Public addresses
+/// parse with [`Host::from_str`] (a real domain); handshake targets inside
+/// [`HostPort`] also accept host names such as `localhost` ([`Host::target`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum Host {
@@ -94,6 +96,40 @@ impl Host {
             Host::Domain(_) => None,
         }
     }
+
+    /// Host of a handshake target: an IP literal or a host name as resolvers
+    /// accept it, including single labels (`localhost`) and underscores
+    /// (v2 accepted any non-empty host; see [`valid_hostname`]).
+    pub fn target(s: &str) -> Result<Host> {
+        if let Ok(ip) = s.parse::<IpAddr>() {
+            return Ok(Host::Ip(ip));
+        }
+        let lower = s.to_ascii_lowercase();
+        if valid_hostname(&lower) {
+            Ok(Host::Domain(lower))
+        } else {
+            Err(Error::Msg(format!("目标主机名无效: {s}")))
+        }
+    }
+}
+
+/// Lower-case host name for handshake targets: at most 253 bytes, labels of
+/// 1–63 `[a-z0-9_-]` not starting or ending with `-`, and a last label that
+/// is not all digits (a mistyped IP is not a name).
+pub fn valid_hostname(s: &str) -> bool {
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    };
+    let last_named = s
+        .rsplit('.')
+        .next()
+        .is_some_and(|l| !l.bytes().all(|b| b.is_ascii_digit()));
+    !s.is_empty() && s.len() <= 253 && s.split('.').all(label_ok) && last_named
 }
 
 impl fmt::Display for Host {
@@ -138,7 +174,8 @@ impl From<Host> for String {
     }
 }
 
-/// `host:port` where host is a domain or IP (IPv6 bracketed in text form).
+/// `host:port` handshake target: a host name or IP literal, IPv6 bracketed
+/// in text form (`[2001:db8::1]:443`; the unbracketed form is ambiguous).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct HostPort {
@@ -158,22 +195,20 @@ impl FromStr for HostPort {
         let invalid = || Error::Msg(format!("目标格式应为 主机:端口: {s}"));
         let (host, port) = if let Some(rest) = s.strip_prefix('[') {
             let (h, p) = rest.split_once("]:").ok_or_else(invalid)?;
-            (h, p)
+            let ip: IpAddr = h.parse().map_err(|_| invalid())?;
+            (Host::Ip(ip), p)
         } else {
             let (h, p) = s.rsplit_once(':').ok_or_else(invalid)?;
-            if h.contains(':') {
+            if h.contains(':') || h.is_empty() {
                 return Err(invalid());
             }
-            (h, p)
+            (Host::target(h)?, p)
         };
         let port: u16 = port.parse().map_err(|_| invalid())?;
-        if port == 0 || host.is_empty() {
+        if port == 0 {
             return Err(invalid());
         }
-        Ok(HostPort {
-            host: host.parse()?,
-            port,
-        })
+        Ok(HostPort { host, port })
     }
 }
 
@@ -542,64 +577,4 @@ impl NodeConfig {
 mod helpers;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn host_parsing() {
-        assert_eq!(
-            "203.0.113.5".parse::<Host>().unwrap().url_host(),
-            "203.0.113.5"
-        );
-        assert_eq!(
-            "[2001:db8::1]".parse::<Host>().unwrap().url_host(),
-            "[2001:db8::1]"
-        );
-        assert_eq!(
-            "WWW.Example.COM".parse::<Host>().unwrap().to_string(),
-            "www.example.com"
-        );
-        assert!("bad host".parse::<Host>().is_err());
-    }
-
-    #[test]
-    fn host_port_parsing() {
-        let hp: HostPort = "www.microsoft.com:443".parse().unwrap();
-        assert_eq!(hp.to_string(), "www.microsoft.com:443");
-        let v6: HostPort = "[2001:db8::1]:8443".parse().unwrap();
-        assert_eq!(v6.to_string(), "[2001:db8::1]:8443");
-        assert!("2001:db8::1:443".parse::<HostPort>().is_err());
-        assert!("example.com:0".parse::<HostPort>().is_err());
-        assert!("example.com".parse::<HostPort>().is_err());
-    }
-
-    #[test]
-    fn port_range_parsing() {
-        let r: PortRange = "20000-30000".parse().unwrap();
-        assert!(r.contains(25000) && !r.contains(19999));
-        assert!("3000-2000".parse::<PortRange>().is_err());
-        assert_eq!(
-            serde_json::to_value(r).unwrap(),
-            serde_json::json!("20000-30000")
-        );
-    }
-
-    #[test]
-    fn tagged_enums_serialize_readably() {
-        let mode = ProxyCertMode::Acme {
-            domain: "a.example.com".into(),
-            method: AcmeMethod::Cloudflare,
-        };
-        assert_eq!(
-            serde_json::to_value(&mode).unwrap(),
-            serde_json::json!({"type": "acme", "domain": "a.example.com", "method": "cloudflare"})
-        );
-        let sub = SubscriptionMode::Ip {
-            address: "203.0.113.5".parse().unwrap(),
-        };
-        assert_eq!(
-            serde_json::to_value(&sub).unwrap(),
-            serde_json::json!({"type": "ip", "address": "203.0.113.5"})
-        );
-    }
-}
+mod tests;

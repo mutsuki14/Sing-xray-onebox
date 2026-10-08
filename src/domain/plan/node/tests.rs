@@ -141,6 +141,34 @@ fn add_first_reality_generates_keys_and_target() {
     assert_eq!(next.reality.guard_port, 18001);
 }
 
+#[test]
+fn first_reality_never_inherits_a_dead_loopback_target() {
+    // A target left on a removed site (or a v2 leftover): no site, loopback.
+    let mut stale = config(&[(Trojan, 443, SB)]);
+    stale.reality.sni = "www.example.com".into();
+    stale.reality.dest = crate::domain::defaults::site_dest(8443);
+    let next = add_default(&stale, VlessReality).unwrap();
+    assert_eq!(next.reality.sni, "www.microsoft.com");
+    assert_eq!(next.reality.dest.to_string(), "www.microsoft.com:443");
+    // An explicit choice still wins, including an explicit loopback target.
+    let opts = AddOptions {
+        reality: RealityChoice::Dest("127.0.0.1:24443".parse().unwrap()),
+        ..AddOptions::default()
+    };
+    let next = add(&stale, VlessReality, &opts, &env(), &mut SeqRandom(5)).unwrap();
+    assert_eq!(next.reality.dest.to_string(), "127.0.0.1:24443");
+    // Later REALITY inbounds keep whatever the first one uses.
+    let next = add_default(&next, VlessGrpc).unwrap();
+    assert_eq!(next.reality.dest.to_string(), "127.0.0.1:24443");
+    // External targets are kept for the first inbound too.
+    let mut apple = config(&[(Trojan, 443, SB)]);
+    apple.reality = crate::domain::defaults::reality_target(18000);
+    apple.reality.sni = "www.apple.com".into();
+    apple.reality.dest = "www.apple.com:443".parse().unwrap();
+    let next = add_default(&apple, VlessReality).unwrap();
+    assert_eq!(next.reality.sni, "www.apple.com");
+}
+
 fn opts_core(core: Core) -> AddOptions {
     AddOptions {
         core: Some(core),

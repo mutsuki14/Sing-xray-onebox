@@ -224,7 +224,8 @@ fn migrate_v2(
         ),
         None => None,
     };
-    let migrated = v2::migrate(&values, settings.as_ref(), rng)?;
+    let deployed = v2::DeployedCerts::of(paths);
+    let migrated = v2::migrate(&values, settings.as_ref(), &deployed, rng)?;
     let origin = Origin::V2 {
         devices: migrated.devices,
         warnings: migrated.warnings,

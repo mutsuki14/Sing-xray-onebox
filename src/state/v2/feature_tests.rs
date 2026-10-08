@@ -4,7 +4,6 @@ use super::fixtures::*;
 use super::*;
 use crate::domain::config::*;
 use crate::domain::{Core, Protocol};
-use crate::sys::rand::SeqRandom;
 use std::net::IpAddr;
 
 #[test]
@@ -58,10 +57,16 @@ fn site_port_derivation_and_https_default() {
             key: "/srv/site.key".into()
         }
     );
+    // A missing source falls back to the deployed site pair.
+    let m = run(&with(custom, &[("SITE_CUSTOM_KEY", "")])).unwrap();
     assert_eq!(
-        err(&with(custom, &[("SITE_CUSTOM_KEY", "")])),
-        "v2 状态缺少 SITE_CUSTOM_KEY"
+        m.config.site.unwrap().cert,
+        WebCert::Custom {
+            cert: "/etc/onebox/site/cert.pem".into(),
+            key: "/etc/onebox/site/key.pem".into()
+        }
     );
+    assert_eq!(m.warnings.len(), 1);
     assert_eq!(
         err(&with(site.clone(), &[("SITE_ACME_METHOD", "self")])),
         "v2 字段 SITE_ACME_METHOD 无效: self"
@@ -182,7 +187,7 @@ fn guard_is_allocated_when_missing() {
 #[test]
 fn subscription_settings() {
     let ip = settings("ip", "203.0.113.10", 8448, "none");
-    let m = migrate(&preset1(), Some(&ip), &mut SeqRandom(1)).unwrap();
+    let m = migrate_with(&preset1(), Some(&ip)).unwrap();
     assert_eq!(
         m.config.subscription,
         Some(SubscriptionConfig {
@@ -196,7 +201,7 @@ fn subscription_settings() {
 
     let mut disabled = ip.clone();
     disabled["enabled"] = serde_json::json!(false);
-    let m = migrate(&preset1(), Some(&disabled), &mut SeqRandom(1)).unwrap();
+    let m = migrate_with(&preset1(), Some(&disabled)).unwrap();
     assert_eq!(m.config.subscription, None);
     assert_eq!(
         m.devices.map(|d| d.len()),
@@ -212,7 +217,7 @@ fn subscription_settings() {
         ],
     );
     let site = settings("site", "www.example.com", 443, "cf");
-    let m = migrate(&site_values, Some(&site), &mut SeqRandom(1)).unwrap();
+    let m = migrate_with(&site_values, Some(&site)).unwrap();
     assert_eq!(
         m.config.subscription,
         Some(SubscriptionConfig {
@@ -220,7 +225,7 @@ fn subscription_settings() {
             port: 443
         })
     );
-    let m = migrate(&preset1(), Some(&site), &mut SeqRandom(1)).unwrap();
+    let m = migrate_with(&preset1(), Some(&site)).unwrap();
     assert_eq!(m.config.subscription, None);
     assert_eq!(
         m.warnings,
@@ -228,7 +233,7 @@ fn subscription_settings() {
     );
 
     let http = settings("standalone", "Sub.Example.com", 8443, "http");
-    let m = migrate(&preset1(), Some(&http), &mut SeqRandom(1)).unwrap();
+    let m = migrate_with(&preset1(), Some(&http)).unwrap();
     assert_eq!(
         m.config.subscription.unwrap().mode,
         SubscriptionMode::Standalone {
@@ -238,11 +243,20 @@ fn subscription_settings() {
         }
     );
     let mut custom = settings("standalone", "sub.example.com", 8443, "custom");
-    let e = migrate(&preset1(), Some(&custom), &mut SeqRandom(1)).unwrap_err();
-    assert_eq!(e.to_string(), "v2 订阅自备证书缺少 custom_cert/custom_key");
+    let m = migrate_with(&preset1(), Some(&custom)).unwrap();
+    assert!(
+        matches!(
+            m.config.subscription.unwrap().mode,
+            SubscriptionMode::Standalone {
+                cert: WebCert::Custom { ref cert, .. },
+                ..
+            } if cert.to_str() == Some("/etc/onebox/subscription/tls/cert.pem")
+        ),
+        "missing sources fall back to the deployed pair"
+    );
     custom["custom_cert"] = serde_json::json!("/srv/sub.pem");
     custom["custom_key"] = serde_json::json!("/srv/sub.key");
-    let m = migrate(&preset1(), Some(&custom), &mut SeqRandom(1)).unwrap();
+    let m = migrate_with(&preset1(), Some(&custom)).unwrap();
     assert!(matches!(
         m.config.subscription.unwrap().mode,
         SubscriptionMode::Standalone {
@@ -267,11 +281,11 @@ fn subscription_settings() {
         ),
     ];
     for (s, want) in cases {
-        let e = migrate(&preset1(), Some(&s), &mut SeqRandom(1)).unwrap_err();
+        let e = migrate_with(&preset1(), Some(&s)).unwrap_err();
         assert_eq!(e.to_string(), want);
     }
     let broken = serde_json::json!({"enabled": "yes"});
-    let e = migrate(&preset1(), Some(&broken), &mut SeqRandom(1)).unwrap_err();
+    let e = migrate_with(&preset1(), Some(&broken)).unwrap_err();
     assert!(e.to_string().starts_with("v2 订阅设置无效"));
 }
 
