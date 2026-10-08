@@ -446,6 +446,20 @@ pub struct SubscriptionConfig {
     pub port: u16,
 }
 
+/// A subscription device (stored in `subscription/devices.json`, not in
+/// state.json). Only the SHA-256 of the bearer token is kept.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Device {
+    /// 16 lowercase hex.
+    pub id: String,
+    /// ≤ 80 bytes, no control characters, unique.
+    pub name: String,
+    /// 64 lowercase hex = sha256(token as ASCII hex).
+    pub hash: String,
+    /// Unix seconds of creation or last reset.
+    pub created: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SubscriptionMode {
