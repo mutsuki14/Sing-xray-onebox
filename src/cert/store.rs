@@ -282,14 +282,46 @@ impl CertStatus {
         lines
     }
 
-    /// `doctor`'s warning: expired, or expiring within `warn_days`.
+    /// `doctor`'s warning: expired, or expiring within `warn_days` (the
+    /// [`Expiry`] predicate every expiry check shares).
     pub fn warning(&self, warn_days: u64) -> Option<String> {
-        match self.days_left {
-            Some(days) if days < 0 => Some("证书已过期".to_owned()),
-            Some(days) if days <= warn_days as i64 => Some(format!("证书将在 {days} 天内到期")),
-            None => Some("无法读取证书有效期".to_owned()),
-            _ => None,
+        let Some(days) = self.days_left else {
+            return Some("无法读取证书有效期".to_owned());
+        };
+        match Expiry::of_days(days, warn_days) {
+            Expiry::Expired => Some("证书已过期".to_owned()),
+            Expiry::Expiring => Some(format!("证书将在 {days} 天内到期")),
+            Expiry::Valid => None,
         }
+    }
+}
+
+/// Where a certificate stands against a warning window. The one predicate
+/// of `cert info`, `doctor` and the feature checks, so they agree at the
+/// boundary: expired once `notAfter` has passed, expiring while fewer than
+/// `warn_days` whole days remain (`openssl x509 -checkend`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expiry {
+    Expired,
+    Expiring,
+    Valid,
+}
+
+impl Expiry {
+    /// From the whole days left ([`days_until`]).
+    pub fn of_days(days_left: i64, warn_days: u64) -> Expiry {
+        if days_left < 0 {
+            Expiry::Expired
+        } else if days_left < warn_days as i64 {
+            Expiry::Expiring
+        } else {
+            Expiry::Valid
+        }
+    }
+
+    /// From the expiry time (unix seconds) measured at `now`.
+    pub fn at(expires_at: u64, now: u64, warn_days: u64) -> Expiry {
+        Expiry::of_days(days_until(expires_at, now), warn_days)
     }
 }
 

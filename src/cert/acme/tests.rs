@@ -184,7 +184,7 @@ fn obtain_serves_responder_challenges_and_cleans_up() {
     let dir = TempDir::new("acme-obtain").unwrap();
     let (ctx, exec, _) = Ctx::test(dir.path());
     serve_release(&exec);
-    let engine = engine(&ctx, InitSystem::None);
+    let mut engine = engine(&ctx, InitSystem::None);
     let script = fake_acme(
         &exec,
         AcmeScript {
@@ -209,7 +209,10 @@ fn obtain_serves_responder_challenges_and_cleans_up() {
     assert!(call.clear_env);
     assert_eq!(call.env, [("PATH".to_owned(), SAFE_PATH.to_owned())]);
 
-    // A failing validation surfaces the redacted acme.sh output.
+    // A failing validation surfaces the redacted acme.sh output. A fresh
+    // responder port: a child forked by a concurrent test may still hold
+    // the first listener's descriptor until it execs.
+    engine.http01_port = crate::cert::testing::free_port();
     script.lock().unwrap().fetch_port = Some(crate::cert::testing::free_port());
     let err = obtain(
         &engine,

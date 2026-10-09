@@ -27,6 +27,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// Default contention message for the node lock.
+/// Busy retries (20 ms apart) in test builds; see [`FileLock::acquire`].
+const TEST_BUSY_RETRIES: u32 = 50;
+
 pub const BUSY_MESSAGE: &str = "另一个配置操作正在进行；稍后重试";
 
 #[derive(Debug)]
@@ -76,16 +79,31 @@ impl FileLock {
                 Some(libc::ELOOP) => Error::msg(format!("不允许符号链接: {}", path.display())),
                 _ => Error::io(path, e),
             })?;
-        match flock_exclusive(file.as_raw_fd()) {
-            Ok(()) => Ok(FileLock {
-                file,
-                path: path.to_path_buf(),
-                inherited: false,
-            }),
-            Err(e) if e.raw_os_error() == Some(libc::EWOULDBLOCK) => {
-                Err(Error::Busy(busy_message.to_owned()))
+        let mut retries = 0;
+        loop {
+            match flock_exclusive(file.as_raw_fd()) {
+                Ok(()) => {
+                    return Ok(FileLock {
+                        file,
+                        path: path.to_path_buf(),
+                        inherited: false,
+                    })
+                }
+                Err(e) if e.raw_os_error() == Some(libc::EWOULDBLOCK) => {
+                    // Test builds only: a child forked by a concurrently
+                    // running test keeps a duplicate of a just-released lock
+                    // descriptor (and so the flock) until it execs. The
+                    // production binary never forks while holding a lock it
+                    // later re-acquires, so it fails immediately.
+                    if cfg!(test) && retries < TEST_BUSY_RETRIES {
+                        retries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        continue;
+                    }
+                    return Err(Error::Busy(busy_message.to_owned()));
+                }
+                Err(e) => return Err(Error::io(path, e)),
             }
-            Err(e) => Err(Error::io(path, e)),
         }
     }
 

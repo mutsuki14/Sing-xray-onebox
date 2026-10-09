@@ -52,7 +52,7 @@ pub use openssl::{publicly_trusted, validate_pair, Trust};
 pub use renew::{
     credentials_needed, credentials_needed_for_apply, renew_all, RenewOptions, RenewReport,
 };
-pub use store::{CertDir, CertStatus, Metadata};
+pub use store::{CertDir, CertStatus, Expiry, Metadata};
 
 use crate::error::{Error, Result};
 use std::fmt;
