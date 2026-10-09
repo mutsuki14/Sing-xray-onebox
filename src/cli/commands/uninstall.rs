@@ -7,6 +7,14 @@
 //! well, `state.json` and `state.v2.json` last (so a failed uninstall can
 //! simply be run again).
 //!
+//! A service that could not be removed (e.g. its stop timed out) keeps the
+//! whole file phase from running: without an init system the supervisor
+//! needs the service spec (`ROOT/services`) to find and stop the daemon,
+//! and a missing spec reads as "already stopped" — deleting it would let
+//! the re-run succeed while sing-box/Xray keep running and hold the ports.
+//! The rules and crontab lines are still cleared; the re-run removes the
+//! rest.
+//!
 //! Removed: the services `onebox-sing-box`, `onebox-xray`,
 //! `onebox-subscription-web`, `onebox-subscription`, `onebox-site`,
 //! `onebox-network`; the firewall owners `proxy` and `acme`; port hopping;
@@ -46,6 +54,8 @@ const SERVICES: [&str; 6] = [
     NETWORK,
 ];
 const FIREWALL_OWNERS: [&str; 2] = ["proxy", "acme"];
+/// Why the files stayed after a failed service removal.
+pub const FILES_KEPT: &str = "服务未能全部删除，已保留服务定义、内核与配置文件";
 
 /// The backup taken under the node lock before anything is removed:
 /// `crate::backup::create_locked` (wired in `cli::registry`).
@@ -90,7 +100,8 @@ pub fn uninstall(session: &Session, backup: BackupHook) -> Result<()> {
     session.data(DONE)
 }
 
-/// Every removal step; returns the failures.
+/// Every removal step; returns the failures. The files go only after
+/// every service did (module docs).
 fn teardown(session: &Session) -> Vec<String> {
     let ctx = session.ctx;
     let mut errors = Vec::new();
@@ -100,6 +111,7 @@ fn teardown(session: &Session) -> Vec<String> {
             errors.push(format!("删除 {name}: {e}"));
         }
     }
+    let services_removed = errors.is_empty();
     for owner in FIREWALL_OWNERS {
         match crate::host::firewall::clear_owner(ctx, owner) {
             Ok(report) if report.failed.is_empty() => {}
@@ -117,7 +129,11 @@ fn teardown(session: &Session) -> Vec<String> {
             errors.push(format!("计划任务: {e}"));
         }
     }
-    errors.extend(remove_files(session));
+    if services_removed {
+        errors.extend(remove_files(session));
+    } else {
+        errors.push(FILES_KEPT.to_owned());
+    }
     errors
 }
 

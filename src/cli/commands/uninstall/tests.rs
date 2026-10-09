@@ -111,8 +111,77 @@ fn teardown_failures_keep_the_state_for_a_retry() {
     assert!(err
         .to_string()
         .ends_with("问题解决后可再次执行 onebox uninstall"));
-    assert!(bench.ctx.paths.state().exists(), "state kept for a re-run");
-    assert!(!bench.ctx.paths.clients().exists(), "other steps still ran");
+    assert!(err.to_string().contains(FILES_KEPT), "{err}");
+    let paths = &bench.ctx.paths;
+    assert!(paths.state().exists(), "state kept for a re-run");
+    for kept in [
+        paths.services(),
+        paths.core_bin(Core::Xray),
+        paths.core_config(Core::Xray),
+        paths.clients(),
+    ] {
+        assert!(kept.exists(), "{} kept for the re-run", kept.display());
+    }
+}
+
+/// No init system: the supervisor finds the daemon through its spec. A
+/// failed removal keeps the specs and binaries, so the re-run can still
+/// stop the daemon; once it succeeds everything goes.
+#[test]
+fn without_init_a_failed_service_removal_keeps_what_the_rerun_needs() {
+    use crate::host::init::InitSystem;
+    use crate::host::service::{ServiceDef, Services};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut bench = node();
+    bench.live.init = InitSystem::None;
+    bench.unattended();
+    let paths = bench.ctx.paths.clone();
+    Services::new(&bench.ctx, InitSystem::None)
+        .write(&ServiceDef::core(&paths, Core::Xray, false))
+        .unwrap();
+    let spec = paths.services().join("onebox-xray.json");
+    assert!(spec.is_file());
+    // Disabling autostart reads the crontab, which fails the first time.
+    let broken = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&broken);
+    bench.exec.provide("crontab").on_fn(
+        |cmd| cmd.program == "crontab",
+        move |_| {
+            Ok(if flag.load(Ordering::SeqCst) {
+                Output::failure(2, "crontab 不可用")
+            } else {
+                Output::success("")
+            })
+        },
+    );
+    let err = uninstall(&bench.session(), fake_backup).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("卸载未完成: 删除 onebox-xray: "),
+        "{err}"
+    );
+    for kept in [
+        paths.state(),
+        spec.clone(),
+        paths.core_bin(Core::Xray),
+        paths.core_config(Core::Xray),
+    ] {
+        assert!(kept.exists(), "{} kept for the re-run", kept.display());
+    }
+    // The problem is fixed: the re-run removes everything.
+    broken.store(false, Ordering::SeqCst);
+    uninstall(&bench.session(), fake_backup).unwrap();
+    for gone in [
+        paths.state(),
+        spec,
+        paths.services(),
+        paths.core_bin(Core::Xray),
+    ] {
+        assert!(!gone.exists(), "{} removed", gone.display());
+    }
+    assert_eq!(bench.output(), DONE);
 }
 
 #[test]
