@@ -8,19 +8,11 @@
 //!
 //! Feature modules return [`super::Check`], so they depend on `diag`;
 //! listing them here would make `diag` depend on them in turn (a module
-//! cycle, ARCH §2). Their list therefore lives in the CLI, which passes it
-//! through [`super::doctor_with`] / [`super::support_with`] from its own
-//! handlers, e.g.
-//!
-//! ```ignore
-//! const PROVIDERS: &[diag::CheckFn] = &[
-//!     |d, cfg| cfg.map(|c| subscription::checks(d.ctx, c)).unwrap_or_default(),
-//!     |d, _| frp::checks(d.ctx),
-//! ];
-//! fn doctor(ctx: &Ctx, _: &Matches) -> Result<()> { diag::doctor_with(ctx, PROVIDERS) }
-//! fn support(ctx: &Ctx, _: &Matches) -> Result<()> { diag::support_command_with(ctx, PROVIDERS) }
-//! // registered as diag::DOCTOR.handler(doctor), diag::SUPPORT.handler(support)
-//! ```
+//! cycle, ARCH §2). Their list therefore lives in the CLI
+//! (`cli::commands::diagnose::PROVIDERS`: the subscription and FRP
+//! checks), whose `doctor` / `support` handlers pass it through
+//! [`super::doctor_with`] / [`super::support_command_with`]; the specs
+//! stay [`super::DOCTOR`] / [`super::SUPPORT`] with the handlers swapped.
 //!
 //! [`EXTRA_CHECKS`] — what [`super::doctor`] / [`super::support`] run —
 //! stays empty: `diag` never imports a feature module.
