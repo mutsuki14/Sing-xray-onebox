@@ -43,7 +43,7 @@ use super::preflight::{check_dns, check_paths, check_ports};
 use super::release::{self, Staged};
 use super::render::{server_toml, NginxPhase};
 use super::runtime::{mkdirs, Runtime, BUSY};
-use super::txn::{recover_locked, Txn};
+use super::txn::{self, recover_locked, Recovery, Txn};
 use crate::cert::{self, CfCredentials};
 use crate::ctx::Ctx;
 use crate::domain::config::WebCert;
@@ -131,12 +131,14 @@ pub fn apply_locked(rt: &Runtime, lock: &FileLock, state: FrpState, change: Chan
         out::ok(format!("FRP 已是 {} 版本，无需更新", staged.version));
         return Ok(());
     }
-    let mut txn = Txn::begin(rt, lock, change.reason, &journal::targets(rt.paths()))?;
     let mut state = state;
-    match deploy(rt, lock, &mut txn, &mut state, &change, &staged, nginx) {
-        Ok(()) => txn.commit()?,
-        Err(e) => return Err(txn.abort(e)),
-    }
+    Txn::run(
+        rt,
+        lock,
+        change.reason,
+        &journal::targets(rt.paths()),
+        |txn| deploy(rt, lock, txn, &mut state, &change, &staged, nginx),
+    )?;
     out::ok(DEPLOYED);
     Ok(())
 }
@@ -206,7 +208,7 @@ fn deploy(
     services.enable(FRPS)?;
     txn.phase(Phase::HealthCheck)?;
     rt.health(state, true)?;
-    txn.phase(Phase::Finalize)?;
+    txn.phase(Phase::WriteCron)?;
     rt.rewrite_cron(state)
 }
 
@@ -297,14 +299,10 @@ pub fn renew(rt: &Runtime, lock: &FileLock, scheduled: bool) -> Result<()> {
     recover_locked(rt, lock)?;
     let state = installed_state(rt)?;
     let _signals = SignalScope::install()?;
-    let mut txn = Txn::begin(rt, lock, "续期", &[rt.paths().frp_root.clone()])?;
-    let web_failure = match renew_in(rt, lock, &mut txn, &state, scheduled) {
-        Ok(failure) => {
-            txn.commit()?;
-            failure
-        }
-        Err(e) => return Err(txn.abort(e)),
-    };
+    let targets = [rt.paths().frp_root.clone()];
+    let web_failure = Txn::run(rt, lock, "续期", &targets, |txn| {
+        renew_in(rt, lock, txn, &state, scheduled)
+    })?;
     if let Some(e) = web_failure {
         return Err(e.wrap("FRP 网站证书续期失败"));
     }
@@ -333,7 +331,7 @@ fn renew_in(
         rt.restart(lock, FRPS)?;
         rt.health(state, false)?;
     }
-    txn.phase(Phase::Finalize)?;
+    txn.phase(Phase::WriteCron)?;
     rt.rewrite_cron(state)?;
     Ok(web_failure)
 }
@@ -397,11 +395,9 @@ pub fn uninstall(rt: &Runtime, lock: &FileLock) -> Result<()> {
     recover_locked(rt, lock)?;
     ensure!(model::installed(paths), "{NOT_INSTALLED}");
     let _signals = SignalScope::install()?;
-    let mut txn = Txn::begin(rt, lock, "卸载", &journal::targets(paths))?;
-    match teardown(rt, &mut txn) {
-        Ok(()) => txn.commit()?,
-        Err(e) => return Err(txn.abort(e)),
-    }
+    Txn::run(rt, lock, "卸载", &journal::targets(paths), |txn| {
+        teardown(rt, txn)
+    })?;
     for dir in [&paths.frp_run, &paths.frp_log] {
         remove_tree_if_exists(dir)?;
     }
@@ -455,14 +451,32 @@ pub fn net_apply(ctx: &Ctx) -> Result<()> {
 }
 
 /// Roll back an interrupted FRP transaction (`onebox recover`, after the
-/// node journal). Nothing to do without a journal.
+/// node journal). Nothing to do without a journal. A rollback that
+/// restored the files but could not restart, re-enable or re-open
+/// everything is an error listing those steps (the journal is gone, so
+/// FRP commands work again).
 pub fn recover(ctx: &Ctx) -> Result<()> {
     if !journal::exists(&ctx.paths) {
         return Ok(());
     }
     let rt = Runtime::system(ctx);
     let lock = rt.lock()?;
-    recover_locked(&rt, &lock).map(drop)
+    recover_with(&rt, &lock)
+}
+
+/// [`recover`] with an explicit runtime and the FRP lock held.
+pub fn recover_with(rt: &Runtime, lock: &FileLock) -> Result<()> {
+    match txn::recover(rt, lock)? {
+        Recovery::Nothing => Ok(()),
+        Recovery::RolledBack(missed) if missed.is_empty() => {
+            out::ok("已恢复未完成的 FRP 事务");
+            Ok(())
+        }
+        Recovery::RolledBack(missed) => Err(Error::msg(format!(
+            "FRP 事务已回滚{}",
+            txn::partly_restored(&missed)
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,10 @@
 //! or roll back on any error or signal — immediately, or after a crash by
 //! the next FRP command or `onebox recover` (G24).
 //!
+//! [`Txn::run`] records `finalize` after the last step succeeded and only
+//! then commits; a journal in `finalize` is finished, so a commit record
+//! that cannot be written never makes a later recovery undo the change.
+//!
 //! Rollback order: validate the journal (nothing changes when it is
 //! corrupt) → stop and disable both FRP services, clear the `frp`
 //! firewall owner → restore the snapshot (trees that did not exist are
@@ -9,6 +13,14 @@
 //! for a restored installation re-open its firewall ports, re-enable and
 //! restart what was enabled/running before → `rolled-back` → remove the
 //! journal. Signals are blocked while it runs.
+//!
+//! The rollback converges: only a journal that fails validation, a
+//! snapshot that cannot be restored or a journal that cannot be written
+//! keeps the journal for `onebox recover`. Failures of the other steps
+//! (a stop that times out, a firewall backend that keeps failing, an old
+//! service that no longer starts) are collected; the files and crontab
+//! lines are restored anyway and the error lists what was not restored —
+//! one persistent failure never locks every FRP command out.
 //!
 //! Changes from v2:
 //! - the transaction is journaled outside the trees it snapshots and is
@@ -21,6 +33,8 @@
 //!   existed, H-8.1#9);
 //! - a rolled-back fresh install leaves no FRP directory behind, so the
 //!   next install is not refused as "not managed";
+//! - a failed service stop or firewall clear no longer skips restoring the
+//!   files (v2 returned before the restore);
 //! - a cancellation keeps exit code 130 through the rollback message.
 
 use super::journal::{self, Before, Journal, Phase, SERVICES};
@@ -39,8 +53,11 @@ use std::path::PathBuf;
 
 /// Suffix of an error whose change was rolled back (v2 wording).
 pub const ROLLED_BACK: &str = "；已恢复旧 FRP 配置与服务状态";
+/// Suffix of a rollback that restored the files while some service,
+/// firewall or crontab steps failed (followed by the failed steps).
+pub const PARTLY_RESTORED: &str = "；已恢复旧 FRP 配置，但以下步骤未完成: ";
 
-/// An open FRP transaction; end it with [`Txn::commit`] or [`Txn::abort`].
+/// An open FRP transaction, normally driven by [`Txn::run`].
 pub struct Txn<'r, 'a> {
     rt: &'r Runtime<'a>,
     lock: &'r FileLock,
@@ -89,6 +106,26 @@ fn before(rt: &Runtime) -> Result<Before> {
 }
 
 impl<'r, 'a> Txn<'r, 'a> {
+    /// Run `work` in a new transaction over `targets` (`reason` for
+    /// messages): record `finalize` and commit when it succeeds, roll
+    /// everything back when it (or the `finalize` record) fails.
+    pub fn run<T>(
+        rt: &'r Runtime<'a>,
+        lock: &'r FileLock,
+        reason: &str,
+        targets: &[PathBuf],
+        work: impl FnOnce(&mut Txn<'r, 'a>) -> Result<T>,
+    ) -> Result<T> {
+        let mut txn = Txn::begin(rt, lock, reason, targets)?;
+        match work(&mut txn).and_then(|value| txn.phase(Phase::Finalize).map(|()| value)) {
+            Ok(value) => {
+                txn.commit();
+                Ok(value)
+            }
+            Err(e) => Err(txn.abort(e)),
+        }
+    }
+
     /// Snapshot `targets` and open the journal (`reason` for messages).
     pub fn begin(
         rt: &'r Runtime<'a>,
@@ -107,23 +144,16 @@ impl<'r, 'a> Txn<'r, 'a> {
         self.journal.set_phase(self.rt.paths(), phase)
     }
 
-    /// Finish successfully. A failed cleanup only warns once the journal
-    /// says `committed`; without that record a later recovery would roll
-    /// the change back, so then it is an error.
-    pub fn commit(mut self) -> Result<()> {
+    /// Finish after `finalize` was recorded. The journal is finished
+    /// already, so neither the `committed` record nor the cleanup can fail
+    /// the change: a leftover journal is only removed later (H-8.1#14).
+    fn commit(mut self) {
         let paths = self.rt.paths();
-        let recorded = self.journal.set_phase(paths, Phase::Committed);
-        match (recorded, journal::remove(paths)) {
-            (_, Ok(())) => Ok(()),
-            (Ok(()), Err(e)) => {
-                out::warn(format!(
-                    "FRP 配置已提交，但事务清理失败: {e}；请执行 onebox recover 清理"
-                ));
-                Ok(())
-            }
-            (Err(e), Err(_)) => {
-                Err(e.wrap("FRP 配置已提交，但事务清理失败；请执行 onebox recover"))
-            }
+        let _ = self.journal.set_phase(paths, Phase::Committed);
+        if let Err(e) = journal::remove(paths) {
+            out::warn(format!(
+                "FRP 配置已提交，但事务清理失败: {e}；请执行 onebox recover 清理"
+            ));
         }
     }
 
@@ -131,7 +161,8 @@ impl<'r, 'a> Txn<'r, 'a> {
     pub fn abort(mut self, error: Error) -> Error {
         let _blocked = BlockSignals::new();
         match rollback(self.rt, self.lock, &mut self.journal) {
-            Ok(()) => decorate(error, ROLLED_BACK),
+            Ok(missed) if missed.is_empty() => decorate(error, ROLLED_BACK),
+            Ok(missed) => decorate(error, &partly_restored(&missed)),
             Err(recovery) => decorate(
                 error,
                 &format!(
@@ -143,6 +174,12 @@ impl<'r, 'a> Txn<'r, 'a> {
     }
 }
 
+/// The suffix of a rollback whose files were restored while some service
+/// steps failed.
+pub fn partly_restored(missed: &[String]) -> String {
+    format!("{PARTLY_RESTORED}{}", missed.join("；"))
+}
+
 /// `{error}{suffix}`; a cancellation stays one (exit 130).
 pub fn decorate(error: Error, suffix: &str) -> Error {
     if error.is_cancelled() {
@@ -152,16 +189,27 @@ pub fn decorate(error: Error, suffix: &str) -> Error {
     }
 }
 
-/// Undo the change `journal` records (module docs for the order).
-pub fn rollback(rt: &Runtime, lock: &FileLock, journal: &mut Journal) -> Result<()> {
+/// Record a failed best-effort step as `{what}: {error}`.
+fn note<T>(missed: &mut Vec<String>, result: Result<T>, what: impl FnOnce() -> String) {
+    if let Err(e) = result {
+        missed.push(format!("{}: {e}", what()));
+    }
+}
+
+/// Undo the change `journal` records (module docs for the order and for
+/// what keeps the journal). Returns the best-effort steps that failed.
+pub fn rollback(rt: &Runtime, lock: &FileLock, journal: &mut Journal) -> Result<Vec<String>> {
     let paths = rt.paths();
     journal.validate(paths)?;
     let services = rt.services();
+    let mut missed = Vec::new();
     journal.set_phase(paths, Phase::RollbackStop)?;
     for name in SERVICES.iter().rev() {
-        services.stop(name)?;
+        note(&mut missed, services.stop(name), || format!("停止 {name}"));
     }
-    firewall::clear_owner(rt.ctx, "frp")?;
+    note(&mut missed, firewall::clear_owner(rt.ctx, "frp"), || {
+        "清除 FRP 防火墙规则".to_owned()
+    });
     for name in SERVICES {
         let _ = services.disable(name);
     }
@@ -174,27 +222,41 @@ pub fn rollback(rt: &Runtime, lock: &FileLock, journal: &mut Journal) -> Result<
     for entry in journal.snapshot.entries.iter().filter(|e| !e.present) {
         remove_tree_if_exists(&entry.target)?;
     }
-    services.daemon_reload()?;
+    note(&mut missed, services.daemon_reload(), || {
+        "重新加载 systemd".to_owned()
+    });
     journal.set_phase(paths, Phase::RollbackServices)?;
-    cron::restore(rt.ctx, &journal.cron, Scope::Frp)?;
-    restore_services(rt, lock, journal)?;
+    note(
+        &mut missed,
+        cron::restore(rt.ctx, &journal.cron, Scope::Frp),
+        || "恢复 FRP 计划任务".to_owned(),
+    );
+    restore_services(rt, lock, journal, &mut missed);
     journal.set_phase(paths, Phase::RolledBack)?;
-    journal::remove(paths)
+    if let Err(e) = journal::remove(paths) {
+        // Finished: the next FRP command or `onebox recover` removes it.
+        out::warn(format!(
+            "FRP 事务日志清理失败: {e}；请执行 onebox recover 清理"
+        ));
+    }
+    Ok(missed)
 }
 
 /// Firewall and services of the restored installation (nothing when the
-/// change was a first install).
-fn restore_services(rt: &Runtime, lock: &FileLock, journal: &Journal) -> Result<()> {
+/// change was a first install); failures are added to `missed`.
+fn restore_services(rt: &Runtime, lock: &FileLock, journal: &Journal, missed: &mut Vec<String>) {
     let paths = rt.paths();
     if !model::installed(paths) {
-        return Ok(());
+        return;
     }
     match model::load(paths) {
-        Ok(Some(state)) => {
-            firewall::reconcile_owner(rt.ctx, "frp", &state.firewall_ports())?;
-        }
+        Ok(Some(state)) => note(
+            missed,
+            firewall::reconcile_owner(rt.ctx, "frp", &state.firewall_ports()),
+            || "恢复 FRP 防火墙规则".to_owned(),
+        ),
         Ok(None) => {}
-        Err(e) => out::warn(format!("恢复的 FRP 状态无法读取，未恢复防火墙规则: {e}")),
+        Err(e) => missed.push(format!("恢复的 FRP 状态无法读取，未恢复防火墙规则: {e}")),
     }
     let services = rt.services();
     for name in SERVICES {
@@ -202,36 +264,64 @@ fn restore_services(rt: &Runtime, lock: &FileLock, journal: &Journal) -> Result<
         // Without an init system the restored crontab already holds the
         // autostart lines exactly as they were.
         if rt.init != InitSystem::None && journal.enabled.contains(&name_owned) {
-            services.enable(name)?;
+            note(missed, services.enable(name), || format!("启用 {name}"));
         }
         if journal.active.contains(&name_owned) {
-            rt.start(lock, name)?;
+            note(missed, rt.start(lock, name), || format!("启动 {name}"));
         }
     }
-    Ok(())
 }
 
-/// Finish an interrupted transaction: a committed or rolled-back journal
-/// is removed, any other one rolled back. Returns whether a rollback ran.
-pub fn recover_locked(rt: &Runtime, lock: &FileLock) -> Result<bool> {
+/// How [`recover`] ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// No journal, or only a finished one to clean up.
+    Nothing,
+    /// Rolled back; the best-effort steps that failed (empty: all fine).
+    RolledBack(Vec<String>),
+}
+
+/// Finish an interrupted transaction: a finished journal is removed, any
+/// other one rolled back. The journal stays (an error) only when the
+/// rollback could not restore the files.
+pub fn recover(rt: &Runtime, lock: &FileLock) -> Result<Recovery> {
     let paths = rt.paths();
     let Some(mut journal) = journal::load(paths)? else {
-        return Ok(false);
+        return Ok(Recovery::Nothing);
     };
     if journal.phase.is_finished() {
         journal::remove(paths)?;
-        return Ok(false);
+        return Ok(Recovery::Nothing);
     }
     let _blocked = BlockSignals::new();
     out::info(format!("回滚未完成的 FRP 事务（{}）…", journal.reason));
-    rollback(rt, lock, &mut journal).map_err(|e| {
+    let missed = rollback(rt, lock, &mut journal).map_err(|e| {
         e.wrap(format!(
             "FRP 事务恢复未完成；事务日志保留于 {}",
             journal::dir(paths).display()
         ))
     })?;
-    out::ok("已恢复未完成的 FRP 事务");
-    Ok(true)
+    Ok(Recovery::RolledBack(missed))
+}
+
+/// [`recover`] before another FRP operation, which then proceeds: steps
+/// the rollback could not redo are warnings (that operation usually redoes
+/// them). Returns whether a rollback ran.
+pub fn recover_locked(rt: &Runtime, lock: &FileLock) -> Result<bool> {
+    match recover(rt, lock)? {
+        Recovery::Nothing => Ok(false),
+        Recovery::RolledBack(missed) if missed.is_empty() => {
+            out::ok("已恢复未完成的 FRP 事务");
+            Ok(true)
+        }
+        Recovery::RolledBack(missed) => {
+            out::warn(format!(
+                "已恢复未完成的 FRP 事务{}",
+                partly_restored(&missed)
+            ));
+            Ok(true)
+        }
+    }
 }
 
 #[cfg(test)]

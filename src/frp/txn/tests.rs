@@ -1,6 +1,7 @@
 use super::*;
 use crate::frp::journal::files_dir;
 use crate::frp::testing::FakeHost;
+use crate::host::firewall;
 use crate::host::service::{FRPS, FRP_WEB};
 use std::fs;
 
@@ -135,7 +136,120 @@ fn finished_journals_are_only_cleaned_up() {
     journal.set_phase(paths, Phase::Committed).unwrap();
     assert!(!recover_locked(&rt, &lock).unwrap());
     assert!(!journal::exists(paths));
-    let txn = Txn::begin(&rt, &lock, "x", &[]).unwrap();
-    txn.commit().unwrap();
+    Txn::run(&rt, &lock, "x", &[], |_| Ok(())).unwrap();
     assert!(!journal::exists(paths));
+}
+
+#[test]
+fn a_finalized_journal_keeps_the_change() {
+    // The commit record could not be written (full disk) and the process
+    // ended: the journal says `finalize`, and recovery keeps the change.
+    let h = FakeHost::new();
+    let rt = h.runtime();
+    let paths = rt.paths();
+    crate::frp::runtime::mkdirs(paths).unwrap();
+    fs::write(paths.frp_root.join("frps.toml"), "old").unwrap();
+    let lock = rt.lock().unwrap();
+    let mut txn = Txn::begin(&rt, &lock, "配置", &journal::targets(paths)).unwrap();
+    txn.phase(Phase::WriteFiles).unwrap();
+    fs::write(paths.frp_root.join("frps.toml"), "new").unwrap();
+    txn.phase(Phase::Finalize).unwrap();
+    drop(txn);
+    assert!(journal::exists(paths));
+    assert!(!recover_locked(&rt, &lock).unwrap());
+    assert!(!journal::exists(paths));
+    assert_eq!(
+        fs::read_to_string(paths.frp_root.join("frps.toml")).unwrap(),
+        "new"
+    );
+}
+
+#[test]
+fn run_records_finalize_before_committing_and_rolls_back_errors() {
+    let h = FakeHost::new();
+    let rt = h.runtime();
+    let paths = rt.paths();
+    crate::frp::runtime::mkdirs(paths).unwrap();
+    fs::write(paths.frp_root.join("frps.toml"), "old").unwrap();
+    let lock = rt.lock().unwrap();
+    let phases = Txn::run(&rt, &lock, "配置", &journal::targets(paths), |txn| {
+        fs::write(paths.frp_root.join("frps.toml"), "new").unwrap();
+        Ok(txn.journal.phase.clone())
+    })
+    .unwrap();
+    assert_eq!(phases, Phase::Prepared);
+    assert!(!journal::exists(paths));
+    let err = Txn::run(&rt, &lock, "配置", &journal::targets(paths), |_| {
+        fs::write(paths.frp_root.join("frps.toml"), "broken").unwrap();
+        Err::<(), _>(Error::msg("失败"))
+    })
+    .unwrap_err();
+    assert_eq!(err.to_string(), format!("失败{ROLLED_BACK}"));
+    assert_eq!(
+        fs::read_to_string(paths.frp_root.join("frps.toml")).unwrap(),
+        "new"
+    );
+}
+
+/// An installed tcp state with a running, enabled `onebox-frps`.
+fn installed(h: &FakeHost) {
+    let rt = h.runtime();
+    let paths = rt.paths();
+    crate::frp::runtime::mkdirs(paths).unwrap();
+    let state = crate::frp::testing::tcp_state();
+    model::save(paths, &state).unwrap();
+    firewall::reconcile_owner(rt.ctx, "frp", &state.firewall_ports()).unwrap();
+    let services = rt.services();
+    services.write_all(&[ServiceDef::frps(paths)]).unwrap();
+    services.enable(FRPS).unwrap();
+    services.start(FRPS).unwrap();
+}
+
+#[test]
+fn failed_stops_and_firewall_clears_still_restore_the_files() {
+    let h = FakeHost::new();
+    installed(&h);
+    let rt = h.runtime();
+    let paths = rt.paths();
+    let state_file = paths.frp_root.join("state.json");
+    let original = fs::read(&state_file).unwrap();
+    let lock = rt.lock().unwrap();
+    let txn = Txn::begin(&rt, &lock, "配置", &journal::targets(paths)).unwrap();
+    fs::write(&state_file, "{}").unwrap();
+    // The stop times out and the firewall ledger is unreadable: v2's order
+    // returned before the snapshot was restored.
+    h.stick_unit(FRPS, true);
+    fs::write(paths.frp_root.join("firewall-v2.json"), "{").unwrap();
+    let err = txn.abort(Error::msg("失败")).to_string();
+    assert!(err.starts_with(&format!("失败{PARTLY_RESTORED}")), "{err}");
+    assert!(err.contains("停止 onebox-frps: "), "{err}");
+    assert!(err.contains("清除 FRP 防火墙规则: "), "{err}");
+    assert_eq!(fs::read(&state_file).unwrap(), original);
+    assert!(!journal::exists(paths), "nothing is left for recover");
+    // The restored ledger let the firewall come back; the service runs.
+    assert!(!err.contains("恢复 FRP 防火墙规则"), "{err}");
+    assert!(h.running(FRPS) && h.enabled(FRPS));
+}
+
+#[test]
+fn services_that_cannot_restart_do_not_keep_the_journal() {
+    let h = FakeHost::new();
+    installed(&h);
+    let rt = h.runtime();
+    let paths = rt.paths();
+    let lock = rt.lock().unwrap();
+    {
+        let _txn = Txn::begin(&rt, &lock, "配置", &journal::targets(paths)).unwrap();
+        fs::write(paths.frp_root.join("frps.toml"), "half").unwrap();
+        // Crash; afterwards the old unit no longer starts.
+    }
+    h.break_unit(FRPS, true);
+    let Recovery::RolledBack(missed) = recover(&rt, &lock).unwrap() else {
+        panic!("rolled back");
+    };
+    assert_eq!(missed.len(), 1, "{missed:?}");
+    assert!(missed[0].starts_with("启动 onebox-frps: "), "{missed:?}");
+    assert!(!journal::exists(paths));
+    assert!(!paths.frp_root.join("frps.toml").exists());
+    assert_eq!(recover(&rt, &lock).unwrap(), Recovery::Nothing);
 }

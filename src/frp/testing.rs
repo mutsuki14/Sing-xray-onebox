@@ -175,6 +175,8 @@ pub struct FakeHost {
     pub crontab: Arc<Mutex<Option<String>>>,
     /// The TLS health check succeeds while this is true.
     pub healthy: Arc<AtomicBool>,
+    /// iptables accepts rule changes while this is true.
+    pub firewall_ok: Arc<AtomicBool>,
 }
 
 /// systemd unit states of the fake host.
@@ -184,6 +186,8 @@ pub struct Units {
     pub enabled: BTreeSet<String>,
     /// Units whose start fails.
     pub broken: BTreeSet<String>,
+    /// Units whose stop fails (they keep running).
+    pub stuck: BTreeSet<String>,
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -211,6 +215,7 @@ impl FakeHost {
             units: Default::default(),
             crontab: Default::default(),
             healthy: Arc::new(AtomicBool::new(true)),
+            firewall_ok: Arc::new(AtomicBool::new(true)),
         };
         host.proc_net();
         host.script(real_openssl);
@@ -288,7 +293,18 @@ impl FakeHost {
             |c| c.program == "iptables" && c.args.iter().any(|a| a == "-C"),
             |_| Ok(Output::failure(1, "")),
         );
-        exec.on("iptables", &[], Output::success(""));
+        let firewall_ok = self.firewall_ok.clone();
+        exec.on_fn(
+            |c| c.program == "iptables",
+            move |c| {
+                let change = c.args.iter().any(|a| a == "-I" || a == "-D");
+                Ok(if change && !firewall_ok.load(Ordering::SeqCst) {
+                    Output::failure(4, "iptables: Resource temporarily unavailable.")
+                } else {
+                    Output::success("")
+                })
+            },
+        );
         serve(exec, release_routes("0.71.0", true));
     }
 
@@ -329,6 +345,19 @@ impl FakeHost {
         } else {
             units.broken.remove(unit);
         }
+    }
+
+    pub fn stick_unit(&self, unit: &str, stuck: bool) {
+        let mut units = guard(&self.units);
+        if stuck {
+            units.stuck.insert(unit.to_owned());
+        } else {
+            units.stuck.remove(unit);
+        }
+    }
+
+    pub fn set_firewall_ok(&self, ok: bool) {
+        self.firewall_ok.store(ok, Ordering::SeqCst);
     }
 
     pub fn set_healthy(&self, healthy: bool) {
@@ -373,6 +402,9 @@ fn systemctl(units: &Mutex<Units>, args: &[String]) -> Output {
         ["start" | "restart", name] => {
             u.running.insert(name.to_string());
             ok
+        }
+        ["stop", name] if u.stuck.contains(*name) => {
+            Output::failure(1, format!("Job for {name} timed out"))
         }
         ["stop", name] => {
             u.running.remove(*name);

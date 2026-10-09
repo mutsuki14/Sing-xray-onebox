@@ -56,6 +56,11 @@ pub enum Phase {
     HealthCheck,
     RenewCertificates,
     Teardown,
+    /// The FRP crontab lines are rewritten.
+    WriteCron,
+    /// Everything is deployed and verified; only the commit record and the
+    /// cleanup are left, so recovery keeps the change (see
+    /// [`Phase::is_finished`]).
     Finalize,
     Committed,
     RollbackStop,
@@ -67,7 +72,7 @@ pub enum Phase {
 }
 
 impl Phase {
-    const KNOWN: [Phase; 16] = [
+    const KNOWN: [Phase; 17] = [
         Phase::Prepared,
         Phase::StopServices,
         Phase::WriteFiles,
@@ -78,6 +83,7 @@ impl Phase {
         Phase::HealthCheck,
         Phase::RenewCertificates,
         Phase::Teardown,
+        Phase::WriteCron,
         Phase::Finalize,
         Phase::Committed,
         Phase::RollbackStop,
@@ -98,6 +104,7 @@ impl Phase {
             Phase::HealthCheck => "health-check",
             Phase::RenewCertificates => "renew-certificates",
             Phase::Teardown => "teardown",
+            Phase::WriteCron => "write-cron",
             Phase::Finalize => "finalize",
             Phase::Committed => "committed",
             Phase::RollbackStop => "rollback-stop",
@@ -108,9 +115,12 @@ impl Phase {
         }
     }
 
-    /// Only cleanup is left: nothing to roll back.
+    /// Only cleanup is left: nothing to roll back. `finalize` counts: a
+    /// transaction records it only after its last step succeeded
+    /// ([`crate::frp::txn::Txn::run`]), so a commit record that could not
+    /// be written (full disk) never makes recovery undo a deployed change.
     pub fn is_finished(&self) -> bool {
-        matches!(self, Phase::Committed | Phase::RolledBack)
+        matches!(self, Phase::Finalize | Phase::Committed | Phase::RolledBack)
     }
 }
 

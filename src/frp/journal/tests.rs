@@ -145,5 +145,10 @@ fn phases() {
     );
     assert!(Phase::try_from("Bad Phase".to_owned()).is_err());
     assert!(Phase::Committed.is_finished() && Phase::RolledBack.is_finished());
+    assert!(
+        Phase::Finalize.is_finished(),
+        "only the commit record is left"
+    );
+    assert!(!Phase::WriteCron.is_finished() && !Phase::HealthCheck.is_finished());
     assert!(!Phase::Other("x".into()).is_finished());
 }

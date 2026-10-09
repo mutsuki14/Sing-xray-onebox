@@ -147,19 +147,68 @@ fn a_failing_service_start_rolls_back_and_restarts_the_old_one() {
     h.break_unit(FRPS, true);
     let mut next = before.clone();
     next.bind_port = 7002;
+    let err = apply(&h.runtime(), next.clone(), change("配置")).unwrap_err();
+    let text = err.to_string();
+    assert_eq!(
+        text,
+        "systemctl 执行失败 (1): Job for onebox-frps failed\
+         ；已恢复旧 FRP 配置，但以下步骤未完成: \
+         启动 onebox-frps: systemctl 执行失败 (1): Job for onebox-frps failed"
+    );
+    // The files are restored and nothing waits for recovery, although the
+    // old service does not start either.
+    let paths = &h.ctx.paths;
+    assert_eq!(model::load(paths).unwrap().unwrap(), before);
+    assert!(!journal::exists(paths));
+    assert!(!h.running(FRPS));
+    net_apply(&h.ctx).unwrap();
+    // Once the unit works again, a plain start restores the service.
+    h.break_unit(FRPS, false);
+    let rt = h.runtime();
+    service(&rt, &rt.lock().unwrap(), ServiceAction::Start).unwrap();
+    assert!(h.running(FRPS));
+}
+
+#[test]
+fn a_unit_that_never_starts_again_does_not_lock_frp_out() {
+    let h = FakeHost::new();
+    let before = install_tcp(&h);
+    h.break_unit(FRPS, true);
+    let mut next = before.clone();
+    next.bind_port = 7002;
+    apply(&h.runtime(), next, change("配置")).unwrap_err();
+    // Every later FRP command recovers first; none is refused.
+    net_apply(&h.ctx).unwrap();
+    let rt = h.runtime();
+    let lock = rt.lock().unwrap();
+    uninstall(&rt, &lock).unwrap();
+    assert!(!model::installed(&h.ctx.paths));
+    assert!(!journal::exists(&h.ctx.paths));
+}
+
+#[test]
+fn a_failing_firewall_backend_still_restores_the_old_configuration() {
+    let h = FakeHost::new();
+    let before = install_tcp(&h);
+    let crontab = h.crontab();
+    // The backend refuses every new rule: the change fails at the firewall
+    // step, and the old rules cannot be re-created either.
+    h.set_firewall_ok(false);
+    let mut next = before.clone();
+    next.bind_port = 7002;
     let err = apply(&h.runtime(), next, change("配置")).unwrap_err();
     let text = err.to_string();
-    assert!(text.contains("Job for onebox-frps failed"), "{text}");
-    assert!(
-        text.contains("；恢复未完成: "),
-        "the old one cannot start either: {text}"
-    );
-    h.break_unit(FRPS, false);
-    // The journal waits for recovery, which succeeds now.
+    assert!(text.contains(crate::frp::txn::PARTLY_RESTORED), "{text}");
+    assert!(text.contains("恢复 FRP 防火墙规则: "), "{text}");
+    let paths = &h.ctx.paths;
+    assert_eq!(model::load(paths).unwrap().unwrap(), before);
+    assert_eq!(h.crontab(), crontab);
+    assert!(h.running(FRPS) && h.enabled(FRPS));
+    assert!(!journal::exists(paths));
+    // Uninstall still works while the backend keeps failing.
     let rt = h.runtime();
-    assert!(recover_locked(&rt, &rt.lock().unwrap()).unwrap());
-    assert_eq!(model::load(&h.ctx.paths).unwrap().unwrap(), before);
-    assert!(h.running(FRPS));
+    uninstall(&rt, &rt.lock().unwrap()).unwrap();
+    assert!(!model::installed(paths));
 }
 
 #[test]
