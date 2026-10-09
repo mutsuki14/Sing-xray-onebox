@@ -7,7 +7,11 @@
 //! by id. `latest` is the newest backup that can be restored. Rotation
 //! keeps the [`KEEP`] newest recognizable backups (plus the new one and the
 //! one being restored); directories that are not backups are listed but
-//! never deleted.
+//! never deleted. The safety copy a restore keeps of an unreadable
+//! `state.json` is labelled as such ([`unreadable_label`]), is never
+//! `latest`, and rotates nothing away: it only replaces the previous such
+//! copy (otherwise every failed restore over a corrupt state pushed out one
+//! good backup).
 //!
 //! Changes from v2: creation time instead of lexicographic ids for order,
 //! `latest` and rotation (E-8.1#1: v1 ids `2026…` outranked every Unix-time
@@ -52,6 +56,9 @@ pub struct BackupInfo {
 pub enum BackupKind {
     /// Schema 2: restorable.
     Current,
+    /// Schema 2, but its `state.json` cannot be loaded (the safety copy of
+    /// an unreadable state): listed and rotated, never `latest`.
+    Unrestorable,
     /// Written by v1: listed, not restorable.
     V1,
     /// Not recognizable as a backup.
@@ -78,7 +85,7 @@ pub fn list(paths: &Paths) -> Result<Vec<BackupInfo>> {
             let written = fs::symlink_metadata(path.join(archive::MANIFEST))
                 .and_then(|m| m.modified())
                 .ok();
-            found.push((info(&path, id), written));
+            found.push((info(paths, &path, id), written));
         }
     }
     // Backups of the same second (a safety copy right before a restore)
@@ -87,9 +94,12 @@ pub fn list(paths: &Paths) -> Result<Vec<BackupInfo>> {
     Ok(found.into_iter().map(|(info, _)| info).collect())
 }
 
-fn info(dir: &Path, id: String) -> BackupInfo {
+fn info(paths: &Paths, dir: &Path, id: String) -> BackupInfo {
     let (kind, label, created) = match archive::kind(dir) {
-        Kind::Current(m) => (BackupKind::Current, m.label, Some(m.created)),
+        Kind::Current(m) if archive::state_restorable(paths, dir) => {
+            (BackupKind::Current, m.label, Some(m.created))
+        }
+        Kind::Current(m) => (BackupKind::Unrestorable, m.label, Some(m.created)),
         Kind::V1 => (BackupKind::V1, label_file(dir), v1_created(&id)),
         Kind::Unknown => (BackupKind::Unknown, label_file(dir), unix_prefix(&id)),
     };
@@ -171,9 +181,17 @@ pub fn create_locked(ctx: &Ctx, lock: &FileLock, label: &str) -> Result<String> 
 /// the migration rejects) is kept as it is, with a warning, instead of
 /// refusing the restore — restoring a backup is the natural way out of
 /// such a state, and the engine applies over it (`engine::old_config`).
+/// Such a copy is labelled [`unreadable_label`] and rotates nothing away:
+/// it only replaces the previous copy of that label, so restores that fail
+/// over a corrupt state cannot push out the good backups one by one.
 /// Rotation also spares `keep` (the backup the restore is about to use).
 pub fn create_kept(ctx: &Ctx, lock: &FileLock, label: &str, keep: Option<&str>) -> Result<String> {
     create(ctx, lock, label, keep, true)
+}
+
+/// The label of a safety copy whose `state.json` could not be loaded.
+pub fn unreadable_label(label: &str) -> String {
+    clean_label(&format!("{label}（state.json 无法读取，不能恢复）"))
 }
 
 fn create(
@@ -186,15 +204,22 @@ fn create(
     let paths = &ctx.paths;
     lock.verify(&paths.lock())?;
     crate::apply::journal::pending(paths)?.refuse()?;
-    if let Err(e) = StateStore::load_required(ctx) {
-        if !(unreadable_ok && fs::symlink_metadata(paths.state()).is_ok()) {
-            return Err(e);
+    let unreadable = match StateStore::load_required(ctx) {
+        Ok(_) => false,
+        Err(e) if unreadable_ok && fs::symlink_metadata(paths.state()).is_ok() => {
+            out::warn(format!(
+                "现有 state.json 无法读取（{}），安全备份按原样保存该文件（该备份不能直接恢复）",
+                e.report_text()
+            ));
+            true
         }
-        out::warn(format!(
-            "现有 state.json 无法读取（{}），安全备份按原样保存该文件（该备份不能直接恢复）",
-            e.report_text()
-        ));
-    }
+        Err(e) => return Err(e),
+    };
+    let label = if unreadable {
+        unreadable_label(label)
+    } else {
+        label.to_owned()
+    };
     let state = read_bounded(&paths.state(), crate::domain::defaults::STATE_MAX_BYTES)?;
     let root = paths.backups();
     crate::sys::fs::check_owned(&paths.root, &root)?;
@@ -202,14 +227,18 @@ fn create(
     let created = crate::sys::time::now();
     let id = format!("{created}-{}", crate::sys::rand::hex(4)?);
     let stage = root.join(format!("{STAGE_PREFIX}{id}"));
-    let result = write_backup(paths, &stage, &state, label, created)
+    let result = write_backup(paths, &stage, &state, &label, created)
         .and_then(|()| fs::rename(&stage, root.join(&id)).map_err(|e| Error::io(&stage, e)))
         .and_then(|()| fsync_dir(&root).map_err(|e| Error::io(&root, e)));
     if let Err(e) = result {
         let _ = remove_tree_if_exists(&stage);
         return Err(e);
     }
-    prune(paths, &id, keep)?;
+    if unreadable {
+        replace_unreadable(paths, &id, &label)?;
+    } else {
+        prune(paths, &id, keep)?;
+    }
     Ok(id)
 }
 
@@ -253,6 +282,20 @@ fn prune(paths: &Paths, new: &str, keep: Option<&str>) -> Result<()> {
         .filter(|b| b.kind != BackupKind::Unknown);
     for old in recognized.skip(KEEP) {
         if old.id != new && Some(old.id.as_str()) != keep {
+            remove_tree_if_exists(&root.join(&old.id))?;
+        }
+    }
+    Ok(())
+}
+
+/// After an unrestorable safety copy `new` (labelled `label`): remove the
+/// earlier unrestorable copies of the same label, nothing else. Restorable
+/// backups are left to the next ordinary rotation, where the copy counts
+/// like any recognizable backup (so it ages out).
+fn replace_unreadable(paths: &Paths, new: &str, label: &str) -> Result<()> {
+    let root = paths.backups();
+    for old in list(paths)? {
+        if old.id != new && old.kind == BackupKind::Unrestorable && old.label == label {
             remove_tree_if_exists(&root.join(&old.id))?;
         }
     }

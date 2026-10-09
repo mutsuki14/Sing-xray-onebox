@@ -343,6 +343,15 @@ pub fn validate(paths: &Paths, id: &str, dir: &Path) -> Result<Validated> {
     })
 }
 
+/// Whether the backup in `dir` holds a `state.json` [`validate`] accepts
+/// (a v3 configuration that validates, or a v2 state that migrates); its
+/// files are not hashed. The safety copy a restore keeps of an unreadable
+/// `state.json` fails this, so `latest` never picks it.
+pub fn state_restorable(paths: &Paths, dir: &Path) -> bool {
+    read_bounded(&dir.join(STATE_FILE), STATE_MAX)
+        .is_ok_and(|bytes| parse_state(paths, dir, &bytes).is_ok())
+}
+
 type Parsed = (NodeConfig, Option<Vec<Device>>, Vec<String>);
 
 /// A v3 state, or a v2 `{"values"}` state migrated with the backup's own

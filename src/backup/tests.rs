@@ -252,15 +252,23 @@ fn a_backup_restores_over_an_unreadable_state_json() {
         assert!(create_locked(&host.ctx, &host.lock, "x").is_err());
         restore(&host, &id).unwrap();
         assert_eq!(host.installed(), original);
-        // The safety copy keeps the unreadable file byte for byte.
+        // The safety copy keeps the unreadable file byte for byte, says so,
+        // and replaced the previous such copy.
         let safety = list(host.paths()).unwrap();
-        assert_eq!(safety[0].label, store::BEFORE_RESTORE);
+        assert_eq!(
+            safety[0].label,
+            store::unreadable_label(store::BEFORE_RESTORE)
+        );
+        assert_eq!(safety[0].kind, BackupKind::Unrestorable);
         let kept = host
             .paths()
             .backups()
             .join(&safety[0].id)
             .join("state.json");
         assert_eq!(fs::read(kept).unwrap(), corrupt);
+        let copies = safety.iter().filter(|b| b.kind != BackupKind::Current);
+        assert_eq!(copies.count(), 1, "{safety:?}");
+        assert_eq!(store::latest(host.paths()).unwrap(), id);
         assert_no_journal_left(&host);
     }
     // Without any state.json there is still nothing to restore over.
@@ -269,6 +277,63 @@ fn a_backup_restores_over_an_unreadable_state_json() {
         store::create_kept(&host.ctx, &host.lock, "x", None).unwrap_err(),
         Error::NotInstalled
     ));
+}
+
+/// Restores that keep failing over an unreadable state.json (a port
+/// conflict, a certificate that cannot be issued) leave one labelled copy
+/// of it: every good backup stays, and neither `latest` nor the menus'
+/// list offers the copy, which could never be restored.
+#[test]
+fn failed_restores_over_an_unreadable_state_keep_every_good_backup() {
+    let host = Host::new();
+    host.install(two_cores());
+    let original = host.installed();
+    let good: Vec<String> = (0..KEEP)
+        .map(|i| create(&host, &format!("good {i}")))
+        .collect();
+    let newest = good[KEEP - 1].clone();
+    file(&host.paths().state(), 0o600, b"{ not json");
+    host.features
+        .inject(Fault::Fail(Checkpoint::Stage(journal::Phase::StartCores)));
+    for _ in 0..2 {
+        let err = restore(&host, &newest).unwrap_err();
+        assert!(
+            err.report_text().starts_with("配置未应用，已恢复原状态"),
+            "{err}"
+        );
+        assert_eq!(fs::read(host.paths().state()).unwrap(), b"{ not json");
+    }
+    let listed = list(host.paths()).unwrap();
+    let copy = &listed[0];
+    assert_eq!(
+        (copy.kind, copy.label.as_str()),
+        (
+            BackupKind::Unrestorable,
+            store::unreadable_label(store::BEFORE_RESTORE).as_str()
+        ),
+        "{listed:?}"
+    );
+    let current: Vec<&str> = listed
+        .iter()
+        .filter(|b| b.kind == BackupKind::Current)
+        .map(|b| b.id.as_str())
+        .collect();
+    let mut expected: Vec<&str> = good.iter().map(String::as_str).collect();
+    expected.reverse();
+    assert_eq!(current, expected, "{listed:?}");
+    assert_eq!(listed.len(), KEEP + 1, "{listed:?}");
+    assert_eq!(store::latest(host.paths()).unwrap(), newest);
+    let offered = super::cli::restorable(&host.ctx).unwrap();
+    assert!(offered.iter().all(|b| b.id != copy.id), "{offered:?}");
+    assert_eq!(offered.len(), KEEP);
+    // Once the cause is gone, `latest` restores the newest good backup.
+    host.features.clear();
+    restore(&host, "latest").unwrap();
+    assert_eq!(host.installed(), original);
+    let listed = list(host.paths()).unwrap();
+    assert_eq!(listed.len(), KEEP + 1, "{listed:?}");
+    assert_eq!(listed[0].kind, BackupKind::Unrestorable);
+    assert_eq!(store::latest(host.paths()).unwrap(), newest);
 }
 
 fn assert_no_journal_left(host: &Host) {
