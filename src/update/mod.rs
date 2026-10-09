@@ -24,8 +24,9 @@
 //! wire the production pieces; tests inject fakes.
 //!
 //! For other work packages: [`sweep_orphans`] removes work directories of
-//! killed self-updates (they may hold a copy of the node's keys); the CLI's
-//! `recover` / `net-apply` handlers should call it after recovering.
+//! killed self-updates (they may hold a copy of the node's keys); callers
+//! holding the node lock after `apply::recover_locked` — the CLI's
+//! `recover` / `net-apply` handlers — should call it.
 
 pub mod channel;
 pub mod cli;

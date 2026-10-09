@@ -24,8 +24,9 @@
 //! format and its recovery live in `apply::program_journal`; this module
 //! only writes it.
 //!
-//! Signals: from the work directory's creation until the outcome is known,
-//! INT/TERM/HUP only set the cancel flag (`SignalScope`), and from just
+//! Signals: from just before the work directory is created until the
+//! outcome is known, INT/TERM/HUP only set the cancel flag (`SignalScope`;
+//! a timed child such as curl gets them forwarded), and from just
 //! before the journal is written until the swap's outcome (recovery
 //! included) they are blocked as well. A signal never kills the updater
 //! half way or before it reported what happened: before the journal it
