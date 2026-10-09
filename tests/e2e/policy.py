@@ -80,14 +80,13 @@ class Policy(h.Bench):
         else:
             self.results.record(name, True)
 
-    def check_render(self, name: str, env, node: h.FixtureNode, form: str) -> None:
+    def check_render(self, name: str, env, node: h.FixtureNode, form: str) -> bool:
         """``render probe`` of the fixture state lists exactly the node's protocols."""
         def check():
             entries = self.onebox(env, "render", "probe")["entries"]
             ids = [entry["id"] for entry in entries]
             assert ids == node.protocols(), f"probe lists {ids}"
-        if not self.results.attempt(f"{name}/render[{form}]", check):
-            raise AssertionError("the fixture state does not render")
+        return self.results.attempt(f"{name}/render[{form}]", check)
 
     def marker_via(self, proxy_port: int, target: str) -> None:
         h.socks_http_marker(proxy_port, target, self.fixture.http_port, self.fixture.marker,
@@ -139,7 +138,8 @@ class Policy(h.Bench):
                          own_cidrs=[OWN_IP + "/32"])
         node.write(layout, form)
         env = layout.env()
-        self.check_render(name, env, node, form)
+        if not self.check_render(name, env, node, form):
+            return
         config = self.policy_server_config(env, core)
         with self.start_server(core, directory, config, env, node) as server:
             port = self.ports.get()
@@ -184,7 +184,8 @@ class Policy(h.Bench):
         node.inbound("vless-xhttp").port = port
         node.write(layout, form)
         env = layout.env()
-        self.check_render("shared", env, node, form)
+        if not self.check_render("shared", env, node, form):
+            return
         combinations = [("vless-reality", "xray"), ("vless-xhttp", "xray")]
         if include_singbox:
             combinations.append(("vless-reality", "singbox"))

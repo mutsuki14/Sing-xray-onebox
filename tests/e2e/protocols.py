@@ -31,8 +31,9 @@ core logs), ``KEEP=1`` (keep the fixture directory),
 Changes from v2 (tests/native_e2e.py): helpers moved to ``_harness``; the
 mihomo export is parsed as YAML and must agree with ``client provider``;
 the proxy certificate lives in ``<ONEBOX_DIR>/tls``; v3 schema-3 states
-are exercised next to migrated v2 states; ``render probe`` is recorded as
-its own check per case; the mihomo variable is ``ONEBOX_TEST_MIHOMO``.
+are exercised next to migrated v2 states; the ``render probe`` assertions
+(plus ``render inbound`` ⊂ ``render server``) are recorded as their own
+check per case; the mihomo variable is ``ONEBOX_TEST_MIHOMO``.
 """
 from __future__ import annotations
 
@@ -126,7 +127,12 @@ class Matrix(h.Bench):
 
     # -- cases ----------------------------------------------------------------
 
-    def check_probe(self, env, protocol: str) -> None:
+    def check_render(self, env, protocol: str, server: str) -> None:
+        """``render probe`` describes the inbound without secrets, and ``render
+        inbound`` is exactly the inbound of ``render server``."""
+        inbound = self.onebox(env, "render", "inbound", protocol)
+        config = self.onebox(env, "render", "server", server)
+        assert inbound in config["inbounds"], "render inbound is not part of render server"
         bundle = self.onebox(env, "render", "probe")
         assert bundle["schema"] == 1 and len(bundle["entries"]) == 1, "unexpected probe bundle"
         probe = bundle["entries"][0]
@@ -160,7 +166,8 @@ class Matrix(h.Bench):
         node = self.node([(protocol, server)], custom_ca=profile.custom_ca)
         node.write(layout, form)
         env = layout.env()
-        if not self.results.attempt(f"{name}/probe[{form}]", lambda: self.check_probe(env, protocol)):
+        if not self.results.attempt(f"{name}/render[{form}]",
+                                    lambda: self.check_render(env, protocol, server)):
             return
         if form == "v3":
             self.results.attempt(f"{name}/v3-matches-v2",
