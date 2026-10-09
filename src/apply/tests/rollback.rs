@@ -86,6 +86,36 @@ fn every_service_is_restored_even_when_one_cannot_start() {
     assert_invariants(&host);
 }
 
+#[test]
+fn a_service_that_exits_right_after_its_restart_keeps_the_journal() {
+    let host = installed_host();
+    let before = host.world();
+    // Before start-cores, so only the rollback starts services.
+    host.features
+        .inject(Fault::Fail(Checkpoint::Stage(Phase::StopOldServices)));
+    // The restart "succeeds", then the core is gone.
+    host.crash_after_start(svc::SING_BOX);
+    let text = err_text(&host.apply(host.change(singbox_only(), "修改")).unwrap_err());
+    assert!(text.starts_with("配置失败: 注入故障"), "{text}");
+    assert!(
+        text.contains("；恢复未完成: 启动 onebox-sing-box: onebox-sing-box 启动后立即退出"),
+        "{text}"
+    );
+    assert!(!host.unit(svc::SING_BOX).active);
+    assert_eq!(host.unit(svc::XRAY), RUNNING);
+    let journal = journal::load(host.paths()).unwrap().unwrap();
+    assert_eq!(journal.phase(), &Phase::RollbackServices);
+    // Once the core stays up, recover finishes the rollback.
+    host.clear_faults();
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::RolledBack
+    );
+    assert_eq!(before.diff(&host.world()), Vec::<String>::new());
+    assert_no_journal(&host);
+    assert_invariants(&host);
+}
+
 /// v2 reported the two firewall owners separately, and a broken
 /// `firewall-acme.json` must not keep the proxy rules and hops live.
 #[test]

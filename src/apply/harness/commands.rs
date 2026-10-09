@@ -69,34 +69,54 @@ pub(super) fn fault_rule(exec: &FakeExec) -> Faults {
     faults
 }
 
+/// Units that crash right after every start: the first `is-active` query
+/// after a start still sees them up (the start "succeeded"), later queries
+/// see them stopped.
+pub type Crashing = Arc<Mutex<BTreeSet<String>>>;
+
 /// `systemctl` over an in-memory unit table (a cron daemon runs).
-pub(super) fn fake_systemd(exec: &FakeExec) -> Units {
+pub(super) fn fake_systemd(exec: &FakeExec) -> (Units, Crashing) {
     let running = Unit {
         active: true,
         enabled: true,
     };
     let units: Units = Arc::new(Mutex::new(BTreeMap::from([("cron".to_owned(), running)])));
-    let shared = units.clone();
+    let crashing: Crashing = Arc::default();
+    let dying: Crashing = Arc::default();
+    let (shared, crash) = (units.clone(), crashing.clone());
     exec.on_fn(
         |cmd| cmd.program == "systemctl",
-        move |cmd| Ok(systemctl(&shared, &cmd.args)),
+        move |cmd| Ok(systemctl(&shared, &crash, &dying, &cmd.args)),
     );
-    units
+    (units, crashing)
 }
 
-fn systemctl(units: &Units, args: &[String]) -> Output {
+fn systemctl(units: &Units, crashing: &Crashing, dying: &Crashing, args: &[String]) -> Output {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut table = lock(units);
+    if let ["start" | "restart", name] = args.as_slice() {
+        if lock(crashing).contains(*name) {
+            lock(dying).insert((*name).to_owned());
+        }
+    }
     let mut set = |name: &str, f: &dyn Fn(&mut Unit)| {
         f(table.entry(name.to_owned()).or_default());
         Output::success("")
     };
     match args.as_slice() {
         ["daemon-reload"] => Output::success(""),
-        ["is-active", "--quiet", name] => match table.get(*name) {
-            Some(u) if u.active => Output::success(""),
-            _ => Output::failure(3, ""),
-        },
+        ["is-active", "--quiet", name] => {
+            let up = table.get(*name).is_some_and(|u| u.active);
+            if up && lock(dying).remove(*name) {
+                // Answered "up" once; the process is gone afterwards.
+                table.entry((*name).to_owned()).or_default().active = false;
+            }
+            if up {
+                Output::success("")
+            } else {
+                Output::failure(3, "")
+            }
+        }
         ["is-enabled", name] => match table.get(*name) {
             Some(u) if u.enabled => Output::success("enabled\n"),
             _ => Output::failure(1, "disabled\n"),

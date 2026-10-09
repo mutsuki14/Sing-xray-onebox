@@ -38,7 +38,7 @@ pub const NEW_IPS: &str = r#"[{"addr_info":[{"local":"203.0.113.10"},{"local":"1
 mod commands;
 
 use commands::{fake_cores, fake_ip, fake_iptables, fake_systemd, fault_rule};
-pub use commands::{CommandFault, Faults, Unit, Units};
+pub use commands::{CommandFault, Crashing, Faults, Unit, Units};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -268,6 +268,7 @@ pub struct Host {
     pub exec: Arc<FakeExec>,
     pub ui: Arc<ScriptedPrompter>,
     pub units: Units,
+    pub crashing: Crashing,
     pub faults: Faults,
     pub cron: CronState,
     pub iptables: Arc<Mutex<BTreeSet<String>>>,
@@ -308,7 +309,7 @@ impl Host {
             }
         }
         let faults = fault_rule(&exec);
-        let units = fake_systemd(&exec);
+        let (units, crashing) = fake_systemd(&exec);
         let cron = fake_crontab(&exec, None);
         let iptables = fake_iptables(&exec);
         let ips = fake_ip(&exec);
@@ -326,6 +327,7 @@ impl Host {
             exec,
             ui,
             units,
+            crashing,
             faults,
             cron,
             iptables,
@@ -369,8 +371,14 @@ impl Host {
         });
     }
 
+    /// Make `unit` exit right after every start (see [`Crashing`]).
+    pub fn crash_after_start(&self, unit: &str) {
+        lock(&self.crashing).insert(unit.to_owned());
+    }
+
     pub fn clear_faults(&self) {
         lock(&self.faults).clear();
+        lock(&self.crashing).clear();
         self.features.clear();
     }
 

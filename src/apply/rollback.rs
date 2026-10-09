@@ -30,6 +30,9 @@
 //!   apply and boot would repeat the same failure and refuse; and one
 //!   service that fails to start no longer leaves the services after it
 //!   stopped and disabled (v2 stopped at the first error);
+//! - a restarted service must still run after a short settle period: one
+//!   that exits right after its first successful check fails the rollback
+//!   and keeps the journal (v2 could report "restored" with the core down);
 //! - a typed old configuration the current rules reject still has its
 //!   files restored; only re-applying its network rules is skipped, with a
 //!   warning (same for a v2 old state that cannot be migrated, and for an
@@ -54,6 +57,7 @@ use crate::sys::lock::FileLock;
 use crate::sys::rand::OsRandom;
 use crate::ui::out;
 use serde_json::Value;
+use std::time::Duration;
 
 /// Stop order: public entrances before their backends (v2).
 pub const STOP_ORDER: [&str; 5] = [
@@ -72,6 +76,15 @@ pub const START_ORDER: [&str; 5] = [
     svc::SING_BOX,
     svc::XRAY,
 ];
+
+/// How long services a rollback started must stay up before it trusts
+/// them (the forward path re-checks its cores in finalize). Zero in unit
+/// tests, whose fake services crash deterministically.
+const SETTLE: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_secs(1)
+};
 
 /// Roll `journal` back; on success the journal is gone. `lock` tells
 /// whether this process is a self-update child (G6).
@@ -223,6 +236,7 @@ fn restore_services(
     if let Err(e) = cron::restore(ctx, &journal.cron(), Scope::Node) {
         errors.push(format!("恢复定时任务: {e}"));
     }
+    let mut started = Vec::new();
     for name in START_ORDER {
         if !journal.active_services().iter().any(|n| n == name) {
             continue;
@@ -232,15 +246,31 @@ fn restore_services(
             // its own manager and starts the worker with it (G6).
             continue;
         }
-        let started = services
+        match services
             .start(name)
-            .and_then(|()| services.wait_running(name, WAIT_RUNNING));
-        if let Err(e) = started {
-            errors.push(format!("启动 {name}: {e}"));
+            .and_then(|()| services.wait_running(name, WAIT_RUNNING))
+        {
+            Ok(()) => started.push(name),
+            Err(e) => errors.push(format!("启动 {name}: {e}")),
         }
     }
+    errors.extend(exited_after_start(services, &started, SETTLE));
     ensure!(errors.is_empty(), "{}", errors.join("; "));
     Ok(())
+}
+
+/// Errors for the `started` services that no longer run once `settle` has
+/// passed: a first successful check must not bless a crashing service.
+fn exited_after_start(services: &Services, started: &[&str], settle: Duration) -> Vec<String> {
+    if started.is_empty() {
+        return Vec::new();
+    }
+    std::thread::sleep(settle);
+    started
+        .iter()
+        .filter(|name| !services.running(name))
+        .map(|name| format!("启动 {name}: {name} 启动后立即退出"))
+        .collect()
 }
 
 /// The old generation's firewall rules and hops (rules only: restored files
