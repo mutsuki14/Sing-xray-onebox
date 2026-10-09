@@ -80,7 +80,7 @@ fn stale_staging_directories_are_swept() {
     let parent = dir(&f.paths).parent().unwrap().to_path_buf();
     let stale = parent.join(format!("{STAGE_PREFIX}deadbeef"));
     fs::create_dir_all(stale.join("files")).unwrap();
-    create(&f.paths, "安装", before(), &[f.paths.frp_root.clone()]).unwrap();
+    create(&f.paths, "安装", before(), std::slice::from_ref(&f.paths.frp_root)).unwrap();
     assert!(!stale.exists());
 }
 
@@ -91,7 +91,7 @@ fn foreign_targets_and_corruption_are_refused() {
     assert!(err.to_string().contains("快照路径范围不合法"), "{err}");
     assert!(!exists(&f.paths));
 
-    let mut journal = create(&f.paths, "x", before(), &[f.paths.frp_root.clone()]).unwrap();
+    let mut journal = create(&f.paths, "x", before(), std::slice::from_ref(&f.paths.frp_root)).unwrap();
     journal.active.push("onebox-xray".into());
     let path = dir(&f.paths).join(JOURNAL_FILE);
     fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
@@ -110,7 +110,7 @@ fn foreign_targets_and_corruption_are_refused() {
 #[test]
 fn a_tampered_snapshot_fails_validation() {
     let f = fixture();
-    let journal = create(&f.paths, "x", before(), &[f.paths.frp_root.clone()]).unwrap();
+    let journal = create(&f.paths, "x", before(), std::slice::from_ref(&f.paths.frp_root)).unwrap();
     fs::write(files_dir(&f.paths).join("item-0/state.json"), "evil").unwrap();
     assert!(journal.validate(&f.paths).is_err());
 }
