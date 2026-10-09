@@ -14,7 +14,8 @@
 //! into a cancellation, see [`interrupt`]) prints `[提示]` and continues;
 //! `Exit{0}` (a finished self-update) and `Exit{75}` end the process, so
 //! the replaced program never keeps running; EOF (or Ctrl+C) at a menu
-//! prompt itself — the main menu's or any submenu's — leaves with 130.
+//! prompt itself — the main menu's or any submenu's, including the FRP and
+//! BBR menus the commands show ([`Menu::command_menu`]) — leaves with 130.
 //! Under `-y` the menu picks `0) 退出` at once.
 //!
 //! Typed values reach dispatched command lines only after `--`, so an
@@ -177,7 +178,7 @@ impl<'a> Menu<'a> {
 
     /// An answer at a menu prompt; a cancellation there leaves the whole
     /// menu (exit 130), unlike one inside an action.
-    fn menu_answer(&self, answer: Result<Option<usize>>) -> Result<Option<usize>> {
+    fn menu_answer<T>(&self, answer: Result<T>) -> Result<T> {
         answer.inspect_err(|e| {
             if e.is_cancelled() {
                 self.left.set(true);
@@ -244,12 +245,12 @@ impl<'a> Menu<'a> {
             Main::Services => self.service_menu(),
             Main::Performance => self.performance_menu(),
             Main::Backups => self.backup_menu(),
-            Main::Frp => self.dispatch(&["frps"]),
+            Main::Frp => self.command_menu(&["frps"]),
             Main::Update => self.update_menu(),
             Main::Reinstall => self.reinstall_menu(),
             Main::Install => install::install(self.session, &InstallArgs::default()),
             Main::Preview => self.preview(),
-            Main::Bbr => self.dispatch(&["bbr"]),
+            Main::Bbr => self.command_menu(&["bbr"]),
             Main::UpdateProgram => self.dispatch(&["update-script"]),
             Main::Restore => self.restore(),
             Main::Recover => self.dispatch(&["recover"]),
@@ -296,6 +297,15 @@ impl<'a> Menu<'a> {
 
     pub fn dispatch(&self, argv: &[&str]) -> Result<()> {
         self.dispatcher.dispatch(self.session, argv)
+    }
+
+    /// A command whose own interactive menu runs as a submenu (`frps`,
+    /// `bbr`). Such a menu keeps its items' errors and cancellations to
+    /// itself and returns a cancellation only from its own prompt, so that
+    /// one leaves the whole menu (exit 130) like a cancellation at a native
+    /// submenu's prompt.
+    fn command_menu(&self, argv: &[&str]) -> Result<()> {
+        self.menu_answer(self.dispatch(argv))
     }
 
     /// The loaded node for a submenu action.
