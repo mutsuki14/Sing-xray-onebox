@@ -177,19 +177,20 @@ fn output_must_not_exist() {
 }
 
 /// Real release packages (`ONEBOX_TEST_XRAY_ZIP=…/Xray-linux-64.zip`,
-/// `ONEBOX_TEST_SINGBOX_TGZ=…/sing-box-1.14.2-linux-amd64-musl.tar.gz`).
+/// `ONEBOX_TEST_SINGBOX_TGZ=…/sing-box-1.14.2-linux-amd64.tar.gz`; CI keeps
+/// the verified archives of `tests/fetch_tools.py`).
 #[test]
 #[ignore = "needs real release packages"]
 fn real_release_packages() {
     let dir = tmp();
-    if let Some(zip) = std::env::var_os("ONEBOX_TEST_XRAY_ZIP") {
-        let n = extract_zip(Path::new(&zip), "xray", &dir.join("xray"), 512 << 20).unwrap();
+    if let Some(zip) = crate::sys::testenv::tool("ONEBOX_TEST_XRAY_ZIP") {
+        let n = extract_zip(&zip, "xray", &dir.join("xray"), 512 << 20).unwrap();
         assert!(n > 1 << 20);
         crate::host::fetch::check_elf(&dir.join("xray")).unwrap();
     }
-    if let Some(tgz) = std::env::var_os("ONEBOX_TEST_SINGBOX_TGZ") {
+    if let Some(tgz) = crate::sys::testenv::tool("ONEBOX_TEST_SINGBOX_TGZ") {
         let out = dir.join("sing-box");
-        let n = extract_tar_gz(Path::new(&tgz), "sing-box", &out, 512 << 20).unwrap();
+        let n = extract_tar_gz(&tgz, "sing-box", &out, 512 << 20).unwrap();
         assert!(n > 1 << 20);
         crate::host::fetch::check_elf(&out).unwrap();
     }

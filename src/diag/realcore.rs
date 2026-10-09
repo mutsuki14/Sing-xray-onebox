@@ -4,7 +4,8 @@
 //! core's own message.
 //!
 //! Run: `ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray
-//! cargo test -- --ignored diag::realcore`. Unset variables skip the test.
+//! cargo test -- --ignored diag::realcore`. Unset variables skip the test
+//! (a failure under CI's `ONEBOX_TEST_REQUIRE_FULL=1`).
 
 use super::{node, CheckStatus};
 use crate::ctx::Ctx;
@@ -12,18 +13,10 @@ use crate::domain::{fixtures, Core, Protocol};
 use crate::render::{self, NodeSpec};
 use crate::sys::exec::SystemExec;
 use crate::sys::fs::TempDir;
+use crate::sys::testenv::tool;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::sync::Arc;
-
-fn tool(var: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(var).filter(|p| !p.is_empty());
-    if path.is_none() {
-        eprintln!("跳过：未设置 {var}");
-    }
-    path.map(PathBuf::from)
-}
 
 #[test]
 #[ignore = "needs ONEBOX_TEST_SINGBOX and ONEBOX_TEST_XRAY"]

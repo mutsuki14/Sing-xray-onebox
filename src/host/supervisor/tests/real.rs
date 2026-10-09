@@ -83,15 +83,16 @@ fn real_daemons_are_started_identified_and_stopped() {
     assert!(identity::process_start(Path::new("/"), found.record.pid).is_none());
 }
 
-/// Real nginx (set `ONEBOX_TEST_NGINX` to its path): the master renames
+/// Real nginx (`ONEBOX_NGINX_BIN`, as CI provides it): the master renames
 /// itself, and the site is still recognized by its title.
 #[test]
-#[ignore = "needs a real nginx in ONEBOX_TEST_NGINX"]
+#[ignore = "needs a real nginx in ONEBOX_NGINX_BIN"]
 fn real_nginx_is_recognized_by_its_title() {
-    let Some(nginx) = std::env::var_os("ONEBOX_TEST_NGINX").map(PathBuf::from) else {
+    let Some(nginx) = crate::sys::testenv::tool(crate::host::nginx::ENV_BIN) else {
         return;
     };
     if !visible_proc() {
+        eprintln!("SKIP: /proc belongs to another PID namespace");
         return;
     }
     let dir = TempDir::new("supervisor-nginx").unwrap();

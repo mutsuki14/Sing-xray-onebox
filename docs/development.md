@@ -98,6 +98,8 @@ CI 用 `tests/fetch_tools.py` 按 `tests/tools.json` 下载并校验（GitHub AP
 python3 tests/fetch_tools.py "$HOME/onebox-tools"    # 需要联网；GH_TOKEN 可选
 ```
 
+CI 还用 `--archives 目录` 保留校验过的发布包（`Xray-linux-64.zip`、`sing-box-…-linux-amd64.tar.gz`，供安装包解压测试 `ONEBOX_TEST_XRAY_ZIP` / `ONEBOX_TEST_SINGBOX_TGZ` 使用），并从 Xray 发布包中解出 `geoip.dat` / `geosite.dat` 放在 xray 旁边。
+
 ### 黄金文件
 
 样例、目录布局和例外说明见 `tests/golden/README.md`。用 v2.0.1 程序重新生成 `expected/`（需要 `jq`；样例部署到 `/tmp/onebox-golden/<名称>`，保证服务端配置中的证书路径在任何机器上相同）：
@@ -128,11 +130,11 @@ ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray \
   cargo test --locked --lib linktools::e2e -- --ignored
 ```
 
-Xray 客户端配置的校验需要 `geosite.dat` / `geoip.dat`，放在 `ONEBOX_TEST_XRAY_ASSETS` 指定的目录（默认与 xray 程序同目录）；mihomo 首次运行会联网下载 geodata 到系统临时目录下的缓存。缺少变量时多数测试打印跳过提示后通过，但 FRP 端到端测试会直接失败。
+Xray 客户端配置的校验需要 `geosite.dat` / `geoip.dat`，放在 `ONEBOX_TEST_XRAY_ASSETS` 指定的目录（默认与 xray 程序同目录）；mihomo 首次运行会联网下载 geodata 到系统临时目录下的缓存。缺少变量或文件时多数测试打印跳过提示后通过（`ONEBOX_TEST_REQUIRE_FULL=1` 时失败），但 FRP 端到端测试会直接失败。
 
-不要不加过滤地在开发机上运行 `cargo test -- --include-ignored`：其余被忽略的测试会访问 github.com（真实下载）、读取本机真实状态（`bbr` 状态）、向测试进程发送信号，或者需要额外条件——可用的 nginx（`ONEBOX_NGINX_BIN`、PATH 或 `/usr/sbin/nginx`，nginx 与网站配置测试找不到时会失败）、`ONEBOX_TEST_NGINX`（无 init 进程管理识别 nginx）、`ONEBOX_TEST_XRAY_ZIP` / `ONEBOX_TEST_SINGBOX_TGZ`（真实安装包解压）、`nft` 与 CAP_NET_ADMIN（端口跳跃脚本），以及在独立网络命名空间中设置 `ONEBOX_TEST_NETNS=1`（防火墙，例如 `unshare -n <测试程序> real_firewall --ignored`）。这些测试适合在容器或 CI 中运行。
+不要不加过滤地在开发机上运行 `cargo test -- --include-ignored`：其余被忽略的测试会访问 github.com（真实下载）、读取本机真实状态（`bbr` 状态）、向测试进程发送信号，或者需要额外条件——可用的 nginx（`ONEBOX_NGINX_BIN`、PATH 或 `/usr/sbin/nginx`，nginx 与网站配置测试找不到时会失败）（无 init 进程管理识别 nginx 也用 `ONEBOX_NGINX_BIN`）、`ONEBOX_TEST_XRAY_ZIP` / `ONEBOX_TEST_SINGBOX_TGZ`（真实安装包解压）、`nft` 与 CAP_NET_ADMIN（端口跳跃脚本），以及在独立网络命名空间中设置 `ONEBOX_TEST_NETNS=1`（防火墙，例如 `unshare -n <测试程序> real_firewall --ignored`）。这些测试适合在容器或 CI 中运行。
 
-`ONEBOX_TEST_REQUIRE_FULL=1` 是 CI 的约定：使用共享测试工具查找变量或程序的测试，在缺少变量、工具或权限时直接失败而不是跳过。
+`ONEBOX_TEST_REQUIRE_FULL=1` 是 CI 的约定：查找真实工具的测试都使用共享的 `sys::testenv`（`tool`、`have`、`skip`），在缺少变量、工具、文件或权限时直接失败而不是跳过。
 
 ### 黑盒测试（Python）
 

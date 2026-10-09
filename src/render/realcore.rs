@@ -4,12 +4,14 @@
 //! Run with the tested binaries:
 //! `ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray
 //! ONEBOX_TEST_MIHOMO=/path/mihomo cargo test -- --ignored realcore`.
-//! A test whose variable is unset reports the skip and passes.
+//! A test whose variable is unset reports the skip and passes, except under
+//! CI's `ONEBOX_TEST_REQUIRE_FULL=1` (`sys::testenv`), where it fails.
 //!
 //! Geodata: Xray client documents reference `geosite:`/`geoip:` lists, so
 //! their check needs `geosite.dat` and `geoip.dat` in
 //! `ONEBOX_TEST_XRAY_ASSETS` (default: next to the xray binary, Xray's own
-//! default); without them only the client document check is skipped.
+//! default); without them only the client document check is skipped (the
+//! same contract).
 //! mihomo downloads its geodata into a cache directory under the system temp
 //! dir on the first run (network needed once).
 
@@ -21,6 +23,7 @@ use crate::domain::protocol::{ClientFormat, Core};
 use crate::paths::Paths;
 use crate::sys::exec::{Cmd, Exec, SystemExec};
 use crate::sys::fs::TempDir;
+use crate::sys::testenv;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,12 +31,9 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The tested core named by `var` (the shared real-tool contract).
 fn tool(var: &str) -> Option<String> {
-    let path = std::env::var(var).ok().filter(|p| !p.is_empty());
-    if path.is_none() {
-        eprintln!("跳过：未设置 {var}");
-    }
-    path
+    testenv::tool(var).map(|p| p.to_string_lossy().into_owned())
 }
 
 /// The case rendered under a real temporary root holding its certificate
@@ -96,10 +96,10 @@ fn xray_assets(bin: &str) -> Option<PathBuf> {
         .iter()
         .all(|f| dir.join(f).is_file());
     if !complete {
-        eprintln!(
-            "跳过 Xray 客户端配置检查：{} 中缺少 geosite.dat / geoip.dat",
+        testenv::skip(&format!(
+            "Xray 客户端配置检查：{} 中缺少 geosite.dat / geoip.dat",
             dir.display()
-        );
+        ));
     }
     complete.then_some(dir)
 }
