@@ -22,6 +22,9 @@
 //! - Cloudflare credentials arrive resolved (the CLI looked them up or
 //!   asked before the confirmation) and are persisted by the certificate
 //!   engine inside the transaction, after the directories exist (H-8.1#1);
+//! - a change built from a state that another operation replaced in the
+//!   meantime is refused (compare-and-swap under the FRP lock; v2 wrote the
+//!   stale token back);
 //! - `update` to the installed version changes nothing: only the release
 //!   is resolved, before packages, the cron daemon or DNS are checked;
 //! - switching to tcp mode removes the stale `nginx.conf` (the web
@@ -46,7 +49,8 @@ use super::release::{self, Staged};
 use super::render::{server_toml, NginxPhase};
 use super::runtime::{mkdirs, Runtime, BUSY};
 use super::txn::{self, recover_locked, Recovery, Txn};
-use crate::cert::{self, CfCredentials};
+use crate::cert::hooks::{renew_dir_with, web_spec};
+use crate::cert::{CertDir, CfCredentials, Challenge, Trust};
 use crate::ctx::Ctx;
 use crate::domain::config::WebCert;
 use crate::error::{Error, Result};
@@ -82,6 +86,47 @@ pub struct Change {
     /// Do nothing when the result would equal the installed deployment
     /// (`update` to the running version).
     pub skip_unchanged: bool,
+    /// The installed state the change was built from.
+    pub expected: Expected,
+}
+
+/// The installed state a change was built from, compared with the state
+/// on disk under the FRP lock: a `configure` that waited at its
+/// confirmation while another administrator ran `rotate-token` must not
+/// write the revoked token (or anything else) back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Expected {
+    /// No check (the caller read the state under the FRP lock).
+    #[default]
+    Any,
+    /// FRP was not installed.
+    Absent,
+    /// The state as it was read.
+    State(FrpState),
+}
+
+impl Expected {
+    /// What a command read before taking the lock.
+    pub fn of(read: Option<&FrpState>) -> Expected {
+        match read {
+            None => Expected::Absent,
+            Some(state) => Expected::State(state.clone()),
+        }
+    }
+
+    /// [`Error::Conflict`] unless `current` is still what was read.
+    pub fn check(&self, current: Option<&FrpState>) -> Result<()> {
+        let unchanged = match self {
+            Expected::Any => true,
+            Expected::Absent => current.is_none(),
+            Expected::State(read) => current == Some(read),
+        };
+        if unchanged {
+            Ok(())
+        } else {
+            Err(Error::Conflict)
+        }
+    }
 }
 
 /// `start` / `stop` / `restart`.
@@ -113,6 +158,7 @@ pub fn apply_locked(rt: &Runtime, lock: &FileLock, state: FrpState, change: Chan
     check_paths(rt.paths())?;
     recover_locked(rt, lock)?;
     let previous = model::load(rt.paths()).ok().flatten();
+    change.expected.check(previous.as_ref())?;
     match &previous {
         None => state.validate_draft()?,
         Some(previous) => state.validate_change(Some(previous))?,
@@ -297,14 +343,15 @@ fn website(
         rt.write_web_config(state, NginxPhase::Bootstrap)?;
         services.start(FRP_WEB)?;
     }
-    cert::issue_domains(
-        rt.ctx,
-        &paths.frp_root.join("web-tls"),
+    // Custom pairs may use a private CA (v2 parity).
+    let spec = web_spec(
         &web.app.cert_domains(),
         &web_cert(&web.tls),
-        http01.then_some(webroot.as_path()),
-        cf,
-    )?;
+        Challenge::Webroot(webroot),
+        Trust::Pinned,
+    );
+    let dir = CertDir::new(paths.frp_root.join("web-tls"));
+    rt.cert_engine().ensure(&dir, &spec, false, cf)?;
     signal::check()?;
     services.stop(FRP_WEB)?;
     rt.write_web_config(state, NginxPhase::Full)?;
@@ -363,12 +410,12 @@ fn renew_website(rt: &Runtime, state: &FrpState, web: &WebSettings, scheduled: b
         return Ok(());
     }
     let dir = rt.paths().frp_root.join("web-tls");
-    let issued = cert::CertDir::new(&dir).metadata()?.is_some();
+    let issued = CertDir::new(&dir).metadata()?.is_some();
     ensure!(
         issued,
         "旧版网站证书需先运行 onebox frps configure 迁移为原生证书管理"
     );
-    if cert::renew_dir(rt.ctx, &dir, !scheduled, None)? {
+    if renew_dir_with(&rt.cert_engine(), &dir, !scheduled, None)? {
         rt.write_web_config(state, NginxPhase::Full)?;
         if services.running(FRP_WEB) {
             services.restart(FRP_WEB)?;

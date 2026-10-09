@@ -1,9 +1,13 @@
 use super::*;
+use crate::cert::testing::{acme_calls, fake_acme, AcmeScript};
 use crate::cli::args::{parse, Globals};
 use crate::domain::config::PortRange;
 use crate::frp::draft::ModeKind;
 use crate::frp::testing::FakeHost;
+use crate::ui::{Prompter, ScriptedPrompter};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::sync::{Arc, Mutex};
 
 fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
@@ -255,6 +259,121 @@ fn cloudflare_credentials_are_never_written_before_the_transaction() {
             CONFIRM_DEPLOY
         ]
     );
+}
+
+#[test]
+fn confirmed_cloudflare_credentials_are_stored_by_the_transaction() {
+    let Some(h) = FakeHost::with_real_openssl() else {
+        return;
+    };
+    let pair = h.public_pair("issued", &["app.example.com"]);
+    fake_acme(
+        &h.exec,
+        AcmeScript {
+            issue: Some(pair),
+            ..AcmeScript::default()
+        },
+    );
+    h.ui.set_interactive(true);
+    h.ui.extend(["fake-token-0123", "", "y"]);
+    session(&h, true).run(install(cf_flags())).unwrap();
+    let store = cloudflare::store_path(&h.ctx.paths.frp_root.join("web-tls"));
+    assert_eq!(
+        fs::read_to_string(&store).unwrap(),
+        r#"{"CF_Token":"fake-token-0123"}"#
+    );
+    let mode = fs::metadata(&store).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let token = ("CF_Token".to_owned(), "fake-token-0123".to_owned());
+    assert!(acme_calls(&h.exec)[0].env.contains(&token));
+    assert!(model::installed(&h.ctx.paths));
+}
+
+/// Answers like `inner`; the first confirmation first runs `before` (another
+/// administrator acting while this command waits at its prompt).
+struct Racing {
+    inner: Arc<ScriptedPrompter>,
+    before: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl Prompter for Racing {
+    fn interactive(&self) -> bool {
+        self.inner.interactive()
+    }
+    fn assume_yes(&self) -> bool {
+        self.inner.assume_yes()
+    }
+    fn input(&self, prompt: &str, default: &str) -> Result<String> {
+        self.inner.input(prompt, default)
+    }
+    fn input_with(
+        &self,
+        prompt: &str,
+        default: &str,
+        check: &dyn Fn(&str) -> Result<String>,
+    ) -> Result<String> {
+        self.inner.input_with(prompt, default, check)
+    }
+    fn confirm(&self, prompt: &str, default: bool) -> Result<bool> {
+        if let Some(before) = self.before.lock().unwrap().take() {
+            before();
+        }
+        self.inner.confirm(prompt, default)
+    }
+    fn select(
+        &self,
+        title: &str,
+        items: &[String],
+        default: usize,
+        back: bool,
+    ) -> Result<Option<usize>> {
+        self.inner.select(title, items, default, back)
+    }
+    fn select_many(&self, title: &str, items: &[String], default: &[usize]) -> Result<Vec<usize>> {
+        self.inner.select_many(title, items, default)
+    }
+    fn secret(&self, prompt: &str) -> Result<String> {
+        self.inner.secret(prompt)
+    }
+}
+
+#[test]
+fn a_change_waiting_at_its_confirmation_never_restores_a_rotated_token() {
+    let h = FakeHost::new();
+    h.ui.set_assume_yes(true);
+    session(&h, true).run(install(tcp_flags())).unwrap();
+    let paths = h.ctx.paths.clone();
+    let mut rotated = model::load(&paths).unwrap().unwrap();
+    rotated.token = "f".repeat(64);
+    let saved = rotated.clone();
+    let racing = Racing {
+        inner: h.ui.clone(),
+        before: Mutex::new(Some(Box::new(move || {
+            model::save(&paths, &saved).unwrap();
+        }))),
+    };
+    let ctx = Ctx {
+        ui: Arc::new(racing),
+        ..h.ctx.clone()
+    };
+    let s = Session {
+        rt: Runtime {
+            ctx: &ctx,
+            ..h.runtime()
+        },
+        cwd: h.dir.path().to_path_buf(),
+        is_root: true,
+    };
+    h.exec.clear_history();
+    let port = Flags {
+        bind_port: Some(7100),
+        ..Flags::default()
+    };
+    let err = s.run(install(port)).unwrap_err();
+    assert!(matches!(err, Error::Conflict), "{err}");
+    assert_eq!(model::load(&h.ctx.paths).unwrap().unwrap(), rotated);
+    assert!(!h.history().iter().any(|c| c.starts_with("systemctl stop")));
+    assert!(!journal::exists(&h.ctx.paths));
 }
 
 #[test]

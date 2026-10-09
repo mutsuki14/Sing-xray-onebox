@@ -18,13 +18,15 @@
 //!   (v2 printed the bare error); Ctrl+D at the menu prompt itself exits
 //!   with 130 (ARCH G5); root is checked before an item asks anything;
 //! - `update` to the version already running changes nothing;
+//! - a change is refused when another FRP operation replaced the state
+//!   while this one waited at its confirmation (no lost token rotation);
 //! - new `rotate-ca` replaces a private CA that is about to expire (v2 had
 //!   no way out, H-8.1#10).
 
 use super::draft::{self, normalize_version, Draft, Flags};
 use super::export::{self, ExportRequest};
 use super::journal;
-use super::lifecycle::{self, Change, ServiceAction, CRON_LOCK_WAIT};
+use super::lifecycle::{self, Change, Expected, ServiceAction, CRON_LOCK_WAIT};
 use super::model::{self, FrpState, WebTls};
 use super::render::summary;
 use super::runtime::Runtime;
@@ -404,6 +406,7 @@ impl Session<'_> {
             Change {
                 cloudflare,
                 reason,
+                expected: Expected::of(previous.as_ref()),
                 ..Change::default()
             },
         )
@@ -442,6 +445,7 @@ impl Session<'_> {
                 cloudflare,
                 reason: "更新",
                 skip_unchanged: true,
+                expected: Expected::State(current),
                 ..Change::default()
             },
         )
@@ -457,11 +461,13 @@ impl Session<'_> {
             return Ok(());
         }
         let ca = change.rotate_ca;
+        let expected = Expected::State(state.clone());
         lifecycle::apply(
             &self.rt,
             state,
             Change {
                 cloudflare,
+                expected,
                 ..change
             },
         )?;

@@ -19,6 +19,9 @@
 
 use super::model::{FrpState, WebSettings};
 use super::render::{nginx_conf, NginxLayout, NginxPhase};
+use crate::cert::acme::AcmeRelease;
+use crate::cert::http01::HTTP_PORT;
+use crate::cert::Engine;
 use crate::ctx::Ctx;
 use crate::domain::defaults::FRP_RENEW_CRON;
 use crate::error::Result;
@@ -26,6 +29,7 @@ use crate::host::cron::{self, Crontab, Tag};
 use crate::host::init::{self, InitSystem};
 use crate::host::os::{self, process_env, EnvLookup};
 use crate::host::service::{ServiceDef, Services, FRPS, FRP_WEB};
+use crate::host::supervisor::Supervisor;
 use crate::host::{nginx, selfexe};
 use crate::paths::Paths;
 use crate::sys::exec::Cmd;
@@ -65,6 +69,10 @@ pub struct Runtime<'a> {
     pub health: Health,
     /// Copies the running program to `EXE` (the hook and cron call it).
     pub install_self: fn(&Ctx) -> Result<bool>,
+    /// Runs the services without an init system.
+    pub supervisor: Supervisor<'a>,
+    /// The acme.sh release the website certificates use.
+    pub acme: AcmeRelease,
 }
 
 impl<'a> Runtime<'a> {
@@ -77,6 +85,8 @@ impl<'a> Runtime<'a> {
             root: os::is_root(),
             health: Health::DEFAULT,
             install_self: selfexe::install_self,
+            supervisor: Supervisor::new(ctx),
+            acme: AcmeRelease::pinned(),
         }
     }
 
@@ -85,7 +95,19 @@ impl<'a> Runtime<'a> {
     }
 
     pub fn services(&self) -> Services<'a> {
-        Services::new(self.ctx, self.init)
+        Services::with_supervisor(self.ctx, self.init, self.supervisor.clone())
+    }
+
+    /// The certificate engine for the website certificate (HTTP-01 always
+    /// through the web nginx's webroot, never the built-in responder).
+    pub fn cert_engine(&self) -> Engine<'a> {
+        Engine {
+            ctx: self.ctx,
+            release: self.acme.clone(),
+            http01_port: HTTP_PORT,
+            env: self.env,
+            init: self.init,
+        }
     }
 
     /// The FRP lock. Contention fails after a short grace period, which

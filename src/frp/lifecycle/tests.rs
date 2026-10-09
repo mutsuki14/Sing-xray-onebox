@@ -278,6 +278,45 @@ fn update_to_the_running_version_changes_nothing() {
 }
 
 #[test]
+fn changes_built_from_a_replaced_state_are_refused() {
+    let h = FakeHost::new();
+    let read = install_tcp(&h);
+    let paths = &h.ctx.paths;
+    // Another operation rotated the token after `read` was taken.
+    apply(
+        &h.runtime(),
+        read.clone(),
+        Change {
+            rotate: true,
+            expected: Expected::State(read.clone()),
+            ..change("轮换 token")
+        },
+    )
+    .unwrap();
+    let rotated = model::load(paths).unwrap().unwrap();
+    assert_ne!(rotated.token, read.token);
+    let mut stale = read.clone();
+    stale.bind_port = 7100;
+    let configure = Change {
+        expected: Expected::State(read.clone()),
+        ..change("配置")
+    };
+    let err = apply(&h.runtime(), stale, configure).unwrap_err();
+    assert_eq!(err.to_string(), Error::Conflict.to_string());
+    assert_eq!(model::load(paths).unwrap().unwrap(), rotated);
+    // An install that saw no FRP is refused once FRP exists.
+    let fresh = Change {
+        expected: Expected::Absent,
+        ..change("安装")
+    };
+    assert!(matches!(
+        apply(&h.runtime(), tcp_state(), fresh),
+        Err(Error::Conflict)
+    ));
+    assert!(!journal::exists(paths));
+}
+
+#[test]
 fn crashed_transactions_block_net_apply_until_recovered() {
     let h = FakeHost::new();
     let original = install_tcp(&h);
@@ -519,3 +558,6 @@ fn web_mode_with_a_custom_certificate_then_back_to_tcp() {
         Mode::Tcp { .. }
     ));
 }
+
+mod init;
+mod web;
