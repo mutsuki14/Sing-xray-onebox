@@ -2,13 +2,16 @@
 """Fetch the pinned official test tools listed in tests/tools.json.
 
     python3 tests/fetch_tools.py DEST     download, verify and install every tool into DEST
+    python3 tests/fetch_tools.py --archives DIR DEST
+                                          also keep each verified release asset in DIR
     python3 tests/fetch_tools.py --check  validate the manifest only (no network)
 
 Each release asset must carry a GitHub API ``digest`` (sha256). The downloaded
 bytes must match it and the API size before anything is extracted; only the
 named binaries are taken, by basename, from regular archive members, and they
-are installed atomically with mode 0755. GH_TOKEN, when set, authenticates
-api.github.com requests only (never forwarded on redirects).
+are installed atomically with mode 0755 (kept assets: 0644, under their asset
+name, for the release-package extraction tests). GH_TOKEN, when set,
+authenticates api.github.com requests only (never forwarded on redirects).
 """
 import argparse
 import gzip
@@ -200,8 +203,8 @@ def extract(asset, data, binaries):
     return result
 
 
-def install(dest, name, content):
-    """Write dest/name atomically with mode 0755 (never through a symlink)."""
+def install(dest, name, content, mode=0o755):
+    """Write dest/name atomically with `mode` (never through a symlink)."""
     temporary = dest / f'.{name}.tmp-{os.getpid()}'
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o700)
     try:
@@ -209,14 +212,14 @@ def install(dest, name, content):
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o755)
+        os.chmod(temporary, mode)
         os.replace(temporary, dest / name)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
 
 
-def fetch(entry, dest):
+def fetch(entry, dest, archives=None):
     repo, tag, asset, binaries = (entry[key] for key in ('repo', 'tag', 'asset', 'binaries'))
     url, size, digest = release_asset(repo, tag, asset)
     data = get(url, size)
@@ -227,6 +230,8 @@ def fetch(entry, dest):
         raise FetchError(f'{asset}: sha256 {actual} does not match the upstream digest {digest}')
     for binary, content in extract(asset, data, binaries).items():
         install(dest, binary, content)
+    if archives is not None:
+        install(archives, asset, data, 0o644)
     print(f'{repo} {tag}: verified sha256:{digest} -> {", ".join(binaries)}', flush=True)
 
 
@@ -234,10 +239,13 @@ def main(argv):
     parser = argparse.ArgumentParser(description='Fetch the pinned test tools (tests/tools.json).')
     parser.add_argument('dest', nargs='?', type=Path, help='directory that receives the binaries')
     parser.add_argument('--check', action='store_true', help='only validate the manifest')
+    parser.add_argument('--archives', type=Path, help='also keep each verified release asset here')
     parser.add_argument('--manifest', type=Path, default=MANIFEST, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.check == (args.dest is not None):
         parser.error('give either DEST or --check')
+    if args.check and args.archives is not None:
+        parser.error('--archives needs DEST')
     try:
         entries = load_manifest(args.manifest)
         if args.check:
@@ -245,8 +253,10 @@ def main(argv):
                 print(f'{entry["repo"]} {entry["tag"]}: {entry["asset"]} -> {", ".join(entry["binaries"])}')
             return 0
         args.dest.mkdir(parents=True, exist_ok=True)
+        if args.archives is not None:
+            args.archives.mkdir(parents=True, exist_ok=True)
         for entry in entries:
-            fetch(entry, args.dest)
+            fetch(entry, args.dest, args.archives)
     except FetchError as error:
         print(f'fetch_tools: {error}', file=sys.stderr)
         return 1

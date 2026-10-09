@@ -260,12 +260,10 @@ impl Drop for Nginx {
     }
 }
 
+/// The real nginx (`ONEBOX_NGINX_BIN`, the shared real-tool contract) and
+/// openssl.
 fn nginx_bin() -> Option<PathBuf> {
-    let bin = std::env::var_os(crate::host::nginx::ENV_BIN).map(PathBuf::from);
-    if bin.is_none() {
-        println!("skipping: set ONEBOX_NGINX_BIN");
-    }
-    bin.filter(|_| have_openssl())
+    crate::sys::testenv::tool(crate::host::nginx::ENV_BIN).filter(|_| have_openssl())
 }
 
 /// `(status, headers, body)` over HTTPS through curl (test CA, pinned host).

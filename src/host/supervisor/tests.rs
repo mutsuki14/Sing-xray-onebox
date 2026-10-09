@@ -322,7 +322,7 @@ fn pre_start_runs_first_and_its_failure_aborts() {
     let calls = f.exec.calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].display(), format!("{exe} frps net-apply"));
-    assert!(calls[0].clear_env && calls[0].timeout.is_some());
+    assert!(calls[0].clear_env && calls[0].timeout == Some(COMMAND_TIMEOUT));
     assert_eq!(calls[1].program, def.program().to_string_lossy());
     assert_eq!(def.pid_file(), f.ctx.paths.frp_run.join("onebox-frps.pid"));
     assert!(def.pid_file().exists());
@@ -338,6 +338,10 @@ fn a_oneshot_runs_synchronously_without_a_record() {
     sup.start(&def, &f.env()).unwrap();
     assert_eq!(f.exec.history(), [format!("{exe} net-apply")]);
     assert!(f.exec.calls()[0].clear_env);
+    // `net-apply` waits up to LOCK_WAIT for the node lock, then may run a
+    // full apply: it must not be killed when the lock wait ends.
+    assert_eq!(f.exec.calls()[0].timeout, Some(ONESHOT_TIMEOUT));
+    assert!(ONESHOT_TIMEOUT >= crate::apply::boot::LOCK_WAIT + Duration::from_secs(3600));
     assert!(f.exec.spawned().is_empty() && !def.pid_file().exists());
     assert!(!sup.running(&def));
 

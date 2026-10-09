@@ -156,7 +156,7 @@ onebox frps --help
 - 计划任务（每次 FRP 变更和续期时重写）：
 
   ```text
-  17 3 * * * PATH=… env ONEBOX_…='…' '/usr/local/bin/onebox' frps renew --cron >>'/var/log/onebox-frp/renew.log' 2>&1 # onebox:frp-renew
+  17 3 * * * mkdir -p '/var/log/onebox-frp' 2>/dev/null; PATH=… env ONEBOX_…='…' '/usr/local/bin/onebox' frps renew --cron >>'/var/log/onebox-frp/renew.log' 2>&1 # onebox:frp-renew
   ```
 
   没有 init 系统时还会为 `onebox-frps`（网站模式另加 `onebox-frp-web`）各写一行 `@reboot … service 服务名 start`（标记 `# onebox:boot:服务名`）。v2 的 `# onebox-frps-renew` 与 `# onebox-frps-boot` 行在升级后第一次 FRP 变更或夜间续期时被替换；systemd / OpenRC 下不再需要 `@reboot` 行（服务已设为开机自启）。

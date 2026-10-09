@@ -18,13 +18,14 @@
 use super::logs;
 use super::{
     render_openrc, render_systemd, script_file, service_env, unit_file, validate_name, Scope,
-    ServiceDef, ServiceSpec, SPEC_MAX_BYTES,
+    ServiceDef, ServiceKind, ServiceSpec, ONESHOT_TIMEOUT, SPEC_MAX_BYTES,
 };
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::host::cron::{self, Crontab, Tag};
 use crate::host::init::{self, InitSystem};
 use crate::host::supervisor::Supervisor;
+use crate::paths::Paths;
 use crate::sys::exec::{Cmd, Output};
 use crate::sys::fs::{atomic_write, check_owned, read_bounded, remove_file_if_exists};
 use crate::sys::lock::FileLock;
@@ -38,7 +39,7 @@ use std::time::{Duration, Instant};
 pub const WAIT_RUNNING: Duration = Duration::from_secs(2);
 /// Queries (`is-active`, `is-enabled`, `status`, journal reads).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
-/// Actions; a oneshot start runs the whole network restore.
+/// Actions (starting a oneshot runs its whole command: [`ONESHOT_TIMEOUT`]).
 const ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// `systemctl stop` of a unit systemd never loaded.
 const SYSTEMD_NOT_LOADED: i32 = 5;
@@ -261,9 +262,10 @@ impl<'a> Services<'a> {
     /// for the lock the service takes itself (see the module docs).
     pub fn start(&self, name: &str) -> Result<()> {
         validate_name(name)?;
+        let timeout = start_timeout(&self.ctx.paths, name);
         match self.init {
-            InitSystem::Systemd => self.act("systemctl", &["start", name]),
-            InitSystem::Openrc => self.act("rc-service", &[name, "start"]),
+            InitSystem::Systemd => self.act_within("systemctl", &["start", name], timeout),
+            InitSystem::Openrc => self.act_within("rc-service", &[name, "start"], timeout),
             InitSystem::None => {
                 let (def, env) = self.load(name)?;
                 self.supervisor.start(&def, &env)
@@ -338,9 +340,10 @@ impl<'a> Services<'a> {
     /// Restart `name`; the same lock rules as [`start`](Services::start).
     pub fn restart(&self, name: &str) -> Result<()> {
         validate_name(name)?;
+        let timeout = start_timeout(&self.ctx.paths, name);
         match self.init {
-            InitSystem::Systemd => self.act("systemctl", &["restart", name]),
-            InitSystem::Openrc => self.act("rc-service", &[name, "restart"]),
+            InitSystem::Systemd => self.act_within("systemctl", &["restart", name], timeout),
+            InitSystem::Openrc => self.act_within("rc-service", &[name, "restart"], timeout),
             InitSystem::None => {
                 let (def, env) = self.load(name)?;
                 self.supervisor.restart(&def, &env)
@@ -505,12 +508,27 @@ impl<'a> Services<'a> {
 
     /// Run a service-manager action; a non-zero exit is an error.
     fn act(&self, program: &str, args: &[&str]) -> Result<()> {
-        let out = self.run(program, args, ACTION_TIMEOUT)?;
+        self.act_within(program, args, ACTION_TIMEOUT)
+    }
+
+    /// [`act`](Services::act) bounded by `timeout`.
+    fn act_within(&self, program: &str, args: &[&str], timeout: Duration) -> Result<()> {
+        let out = self.run(program, args, timeout)?;
         if out.ok() {
             Ok(())
         } else {
             Err(command_error(program, out))
         }
+    }
+}
+
+/// The bound of starting `name`: `systemctl start` and `rc-service start`
+/// of a oneshot run its whole command, and killing `rc-service` would kill
+/// that command mid-transaction too.
+fn start_timeout(paths: &Paths, name: &str) -> Duration {
+    match ServiceDef::skeleton(paths, name).kind() {
+        ServiceKind::Oneshot => ONESHOT_TIMEOUT,
+        ServiceKind::Daemon => ACTION_TIMEOUT,
     }
 }
 

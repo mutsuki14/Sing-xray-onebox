@@ -38,7 +38,7 @@ pub mod identity;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::host::service::{prepare_dir, ServiceDef, ServiceKind, NOFILE_LIMIT};
+use crate::host::service::{prepare_dir, ServiceDef, ServiceKind, NOFILE_LIMIT, ONESHOT_TIMEOUT};
 use crate::sys::exec::Cmd;
 use crate::sys::fs::{atomic_write, read_to_string_bounded, remove_file_if_exists};
 use crate::sys::lock::FileLock;
@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 /// Largest PID file accepted.
 const PID_FILE_MAX: u64 = 4096;
-/// How long a pre-start command or a oneshot may run.
+/// How long a pre-start command may run (a oneshot: [`ONESHOT_TIMEOUT`]).
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 pub const STOP_FAILED: &str = "后台服务未能退出，已保留 PID 记录";
 pub const SPAWN_EXITED: &str = "启动的后台进程已退出";
@@ -243,13 +243,13 @@ impl<'a> Supervisor<'a> {
             prepare_dir(dir)?;
         }
         if let Some(pre) = def.pre_start() {
-            self.run_to_completion(pre, env, lock_fd)?;
+            self.run_to_completion(pre, env, lock_fd, COMMAND_TIMEOUT)?;
         }
         if def.kind() == ServiceKind::Oneshot {
             let argv: Vec<String> = std::iter::once(def.program().to_string_lossy().into_owned())
                 .chain(def.args().iter().cloned())
                 .collect();
-            return self.run_to_completion(&argv, env, lock_fd);
+            return self.run_to_completion(&argv, env, lock_fd, ONESHOT_TIMEOUT);
         }
         self.spawn(def, env)
     }
@@ -331,12 +331,14 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Run a helper command (pre-start, oneshot) with the service
-    /// environment (and the handed-over lock); a non-zero exit is an error.
+    /// environment (and the handed-over lock) for at most `timeout`; a
+    /// non-zero exit is an error.
     fn run_to_completion(
         &self,
         argv: &[String],
         env: &[(String, String)],
         lock_fd: Option<RawFd>,
+        timeout: Duration,
     ) -> Result<()> {
         let (program, args) = argv
             .split_first()
@@ -344,7 +346,7 @@ impl<'a> Supervisor<'a> {
         let mut cmd = Cmd::new(program)
             .args(args)
             .daemon_env(env)
-            .timeout(COMMAND_TIMEOUT);
+            .timeout(timeout);
         if let Some(fd) = lock_fd {
             cmd = cmd.inherit_lock(fd);
         }

@@ -34,6 +34,9 @@ fn every_written_form_is_restorable() {
         // Cron ignores leading blanks, and so does the shape check.
         format!("  {}", lines::v2_cert("proxy")),
         format!("\t{}", lines::boot("onebox-xray")),
+        lines::early(&lines::renew()),
+        lines::early(&lines::boot("onebox-xray")),
+        lines::early(&lines::frp_renew()),
     ];
     // v2's fixture form with fewer variables, and the `%`-escaped forms.
     all.push(format!(
@@ -53,6 +56,12 @@ fn every_written_form_is_restorable() {
         )
         .unwrap(),
     );
+    let percent = all.last().unwrap().clone();
+    assert!(
+        percent.contains(r"mkdir -p '/var/log/50\%' 2>/dev/null;"),
+        "{percent}"
+    );
+    all.push(lines::early(&percent));
     for text in &all {
         let (tag, form) = o.classify_form(text).unwrap_or_else(|| panic!("{text}"));
         assert!(o.restorable(text, &tag, form), "{text}");
@@ -104,6 +113,14 @@ fn journal_lines_must_have_an_exact_known_shape() {
         renew.replace("PATH=", "PATH=/tmp:"),
         renew.replace("17 4 * * *", "17 4 * *"),
         renew.replace("/var/log/onebox/renew.log", "/var/log/%/renew.log"),
+        // The directory recreated is the log's, by `mkdir -p` only.
+        renew.replace("mkdir -p '/var/log/onebox'", "mkdir -p '/tmp'"),
+        renew.replace("mkdir -p '/var/log/onebox'", "mkdir -p '/var/log/onebox' '/x'"),
+        renew.replace("mkdir -p '/var/log/onebox'", "rm -rf '/var/log/onebox'"),
+        renew.replace("mkdir -p '/var/log/onebox' 2>/dev/null;", "mkdir -p '/var/log/onebox';"),
+        renew.replace("2>/dev/null; ", "2>/dev/null; id; "),
+        renew.replace("2>/dev/null; ", "2>/dev/null; mkdir -p '/var/log/onebox' 2>/dev/null; "),
+        renew.replace(">>'/var/log/onebox/renew.log'", ">>'/var/log/other/renew.log'"),
         lines::boot("onebox-xray").replace("service onebox-xray start", "service onebox-site start"),
         format!("17 4 * * * {exe} cert renew proxy --cron >/dev/null 2>&1; id # onebox-native-cert-proxy"),
         format!("17 4 * * * {exe} cert renew site --cron >/dev/null 2>&1 # onebox-native-cert-proxy"),

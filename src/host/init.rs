@@ -9,10 +9,13 @@
 //! Changes from v2: the result is a typed enum; the check runs under
 //! `system_root` and `which` goes through `Exec` (testable); an
 //! unrecognized `ONEBOX_INIT` value is still ignored (v2 parity), but
-//! [`override_error`] lets callers report it.
+//! [`detect`] says so ([`override_error`], once per process) instead of
+//! silently using another init system.
 
 use crate::ctx::Ctx;
 use crate::host::os::{process_env, EnvLookup};
+use crate::ui::out;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Environment variable that forces the init system (also persisted into
 /// units and cron lines by the service layer).
@@ -43,8 +46,10 @@ impl InitSystem {
         InitSystem::ALL.into_iter().find(|i| i.id() == value)
     }
 
-    /// Detect with the process environment's `ONEBOX_INIT`.
+    /// Detect with the process environment's `ONEBOX_INIT`, warning (once
+    /// per process) when its value is ignored.
     pub fn detect(ctx: &Ctx) -> InitSystem {
+        warn_ignored_override(&process_env, &OVERRIDE_WARNED, out::warn);
         detect_with(ctx, &process_env)
     }
 }
@@ -72,6 +77,19 @@ pub fn detect_with(ctx: &Ctx, env: EnvLookup) -> InitSystem {
         return InitSystem::Openrc;
     }
     InitSystem::None
+}
+
+/// [`override_error`] was printed by this process.
+static OVERRIDE_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Pass [`override_error`] to `warn` unless `warned` says it already was
+/// (every command detects the init system several times).
+fn warn_ignored_override(env: EnvLookup, warned: &AtomicBool, warn: impl FnOnce(String)) {
+    if let Some(message) = override_error(env) {
+        if !warned.swap(true, Ordering::Relaxed) {
+            warn(message);
+        }
+    }
 }
 
 /// A message when `ONEBOX_INIT` is set to something [`detect`] ignores.
@@ -145,5 +163,30 @@ mod tests {
             override_error(&env_of(Some("upstart"))).unwrap(),
             "ONEBOX_INIT 只能是 systemd、openrc 或 none（当前为 upstart），已改用自动检测"
         );
+    }
+
+    /// An ignored override is reported (once per process), a valid or
+    /// absent one never.
+    #[test]
+    fn ignored_overrides_are_reported_once() {
+        let cases: [(Option<&'static str>, bool); 7] = [
+            (None, false),
+            (Some("systemd"), false),
+            (Some("openrc"), false),
+            (Some("none"), false),
+            (Some("None"), true),
+            (Some("supervisor"), true),
+            (Some("systemd "), true),
+        ];
+        for (value, reported) in cases {
+            let warned = AtomicBool::new(false);
+            let mut messages = Vec::new();
+            for _ in 0..3 {
+                warn_ignored_override(&env_of(value), &warned, |m| messages.push(m));
+            }
+            let want: Vec<String> = override_error(&env_of(value)).into_iter().collect();
+            assert_eq!(messages, want, "{value:?}");
+            assert_eq!(messages.len(), usize::from(reported), "{value:?}");
+        }
     }
 }

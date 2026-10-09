@@ -109,6 +109,16 @@ pub mod lines {
         .unwrap()
     }
 
+    /// A v3 `line` as early v3 builds wrote it: without recreating the log
+    /// directory first.
+    pub fn early(line: &str) -> String {
+        const MKDIR: &str = "mkdir -p ";
+        const QUIET: &str = "2>/dev/null; ";
+        let start = line.find(MKDIR).unwrap();
+        let end = line.find(QUIET).unwrap() + QUIET.len();
+        format!("{}{}", &line[..start], &line[end..])
+    }
+
     pub fn v2_cert(target: &str) -> String {
         let job = if target == "subscription" {
             "subscription renew --cron".to_owned()

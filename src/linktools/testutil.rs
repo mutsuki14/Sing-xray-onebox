@@ -1,5 +1,6 @@
 //! Shared test helpers of the link tools: bundle fixtures, fake proxies,
-//! scripted curl output and the real-tool lookup contract of CI.
+//! scripted curl output and (re-exported) the real-tool lookup contract of
+//! CI.
 
 use super::cancel::CancelToken;
 use super::core_client::{Launcher, Proxy, Resources};
@@ -86,45 +87,8 @@ pub fn proxy_port(cmd: &Cmd) -> Option<u16> {
         .ok()
 }
 
-/// A real tool from `var`. Unset: skip (returns `None`) unless CI's
-/// `ONEBOX_TEST_REQUIRE_FULL=1` contract turns the skip into a failure.
-pub fn tool(var: &str) -> Option<PathBuf> {
-    match std::env::var_os(var).filter(|v| !v.is_empty()) {
-        Some(path) => Some(PathBuf::from(path)),
-        None => {
-            assert!(
-                std::env::var("ONEBOX_TEST_REQUIRE_FULL").as_deref() != Ok("1"),
-                "{var} 未设置，但 ONEBOX_TEST_REQUIRE_FULL=1"
-            );
-            eprintln!("跳过：未设置 {var}");
-            None
-        }
-    }
-}
-
-/// Whether a program runs (tests that need curl/openssl skip without it,
-/// except under `ONEBOX_TEST_REQUIRE_FULL=1`).
-pub fn have(program: &str) -> bool {
-    let probe = if program == "openssl" {
-        "version"
-    } else {
-        "--version"
-    };
-    let found = std::process::Command::new(program)
-        .arg(probe)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok();
-    if !found {
-        assert!(
-            std::env::var("ONEBOX_TEST_REQUIRE_FULL").as_deref() != Ok("1"),
-            "{program} 不可用，但 ONEBOX_TEST_REQUIRE_FULL=1"
-        );
-        eprintln!("跳过：未找到 {program}");
-    }
-    found
-}
+/// The real-tool lookup contract of CI (shared by every module).
+pub use crate::sys::testenv::{have, tool};
 
 /// The JSON value of a serializable report part.
 pub fn to_value<T: serde::Serialize>(value: &T) -> Value {

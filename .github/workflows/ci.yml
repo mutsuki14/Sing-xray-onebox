@@ -91,7 +91,13 @@ jobs:
         env:
           # Only the fetcher calls the GitHub API: builds and tests never see the token.
           GH_TOKEN: ${{ github.token }}
-        run: python3 tests/fetch_tools.py "$RUNNER_TEMP/bin"
+        run: |
+          set -euo pipefail
+          # The verified release archives are kept for the package extraction
+          # test; the Xray client checks need the geodata of the same archive
+          # next to xray (their default location).
+          python3 tests/fetch_tools.py --archives "$RUNNER_TEMP/archives" "$RUNNER_TEMP/bin"
+          unzip -j -o -q "$RUNNER_TEMP/archives/Xray-linux-64.zip" geoip.dat geosite.dat -d "$RUNNER_TEMP/bin"
       - name: Extract nginx without starting a system service
         id: nginx
         run: |
@@ -160,6 +166,22 @@ jobs:
               exit 1
             fi
           done
+          # Release archives (package extraction test) and Xray's geodata.
+          singbox_tgz=("$RUNNER_TEMP"/archives/sing-box-*-linux-amd64.tar.gz)
+          files=(
+            "ONEBOX_TEST_XRAY_ZIP=$RUNNER_TEMP/archives/Xray-linux-64.zip"
+            "ONEBOX_TEST_SINGBOX_TGZ=${singbox_tgz[0]}"
+          )
+          if [[ ${#singbox_tgz[@]} -ne 1 ]]; then
+            echo "::error::expected one sing-box archive, found: ${singbox_tgz[*]}"
+            exit 1
+          fi
+          for file in "${files[@]#*=}" "$RUNNER_TEMP/bin/geoip.dat" "$RUNNER_TEMP/bin/geosite.dat"; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::missing test file: $file"
+              exit 1
+            fi
+          done
           # Each tool must also run on this runner (right architecture, complete).
           "$RUNNER_TEMP/bin/sing-box" version
           "$RUNNER_TEMP/bin/xray" version
@@ -169,7 +191,7 @@ jobs:
           "$RUNNER_TEMP/nginx-root/usr/sbin/nginx" -v
           "$GITHUB_WORKSPACE/target/debug/onebox" --version
           "$RUNNER_TEMP/onebox-v2/onebox-linux-amd64-musl" version
-          printf '%s\n' "${tools[@]}" ONEBOX_TEST_REQUIRE_FULL=1 > "$RUNNER_TEMP/real-tools.env"
+          printf '%s\n' "${tools[@]}" "${files[@]}" ONEBOX_TEST_REQUIRE_FULL=1 > "$RUNNER_TEMP/real-tools.env"
       - name: Unit, ignored and real-process Rust tests (root, one thread)
         # --all-targets leaves out doctests (lint runs them): --include-ignored
         # would otherwise try to run `ignore` code blocks.
