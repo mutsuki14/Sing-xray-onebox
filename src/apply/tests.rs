@@ -24,14 +24,25 @@ fn uncommitted_points() -> Vec<Checkpoint> {
 }
 
 /// An installed two-core node whose installed manager differs from the
-/// running one (so prepare-state rewrites it), with history cleared.
+/// running one (so prepare-state rewrites it) and whose crontab still has a
+/// v2 renewal line next to foreign ones (so finalize rewrites it), with
+/// history cleared.
 fn installed_host() -> Host {
     let host = Host::new();
     host.install(super::harness::two_cores());
     crate::apply::testing::file(&host.paths().executable, 0o755, OLD_MANAGER);
+    host.set_crontab(&legacy_crontab(host.paths()));
     host.exec.clear_history();
     host.features.clear();
     host
+}
+
+/// Foreign lines around a v2 `# onebox-native-cert-proxy` line.
+fn legacy_crontab(paths: &crate::paths::Paths) -> String {
+    use crate::host::cron::testing::lines;
+    let exe = paths.executable.display().to_string();
+    let v2 = lines::v2_cert("proxy").replace(lines::EXE, &exe);
+    format!("MAILTO=root\n{v2}\n0 1 * * * /usr/bin/foreign\n")
 }
 
 fn assert_no_journal(host: &Host) {

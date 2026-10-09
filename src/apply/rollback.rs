@@ -81,7 +81,7 @@ pub fn rollback(ctx: &Ctx, lock: &FileLock, journal: &mut Journal) -> Result<()>
 }
 
 /// What the old network rules are re-applied from, decided before anything
-/// changes. `Err` is the reason they cannot be (reported as a warning).
+/// changes. `Skip` carries the reason they cannot be (shown as a warning).
 enum Reapply {
     Nothing,
     Config(Box<NodeConfig>),

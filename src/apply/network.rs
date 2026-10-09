@@ -12,7 +12,9 @@
 //! Changes from v2: a rule that cannot be removed (stopped firewalld,
 //! disabled ufw, broken nft) no longer aborts a rollback — the node is
 //! brought back and the leftover is reported and retried later; only ledger
-//! and lock problems are errors.
+//! and lock problems are errors. An unremovable hop redirect is reported
+//! only: nft/iptables rules do not survive a reboot, and the next hop change
+//! retries what its ledger still records.
 
 use crate::ctx::Ctx;
 use crate::domain::config::{SubscriptionMode, WebCert};

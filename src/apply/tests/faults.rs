@@ -56,6 +56,8 @@ fn a_failure_at_every_stage_and_at_the_final_save_restores_the_old_generation() 
         changed.iter().any(|c| c.starts_with("iptables ")),
         "{changed:?}"
     );
+    // The v2 renewal line is retired; foreign lines keep their place.
+    assert_eq!(host.crontab(), "MAILTO=root\n0 1 * * * /usr/bin/foreign\n");
 }
 
 #[test]

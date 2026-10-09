@@ -1,6 +1,12 @@
 //! Public API of the apply engine: the request types and the entry points,
 //! which take the node lock and hand over to the engine with the production
 //! feature hooks.
+//!
+//! Changes from v2: one-shot requests are typed [`Intents`] instead of
+//! transient state keys (`RESTORE_PENDING_ID`, `CERT_RENEW_PROXY`,
+//! `SITE_CONTENT_PENDING_TEXT`, …), and the compare-and-swap hash is a field
+//! of the request instead of `__EXPECTED_STATE_HASH`; every entry point
+//! adopts a lock inherited from a self-update parent.
 
 use super::features::SystemFeatures;
 use crate::cert::cloudflare::CfCredentials;
@@ -19,7 +25,9 @@ use std::path::PathBuf;
 pub struct Intents {
     /// Force renewal of these certificates.
     pub renew: CertScopes,
-    /// Restore this backup id (or `latest`) inside the transaction.
+    /// Place this backup's files inside the transaction (prepare-state).
+    /// A concrete id: `backup::restore` resolves `latest` before it takes
+    /// its safety backup, which would otherwise be the newest.
     pub restore_backup: Option<String>,
     pub site_content: Option<SiteContent>,
     /// Verified core binaries to swap in (`onebox update`).
