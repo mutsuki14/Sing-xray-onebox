@@ -17,6 +17,7 @@ use super::{program_journal, rollback, transaction};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::lock::FileLock;
+use crate::sys::signal;
 use crate::ui::out;
 
 /// What [`recover_journal`] found.
@@ -69,6 +70,31 @@ fn describe(journal: &Journal) -> String {
         Some(reason) => format!("（{reason}，中断于 {phase}）"),
         None => format!("（中断于 {phase}）"),
     }
+}
+
+/// Consume a cancellation signal still pending when an operation failed:
+/// the error becomes (or stays) a cancellation — exit 130 — and the flag
+/// is cleared, so the next operation of an interactive session does not
+/// start out cancelled by a signal this one already answered (a Ctrl+C
+/// that killed a child surfaces as that child's failure, and errors before
+/// the journal exists never reach a rollback). A success leaves the flag
+/// to the caller, which may still have work to cancel.
+pub fn settle_signal<T>(result: Result<T>) -> Result<T> {
+    let error = match result {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let Some(n) = signal::pending() else {
+        return Err(error);
+    };
+    signal::clear();
+    if error.is_cancelled() {
+        return Err(error);
+    }
+    Err(Error::Cancelled.wrap(format!(
+        "{}（操作被信号 {n} 中断）",
+        error.report_text()
+    )))
 }
 
 /// `message` as the error, keeping exit code 130 when `cause` was a

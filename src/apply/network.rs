@@ -3,18 +3,20 @@
 //! certificates are prepared) and the Hysteria2 hop redirects.
 //!
 //! [`apply_rules`] is what apply-network, rollback and boot share (rules
-//! only: units and persistence are the stages' business). [`clear_rules`]
-//! is rollback-stop's half: it removes everything it can and returns what
-//! it could not, so the caller can surface it and carry unremovable
-//! firewall rules over into the restored ledgers (a rule nobody records
-//! would stay open forever on ufw/firewalld, whose rules persist).
+//! only: units and persistence are the stages' business). [`clear_owner`]
+//! and [`clear_hops`] are rollback-stop's half: they remove everything they
+//! can and return what they could not, so the caller can surface it and
+//! [`carry_over`] the leftovers into the ledgers the snapshot restores (a
+//! rule nobody records would stay open forever on ufw/firewalld, whose
+//! rules persist; a redirect nobody records could shadow the restored hop
+//! until the next reboot).
 //!
 //! Changes from v2: a rule that cannot be removed (stopped firewalld,
 //! disabled ufw, broken nft) no longer aborts a rollback — the node is
-//! brought back and the leftover is reported and retried later; only ledger
-//! and lock problems are errors. An unremovable hop redirect is reported
-//! only: nft/iptables rules do not survive a reboot, and the next hop change
-//! retries what its ledger still records.
+//! brought back and the leftover is reported, kept recorded and retired by
+//! the next reconcile or hop change (which fails rather than let a leftover
+//! redirect shadow the hop it installs); only ledger and lock problems are
+//! errors, and each owner and the hops are cleared independently.
 
 use crate::ctx::Ctx;
 use crate::domain::config::{SubscriptionMode, WebCert};
@@ -23,8 +25,10 @@ use crate::domain::ports::{proxy_http01_responder, PortPlan};
 use crate::domain::protocol::{Protocol, Transport};
 use crate::domain::NodeConfig;
 use crate::error::Result;
-use crate::host::firewall::{self, ledger_path, Entry, Ledger};
-use crate::host::hop;
+use crate::host::firewall::{self, ledger_path, lock_waiting, Entry, Ledger};
+use crate::host::hop::{self, Hop};
+use crate::sys::fs::atomic_write;
+use std::time::Duration;
 
 /// Firewall owner of the node's public ports (`firewall-v2.json`).
 pub const PROXY_OWNER: &str = "proxy";
@@ -79,11 +83,13 @@ pub fn clear_acme(ctx: &Ctx) -> Result<Vec<String>> {
     Ok(firewall::clear_owner(ctx, ACME_OWNER)?.failed)
 }
 
-/// What [`clear_rules`] could not remove.
+/// What rollback-stop could not remove.
 #[derive(Debug, Default)]
 pub struct Leftovers {
     /// Recorded rules per owner that are still live (ledger entries).
     pub firewall: Vec<(&'static str, Vec<Entry>)>,
+    /// Hop redirects that are still live (hop ledger records).
+    pub hops: Vec<Hop>,
     /// Human-readable descriptions of everything left (warnings).
     pub messages: Vec<String>,
 }
@@ -94,26 +100,34 @@ impl Leftovers {
     }
 }
 
-/// rollback-stop: remove the `acme` and `proxy` rules and every hop. Each
-/// part is attempted; unremovable rules are returned, ledger or lock
-/// problems are errors.
-pub fn clear_rules(ctx: &Ctx) -> Result<Leftovers> {
-    let mut left = Leftovers::default();
-    for owner in [ACME_OWNER, PROXY_OWNER] {
-        let report = firewall::clear_owner(ctx, owner)?;
-        if report.failed.is_empty() {
-            continue;
-        }
-        let ledger = Ledger::load(&ledger_path(&ctx.paths, owner), owner)?;
-        left.firewall.push((owner, ledger.entries));
-        left.messages.extend(report.failed);
+/// Remove every rule of `owner` (`acme` or `proxy`); rules that could not
+/// be removed are added to `left`. Errors are ledger and lock problems.
+pub fn clear_owner(ctx: &Ctx, owner: &'static str, left: &mut Leftovers) -> Result<()> {
+    let report = firewall::clear_owner(ctx, owner)?;
+    if report.failed.is_empty() {
+        return Ok(());
     }
-    left.messages.extend(hop::clear(ctx)?.failed);
-    Ok(left)
+    let ledger = Ledger::load(&ledger_path(&ctx.paths, owner), owner)?;
+    left.firewall.push((owner, ledger.entries));
+    left.messages.extend(report.failed);
+    Ok(())
 }
 
-/// After the snapshot put the old ledgers back: record the rules that could
-/// not be removed in them again, so the next reconcile or clear retries
+/// Remove every hop redirect; the ones that could not be removed (what the
+/// hop ledger still records afterwards) are added to `left`.
+pub fn clear_hops(ctx: &Ctx, left: &mut Leftovers) -> Result<()> {
+    let report = hop::clear(ctx)?;
+    if report.failed.is_empty() {
+        return Ok(());
+    }
+    left.hops.extend(hop::recorded(ctx)?);
+    left.messages.extend(report.failed);
+    Ok(())
+}
+
+/// After the snapshot put the old ledgers back: record the rules and hops
+/// that could not be removed in them again, so the next reconcile, hop
+/// change or clear retries (or refuses to install a hop they would shadow)
 /// instead of forgetting a live rule.
 pub fn carry_over(ctx: &Ctx, left: &Leftovers) -> Result<()> {
     for (owner, entries) in &left.firewall {
@@ -129,7 +143,35 @@ pub fn carry_over(ctx: &Ctx, left: &Leftovers) -> Result<()> {
         ledger.entries.extend(fresh);
         ledger.save()?;
     }
-    Ok(())
+    carry_over_hops(ctx, &left.hops)
+}
+
+/// Contention message of the hop ledger lock (`host::hop`'s own text).
+const HOP_LOCK_BUSY: &str = "另一个端口跳跃操作正在进行；稍后重试";
+const HOP_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// Append the `hops` the restored hop ledger does not record yet:
+/// `hop::apply` retires every record present before it runs (failing when
+/// one it cannot remove would shadow the new hop), `hop::clear` attempts
+/// them all. Written like `host::hop` writes it (compact JSON array of
+/// [`Hop`], 0600, under `hop-v2.lock`).
+fn carry_over_hops(ctx: &Ctx, hops: &[Hop]) -> Result<()> {
+    if hops.is_empty() {
+        return Ok(());
+    }
+    let path = hop::ledger_path(ctx);
+    let _lock = lock_waiting(&path.with_extension("lock"), HOP_LOCK_BUSY, HOP_LOCK_WAIT)?;
+    let mut all = hop::recorded(ctx)?;
+    let fresh: Vec<Hop> = hops
+        .iter()
+        .filter(|h| !all.iter().any(|r| r.token == h.token))
+        .cloned()
+        .collect();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    all.extend(fresh);
+    atomic_write(&path, &serde_json::to_vec(&all)?, 0o600)
 }
 
 #[cfg(test)]

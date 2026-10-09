@@ -7,23 +7,33 @@
 //! 2. `rollback-stop`: stop and disable the node services in the canonical
 //!    stop order, only *disable* `onebox-network` (it may be the boot
 //!    oneshot running this very recovery), clear the `acme` and `proxy`
-//!    firewall owners and the hops; a service-manager error aborts here with
-//!    the journal kept, so files are never restored under running daemons;
-//! 3. `rollback-files`: restore the snapshot, re-record firewall rules that
-//!    could not be removed, reload systemd;
-//! 4. `rollback-services`: re-apply the old rules and hops, restore enable
-//!    states (legacy `onebox-net`/`onebox-hop` included), the crontab, and
-//!    start what was running in the canonical start order;
+//!    firewall owners and the hops (each attempted); a service-manager or
+//!    ledger error aborts here with the journal kept, so files are never
+//!    restored under running daemons;
+//! 3. `rollback-files`: restore the snapshot, re-record firewall rules and
+//!    hops that could not be removed, reload systemd;
+//! 4. `rollback-services` (best effort): re-apply the old rules and hops,
+//!    restore enable states (legacy `onebox-net`/`onebox-hop` included),
+//!    the crontab, and start what was running in the canonical start order
+//!    — every step is attempted; only a failed enable state, crontab or
+//!    start keeps the journal;
 //! 5. `rolled-back`, then the journal is removed.
 //!
 //! Changes from v2:
 //! - `Journal::validate` (cron lines, old state, services, snapshot) runs
 //!   before anything stops (v2 validated only the snapshot);
 //! - firewall and hop rules that cannot be removed do not abort the
-//!   rollback: they are reported as warnings and kept recorded;
+//!   rollback: they are reported as warnings and kept recorded in the
+//!   restored ledgers, so the old rules' reconcile retires them;
+//! - old rules that cannot be re-created do not keep the journal either
+//!   (a warning says to run `net-apply`): otherwise every later recover,
+//!   apply and boot would repeat the same failure and refuse; and one
+//!   service that fails to start no longer leaves the services after it
+//!   stopped and disabled (v2 stopped at the first error);
 //! - a typed old configuration the current rules reject still has its
 //!   files restored; only re-applying its network rules is skipped, with a
-//!   warning (same for a v2 old state that cannot be migrated);
+//!   warning (same for a v2 old state that cannot be migrated, and for an
+//!   old state.json the apply could not read);
 //! - under a lock inherited from a self-update parent, `onebox-subscription`
 //!   is not started: the parent restores its own manager and starts it (G6);
 //! - one canonical service order everywhere (B-9.1#24).
@@ -68,7 +78,7 @@ pub const START_ORDER: [&str; 5] = [
 pub fn rollback(ctx: &Ctx, lock: &FileLock, journal: &mut Journal) -> Result<()> {
     let paths = &ctx.paths;
     journal.validate_files(paths)?;
-    let reapply = old_rules_config(journal);
+    let reapply = old_rules_config(paths, journal);
     let services = Services::detect(ctx);
     journal.set_phase(paths, Phase::RollbackStop)?;
     let left = stop_everything(ctx, &services)?;
@@ -91,8 +101,13 @@ enum Reapply {
     Skip(String),
 }
 
-fn old_rules_config(journal: &Journal) -> Reapply {
+fn old_rules_config(paths: &Paths, journal: &Journal) -> Reapply {
     match journal.old() {
+        // An apply over a state.json it could not read journals no old
+        // configuration; the snapshot still restores the file.
+        OldState::None if recorded_present(journal, &paths.state()) => {
+            Reapply::Skip(UNREADABLE_OLD_STATE.to_owned())
+        }
         OldState::None => Reapply::Nothing,
         OldState::Config(cfg) => match journal.check_old_config() {
             Ok(()) => Reapply::Config(Box::new(cfg.clone())),
@@ -104,6 +119,14 @@ fn old_rules_config(journal: &Journal) -> Reapply {
             Err(e) => Reapply::Skip(e.to_string()),
         },
     }
+}
+
+/// Why old rules are not re-applied when the old state.json was unreadable.
+pub const UNREADABLE_OLD_STATE: &str = "原 state.json 无法读取";
+
+/// Whether the journal's snapshot recorded `target` as present.
+fn recorded_present(journal: &Journal, target: &std::path::Path) -> bool {
+    journal.snapshot().entry(target).is_some_and(|e| e.present)
 }
 
 /// rollback-stop. Service errors abort (journal kept); unremovable rules
@@ -126,13 +149,17 @@ fn stop_everything(ctx: &Ctx, services: &Services) -> Result<Leftovers> {
             errors.push(format!("停用 {}: {e}", svc::NETWORK));
         }
     }
-    let left = match network::clear_rules(ctx) {
-        Ok(left) => left,
-        Err(e) => {
-            errors.push(format!("清理当前网络: {e}"));
-            Leftovers::default()
-        }
-    };
+    let mut left = Leftovers::default();
+    // Each part is attempted whatever the others did (v2 message prefixes).
+    if let Err(e) = network::clear_owner(ctx, network::ACME_OWNER, &mut left) {
+        errors.push(format!("清理 ACME 防火墙: {e}"));
+    }
+    if let Err(e) = network::clear_owner(ctx, network::PROXY_OWNER, &mut left) {
+        errors.push(format!("清理当前网络: {e}"));
+    }
+    if let Err(e) = network::clear_hops(ctx, &mut left) {
+        errors.push(format!("清理当前网络: {e}"));
+    }
     ensure!(errors.is_empty(), "{}", errors.join("; "));
     if !left.is_empty() {
         out::warn(format!(
@@ -157,7 +184,13 @@ fn restore_files(
     services.daemon_reload()
 }
 
-/// rollback-services.
+/// rollback-services, best effort: every step is attempted even when an
+/// earlier one failed, so one broken service or rule does not leave the
+/// rest of the node stopped and disabled. Old rules that cannot be
+/// re-created only warn (the journal is still finished: keeping it would
+/// make every later recover, apply and boot repeat the same failure and
+/// refuse); a failed enable state, crontab restore or start fails the
+/// rollback after everything was tried, with the journal kept.
 fn restore_services(
     ctx: &Ctx,
     services: &Services,
@@ -165,18 +198,27 @@ fn restore_services(
     journal: &Journal,
     reapply: Reapply,
 ) -> Result<()> {
-    reapply_rules(ctx, reapply)?;
+    if let Err(e) = reapply_rules(ctx, reapply) {
+        out::warn(format!(
+            "旧防火墙规则恢复失败: {}；请执行 onebox net-apply 重试",
+            e.report_text()
+        ));
+    }
+    let mut errors = Vec::new();
     for name in SERVICES.iter().chain(LEGACY_NETWORK_SERVICES.iter()) {
         if !services.exists(name) {
             continue;
         }
-        if journal.enabled_services().iter().any(|n| n == name) {
-            services.enable(name)?;
+        let result = if journal.enabled_services().iter().any(|n| n == name) {
+            services.enable(name).map_err(|e| format!("启用 {name}: {e}"))
         } else {
-            services.disable(name)?;
-        }
+            services.disable(name).map_err(|e| format!("停用 {name}: {e}"))
+        };
+        errors.extend(result.err());
     }
-    cron::restore(ctx, &journal.cron(), Scope::Node)?;
+    if let Err(e) = cron::restore(ctx, &journal.cron(), Scope::Node) {
+        errors.push(format!("恢复定时任务: {e}"));
+    }
     for name in START_ORDER {
         if !journal.active_services().iter().any(|n| n == name) {
             continue;
@@ -186,9 +228,14 @@ fn restore_services(
             // its own manager and starts the worker with it (G6).
             continue;
         }
-        services.start(name)?;
-        services.wait_running(name, WAIT_RUNNING)?;
+        let started = services
+            .start(name)
+            .and_then(|()| services.wait_running(name, WAIT_RUNNING));
+        if let Err(e) = started {
+            errors.push(format!("启动 {name}: {e}"));
+        }
     }
+    ensure!(errors.is_empty(), "{}", errors.join("; "));
     Ok(())
 }
 

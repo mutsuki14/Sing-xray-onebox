@@ -33,7 +33,8 @@ pub mod transaction;
 
 pub use features::{Checkpoint, Features, SystemFeatures};
 pub use request::{
-    apply, apply_locked, boot, node_lock, recover, recover_locked, ApplyRequest, Intents,
+    apply, apply_locked, boot, frp_reservations, node_lock, recover, recover_locked,
+    ApplyRequest, Intents,
 };
 
 #[cfg(test)]

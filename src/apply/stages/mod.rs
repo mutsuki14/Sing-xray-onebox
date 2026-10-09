@@ -5,7 +5,7 @@
 //!
 //! | phase | work |
 //! |---|---|
-//! | prepare-state | install the manager, restore a backup's files, subscription devices, sweep temps |
+//! | prepare-state | install the manager, restore a backup's files, subscription devices |
 //! | replace-cores | swap in verified core binaries (`onebox update` only) |
 //! | prepare-cores | make sure used cores exist, record versions, refresh own IPs, re-check ports |
 //! | prepare-certificates | stop old TCP-80 holders and open TCP 80 when HTTP-01 needs it; subscription, site and proxy certificates |
@@ -21,6 +21,8 @@
 //! | finalize | `acme` owner cleared, running re-check, crontab policy, state.json, `committed` |
 //!
 //! Changes from v2:
+//! - crash leftovers are swept just before the journal snapshot instead of
+//!   in prepare-state, so a rollback never restores them;
 //! - stages read typed intents instead of magic state keys, and feature
 //!   modules never rewrite the configuration behind the engine's back
 //!   (only the recorded facts listed on [`Run::cfg`]);
@@ -37,7 +39,7 @@ mod finalize;
 mod prepare;
 
 pub(super) use finalize::precheck as cron_precheck;
-pub(super) use prepare::check_replacements;
+pub(super) use prepare::{check_replacements, sweep_leftovers};
 
 use super::features::{Checkpoint, Features};
 use super::journal::{Journal, Phase};

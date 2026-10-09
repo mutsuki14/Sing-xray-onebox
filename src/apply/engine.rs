@@ -18,9 +18,13 @@
 //!
 //! Changes from v2: preconditions that need no side effect (replacements,
 //! the cron daemon for ACME renewals) fail before the journal exists; a
-//! pending signal fails before anything starts; the cancellation an error
-//! carried is cleared once it has been turned into that error, so the next
-//! operation of an interactive session is not cancelled by it.
+//! pending signal fails before anything starts; whatever error an apply
+//! ends with while a signal is pending becomes a cancellation (exit 130)
+//! and the signal is cleared (`recover::settle_signal`), so the next
+//! operation of an interactive session is not cancelled by it; a
+//! `state.json` that exists but cannot be read no longer blocks a
+//! reinstall; crash leftovers are swept before the journal snapshot, so
+//! they are neither copied into it nor restored.
 
 use super::features::Features;
 use super::journal::{self, Journal, Phase};
@@ -45,6 +49,10 @@ pub fn apply_with(
     req: ApplyRequest,
     features: &dyn Features,
 ) -> Result<()> {
+    recover::settle_signal(run(ctx, lock, req, features))
+}
+
+fn run(ctx: &Ctx, lock: &FileLock, req: ApplyRequest, features: &dyn Features) -> Result<()> {
     recover::recover_all(ctx, lock)?;
     if StateStore::current_hash(ctx)? != req.expected {
         return Err(Error::Conflict);
@@ -59,8 +67,9 @@ pub fn apply_with(
     } = req;
     let services = Services::detect(ctx);
     preflight(ctx, &services, &mut config, &intents)?;
-    let old = StateStore::load(ctx)?.map(|loaded| loaded.config);
+    let old = old_config(ctx)?;
     let runtime = transaction::runtime_state(ctx, &services)?;
+    stages::sweep_leftovers(&ctx.paths);
     let journal = transaction::begin(ctx, reason, old.clone(), runtime)?;
     let mut run = Run::new(ctx, features, services, journal, config, old, intents);
     if let Err(error) = stages::run_all(&mut run) {
@@ -86,10 +95,30 @@ fn preflight(
         config.installed_at = crate::sys::time::now();
     }
     config.validate()?;
-    let frp = crate::frp::model::reservations(&ctx.paths)?;
+    let frp = super::frp_reservations(&ctx.paths)?;
     PortPlan::of(config, &frp).validate()?;
     stages::check_replacements(config, &intents.replace_cores)?;
     stages::cron_precheck(ctx, config, services.init())
+}
+
+/// The running generation's configuration. A state.json that exists but
+/// cannot be read (corrupt, or a v2 state the migration rejects) does not
+/// block the apply — the request's hash matched those very bytes, so this
+/// is a reinstall or restore over them: the snapshot keeps the file for a
+/// rollback, which then skips re-applying old network rules with a
+/// warning. A v1 installation (no state.json) is still refused.
+fn old_config(ctx: &Ctx) -> Result<Option<NodeConfig>> {
+    match StateStore::load(ctx) {
+        Ok(loaded) => Ok(loaded.map(|loaded| loaded.config)),
+        Err(e) if std::fs::symlink_metadata(ctx.paths.state()).is_ok() => {
+            out::warn(format!(
+                "现有 state.json 无法读取（{}），按全新配置应用；失败时将恢复原文件",
+                e.report_text()
+            ));
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// The error of a failed apply after the rollback it triggers.
@@ -114,10 +143,5 @@ fn failed(ctx: &Ctx, lock: &FileLock, journal: &mut Journal, error: Error) -> Er
             }
         }
     };
-    if result.is_cancelled() {
-        // The cancellation is consumed by this error; also forget a second
-        // signal that arrived during the rollback.
-        signal::clear();
-    }
     result
 }

@@ -13,8 +13,10 @@ use crate::cert::cloudflare::CfCredentials;
 use crate::cert::CertScopes;
 use crate::ctx::Ctx;
 use crate::domain::config::Device;
+use crate::domain::ports::Reservation;
 use crate::domain::{Core, NodeConfig};
 use crate::error::Result;
+use crate::paths::Paths;
 use crate::site::SiteContent;
 use crate::state::{Loaded, Origin, StateHash, StateStore};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
@@ -104,13 +106,19 @@ pub fn recover(ctx: &Ctx) -> Result<()> {
 }
 
 pub fn recover_locked(ctx: &Ctx, lock: &FileLock) -> Result<()> {
-    super::recover::recover_all(ctx, lock).map(drop)
+    super::recover::settle_signal(super::recover::recover_all(ctx, lock)).map(drop)
 }
 
 /// `onebox net-apply` at boot: recover, refresh own IPs, re-apply firewall
 /// rules and hops (full apply only when own IPs changed). Starts nothing.
 pub fn boot(ctx: &Ctx) -> Result<()> {
     super::boot::boot_with(ctx, &SystemFeatures)
+}
+
+/// The FRP server's port reservations (C5's port allocation and planners
+/// use this seam; the engine re-checks the plan against it under the lock).
+pub fn frp_reservations(paths: &Paths) -> Result<Vec<Reservation>> {
+    crate::frp::model::reservations(paths)
 }
 
 /// The node lock: inherited from a self-update parent when one is offered,
