@@ -141,8 +141,13 @@ impl Features for FakeFeatures {
     ) -> Result<SitePrepared> {
         self.record(format!("site_prepare content={content:?} force={force}"));
         if cfg.site_active().is_some() {
-            let index = ctx.paths.site_root.join("index.html");
+            // Like `site::ContentStore`: content plus ownership markers.
+            let paths = &ctx.paths;
+            let marker = crate::site::content::OWNED_MARKER;
+            let index = paths.site_root.join("index.html");
             crate::sys::fs::atomic_write(&index, b"<h1>new site</h1>", 0o644)?;
+            crate::sys::fs::atomic_write(&paths.site_root.join(marker), b"onebox\n", 0o600)?;
+            crate::sys::fs::atomic_write(&paths.site().join(marker), b"onebox\n", 0o600)?;
         }
         Ok(SitePrepared::default())
     }

@@ -7,6 +7,11 @@
 //!
 //! Invariant (G12): no method is allowed to ask the prompter anything; every
 //! input (Cloudflare credentials, content intents) is passed in.
+//!
+//! Changes from v2: v2's workflow called the modules directly and let them
+//! read and write magic keys of the state map; here each hook has typed
+//! inputs, and [`Features::checkpoint`] gives tests a fault-injection point
+//! after every stage and after the final save.
 
 use crate::apply::journal::Phase;
 use crate::cert::{self, CfCredentials};

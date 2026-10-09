@@ -19,6 +19,18 @@
 //! | publish-clients | every client format, atomic directory swap |
 //! | publish-subscription | tested web config installed, snapshot published, worker state |
 //! | finalize | `acme` owner cleared, running re-check, crontab policy, state.json, `committed` |
+//!
+//! Changes from v2:
+//! - stages read typed intents instead of magic state keys, and feature
+//!   modules never rewrite the configuration behind the engine's back
+//!   (only the recorded facts listed on [`Run::cfg`]);
+//! - old TCP-80 holders are stopped whenever any HTTP-01 challenge needs the
+//!   port, not only for the proxy's standalone method (G21);
+//! - nginx configs are tested in check-configurations, before any service
+//!   stops (K7);
+//! - finalize writes one `renew` crontab line (or none) and retires the v2
+//!   and v1 lines in the same edit (G17, G18, G40);
+//! - legacy boot hooks are no longer retired here (v1 is unsupported).
 
 mod commit;
 mod finalize;

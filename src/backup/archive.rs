@@ -26,7 +26,10 @@
 //!   *and* when validating (v2 checked hard links only in some places);
 //! - a backup written by v1 (format 1) gets a clear message instead of
 //!   being restored through a dropped parser;
-//! - `state.json` is no longer polluted with internal keys (E-8.1#18).
+//! - `state.json` is no longer polluted with internal keys (E-8.1#18);
+//! - only the site root (outside `ROOT`, possibly holding an
+//!   administrator's site) needs the ownership marker to be overwritten;
+//!   `ROOT/site` belongs to Onebox anyway (v2 refused it without a marker).
 
 use crate::ctx::Ctx;
 use crate::domain::config::{Device, NodeConfig};
@@ -387,7 +390,7 @@ fn restore_part(paths: &Paths, part: Part, source: &Path) -> Result<()> {
     }
     let web = matches!(part, Part::Site | Part::Public);
     if exists(&target) {
-        if web {
+        if part == Part::Public {
             check_web_target(&target)?;
         }
         remove_assets(&target)?;

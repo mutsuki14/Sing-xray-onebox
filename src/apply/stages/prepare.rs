@@ -1,4 +1,9 @@
 //! prepare-state, replace-cores, prepare-cores, prepare-certificates.
+//!
+//! Changes from v2: replacement cores are checked before the journal
+//! exists; a working core is never replaced by prepare-cores (G2); crash
+//! leftovers (temp files, backup stages) are swept here (E-8.1#16); TCP-80
+//! holders of the old generation are stopped for any HTTP-01 user (G21).
 
 use super::Run;
 use crate::apply::network;

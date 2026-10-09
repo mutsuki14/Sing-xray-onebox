@@ -191,3 +191,30 @@ fn migrated_devices_are_written_inside_the_transaction() {
     host.apply(reinstall).unwrap();
     assert!(!exists(&devices));
 }
+
+/// G12: apply, rollback, recovery, boot and backups never ask anything. The
+/// test prompter is interactive with no answers, so any question would fail
+/// the operation with "input ended" and be recorded.
+#[test]
+fn nothing_reachable_from_apply_recover_boot_or_backups_asks_a_question() {
+    let host = Host::new();
+    host.install(site_node());
+    host.features
+        .inject(Fault::Fail(Checkpoint::Stage(Phase::StartCores)));
+    host.apply(host.change(two_cores(), "修改")).unwrap_err();
+    host.features
+        .inject(Fault::Crash(Checkpoint::Stage(Phase::ApplyWebsite)));
+    let req = host.change(two_cores(), "修改");
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.apply(req))).is_err());
+    host.features.clear();
+    recover_all(&host.ctx, &host.lock).unwrap();
+    host.set_ips(crate::apply::harness::NEW_IPS);
+    crate::apply::boot::boot_locked(&host.ctx, &host.lock, &host.features).unwrap();
+    let id = crate::backup::create_locked(&host.ctx, &host.lock, "g12").unwrap();
+    host.apply(host.change(two_cores(), "修改")).unwrap();
+    crate::backup::restore_with(&host.ctx, &host.lock, &id, &host.features).unwrap();
+    assert_eq!(host.installed().inbounds, site_node().inbounds);
+    assert!(host.ui.prompts().is_empty(), "{:?}", host.ui.prompts());
+    assert!(host.ui.errors().is_empty(), "{:?}", host.ui.errors());
+    assert_invariants(&host);
+}

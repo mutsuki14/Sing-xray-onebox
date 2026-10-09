@@ -116,3 +116,93 @@ pub fn restorable(ctx: &Ctx) -> Result<Vec<store::BackupInfo>> {
 pub fn recovery_due(ctx: &Ctx) -> Result<bool> {
     Ok(journal::pending(&ctx.paths)?.any())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::fixtures;
+    use crate::domain::protocol::{Core, Protocol};
+    use crate::error::Error;
+    use crate::state::StateStore;
+    use crate::sys::fs::TempDir;
+    use crate::ui::ScriptedPrompter;
+    use std::sync::Arc;
+
+    fn matches(positionals: &[&str]) -> Matches {
+        Matches {
+            positionals: positionals.iter().map(|s| s.to_string()).collect(),
+            ..Matches::default()
+        }
+    }
+
+    fn installed() -> (TempDir, Ctx, Arc<ScriptedPrompter>) {
+        let dir = TempDir::new("backup-cli").unwrap();
+        let (ctx, _, ui) = Ctx::test(dir.path());
+        let cfg = fixtures::config(&[(Protocol::VlessReality, 443, Core::Singbox)]);
+        StateStore::save(&ctx, &cfg).unwrap();
+        (dir, ctx, ui)
+    }
+
+    #[test]
+    fn specs_declare_names_aliases_and_root_policy() {
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            ["backup", "backups", "restore", "recover", "net-apply"]
+        );
+        for spec in COMMANDS {
+            let root = !matches!(spec.root, Root::NotRequired);
+            assert_eq!(root, spec.name != "backups", "{}", spec.name);
+            assert!(spec.handler.is_some());
+        }
+        assert!(NET_APPLY.is_named("hop-apply") && NET_APPLY.is_named("boot"));
+        const { assert!(NET_APPLY.hidden) };
+    }
+
+    #[test]
+    fn backup_then_list_then_decline_a_restore() {
+        let (_dir, ctx, ui) = installed();
+        backup_command(&ctx, &matches(&[])).unwrap();
+        backup_command(&ctx, &matches(&["升级前"])).unwrap();
+        let listed = store::list(&ctx.paths).unwrap();
+        let labels: Vec<&str> = listed.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(labels.len(), 2);
+        assert!(labels.contains(&MANUAL_LABEL) && labels.contains(&"升级前"));
+        backups_command(&ctx, &matches(&[])).unwrap();
+        // Declining the confirmation is a silent success; nothing changed.
+        ui.push("n");
+        let before = std::fs::read(ctx.paths.state()).unwrap();
+        restore_command(&ctx, &matches(&["latest"])).unwrap();
+        assert_eq!(std::fs::read(ctx.paths.state()).unwrap(), before);
+        assert_eq!(ui.prompts().len(), 1);
+        assert!(
+            ui.prompts()[0].contains("当前配置会先备份"),
+            "{:?}",
+            ui.prompts()
+        );
+        assert_eq!(store::list(&ctx.paths).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn restore_reports_unusable_backups_before_asking() {
+        let (_dir, ctx, ui) = installed();
+        let err = restore_command(&ctx, &matches(&[])).unwrap_err();
+        assert_eq!(err.to_string(), "没有备份");
+        let err = restore_command(&ctx, &matches(&["../x"])).unwrap_err();
+        assert_eq!(err.to_string(), "备份 ID 无效");
+        assert!(ui.prompts().is_empty());
+    }
+
+    #[test]
+    fn recover_and_net_apply_entry_points() {
+        let dir = TempDir::new("backup-cli-recover").unwrap();
+        let (ctx, exec, ui) = Ctx::test(dir.path());
+        recover_command(&ctx, &matches(&[])).unwrap();
+        assert!(recovery_due(&ctx).is_ok_and(|due| !due));
+        let err = net_apply_command(&ctx, &matches(&[])).unwrap_err();
+        assert!(matches!(err, Error::NotInstalled), "{err}");
+        assert!(exec.calls().is_empty());
+        assert!(ui.prompts().is_empty());
+        assert!(restorable(&ctx).unwrap().is_empty());
+    }
+}

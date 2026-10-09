@@ -1,4 +1,10 @@
 //! publish-clients, publish-subscription and finalize (the commit point).
+//!
+//! Changes from v2: finalize owns the node's crontab policy — one `renew`
+//! line only when an ACME or custom certificate exists (self-signed nodes
+//! need no cron, F-8.1#6), v2's three certificate lines and the v1 boot
+//! line retired in the same edit, no per-service `@reboot` lines under an
+//! init system (G17, G18, G40); client publication warnings are shown.
 
 use super::Run;
 use crate::apply::features::Checkpoint;

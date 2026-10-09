@@ -3,10 +3,18 @@
 //! Order is by creation time, never by name (E-8.1#1): schema-2 backups by
 //! their manifest's `created`, v1 backups by the timestamp in their id
 //! (`YYYYMMDDTHHMMSSZ-XXXXXX`), anything else by a leading `{unix}-` in the
-//! id, else as the oldest; ties by id. `latest` is the newest backup that
-//! can be restored. Rotation keeps the [`KEEP`] newest recognizable backups
-//! (plus the new one and the one being restored); directories that are not
-//! backups are listed but never deleted.
+//! id, else as the oldest; ties by the manifest's modification time, then
+//! by id. `latest` is the newest backup that can be restored. Rotation
+//! keeps the [`KEEP`] newest recognizable backups (plus the new one and the
+//! one being restored); directories that are not backups are listed but
+//! never deleted.
+//!
+//! Changes from v2: creation time instead of lexicographic ids for order,
+//! `latest` and rotation (E-8.1#1: v1 ids `2026…` outranked every Unix-time
+//! id, so rotation could delete the `before-restore` copy); unknown
+//! directories are never rotated away; stale `.new-*` stages are removed by
+//! the next apply; `state.json` is stored as it is on disk (no internal keys,
+//! E-8.1#18) and counts against the 64 MiB budget.
 
 use super::archive::{self, clean_label, copy_private, inventory, Budget, Kind, Manifest, Part};
 use crate::ctx::Ctx;
@@ -65,11 +73,17 @@ pub fn list(paths: &Paths) -> Result<Vec<BackupInfo>> {
             continue;
         };
         if is_dir && archive::id_valid(&id) {
-            found.push(info(&dir.join(&id), id));
+            let path = dir.join(&id);
+            let written = fs::symlink_metadata(path.join(archive::MANIFEST))
+                .and_then(|m| m.modified())
+                .ok();
+            found.push((info(&path, id), written));
         }
     }
-    sort_newest_first(&mut found);
-    Ok(found)
+    // Backups of the same second (a safety copy right before a restore)
+    // are told apart by when their manifest was written.
+    found.sort_by(|(a, wa), (b, wb)| (b.created, wb, &b.id).cmp(&(a.created, wa, &a.id)));
+    Ok(found.into_iter().map(|(info, _)| info).collect())
 }
 
 fn info(dir: &Path, id: String) -> BackupInfo {
@@ -84,11 +98,6 @@ fn info(dir: &Path, id: String) -> BackupInfo {
         created,
         kind,
     }
-}
-
-/// Newest first: by creation time (unknown = oldest), then by id.
-pub fn sort_newest_first(backups: &mut [BackupInfo]) {
-    backups.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
 }
 
 /// The trimmed `label` file of a v1 backup, else [`LEGACY_LABEL`].

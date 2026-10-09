@@ -1,5 +1,10 @@
 //! check-configurations, stop-old-services, commit-configurations,
 //! configure-services, apply-website, apply-network, start-cores.
+//!
+//! Changes from v2: the site and standalone subscription nginx configs are
+//! staged and `nginx -t`-tested in check-configurations, later stages only
+//! install the tested files (K7); a core check failure names the core; the
+//! v1 boot-hook retirement is gone from apply-network (v1 is unsupported).
 
 use super::Run;
 use crate::apply::journal;
