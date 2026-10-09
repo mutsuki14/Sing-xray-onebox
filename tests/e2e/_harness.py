@@ -47,9 +47,9 @@ import contextlib
 import dataclasses
 import http.client
 import http.server
+import io
 import json
 import os
-from pathlib import Path
 import random
 import secrets
 import shutil
@@ -66,6 +66,7 @@ import time
 import unittest
 import unittest.mock
 import uuid
+from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 REQUIRE_FULL = os.environ.get("ONEBOX_TEST_REQUIRE_FULL") == "1"
@@ -254,7 +255,7 @@ def run(argv, *, env=None, timeout: float = 30, check: bool = True,
         input: bytes | None = None, cwd=None) -> Completed:
     """Run a command with captured, UTF-8 decoded output (stdin closed or ``input``)."""
     args = [str(a) for a in argv]
-    result = subprocess.run(args, env=env, cwd=cwd, capture_output=True, timeout=timeout,
+    result = subprocess.run(args, env=env, cwd=cwd, capture_output=True, timeout=timeout, check=False,
                             input=input, stdin=None if input is not None else subprocess.DEVNULL)
     done = Completed(args, result.returncode, result.stdout.decode(errors="replace"),
                      result.stderr.decode(errors="replace"))
@@ -374,7 +375,7 @@ def _marker_handler(marker: bytes):
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
 
-        def do_GET(self):  # noqa: N802 - http.server API
+        def do_GET(self):  # http.server dispatches on this name
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(marker)))
@@ -451,7 +452,7 @@ class MarkerFixtures:
             try:
                 data, peer = self.udp.recvfrom(65535)
                 self.udp.sendto(data, peer)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 return
@@ -516,7 +517,7 @@ class DnsFixture:
         while not self.closed.is_set():
             try:
                 message, peer = self.socket.recvfrom(4096)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 return
@@ -717,7 +718,7 @@ def socks_udp_echo(proxy_port: int, ip: str, port: int, marker: bytes,
                 datagram.sendto(header + payload, (relay, relay_port))
                 try:
                     reply, _ = datagram.recvfrom(65535)
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 if reply[:3] == b"\x00\x00\x00" and reply.endswith(payload):
                     return
@@ -735,9 +736,9 @@ def tls_marker(port: int, server_name: str | None, marker: bytes, timeout: float
     context.verify_mode = ssl.CERT_NONE
     context.minimum_version = ssl.TLSVersion.TLSv1_3
     context.set_alpn_protocols(["http/1.1"])
-    with socket.create_connection((LOOPBACK, port), timeout=timeout) as raw:
-        with context.wrap_socket(raw, server_hostname=server_name) as stream:
-            read_marker(stream, server_name or "no-sni.test", marker)
+    with socket.create_connection((LOOPBACK, port), timeout=timeout) as raw, \
+            context.wrap_socket(raw, server_hostname=server_name) as stream:
+        read_marker(stream, server_name or "no-sni.test", marker)
 
 
 def reached(action) -> tuple[bool, str]:
@@ -980,7 +981,9 @@ class FixtureNode:
 
     def v2_values(self, layout: Layout) -> dict[str, str]:
         """The keys a v2.0.1 install writes (spec A §3.4), all strings."""
-        flag = lambda value: "1" if value else "0"  # noqa: E731
+        def flag(value: bool) -> str:
+            return "1" if value else "0"
+
         private, public = self.reality_keys
         c, p = self.creds, self.paths
         values = {
@@ -1210,13 +1213,14 @@ class Bench:
         REALITY and ShadowTLS hand shakes go to the TLS marker fixture.
         """
         cert = self.ca_cert if custom_ca else self.self_cert
-        settings = dict(
-            inbounds=[Inbound(p, self.ports.get(), core) for p, core in protocols],
-            reality_keys=self.keys, reality_dest=f"{LOOPBACK}:{self.fixture.tls_port}",
-            guard_port=self.ports.get(), proxy_cert=cert,
-            tls_mode="custom" if custom_ca else "self",
-            custom_source=cert if custom_ca else None, pinned=not custom_ca,
-            vmess_tls=custom_ca, hy2_obfs=custom_ca)
+        settings = {
+            "inbounds": [Inbound(p, self.ports.get(), core) for p, core in protocols],
+            "reality_keys": self.keys, "reality_dest": f"{LOOPBACK}:{self.fixture.tls_port}",
+            "guard_port": self.ports.get(), "proxy_cert": cert,
+            "tls_mode": "custom" if custom_ca else "self",
+            "custom_source": cert if custom_ca else None, "pinned": not custom_ca,
+            "vmess_tls": custom_ca, "hy2_obfs": custom_ca,
+        }
         settings.update(overrides)
         return FixtureNode(**settings)
 
@@ -1456,8 +1460,8 @@ class YamlReaderTests(unittest.TestCase):
         cases = [
             ("a: 1\n", {"a": 1}),
             ("- 1\n- \"x\"\n", [1, "x"]),
-            ("proxies:\n  - name: \"n\"\n    port: 443\n    tls: true\n    alpn:\n      - \"h2\"\n"
-             "rules:\n  - \"MATCH,n\"\n",
+            (("proxies:\n  - name: \"n\"\n    port: 443\n    tls: true\n    alpn:\n      - \"h2\"\n"
+              "rules:\n  - \"MATCH,n\"\n"),
              {"proxies": [{"name": "n", "port": 443, "tls": True, "alpn": ["h2"]}],
               "rules": ["MATCH,n"]}),
             ("- - 1\n  - 2\n- {}\n- []\n", [[1, 2], {}, []]),
@@ -1505,7 +1509,8 @@ class SocksAndDnsTests(unittest.TestCase):
     @staticmethod
     def query(name: str, qtype: int = 1) -> bytes:
         labels = b"".join(bytes([len(p)]) + p.encode() for p in name.split("."))
-        return b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + b"\x00" + struct.pack("!HH", qtype, 1)
+        header = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        return header + labels + b"\x00" + struct.pack("!HH", qtype, 1)
 
     def test_dns_answers(self):
         records = {"a.test": "192.0.2.1"}
@@ -1531,9 +1536,9 @@ class SocksAndDnsTests(unittest.TestCase):
 
 class ToolContractTests(unittest.TestCase):
     def test_set_but_unusable_variable_is_fatal(self):
-        with unittest.mock.patch.dict(os.environ, {"ONEBOX_TEST_X": "/nonexistent/x"}):
-            with self.assertRaises(SystemExit):
-                tool("ONEBOX_TEST_X")
+        with unittest.mock.patch.dict(os.environ, {"ONEBOX_TEST_X": "/nonexistent/x"}), \
+                self.assertRaises(SystemExit):
+            tool("ONEBOX_TEST_X")
 
     def test_unset_variable(self):
         with unittest.mock.patch.dict(os.environ, {}, clear=False):
@@ -1552,6 +1557,97 @@ class ToolContractTests(unittest.TestCase):
         self.assertNotIn("ONEBOX_DIR", env)
         self.assertNotIn("GH_PROXY", env)
         self.assertEqual((env["NO_COLOR"], env["A"]), ("1", "1"))
+
+    def test_results_exit_status(self):
+        cases = [([], 1), ([("a", True)], 0), ([("a", True), ("b", False)], 1)]
+        for records, expected in cases:
+            results = Results("t")
+            with contextlib.redirect_stdout(io.StringIO()):
+                for name, ok in records:
+                    results.record(name, ok)
+                self.assertEqual(results.finish(), expected)
+
+
+class FixtureNodeTests(unittest.TestCase):
+    PAIR = CertPair(Path("/pki/c.pem"), Path("/pki/k.pem"))
+
+    def node(self, inbounds, **overrides):
+        return FixtureNode(inbounds=[Inbound(p, 20000 + i, c) for i, (p, c) in enumerate(inbounds)],
+                           reality_keys=("priv", "pub"), reality_dest="127.0.0.1:1",
+                           guard_port=2, proxy_cert=self.PAIR, **overrides)
+
+    def test_certificate_and_tuning_rules(self):
+        cases = [
+            ([("vmess-ws", "xray")], {}, False, None),
+            ([("vmess-ws", "xray")], {"vmess_tls": True}, True, None),
+            ([("hysteria2", "xray")], {}, True, None),
+            ([("hysteria2", "singbox")], {}, True, "auto"),
+            ([("vless-reality", "xray")], {}, False, None),
+        ]
+        for inbounds, overrides, cert, profile in cases:
+            with self.subTest(inbounds=inbounds, overrides=overrides):
+                node = self.node(inbounds, **overrides)
+                self.assertEqual(node.needs_cert(), cert)
+                self.assertEqual(node.hy2_profile(), profile)
+                config = node.v3_config()
+                self.assertEqual(config["tls"] is not None, cert)
+                self.assertEqual(config["hy2"]["profile"], profile)
+
+    def test_v3_shape(self):
+        node = self.node([("vless-reality", "xray"), ("vless-xhttp", "xray")],
+                         own_cidrs=["9.9.9.9/32"], block_private=True)
+        config = node.v3_config()
+        self.assertEqual(config["schema"], 3)
+        self.assertEqual(config["inbounds"][1], {"protocol": "vless-xhttp", "port": 20001, "core": "xray"})
+        self.assertEqual(config["creds"]["reality"]["public_key"], "pub")
+        self.assertEqual(config["routing"], {"block_private": True, "block_bt": True,
+                                             "own_cidrs": ["9.9.9.9/32"]})
+        self.assertIsNone(self.node([("trojan", "xray")]).v3_config()["creds"]["reality"])
+        custom = self.node([("trojan", "xray")], tls_mode="custom", custom_source=self.PAIR,
+                           pinned=False).v3_config()["tls"]
+        self.assertEqual(custom, {"mode": {"type": "custom", "domain": "onebox.test",
+                                           "cert": "/pki/c.pem", "key": "/pki/k.pem"},
+                                  "pinned": False})
+
+    def test_v2_shape(self):
+        layout = unittest.mock.Mock(tls=Path("/r/tls"))
+        node = self.node([("shadowsocks", "singbox"), ("vless-reality", "xray")],
+                         own_cidrs=["9.9.9.9/32"])
+        values = node.v2_values(layout)
+        self.assertTrue(all(isinstance(v, str) for v in values.values()))
+        self.assertEqual(values["PROTOCOLS"], "shadowsocks vless-reality")
+        self.assertEqual((values["PORT_vless_reality"], values["CORE_vless_reality"]), ("20001", "xray"))
+        self.assertEqual(values["CERT_FILE"], "/r/tls/cert.pem")
+        self.assertEqual(values["OWN_IP_CIDRS"], '["9.9.9.9/32"]')
+        self.assertEqual((values["BLOCK_PRIVATE"], values["BLOCK_BT"]), ("0", "1"))
+        self.assertNotIn("CUSTOM_CERT", values)
+
+
+class CoreConfigTests(unittest.TestCase):
+    def test_rewrite_targets(self):
+        singbox = {"route": {"rules": [{"action": "sniff"}]}}
+        rewrite_targets("singbox", singbox)
+        self.assertEqual([r.get("action") for r in singbox["route"]["rules"]],
+                         ["route-options", "route-options", "sniff"])
+        xray = {"outbounds": [{"tag": "direct"}], "routing": {"rules": [{"outboundTag": "block"}]}}
+        rewrite_targets("xray", xray)
+        self.assertEqual(xray["outbounds"][-1]["tag"], "native-target")
+        self.assertEqual([r["outboundTag"] for r in xray["routing"]["rules"]],
+                         ["native-target", "native-target", "block"])
+
+    def test_socks_clients_use_the_first_outbound(self):
+        outbounds = [{"tag": "a", "name": "a"}, {"tag": "b", "name": "b"}]
+        self.assertEqual(socks_client("singbox", 1, outbounds)["route"]["final"], "a")
+        self.assertEqual(socks_client("mihomo", 1, outbounds)["rules"], ["MATCH,a"])
+        xray = socks_client("xray", 1, outbounds, udp_ip=False)
+        self.assertEqual(xray["inbounds"][0]["settings"], {"udp": True})
+
+    def test_abstract_socket_detection(self):
+        name = "onebox-harness-" + secrets.token_hex(6)
+        self.assertFalse(abstract_socket_bound(name))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.bind("\0" + name)
+            self.assertTrue(abstract_socket_bound(name))
 
 
 if __name__ == "__main__":

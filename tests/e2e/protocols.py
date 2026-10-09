@@ -40,8 +40,8 @@ import argparse
 import copy
 import dataclasses
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import _harness as h
 
@@ -265,7 +265,11 @@ def main(argv=None) -> int:
     if tools is None:
         return results.finish(args.report)
     with h.Workspace("onebox-e2e-protocols-") as root:
-        matrix = Matrix(root, tools, args, results)
+        try:
+            matrix = Matrix(root, tools, args, results)
+        except Exception as error:  # noqa: BLE001 - fixture set-up failed
+            results.record("setup", False, h.describe(error))
+            return results.finish(args.report)
         try:
             if not args.negative_only:
                 for profile, protocol, server, form in plan(args):

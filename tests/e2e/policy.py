@@ -39,8 +39,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import _harness as h
 
@@ -240,7 +240,11 @@ def main(argv=None) -> int:
     if tools is None:
         return results.finish(args.report)
     with h.Workspace("onebox-e2e-policy-") as root:
-        policy = Policy(root, tools, args, results)
+        try:
+            policy = Policy(root, tools, args, results)
+        except Exception as error:  # noqa: BLE001 - fixture set-up failed
+            results.record("setup", False, h.describe(error))
+            return results.finish(args.report)
         try:
             for core in args.servers:
                 policy.private_policy(core)
