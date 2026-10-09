@@ -369,7 +369,8 @@ fn filter_input_belongs_to_iptables_only_when_iptables_nft_lists_it() {
     let native = || Location::Nft(nft_chain("ip", "filter", "INPUT"));
     let v4 = || Location::Iptables(Iptables { v6: false });
     // (case, ruleset, `iptables -V` (None: no binary), `-S INPUT` result, locations)
-    let cases: [(&str, &str, Option<&str>, Output, Vec<Location>); 7] = [
+    type Case<'a> = (&'a str, &'a str, Option<&'a str>, Output, Vec<Location>);
+    let cases: [Case; 7] = [
         (
             "translated policy drop, iptables-nft refuses it",
             TRANSLATED,
