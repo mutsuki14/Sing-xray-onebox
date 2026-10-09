@@ -24,6 +24,21 @@ const HELP: CommandSpec = CommandSpec::new("help", Group::Maintain, "显示帮�
     .root(Root::NotRequired)
     .handler(help_command);
 
+/// The backup `uninstall` takes under the node lock (G11). Wave C wires
+/// `crate::backup::create_locked` here; until then uninstall refuses to
+/// remove anything without a backup.
+pub const UNINSTALL_BACKUP: super::commands::uninstall::BackupHook = backup_not_wired;
+
+fn backup_not_wired(
+    _ctx: &Ctx,
+    _lock: &crate::sys::lock::FileLock,
+    _label: &str,
+) -> Result<String> {
+    Err(Error::msg(
+        "备份模块尚未接入，无法在卸载前保存快照；已中止卸载",
+    ))
+}
+
 /// Whether the resolved command needs root for these matches.
 pub fn requires_root(spec: &CommandSpec, matches: &Matches) -> bool {
     spec.root.required(matches)

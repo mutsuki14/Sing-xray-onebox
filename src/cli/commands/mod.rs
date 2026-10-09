@@ -8,4 +8,6 @@ pub mod connection;
 pub mod info;
 pub mod install;
 pub mod node;
+pub mod service;
 pub mod tune;
+pub mod uninstall;
