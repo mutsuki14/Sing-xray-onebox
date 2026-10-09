@@ -68,12 +68,116 @@ fn domain_names_are_replaced_but_file_names_kept() {
 }
 
 #[test]
+fn names_inside_file_names_and_next_to_underscores_are_replaced() {
+    let r = Redactor::new();
+    let cases = [
+        ("/etc/ssl/example.com.crt", "/etc/ssl/<domain>.crt"),
+        (
+            "/root/.acme.sh/example.com_ecc/example.com.cer",
+            "/root/.acme.sh/<domain>_ecc/<domain>.cer",
+        ),
+        ("example.com.json.bak", "<domain>.json.bak"),
+        ("_acme-challenge.example.com", "_<domain>"),
+        ("host_192.0.2.1", "host_<ip>"),
+        ("192.0.2.1_x", "<ip>_x"),
+        ("v6_2001:db8::1 down", "v6_<ip> down"),
+        ("addr:2001:db8::1", "addr:<ip>"),
+        ("peer=[2001:db8::7]:443", "peer=[<ip>]:443"),
+        ("...192.0.2.5", "...<ip>"),
+        ("example.xn--p1ai", "<domain>"),
+        ("例子.中国", "<domain>"),
+        ("访问 例子.中国 失败", "访问 <domain> 失败"),
+        ("bücher.de", "<domain>"),
+        ("node.example.sh", "<domain>"),
+        ("my.site.zip", "<domain>"),
+        ("docs.example.md", "<domain>"),
+        ("x.example.py", "<domain>"),
+        ("cdn.example.so", "<domain>"),
+        ("shop.example.new", "<domain>"),
+        ("www.example.target", "<domain>"),
+        ("*.apps.example.dev", "*.<domain>"),
+    ];
+    for (text, want) in cases {
+        assert_eq!(r.redact(text), want, "{text}");
+    }
+}
+
+#[test]
+fn file_names_versions_and_config_paths_are_kept() {
+    let r = Redactor::new();
+    for text in [
+        "/etc/onebox/sing-box.json",
+        "/etc/onebox/subscription/nginx.conf.new",
+        "/etc/onebox/.transaction/journal.json",
+        "/etc/onebox/.self-update.json",
+        "state.v2.json",
+        "acme.sh --issue",
+        "/root/.acme.sh/acme.sh",
+        "dns_cf.sh",
+        "curl … | sh onebox.sh",
+        "After=network-online.target",
+        "WantedBy=multi-user.target",
+        "onebox-xray.service",
+        "decode config at x: inbounds[0].tls.server_name: missing",
+        "uname 6.1.0-18-amd64",
+        "sing-box 1.14.2 go1.25 v2.0.1 3.x e.g.",
+        "18000-19999",
+        "at 18:19:13 GMT",
+        "crate::diag::checks foo_bar::baz",
+        "libc.so.6",
+    ] {
+        assert_eq!(r.redact(text), text);
+    }
+}
+
+#[test]
+fn raw_json_values_become_known_values() {
+    let mut r = Redactor::new();
+    let raw = r#"{"schema": 3, "creds": {"ws_path": "/s3cr3t-path", "password": 12345678,
+        "uuid": "0b5c6a1e-0000-4000-8000-000000000000"}, "port": 8443,
+        "server": {"addr": "node.example.net", "ipv4": "203.0.113.10"},
+        "inbounds": [{"protocol": "vless-reality", "core": "xray"}]}"#;
+    assert!(r.add_raw(raw));
+    assert_eq!(
+        r.redact("ws_path 路径无效: /s3cr3t-path"),
+        "ws_path 路径无效: <secret>"
+    );
+    assert_eq!(
+        r.redact("invalid type: integer `12345678`, expected a string"),
+        "invalid type: integer `<secret>`, expected a string"
+    );
+    assert_eq!(
+        r.redact("0b5c6a1e-0000-4000-8000-000000000000 node.example.net 203.0.113.10"),
+        "<secret> <domain> <ip>"
+    );
+    assert_eq!(
+        r.redact("port 8443 onebox-xray vless-reality"),
+        "port 8443 onebox-xray vless-reality",
+        "ports are no credentials; protocol and core ids are vocabulary"
+    );
+}
+
+#[test]
+fn raw_conf_values_become_known_values() {
+    let mut r = Redactor::new();
+    assert!(r.add_raw("# v1\nFRPS_TOKEN='tok-123456'\nFRPS_DOMAIN=frp.example.org\n"));
+    assert_eq!(r.redact("tok-123456 frp.example.org"), "<secret> <domain>");
+    let mut other = Redactor::new();
+    assert!(!other.add_raw("{broken"));
+    assert!(!other.add_raw(""));
+    assert!(!other.add_raw("FRPS_TOKEN=x\nnot a pair\n"));
+}
+
+#[test]
 fn looks_like_domain_rules() {
     for yes in [
         "example.com",
         "a.b.example.co",
         "xn--fiqs8s.cn",
         "WWW.Example.ORG",
+        "example.xn--p1ai",
+        "例子.中国",
+        "node.example.sh",
     ] {
         assert!(looks_like_domain(yes), "{yes}");
     }
@@ -88,6 +192,9 @@ fn looks_like_domain_rules() {
         "",
         "..",
         "under_score.com",
+        "example.com.crt",
+        "acme.sh",
+        "nginx.conf.new",
     ] {
         assert!(!looks_like_domain(no), "{no}");
     }
