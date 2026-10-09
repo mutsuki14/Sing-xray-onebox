@@ -232,23 +232,31 @@ macro_rules! ensure {
 }
 
 /// Print an error the way `main` does and return its exit code.
+///
+/// Printing is best effort, like `ui::out`'s diagnostics: a closed pipe
+/// (`onebox update-script | head -n 3`) or a hung-up terminal never turns
+/// the result into a panic (`println!` would abort with status 134); the
+/// exit code comes from the error alone.
 pub fn report(error: &Error) -> i32 {
-    let code = error.exit_code();
-    match error {
-        Error::Exit { code: 0, message } => {
-            if !message.is_empty() {
-                println!("{message}");
-            }
-        }
-        Error::Cancelled => eprintln!("[错误] 输入结束，操作已取消"),
+    report_to(error, &mut io::stdout().lock(), &mut io::stderr().lock())
+}
+
+/// [`report`] with explicit streams: `Exit{0}`'s message goes to `stdout`,
+/// everything else to `stderr`. Write failures are ignored.
+fn report_to(error: &Error, stdout: &mut dyn io::Write, stderr: &mut dyn io::Write) -> i32 {
+    let (stream, text): (&mut dyn io::Write, String) = match error {
+        Error::Exit { code: 0, message } if message.is_empty() => return 0,
+        Error::Exit { code: 0, message } => (stdout, message.clone()),
+        Error::Cancelled => (stderr, "[错误] 输入结束，操作已取消".to_owned()),
         // A warnings-only result (reality-check) is not an error (D-8.1#3).
         Error::Exit {
             code: EXIT_WARNINGS,
             message,
-        } => eprintln!("[警告] {message}"),
-        _ => eprintln!("[错误] {}", error.report_text()),
-    }
-    code
+        } => (stderr, format!("[警告] {message}")),
+        _ => (stderr, format!("[错误] {}", error.report_text())),
+    };
+    let _ = writeln!(stream, "{text}").and_then(|()| stream.flush());
+    error.exit_code()
 }
 
 #[cfg(test)]
@@ -300,6 +308,67 @@ mod tests {
         assert_eq!(report(&Error::exit(EXIT_WARNINGS, "检查完成，有警告")), 2);
         assert_eq!(report(&Error::exit(EXIT_CANCELLED, "测试已取消")), 130);
         assert_eq!(report(&Error::msg("失败")), 1);
+    }
+
+    /// A stream whose every write fails, like a pipe whose reader exited
+    /// or a terminal that hung up.
+    struct Dead(io::ErrorKind);
+
+    impl io::Write for Dead {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(self.0))
+        }
+    }
+
+    #[test]
+    fn report_routes_each_kind_to_its_stream() {
+        let cases: [(Error, i32, &str, &str); 6] = [
+            (Error::exit(0, "程序已更新到 3.0.1"), 0, "程序已更新到 3.0.1\n", ""),
+            (Error::exit(0, ""), 0, "", ""),
+            (Error::Cancelled, 130, "", "[错误] 输入结束，操作已取消\n"),
+            (
+                Error::exit(EXIT_WARNINGS, "检查完成，有警告"),
+                2,
+                "",
+                "[警告] 检查完成，有警告\n",
+            ),
+            (
+                Error::Cancelled.wrap("测试已取消"),
+                130,
+                "",
+                "[错误] 测试已取消\n",
+            ),
+            (Error::msg("未知命令: nope"), 1, "", "[错误] 未知命令: nope\n"),
+        ];
+        for (error, code, out, err) in cases {
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            assert_eq!(report_to(&error, &mut stdout, &mut stderr), code, "{error}");
+            assert_eq!(String::from_utf8_lossy(&stdout), out, "{error}");
+            assert_eq!(String::from_utf8_lossy(&stderr), err, "{error}");
+        }
+    }
+
+    #[test]
+    fn report_survives_dead_streams() {
+        // `onebox update-script | head -n 3`: the update finished, so the
+        // closed stdout must neither panic nor change the exit code.
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::Other] {
+            let cases = [
+                (Error::exit(0, "程序已更新到 3.0.1"), 0),
+                (Error::exit(EXIT_STALE_PROCESS, "旧进程"), EXIT_STALE_PROCESS),
+                (Error::exit(EXIT_WARNINGS, "检查完成，有警告"), EXIT_WARNINGS),
+                (Error::Cancelled, EXIT_CANCELLED),
+                (Error::msg("未知命令: nope"), EXIT_ERROR),
+            ];
+            for (error, code) in cases {
+                let code_seen = report_to(&error, &mut Dead(kind), &mut Dead(kind));
+                assert_eq!(code_seen, code, "{error} ({kind:?})");
+            }
+        }
     }
 
     #[test]
