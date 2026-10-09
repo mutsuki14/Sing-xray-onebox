@@ -374,6 +374,87 @@ fn wrong_short_ids_change_only_the_copy() {
     assert_eq!(err.to_string(), "REALITY short ID 类型无效");
 }
 
+/// Leaves (JSON pointer, left, right) that differ between two values.
+fn leaf_diff(path: &str, a: &Value, b: &Value, out: &mut Vec<(String, Value, Value)>) {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            let keys: std::collections::BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            for key in keys {
+                let null = Value::Null;
+                let (l, r) = (x.get(key).unwrap_or(&null), y.get(key).unwrap_or(&null));
+                leaf_diff(&format!("{path}/{key}"), l, r, out);
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (l, r)) in x.iter().zip(y).enumerate() {
+                leaf_diff(&format!("{path}/{i}"), l, r, out);
+            }
+        }
+        _ if a != b => out.push((path.to_owned(), a.clone(), b.clone())),
+        _ => {}
+    }
+}
+
+/// `wrong_short_id` relies on where render puts the short ID (an implicit
+/// contract, D §8.2): check it against the real probe bundles of every
+/// REALITY protocol on both cores, public and server-local.
+#[test]
+fn wrong_short_ids_fit_the_rendered_bundles() {
+    use crate::domain::protocol::Protocol::{AnytlsReality, VlessReality, VlessXhttp};
+    let dir = TempDir::new("linktools-test").unwrap();
+    let (ctx, _, _) = Ctx::test(dir.path());
+    let nodes = [
+        (
+            vec![
+                (VlessReality, 443, Core::Singbox),
+                (AnytlsReality, 8443, Core::Singbox),
+            ],
+            "/0/tls/reality/short_id",
+            Core::Singbox,
+        ),
+        (
+            vec![
+                (VlessReality, 443, Core::Xray),
+                (VlessXhttp, 8443, Core::Xray),
+            ],
+            "/0/streamSettings/realitySettings/shortId",
+            Core::Xray,
+        ),
+    ];
+    for (inbounds, pointer, client) in nodes {
+        let cfg = crate::domain::fixtures::config(&inbounds);
+        let short_id = cfg.creds.reality.as_ref().unwrap().short_id.clone();
+        let spec = crate::render::NodeSpec::load(&cfg, &ctx.paths).unwrap();
+        for local in [false, true] {
+            let bundle = crate::render::probe::bundle(&spec, local).unwrap();
+            let reality: Vec<&ProbeEntry> = bundle
+                .entries
+                .iter()
+                .filter(|e| e.reality.is_some())
+                .collect();
+            assert_eq!(reality.len(), 2, "{inbounds:?}");
+            for entry in reality {
+                assert_eq!(entry.core, client, "{}", entry.id);
+                let wrong = wrong_short_id(entry, &mut SeqRandom(3)).unwrap();
+                let mut diff = Vec::new();
+                let (old, new) = (json!(entry.outbounds), json!(wrong.outbounds));
+                leaf_diff("", &old, &new, &mut diff);
+                assert_eq!(diff.len(), 1, "{} local={local}: {diff:?}", entry.id);
+                let (path, before, after) = &diff[0];
+                assert_eq!((path.as_str(), before), (pointer, &json!(short_id)));
+                assert!(after
+                    .as_str()
+                    .is_some_and(|v| v.len() == 16 && *v != short_id));
+                let rest = ProbeEntry {
+                    outbounds: entry.outbounds.clone(),
+                    ..wrong.clone()
+                };
+                assert_eq!(&rest, entry, "only the short ID changes");
+            }
+        }
+    }
+}
+
 // ---- real openssl (skipped without it) ----
 
 #[test]
