@@ -1,10 +1,13 @@
 //! `onebox doctor` checks of the remote subscription (none when it is off):
-//! the worker (running, current program), the standalone web service and
-//! certificate, the published snapshot against the configuration, the
-//! device list, and the IPv6 family of an ip-mode address.
+//! whether the running worker is the installed program, the published
+//! snapshot against the configuration, the device list, and the IPv6
+//! family of an ip-mode address.
 //!
-//! Read-only: service queries, file reads and `openssl` for the
-//! certificate dates.
+//! Whether the worker and the standalone web service run, and the
+//! standalone certificate, are the built-in doctor checks (`服务 …`,
+//! `订阅证书`); they are not repeated here.
+//!
+//! Read-only: service queries and file reads.
 //!
 //! Changes from v2: new — v2's doctor did not look at the subscription.
 
@@ -12,20 +15,17 @@ use super::devices::DeviceStore;
 use super::endpoint::endpoint;
 use super::lifecycle::worker_is_current;
 use super::snapshot::{self, supported_formats};
-use super::{SERVICE, WEB_SERVICE};
-use crate::cert::{CertDir, CertStatus, Engine};
+use super::SERVICE;
+use crate::cert::Engine;
 use crate::ctx::Ctx;
 use crate::diag::{Check, CheckStatus};
-use crate::domain::defaults::CERT_WARNING_DAYS;
 use crate::domain::plan::check_subscription_family;
 use crate::domain::NodeConfig;
 use crate::host::service::Services;
 
 const WORKER: &str = "订阅服务";
-const WEB: &str = "订阅 HTTPS 入口";
 const SNAPSHOT: &str = "订阅快照";
 const DEVICES: &str = "订阅设备";
-const CERT: &str = "订阅证书";
 const ADDRESS: &str = "订阅地址";
 
 /// Every subscription check for `cfg` (empty when the subscription is off).
@@ -35,19 +35,12 @@ pub fn checks(ctx: &Ctx, cfg: &NodeConfig) -> Vec<Check> {
 
 /// [`checks`] with an explicit engine (init system, environment).
 pub fn checks_with(engine: &Engine, cfg: &NodeConfig) -> Vec<Check> {
-    let Some(sub) = &cfg.subscription else {
+    if cfg.subscription.is_none() {
         return Vec::new();
-    };
-    let paths = &engine.ctx.paths;
-    let services = engine.services();
-    let mut out = vec![address(cfg, paths), worker(&services, paths)];
-    if matches!(
-        sub.mode,
-        crate::domain::config::SubscriptionMode::Standalone { .. }
-    ) {
-        out.push(running(&services, WEB, WEB_SERVICE));
-        out.push(certificate(engine));
     }
+    let paths = &engine.ctx.paths;
+    let mut out = vec![address(cfg, paths)];
+    out.extend(worker(&engine.services(), paths));
     out.push(published(cfg, paths));
     out.push(devices(paths));
     out
@@ -65,46 +58,22 @@ fn address(cfg: &NodeConfig, paths: &crate::paths::Paths) -> Check {
     }
 }
 
-fn running(services: &Services, name: &str, service: &str) -> Check {
-    if services.running(service) {
-        Check::new(name, CheckStatus::Pass, format!("{service} 运行中"))
+/// The running worker is the installed program (after a self-update it
+/// keeps serving with the old one until restarted); nothing when it does
+/// not run (the built-in `服务 onebox-subscription` check reports that).
+fn worker(services: &Services, paths: &crate::paths::Paths) -> Option<Check> {
+    if !services.running(SERVICE) {
+        return None;
+    }
+    Some(if worker_is_current(services, paths) {
+        Check::new(WORKER, CheckStatus::Pass, "运行当前安装的程序")
     } else {
-        Check::new(name, CheckStatus::Fail, format!("{service} 未运行"))
-    }
-}
-
-fn worker(services: &Services, paths: &crate::paths::Paths) -> Check {
-    let check = running(services, WORKER, SERVICE);
-    if check.status != CheckStatus::Pass || worker_is_current(services, paths) {
-        return check;
-    }
-    Check::new(
-        WORKER,
-        CheckStatus::Warn,
-        "运行的不是当前安装的程序；执行 onebox subscription publish 重启",
-    )
-}
-
-fn certificate(engine: &Engine) -> Check {
-    let dir = CertDir::subscription(&engine.ctx.paths);
-    match crate::cert::store::status(engine.ctx, &dir) {
-        Ok(Some(status)) => cert_check(&status),
-        Ok(None) => Check::new(CERT, CheckStatus::Fail, "证书不存在"),
-        Err(e) => Check::new(CERT, CheckStatus::Fail, e.to_string()),
-    }
-}
-
-/// Fail when expired, warn within 7 days, else pass with the days left.
-pub fn cert_check(status: &CertStatus) -> Check {
-    match (status.warning(CERT_WARNING_DAYS), status.days_left) {
-        (Some(w), Some(days)) if days < 0 => Check::new(CERT, CheckStatus::Fail, w),
-        (Some(w), _) => Check::new(CERT, CheckStatus::Warn, w),
-        (None, days) => Check::new(
-            CERT,
-            CheckStatus::Pass,
-            format!("剩余 {} 天", days.unwrap_or_default()),
-        ),
-    }
+        Check::new(
+            WORKER,
+            CheckStatus::Warn,
+            "运行的不是当前安装的程序；执行 onebox subscription publish 重启",
+        )
+    })
 }
 
 fn published(cfg: &NodeConfig, paths: &crate::paths::Paths) -> Check {

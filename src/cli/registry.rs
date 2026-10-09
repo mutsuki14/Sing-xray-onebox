@@ -4,12 +4,11 @@
 //!
 //! Feature modules contribute their own `const` [`CommandSpec`]s; adding a
 //! command means appending it to [`COMMANDS`] (order = help order within
-//! each group). The commands of the wave-C modules are added at the marked
-//! place; the menus already reach them through [`dispatch`].
+//! each group). The menus reach the same commands through [`dispatch`].
 
 use super::args::{self, find, ArgSpec, CommandSpec, Globals, Group, Matches, Root};
 use super::commands::{
-    cert, client, connection, info, install, node, service, site, tune, uninstall,
+    cert, client, connection, diagnose, info, install, node, service, site, tune, uninstall,
 };
 use super::help;
 use crate::ctx::Ctx;
@@ -42,8 +41,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     // 功能
     site::SITE,
     cert::CERT,
+    crate::subscription::SUBSCRIPTION,
     crate::bbr::COMMAND,
+    crate::frp::COMMAND,
     // 诊断
+    diagnose::DOCTOR,
+    diagnose::SUPPORT,
     crate::linktools::PROBE,
     crate::linktools::BENCH,
     crate::linktools::FAILOVER,
@@ -67,7 +70,6 @@ pub static COMMANDS: &[CommandSpec] = &[
     service::NET_APPLY,
     service::HOP_CLEAR,
     client::RENDER,
-    // wave C modules: subscription, frps, doctor, support
 ];
 
 const VERSION: CommandSpec = CommandSpec::new("version", Group::Maintain, "显示程序版本")

@@ -16,7 +16,7 @@
 //! [`runtime`] (host effects), [`lifecycle`] (operations), [`cli`]
 //! (command tree, handlers, menu), [`checks`] (doctor).
 //!
-//! Public entry points used by other packages: [`cli_spec`] (the `frps`
+//! Public entry points used by other packages: [`COMMAND`] (the `frps`
 //! tree for the registry), [`menu`] (G41), [`net_apply`] (the
 //! `onebox-frps` pre-start hook), [`recover`] (`onebox recover`, after the
 //! node journal), [`checks`] (`onebox doctor`), and the leaf
@@ -60,7 +60,7 @@ pub mod wizard;
 mod e2e;
 
 pub use checks::checks;
-pub use cli::{cli_spec, Action, COMMAND};
+pub use cli::{Action, COMMAND};
 pub use lifecycle::{net_apply, recover};
 
 use crate::ctx::Ctx;

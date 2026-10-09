@@ -151,11 +151,6 @@ pub fn run(ctx: &Ctx, action: Action) -> Result<()> {
     .run(action)
 }
 
-/// The `frps` tree for the registry (`cli_spec()`).
-pub fn cli_spec() -> &'static CommandSpec {
-    &COMMAND
-}
-
 const fn option(long: &'static str, value: &'static str, help: &'static str) -> OptSpec {
     OptSpec::value(long, value, help).repeated()
 }
@@ -209,7 +204,7 @@ const fn sub(name: &'static str, summary: &'static str, root: Root) -> CommandSp
         .handler(handle)
 }
 
-pub static COMMAND: CommandSpec = CommandSpec::new("frps", Group::Feature, "独立 FRP 服务端")
+pub const COMMAND: CommandSpec = CommandSpec::new("frps", Group::Feature, "独立 FRP 服务端")
     .usage(&[
         "frps [menu]",
         "frps info|status",

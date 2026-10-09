@@ -33,12 +33,11 @@
 use super::devices::{self, DeviceStore, NewDevice};
 use super::endpoint::{self, SubscriptionInfo, DISABLED, REVOKED};
 use super::request::{EnableRequest, Mode};
-use super::{frontend, lifecycle, renew, server, snapshot};
+use super::{lifecycle, renew, server, snapshot};
 use crate::apply::{self, ApplyRequest};
-use crate::cert::{self, cloudflare, CertDir, CfCredentials, Engine, WebCertTarget};
+use crate::cert::{self, cloudflare, CertScopes, CfCredentials, Engine};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
 use crate::ctx::Ctx;
-use crate::domain::config::WebCert;
 use crate::domain::plan::{self, PlanEnv};
 use crate::domain::ports::FnProbe;
 use crate::domain::protocol::Transport;
@@ -242,7 +241,7 @@ pub fn enable(ctx: &Ctx, request: &EnableRequest) -> Result<()> {
     ensure!(devices::valid_name(name.trim()), "{}", devices::BAD_NAME);
     let loaded = StateStore::load_required(ctx)?;
     let next = plan_request(ctx, &loaded.config, request)?;
-    let cloudflare = cloudflare_for(ctx, &next, false)?;
+    let cloudflare = cloudflare_for(ctx, &next)?;
     let lock = node_lock(ctx)?;
     // A journal left behind is finished first; if that (or anything
     // else) changed state.json since it was loaded, the apply refuses.
@@ -310,48 +309,29 @@ fn plan_enable(
     plan::enable_subscription(cfg, choice, port, &env)
 }
 
-/// Cloudflare credentials the apply of `cfg` needs for the standalone
-/// certificate: `None` when none is issued, or stored/environment
-/// credentials exist; otherwise prompted on a terminal (G8).
-pub fn cloudflare_for(ctx: &Ctx, cfg: &NodeConfig, force: bool) -> Result<Option<CfCredentials>> {
-    let Some((domain, cert @ WebCert::Cloudflare, _, _)) = frontend::standalone(cfg) else {
-        return Ok(None);
-    };
-    let dir = CertDir::subscription(&ctx.paths).path().to_path_buf();
-    if cloudflare::lookup(ctx, &dir)?.is_some() {
-        return Ok(None);
-    }
-    let target = WebCertTarget {
-        dir,
-        domains: vec![domain.to_owned()],
-        cert,
-        webroot: None,
-    };
-    if !cert::web_needs_acme(ctx, &target, force) {
-        return Ok(None);
-    }
-    prompt_cloudflare(ctx).map(Some)
+/// Cloudflare credentials an apply of `cfg` needs and lacks (stored and
+/// environment ones are used as they are), prompted for on a terminal
+/// before the node lock is taken — the rule of every apply caller (G8).
+pub fn cloudflare_for(ctx: &Ctx, cfg: &NodeConfig) -> Result<Option<CfCredentials>> {
+    cloudflare::resolve_for_apply(ctx, ctx.ui.as_ref(), cfg, CertScopes::NONE)
 }
 
-/// Ask for credentials on a terminal; unattended runs get v2's message.
-fn prompt_cloudflare(ctx: &Ctx) -> Result<CfCredentials> {
-    ensure!(ctx.ui.interactive(), "{}", cloudflare::MISSING);
-    cloudflare::prompt(ctx.ui.as_ref())
-}
-
-/// `subscription disable`.
+/// `subscription disable`: planned and credentials resolved without the
+/// lock, like `enable` (the apply refuses if state.json changed since).
 pub fn disable(ctx: &Ctx) -> Result<()> {
+    let loaded = StateStore::load_required(ctx)?;
+    if loaded.config.subscription.is_none() {
+        // Still finish a journal left behind, as every command does.
+        let lock = node_lock(ctx)?;
+        apply::recover_locked(ctx, &lock)?;
+        return print(&[DISABLED.to_owned()]);
+    }
+    let next = plan::disable_subscription(&loaded.config)?;
+    let mut req = ApplyRequest::from_loaded(&loaded, next, "关闭订阅");
+    req.intents.cloudflare = cloudflare_for(ctx, &req.config)?;
     let lock = node_lock(ctx)?;
     apply::recover_locked(ctx, &lock)?;
-    let loaded = StateStore::load_required(ctx)?;
-    if loaded.config.subscription.is_some() {
-        let next = plan::disable_subscription(&loaded.config)?;
-        apply::apply_locked(
-            ctx,
-            &lock,
-            ApplyRequest::from_loaded(&loaded, next, "关闭订阅"),
-        )?;
-    }
+    apply::apply_locked(ctx, &lock, req)?;
     print(&[DISABLED.to_owned()])
 }
 
@@ -416,7 +396,7 @@ pub fn publish_now(ctx: &Ctx) -> Result<()> {
 pub fn publish_request(ctx: &Ctx) -> Result<ApplyRequest> {
     let loaded = StateStore::load_required(ctx)?;
     let mut req = ApplyRequest::from_loaded(&loaded, loaded.config.clone(), "发布订阅");
-    req.intents.cloudflare = cloudflare_for(ctx, &loaded.config, false)?;
+    req.intents.cloudflare = cloudflare_for(ctx, &loaded.config)?;
     Ok(req)
 }
 
@@ -448,10 +428,11 @@ fn renew_credentials(
     cfg: &NodeConfig,
     scheduled: bool,
 ) -> Result<Option<CfCredentials>> {
-    if scheduled || cert::credentials_needed(ctx, cfg, &renew::options(false)).is_empty() {
+    if scheduled {
         return Ok(None);
     }
-    prompt_cloudflare(ctx).map(Some)
+    let needed = cert::credentials_needed(ctx, cfg, &renew::options(false));
+    cloudflare::resolve_needed(ctx.ui.as_ref(), &needed)
 }
 
 /// Print a created or reset device (stdout) and the warnings (stderr).

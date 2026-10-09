@@ -1,6 +1,8 @@
 use super::*;
+use crate::cert::CertDir;
 use crate::cli::args::{parse, Globals};
 use crate::domain::config::SubscriptionMode;
+use crate::domain::config::WebCert;
 use crate::subscription::request::EnableRequest;
 use crate::subscription::testing::{device, ip, reality, site, standalone, Node, TOKEN};
 use crate::subscription::SERVICE;
@@ -234,27 +236,25 @@ fn after_enable_creates_the_first_device_once() {
 fn cloudflare_credentials_are_resolved_before_the_apply() {
     let node = Node::new("sub-cli-cf");
     let ctx = &node.ctx;
-    assert!(cloudflare_for(ctx, &ip(8448), false).unwrap().is_none());
-    assert!(
-        cloudflare_for(ctx, &standalone(WebCert::Http01, 8448), false)
-            .unwrap()
-            .is_none()
-    );
+    assert!(cloudflare_for(ctx, &ip(8448)).unwrap().is_none());
+    assert!(cloudflare_for(ctx, &standalone(WebCert::Http01, 8448))
+        .unwrap()
+        .is_none());
     let cfg = standalone(WebCert::Cloudflare, 8448);
     node.ui.set_interactive(false);
     assert_eq!(
-        cloudflare_for(ctx, &cfg, false).unwrap_err().to_string(),
+        cloudflare_for(ctx, &cfg).unwrap_err().to_string(),
         cloudflare::MISSING
     );
     node.ui.set_interactive(true);
     node.ui.extend(["fake-token-0123", ""]);
-    let given = cloudflare_for(ctx, &cfg, false).unwrap().unwrap();
+    let given = cloudflare_for(ctx, &cfg).unwrap().unwrap();
     assert_eq!(given.get("CF_Token"), Some("fake-token-0123"));
 
     let dir = CertDir::subscription(&ctx.paths);
     cloudflare::persist(dir.path(), &given).unwrap();
     assert!(
-        cloudflare_for(ctx, &cfg, false).unwrap().is_none(),
+        cloudflare_for(ctx, &cfg).unwrap().is_none(),
         "stored credentials are used as they are"
     );
 }

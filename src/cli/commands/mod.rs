@@ -6,6 +6,7 @@
 pub mod cert;
 pub mod client;
 pub mod connection;
+pub mod diagnose;
 pub mod info;
 pub mod install;
 pub mod node;

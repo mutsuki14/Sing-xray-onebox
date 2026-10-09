@@ -63,8 +63,8 @@ fn names_aliases_and_handlers() {
 
 #[test]
 fn v2_command_names_are_registered() {
-    // Every v2 command (spec B §2.4) that this package owns, plus the new
-    // `renew` and `boot`; wave-C modules register the rest.
+    // Every v2 command and alias (spec B §2.4), plus the new `renew` and
+    // `boot`.
     for name in [
         "install",
         "plan",
@@ -105,6 +105,20 @@ fn v2_command_names_are_registered() {
         "help",
         "renew",
         "boot",
+        "subscription",
+        "subscribe",
+        "sub",
+        "frps",
+        "doctor",
+        "support",
+        "backup",
+        "backups",
+        "restore",
+        "recover",
+        "update",
+        "update-script",
+        "update-check",
+        "update-channel",
     ] {
         assert!(find(COMMANDS, name).is_some(), "{name}");
     }
@@ -281,9 +295,13 @@ fn global_help_snapshot() {
 功能:
   site            自有域名 REALITY 网站
   cert            代理、网站与订阅证书
+  subscription    远程订阅：按设备授权的客户端配置 URL
   bbr             TCP BBR 与 BBRv3 内核
+  frps            独立 FRP 服务端
 
 诊断:
+  doctor          体检：内核、配置、服务、证书、网站、订阅、FRP 与未完成事务
+  support         生成脱敏诊断文件（不含凭据、IP 地址和域名，不会自动上传）
   probe           导出、查看或合并链路测试用的探测配置
   bench           经临时客户端内核测试真实链路的延迟、吞吐与资源占用
   failover        本机 SOCKS5 故障切换（TCP CONNECT；既有连接不迁移；Ctrl+C 结束）
@@ -366,11 +384,15 @@ fn dispatch_applies_the_root_policy() {
     dispatch(COMMANDS, &bench.ctx, &["site", "--help"], false).unwrap();
     let err = dispatch(COMMANDS, &bench.ctx, &["uninstall"], false).unwrap_err();
     assert_eq!(err.to_string(), "此操作需要 root 权限");
-    let err = dispatch(COMMANDS, &bench.ctx, &["subscription", "info"], true).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "未知命令: subscription；请执行 onebox help"
-    );
+    let err = dispatch(COMMANDS, &bench.ctx, &["nope"], true).unwrap_err();
+    assert_eq!(err.to_string(), "未知命令: nope；请执行 onebox help");
+    for feature in ["subscription", "frps", "doctor", "support"] {
+        dispatch(COMMANDS, &bench.ctx, &[feature, "--help"], false).unwrap();
+    }
+    for diagnose in ["doctor", "support"] {
+        let err = dispatch(COMMANDS, &bench.ctx, &[diagnose], false).unwrap_err();
+        assert_eq!(err.to_string(), "此操作需要 root 权限", "{diagnose}");
+    }
     let err = dispatch(COMMANDS, &bench.ctx, &["probe"], false).unwrap_err();
     assert_eq!(err.to_string(), crate::linktools::cli::PROBE_USAGE);
 }

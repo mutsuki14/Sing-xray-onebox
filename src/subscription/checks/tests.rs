@@ -1,5 +1,4 @@
 use super::*;
-use crate::cert::openssl::X509Info;
 use crate::cert::testing::engine;
 use crate::domain::config::{SubscriptionConfig, SubscriptionMode, WebCert};
 use crate::host::init::InitSystem;
@@ -10,21 +9,6 @@ use crate::subscription::testing::{
 use crate::subscription::{devices, snapshot};
 
 const PID: u32 = 777;
-
-fn status(days_left: Option<i64>) -> CertStatus {
-    CertStatus {
-        dir: "/x".into(),
-        x509: X509Info {
-            subject: "CN=sub.example.com".into(),
-            issuer: "CN=CA".into(),
-            not_before: String::new(),
-            not_after: String::new(),
-            expires_at: None,
-        },
-        days_left,
-        metadata: None,
-    }
-}
 
 fn by_name<'a>(checks: &'a [Check], name: &str) -> &'a Check {
     checks.iter().find(|c| c.name == name).unwrap()
@@ -46,9 +30,9 @@ fn ip_mode_checks_worker_snapshot_devices_and_address() {
     let cfg = ip(8448);
     let all = checks_with(&engine, &cfg);
     let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, [ADDRESS, WORKER, SNAPSHOT, DEVICES]);
+    // A stopped worker is the built-in service check's line.
+    assert_eq!(names, [ADDRESS, SNAPSHOT, DEVICES]);
     assert_eq!(by_name(&all, ADDRESS).detail, "http://203.0.113.10:8448");
-    assert_eq!(by_name(&all, WORKER).status, CheckStatus::Fail);
     assert_eq!(by_name(&all, SNAPSHOT).status, CheckStatus::Fail);
     assert_eq!(by_name(&all, DEVICES).status, CheckStatus::Warn);
 
@@ -58,6 +42,7 @@ fn ip_mode_checks_worker_snapshot_devices_and_address() {
         .unwrap();
     let all = checks_with(&engine, &cfg);
     assert!(all.iter().all(|c| c.status == CheckStatus::Pass), "{all:?}");
+    assert_eq!(by_name(&all, WORKER).detail, "运行当前安装的程序");
     assert_eq!(
         by_name(&all, SNAPSHOT).detail,
         "base64 / mihomo / provider / singbox / singbox-notun / xray"
@@ -108,37 +93,14 @@ fn ipv6_address_without_ipv6_fails() {
 }
 
 #[test]
-fn standalone_adds_web_service_and_certificate() {
+fn standalone_service_and_certificate_are_left_to_the_built_in_checks() {
     let node = Node::new("sub-checks-standalone");
     let systemd = node.systemd(PID);
-    systemd.activate(WEB_SERVICE);
+    systemd.activate(crate::subscription::WEB_SERVICE);
     let all = checks_with(
         &engine(&node.ctx, InitSystem::Systemd),
         &standalone(WebCert::Cloudflare, 8448),
     );
-    assert_eq!(by_name(&all, WEB).status, CheckStatus::Pass);
-    assert_eq!(by_name(&all, WEB).detail, "onebox-subscription-web 运行中");
-    let cert = by_name(&all, CERT);
-    assert_eq!(
-        (cert.status, cert.detail.as_str()),
-        (CheckStatus::Fail, "证书不存在")
-    );
-}
-
-#[test]
-fn certificate_expiry_levels() {
-    let cases = [
-        (Some(-1), CheckStatus::Fail, "证书已过期"),
-        (Some(3), CheckStatus::Warn, "证书将在 3 天内到期"),
-        (None, CheckStatus::Warn, "无法读取证书有效期"),
-        (Some(60), CheckStatus::Pass, "剩余 60 天"),
-    ];
-    for (days, level, detail) in cases {
-        let check = cert_check(&status(days));
-        assert_eq!(
-            (check.status, check.detail.as_str()),
-            (level, detail),
-            "{days:?}"
-        );
-    }
+    let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, [ADDRESS, SNAPSHOT, DEVICES]);
 }

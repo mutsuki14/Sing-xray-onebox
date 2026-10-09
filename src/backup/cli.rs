@@ -90,13 +90,24 @@ fn restore_command(ctx: &Ctx, m: &Matches) -> Result<()> {
     restore::restore(ctx, &id)
 }
 
+/// The node and self-update journals under the node lock, then an FRP
+/// transaction under the FRP lock (`FRP 存在未完成事务，请先执行 onebox
+/// recover`). FRP is recovered even when the node recovery failed; the
+/// first error is returned.
 fn recover_command(ctx: &Ctx, _m: &Matches) -> Result<()> {
-    let lock = apply::node_lock(ctx)?;
-    let program = program_journal::load(&ctx.paths)?.is_some();
-    let outcome = apply::recover::recover_all(ctx, &lock)?;
-    // Work directories a killed self-update left before its journal existed.
-    crate::update::sweep_orphans(&ctx.paths, &lock);
-    if outcome == apply::recover::Recovery::Nothing && !program {
+    let (program, node) = {
+        let lock = apply::node_lock(ctx)?;
+        let program = program_journal::load(&ctx.paths)?.is_some();
+        let node = apply::recover::recover_all(ctx, &lock);
+        // Work directories a killed self-update left before its journal existed.
+        crate::update::sweep_orphans(&ctx.paths, &lock);
+        (program, node)
+    };
+    let frp_pending = crate::frp::journal::exists(&ctx.paths);
+    let frp = crate::frp::recover(ctx);
+    let outcome = node?;
+    frp?;
+    if outcome == apply::recover::Recovery::Nothing && !program && !frp_pending {
         out::ok("没有需要恢复的事务");
     }
     Ok(())
@@ -114,9 +125,9 @@ pub fn restorable(ctx: &Ctx) -> Result<Vec<store::BackupInfo>> {
         .collect())
 }
 
-/// Whether a node or self-update journal waits for `recover` (menus).
+/// Whether a node, self-update or FRP journal waits for `recover` (menus).
 pub fn recovery_due(ctx: &Ctx) -> Result<bool> {
-    Ok(journal::pending(&ctx.paths)?.any())
+    Ok(journal::pending(&ctx.paths)?.any() || crate::frp::journal::exists(&ctx.paths))
 }
 
 #[cfg(test)]
@@ -206,5 +217,23 @@ mod tests {
         assert!(exec.calls().is_empty());
         assert!(ui.prompts().is_empty());
         assert!(restorable(&ctx).unwrap().is_empty());
+    }
+
+    /// `recover` also clears an FRP transaction (`FRP 存在未完成事务，请先
+    /// 执行 onebox recover`); a finished one only needs its removal.
+    #[test]
+    fn recover_clears_a_finished_frp_journal() {
+        use crate::frp::journal as frp_journal;
+        let dir = TempDir::new("backup-cli-recover-frp").unwrap();
+        let (ctx, _, _) = Ctx::test(dir.path());
+        crate::frp::runtime::mkdirs(&ctx.paths).unwrap();
+        let mut j =
+            frp_journal::create(&ctx.paths, "配置", frp_journal::Before::default(), &[]).unwrap();
+        j.set_phase(&ctx.paths, frp_journal::Phase::Committed)
+            .unwrap();
+        assert!(recovery_due(&ctx).unwrap());
+        recover_command(&ctx, &matches(&[])).unwrap();
+        assert!(!frp_journal::exists(&ctx.paths));
+        assert!(!recovery_due(&ctx).unwrap());
     }
 }

@@ -427,5 +427,5 @@ fn the_menu_runs_the_wizard_and_survives_its_cancellation() {
 fn help_text_is_v2() {
     assert!(HELP.starts_with("onebox frps [plan|install|configure|info|status|"));
     assert!(HELP.ends_with("--version 0.71.0|latest --dry-run"));
-    assert!(std::ptr::eq(cli_spec(), &COMMAND));
+    assert_eq!(COMMAND.name, "frps");
 }

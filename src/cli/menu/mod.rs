@@ -267,7 +267,9 @@ impl<'a> Menu<'a> {
     pub fn outcome(&self, result: Result<()>) -> Result<()> {
         match result {
             Ok(()) => Ok(()),
-            Err(e @ Error::Exit { code: 0 | 75, .. }) => Err(e),
+            // Exit 0, or 75 (the program was replaced while recovering a
+            // self-update), ends the menu even when wrapped in context.
+            Err(e) if matches!(crate::update::exit_within(&e), Some(0 | 75)) => Err(e),
             Err(Error::Exit { code: 2, message }) => {
                 self.session.warn(message);
                 Ok(())

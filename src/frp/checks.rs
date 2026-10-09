@@ -1,7 +1,8 @@
 //! FRP checks for `onebox doctor` (none when FRP is not installed and no
-//! transaction journal is left): a leftover transaction, the state, the
-//! binary, the services, the private CA and control certificate, the
-//! website certificate and the renewal job.
+//! transaction journal is left): a leftover transaction, the binary, the
+//! services, the private CA and control certificate, the website
+//! certificate and the renewal job. The state (readable, mode, warnings)
+//! is the built-in `FRP 服务端` check.
 //! Read-only: nothing is written, started or asked.
 //!
 //! Changes from v2: v2's `doctor` did not look at FRP at all.
@@ -43,26 +44,11 @@ pub fn checks_with(rt: &Runtime) -> Vec<Check> {
     if !installed {
         return out;
     }
-    let state = match model::load(paths) {
-        Ok(Some(state)) => state,
-        Ok(None) => return out,
-        Err(e) => {
-            out.push(check("FRP 状态", CheckStatus::Fail, e.to_string()));
-            return out;
-        }
+    // The state itself (readable, mode, warnings) is the built-in
+    // `FRP 服务端` check; an unreadable one leaves nothing more to check.
+    let Ok(Some(state)) = model::load(paths) else {
+        return out;
     };
-    let mode = if state.is_web() { "web" } else { "tcp" };
-    out.push(check(
-        "FRP 状态",
-        CheckStatus::Pass,
-        format!("{mode} · {}:{}", state.domain, state.bind_port),
-    ));
-    out.extend(
-        state
-            .warnings()
-            .into_iter()
-            .map(|w| check("FRP 配置", CheckStatus::Warn, w)),
-    );
     out.push(binary_check(rt, &state));
     out.extend(service_checks(rt, &state));
     out.extend(control_checks(rt));

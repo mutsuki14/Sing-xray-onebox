@@ -33,7 +33,6 @@ fn a_healthy_installation_passes() {
         statuses(&checks_with(&rt)),
         [
             ("FRP 事务".to_owned(), pass),
-            ("FRP 状态".to_owned(), pass),
             ("frps 程序".to_owned(), pass),
             (FRPS.to_owned(), pass),
             ("FRP 私有 CA".to_owned(), pass),
@@ -58,10 +57,12 @@ fn a_broken_state_fails() {
     let paths = &h.ctx.paths;
     crate::frp::runtime::mkdirs(paths).unwrap();
     std::fs::write(paths.frp_root.join("state.json"), "{").unwrap();
+    // The unreadable state is the built-in `FRP 服务端` failure.
     let found = checks_with(&h.runtime());
-    assert_eq!(found.len(), 2);
-    assert_eq!(found[1].name, "FRP 状态");
-    assert_eq!(found[1].status, CheckStatus::Fail);
+    assert_eq!(
+        statuses(&found),
+        [("FRP 事务".to_owned(), CheckStatus::Pass)]
+    );
 }
 
 #[test]

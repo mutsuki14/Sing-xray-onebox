@@ -158,6 +158,16 @@ fn outcome_rules() {
     assert!(matches!(exit0, Err(Error::Exit { code: 0, .. })));
     let exit75 = menu.outcome(Err(Error::exit(75, "自更新恢复已完成")));
     assert!(matches!(exit75, Err(Error::Exit { code: 75, .. })));
+    let wrapped = Error::Context {
+        message: "程序更新".into(),
+        source: Box::new(Error::exit(75, "自更新恢复已完成")),
+    };
+    let wrapped = menu.outcome(Err(wrapped)).unwrap_err();
+    assert_eq!(
+        wrapped.exit_code(),
+        75,
+        "a wrapped exit 75 still ends the menu"
+    );
     menu.outcome(Err(Error::exit(
         2,
         "REALITY 检查完成，请核对报告中的警告。",
