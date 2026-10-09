@@ -8,9 +8,11 @@
 //! version 1 (written by v2.x) against v2's fixed allowlist, and its old
 //! state is migrated with `state::v2` when its rules are re-applied.
 //!
-//! Changes from v2: the outcome is reported (`[完成] …`), and the
-//! self-update journal is not consulted at all under a lock inherited from
-//! the updating parent (the parent owns it).
+//! Changes from v2: the outcome is reported (`[完成] …`); the self-update
+//! journal is not consulted at all under a lock inherited from the updating
+//! parent (the parent owns it); a journal directory without `journal.json`
+//! (a cleanup interrupted after the journal finished) is removed with a
+//! warning instead of blocking every later recovery.
 
 use super::journal::{self, Journal};
 use super::{program_journal, rollback, transaction};
@@ -43,6 +45,10 @@ pub fn recover_all(ctx: &Ctx, lock: &FileLock) -> Result<Recovery> {
 /// The node journal alone (the caller verified the lock).
 pub fn recover_journal(ctx: &Ctx, lock: &FileLock) -> Result<Recovery> {
     let paths = &ctx.paths;
+    if transaction::discard_orphan(paths)? {
+        out::warn("已删除缺少 journal.json 的事务目录（上次事务结束后的清理被中断）");
+        return Ok(Recovery::Finished);
+    }
     let Some(mut journal) = journal::load(paths)? else {
         return Ok(Recovery::Nothing);
     };

@@ -7,6 +7,7 @@ use crate::apply::snapshot::{take, v2_fixed_targets, v2_node_allowlist_with};
 use crate::apply::testing::{
     acme_deployment, acme_home, build_v2_layout, file, v2_journal_text, v2_paths,
 };
+use crate::apply::transaction;
 use crate::host::cron::testing::lines;
 use crate::host::service as svc;
 use crate::sys::exec::{Cmd, Exec, SystemExec};
@@ -93,6 +94,65 @@ fn a_journal_committed_before_the_crash_is_only_cleaned_up() {
     assert!(host.history().is_empty(), "{:?}", host.history());
     assert_eq!(host.installed().inbounds, singbox_only().inbounds);
     assert_no_journal(&host);
+}
+
+#[test]
+fn a_crash_while_a_finished_journal_is_deleted_leaves_only_a_stage() {
+    // finish() renames the journal away before deleting it: a crash during
+    // the deletion leaves only a staging leftover, which recovery ignores
+    // and the next apply sweeps.
+    let host = installed_host();
+    crash_at(&host, Checkpoint::Stage(Phase::Finalize));
+    let stage = host
+        .paths()
+        .root
+        .join(format!("{}{}", transaction::STAGE_PREFIX, "0".repeat(24)));
+    fs::rename(journal::dir(host.paths()), &stage).unwrap();
+    assert!(journal::pending(host.paths()).unwrap().config.is_none());
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::Nothing
+    );
+    host.apply(host.change(two_cores(), "修改")).unwrap();
+    assert_no_journal(&host);
+}
+
+#[test]
+fn a_journal_directory_without_its_journal_is_removed_by_the_next_recovery() {
+    // A cleanup done in place (v2, earlier v3) that died after removing
+    // `journal.json`: the next recovery removes the rest instead of
+    // refusing forever with "事务日志不完整".
+    let host = installed_host();
+    crash_at(&host, Checkpoint::Stage(Phase::Finalize));
+    fs::remove_file(journal::dir(host.paths()).join(journal::JOURNAL_FILE)).unwrap();
+    assert!(journal::files_dir(host.paths()).is_dir());
+    let err = journal::pending(host.paths()).unwrap_err().to_string();
+    assert!(err.contains("事务日志不完整"), "{err}");
+    host.exec.clear_history();
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::Finished
+    );
+    assert!(host.history().is_empty(), "{:?}", host.history());
+    assert_no_journal(&host);
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::Nothing
+    );
+}
+
+#[test]
+fn a_journal_with_its_journal_file_is_never_discarded() {
+    let host = installed_host();
+    crash_at(&host, Checkpoint::Stage(Phase::Finalize));
+    assert!(!transaction::discard_orphan(host.paths()).unwrap());
+    assert!(journal::load(host.paths()).unwrap().is_some());
+    // Finishing removes it without leaving a stage behind, and is
+    // idempotent.
+    transaction::finish(host.paths()).unwrap();
+    assert_no_journal(&host);
+    transaction::finish(host.paths()).unwrap();
+    assert!(!transaction::discard_orphan(host.paths()).unwrap());
 }
 
 #[test]
