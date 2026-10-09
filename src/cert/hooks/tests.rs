@@ -324,6 +324,16 @@ fn dns01_credentials_are_needed_exactly_when_acme_sh_runs() {
     assert!(!prepare_proxy_with(&engine, &mut cfg, false, Option::None).unwrap());
     assert_eq!(acme_calls(&f.fake).len(), 1);
     assert!(!stored.exists());
+    // Credentials given anyway (FRP asks whenever none are stored) are
+    // kept for the renewal that will need them; acme.sh still does not run.
+    let fresh = CfCredentials::token("cf-token-2", Option::None).unwrap();
+    assert!(!prepare_proxy_with(&engine, &mut cfg, false, Some(&fresh)).unwrap());
+    assert_eq!(acme_calls(&f.fake).len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&stored).unwrap(),
+        r#"{"CF_Token":"cf-token-2"}"#
+    );
+    std::fs::remove_file(&stored).unwrap();
 
     // A forced renewal, or a pair that became due, runs acme.sh: the CLI
     // asks, and the engine refuses to go on without credentials.

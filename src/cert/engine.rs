@@ -11,9 +11,10 @@
 //! - anything else is issued anew (ACME `--issue --force`, a new
 //!   self-signed pair); [`Engine::will_contact_acme`] answers in advance
 //!   whether acme.sh will run (the site starts its bootstrap nginx then);
-//! - Cloudflare credentials are resolved (and stored) only when acme.sh
-//!   runs, so a valid DNS-01 pair that is not due needs none — the same
-//!   rule as `renew::credentials_needed_for_apply`, what the CLI asks for;
+//! - Cloudflare credentials are required only when acme.sh runs, so a
+//!   valid DNS-01 pair that is not due needs none — the same rule as
+//!   `renew::credentials_needed_for_apply`, what the CLI asks for; complete
+//!   ones (given, stored or from the environment) are stored either way;
 //! - when acme.sh answers "not due" (exit 2), the pair it holds is still
 //!   deployed if it differs (v2 did the same): a renewal whose deployment
 //!   failed earlier is picked up instead of being reported as "unchanged"
@@ -133,13 +134,10 @@ impl<'a> Engine<'a> {
             Source::Acme(_) => self.acme_request(dir, spec, matches, force),
             _ => None,
         };
-        // Credentials only when acme.sh runs: a valid DNS-01 pair that is
-        // not due needs none, which is also all the CLI asks for
-        // (`renew::credentials_needed_for_apply`).
-        let credentials = match request {
-            Some(_) => self.credentials(dir, spec, cf)?,
-            None => None,
-        };
+        // Credentials are required only when acme.sh runs: a valid DNS-01
+        // pair that is not due needs none, which is also all the CLI asks
+        // for (`renew::credentials_needed_for_apply`).
+        let credentials = self.credentials(dir, spec, cf, request.is_some())?;
         let mut metadata = Metadata::attempt(spec, previous.as_ref(), now());
         let result = self.ensure_pair(dir, spec, previous.as_ref(), request, credentials.as_ref());
         let outcome = self.record(dir, &mut metadata, result, ISSUE_FAILED)?;
@@ -211,7 +209,7 @@ impl<'a> Engine<'a> {
         spec.check()?;
         dir.ensure()?;
         // An ACME renewal always runs acme.sh (DNS-01 needs credentials).
-        let credentials = self.credentials(dir, spec, cf)?;
+        let credentials = self.credentials(dir, spec, cf, true)?;
         let previous = self.previous(dir);
         let mut metadata = Metadata::attempt(spec, previous.as_ref(), now());
         let matches = previous.as_ref().is_none_or(|m| m.matches(spec));
@@ -313,16 +311,22 @@ impl<'a> Engine<'a> {
         })
     }
 
-    /// Cloudflare credentials for DNS-01 specs (resolved and persisted).
+    /// Cloudflare credentials for DNS-01 specs, resolved and persisted when
+    /// complete; missing ones are an error only when `required` (acme.sh
+    /// will run).
     fn credentials(
         &self,
         dir: &CertDir,
         spec: &CertSpec,
         cf: Option<&CfCredentials>,
+        required: bool,
     ) -> Result<Option<CfCredentials>> {
         match spec.source {
-            Source::Acme(Challenge::Cloudflare) => {
+            Source::Acme(Challenge::Cloudflare) if required => {
                 cloudflare::resolve(self.ctx, dir.path(), cf, self.env).map(Some)
+            }
+            Source::Acme(Challenge::Cloudflare) => {
+                cloudflare::resolve_available(self.ctx, dir.path(), cf, self.env)
             }
             _ => Ok(None),
         }
