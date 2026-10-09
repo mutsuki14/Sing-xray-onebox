@@ -143,6 +143,9 @@ fn delete_rules() {
     let err = plan_del(&bench.session(), Some(Tuic)).unwrap_err();
     assert_eq!(err.to_string(), "协议未启用");
     let bench = Bench::installed(&config(&[(VlessReality, 443, XR), (Tuic, 443, SB)]));
+    // Enter at the menu deletes nothing.
+    bench.answers(&[""]);
+    assert!(plan_del(&bench.session(), None).unwrap().is_none());
     bench.answers(&["2"]);
     let req = plan_del(&bench.session(), None).unwrap().unwrap();
     assert_eq!(req.reason, "删除协议");
@@ -152,6 +155,14 @@ fn delete_rules() {
         bench.ui.menus()[0],
         "选择要删除的协议\n  1) VLESS-Reality-Vision\n  2) TUIC-v5\n  0) 返回"
     );
+    // Unattended without a protocol: refused, never the first one.
+    bench.unattended();
+    let err = plan_del(&bench.session(), None).unwrap_err();
+    assert_eq!(err.to_string(), DEL_NEEDS_PROTOCOL);
+    let req = plan_del(&bench.session(), Some(VlessReality))
+        .unwrap()
+        .unwrap();
+    assert!(!req.config.has(VlessReality));
 }
 
 #[test]

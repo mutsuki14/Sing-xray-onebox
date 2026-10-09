@@ -13,7 +13,9 @@
 //! AnyTLS-REALITY itself; selections are numbered menus of the relevant
 //! protocols with `0) 返回`; `add --port` takes `端口` or v2's
 //! `协议=端口`; `port` without a port under `-y` keeps the current one and
-//! changes nothing.
+//! changes nothing; `del` never deletes by default: Enter at its menu goes
+//! back, and without a terminal (or under `-y`) the protocol must be named
+//! (v2 deleted the first protocol).
 
 use crate::apply::ApplyRequest;
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec};
@@ -26,9 +28,12 @@ use crate::domain::plan::{self, AddOptions, RealityChoice};
 use crate::domain::protocol::{Core, Protocol};
 use crate::error::Result;
 use crate::state::Loaded;
+use crate::ui;
 
 /// The v2 tail after a node change (scripts grep it).
 pub const UPDATED: &str = "配置已更新";
+/// `del` without a protocol where nobody can choose one.
+pub const DEL_NEEDS_PROTOCOL: &str = "请指定要删除的协议，例如 onebox del tuic";
 const ANYTLS_REALITY_HINT: &str =
     "AnyTLS-REALITY: onebox client singbox，或使用 sing-box 远程配置订阅";
 
@@ -247,10 +252,20 @@ fn choose_new(session: &Session, cfg: &NodeConfig) -> Result<Option<Protocol>> {
     pick(session, "选择要添加的协议", &candidates)
 }
 
-/// A numbered choice among `protocols` (`None` = back).
+/// A numbered choice among `protocols` (`None` = back), Enter = the first.
 pub fn pick(session: &Session, title: &str, protocols: &[Protocol]) -> Result<Option<Protocol>> {
+    pick_with_default(session, title, protocols, 0)
+}
+
+/// [`pick`] with `default` (an index, or [`ui::BACK`]).
+fn pick_with_default(
+    session: &Session,
+    title: &str,
+    protocols: &[Protocol],
+    default: usize,
+) -> Result<Option<Protocol>> {
     let items: Vec<String> = protocols.iter().map(|p| protocol_item(*p)).collect();
-    let choice = session.ui().select(title, &items, 0, true)?;
+    let choice = session.ui().select(title, &items, default, true)?;
     Ok(choice.and_then(|i| protocols.get(i).copied()))
 }
 
@@ -311,7 +326,19 @@ pub fn plan_del(session: &Session, protocol: Option<Protocol>) -> Result<Option<
         protocol.is_some() || cfg.inbounds.len() > 1,
         "至少保留一个协议；全部删除请使用 uninstall"
     );
-    let Some(protocol) = enabled(session, cfg, protocol, "选择要删除的协议")? else {
+    let protocol = match protocol {
+        Some(p) => {
+            ensure!(cfg.has(p), "协议未启用");
+            Some(p)
+        }
+        // Destructive: nothing is picked for the user.
+        None => {
+            ensure!(session.ui().interactive(), "{DEL_NEEDS_PROTOCOL}");
+            let list: Vec<Protocol> = cfg.protocols().collect();
+            pick_with_default(session, "选择要删除的协议", &list, ui::BACK)?
+        }
+    };
+    let Some(protocol) = protocol else {
         return Ok(None);
     };
     let next = plan::remove(cfg, protocol)?;
