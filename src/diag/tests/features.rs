@@ -1,7 +1,7 @@
 //! End-to-end diagnoses of optional features: the site, the standalone
 //! subscription, FRP, extra providers, v2 and broken states.
 
-use super::super::fixture::{check, two_core_config, with_status, Node, NOW};
+use super::super::fixture::{check, signals, two_core_config, with_status, Node, NOW};
 use super::super::*;
 use super::{failing_provider, names};
 use crate::apply::program_journal::{self, ProgramJournal};
@@ -188,6 +188,7 @@ fn nothing_installed_is_not_installed() {
         init: crate::host::init::InitSystem::Systemd,
         now: NOW,
     };
+    let _signals = signals();
     let err = doctor.diagnose(&[], &mut |_| {}).unwrap_err();
     assert!(matches!(err, Error::NotInstalled), "{err}");
 }
@@ -209,6 +210,7 @@ fn a_journal_without_state_is_still_diagnosed() {
         init: crate::host::init::InitSystem::Systemd,
         now: NOW,
     };
+    let _signals = signals();
     let checks = doctor.diagnose(&[], &mut |_| {}).unwrap().checks;
     assert_eq!(names(&checks), ["节点配置", "未完成事务", "管理程序"]);
     assert_eq!(check(&checks, "节点配置").detail, "未安装代理节点");
@@ -228,6 +230,7 @@ fn an_frp_journal_without_any_installation_is_still_diagnosed() {
         init: crate::host::init::InitSystem::Systemd,
         now: NOW,
     };
+    let _signals = signals();
     let checks = doctor.diagnose(&[], &mut |_| {}).unwrap().checks;
     assert_eq!(names(&checks), ["节点配置", "未完成事务", "管理程序"]);
     assert_eq!(check(&checks, "未完成事务").status, CheckStatus::Pass);
@@ -302,6 +305,7 @@ fn frp_only_hosts_are_diagnosed_without_node_checks() {
         init: crate::host::init::InitSystem::Systemd,
         now: NOW,
     };
+    let _signals = signals();
     let checks = doctor.diagnose(&[], &mut |_| {}).unwrap().checks;
     assert_eq!(
         names(&checks),
@@ -330,6 +334,7 @@ fn extra_provider(doctor: &Doctor, cfg: Option<&crate::domain::NodeConfig>) -> V
 fn extra_providers_run_last_in_order_with_the_diagnosis_facts() {
     let node = Node::healthy();
     let providers: [CheckFn; 2] = [extra_provider, failing_provider];
+    let _signals = signals();
     let diagnosis = node.doctor().diagnose(&providers, &mut |_| {}).unwrap();
     let tail: Vec<&Check> = diagnosis.checks.iter().rev().take(2).collect();
     assert_eq!(
@@ -346,6 +351,7 @@ fn extra_providers_run_last_in_order_with_the_diagnosis_facts() {
 #[test]
 fn doctor_reports_failures_through_its_exit_status() {
     let node = Node::healthy();
+    let _signals = signals();
     assert!(report::run_doctor(&node.doctor(), &[]).is_ok());
     let err = report::run_doctor(&node.doctor(), &[failing_provider]).unwrap_err();
     assert_eq!(err.to_string(), "体检发现 1 个需要处理的问题");

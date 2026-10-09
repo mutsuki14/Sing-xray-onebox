@@ -18,7 +18,10 @@
 //! one runs, services are stopped and files swapped on purpose, so every
 //! later failure is reported as a warning. The FRP journal and lock get the
 //! same treatment for the FRP lines. Checks never abort the diagnosis: a
-//! failing probe becomes a `[失败]` or `[警告]` line.
+//! failing probe becomes a `[失败]` or `[警告]` line. Only Ctrl+C
+//! (INT/TERM/HUP) does: the diagnosis holds recording handlers and stops
+//! at the next check with `Error::Cancelled` (exit 130), so a probe cut
+//! short is never reported as a broken component.
 //!
 //! Changes from v2:
 //! - checks cover the site, subscription and FRP, service autostart, the
@@ -40,6 +43,9 @@
 //! - an unreadable state is a failure line and the checks that do not need
 //!   it still run (v2 aborted); a host with only FRP, or with only a
 //!   journal, is diagnosed instead of reported as not installed;
+//! - Ctrl+C stops `doctor` with exit 130 as in v2 (which died on the
+//!   signal), now with `[错误] 操作被信号 N 中断`; `support` then writes no
+//!   file;
 //! - `support` names its file `support-{unix}-{random}.json` (v2 failed
 //!   when run twice in a second, D-8.1#31), ends it with a newline, adds the
 //!   check results, and redacts IP addresses, domain names and credentials
@@ -189,7 +195,8 @@ impl<'a> Doctor<'a> {
     /// Run every applicable check (see the module docs), handing each one
     /// to `sink` as soon as it is known. `Err(NotInstalled)` when there is
     /// nothing to diagnose: no node state, no FRP and no pending journal
-    /// (node, self-update or FRP).
+    /// (node, self-update or FRP); `Err(Cancelled)` (exit 130) when the
+    /// user pressed Ctrl+C.
     pub fn diagnose(&self, extra: &[CheckFn], sink: &mut dyn FnMut(&Check)) -> Result<Diagnosis> {
         checks::diagnose(self, extra, sink)
     }
@@ -229,7 +236,8 @@ pub fn support(ctx: &Ctx) -> Result<PathBuf> {
     support_with(ctx, EXTRA_CHECKS)
 }
 
-/// [`support`] with explicit extra check providers.
+/// [`support`] with explicit extra check providers. Ctrl+C before the
+/// report is written leaves no file (`Err(Cancelled)`).
 pub fn support_with(ctx: &Ctx, extra: &[CheckFn]) -> Result<PathBuf> {
     support::write_support(&Doctor::system(ctx), extra)
 }

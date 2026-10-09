@@ -98,6 +98,7 @@ mod tests {
             init: crate::host::init::InitSystem::Systemd,
             now: 0,
         };
+        let _signals = crate::diag::fixture::signals();
         let checks = doctor.diagnose(PROVIDERS, &mut |_| {}).unwrap().checks;
         let journal = checks.iter().find(|c| c.name == "FRP 事务").unwrap();
         assert_eq!(

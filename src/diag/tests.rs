@@ -1,7 +1,8 @@
 //! End-to-end diagnoses of fixture nodes (FakeExec + isolated layouts).
 
 use super::fixture::{
-    acme_config, check, two_core_config, with_status, x509_output, Cron, Node, DAY, NOW,
+    acme_config, check, interrupted, signals, two_core_config, with_status, x509_output, Cron,
+    Node, DAY, NOW,
 };
 use super::*;
 use crate::apply::journal::{self, Journal, Phase};
@@ -22,6 +23,7 @@ fn names(checks: &[Check]) -> Vec<&str> {
 fn healthy_node_passes_every_applicable_check_in_order() {
     let node = Node::healthy();
     let mut streamed = Vec::new();
+    let _signals = signals();
     let diagnosis = node
         .doctor()
         .diagnose(&[], &mut |c| streamed.push(c.clone()))
@@ -253,7 +255,10 @@ fn a_running_operation_turns_failures_into_warnings() {
             "配置操作进行中，可能是暂时的: 未运行；查看日志: onebox service onebox-xray log"
         )
     );
-    assert!(report::run_doctor(&node.doctor(), &[failing_provider]).is_ok());
+    {
+        let _signals = signals();
+        assert!(report::run_doctor(&node.doctor(), &[failing_provider]).is_ok());
+    }
 
     drop(held);
     let after = node.diagnose();
@@ -379,6 +384,57 @@ fn stopped_disabled_and_unconfigured_services() {
 
 pub(super) fn failing_provider(_: &Doctor, _: Option<&crate::domain::NodeConfig>) -> Vec<Check> {
     vec![Check::fail("额外检查", "坏了")]
+}
+
+#[test]
+fn ctrl_c_stops_the_diagnosis_before_the_interrupted_probe_is_reported() {
+    let node = Node::new(two_core_config());
+    interrupted(&node.fake, "onebox", "version");
+    let node = node.finish();
+    let _signals = signals();
+    crate::sys::signal::clear();
+    let mut shown = Vec::new();
+    let err = node
+        .doctor()
+        .diagnose(&[], &mut |c| shown.push(c.name.clone()))
+        .unwrap_err();
+    assert!(err.is_cancelled(), "{err}");
+    assert_eq!(err.exit_code(), 130);
+    assert_eq!(err.report_text(), "操作被信号 2 中断");
+    assert_eq!(shown, ["节点配置", "未完成事务"], "管理程序 is not broken");
+    assert_eq!(
+        crate::sys::signal::pending(),
+        None,
+        "the signal is consumed"
+    );
+    // Doctor exits 130 instead of counting problems.
+    let err = report::run_doctor(&node.doctor(), &[]).unwrap_err();
+    assert!(err.is_cancelled(), "{err}");
+}
+
+/// Interrupted while it works, without a line of its own.
+fn interrupted_provider(_: &Doctor, _: Option<&crate::domain::NodeConfig>) -> Vec<Check> {
+    // SAFETY: raises a signal on this thread; the diagnosis has installed
+    // the recording handler.
+    unsafe {
+        libc::raise(libc::SIGTERM);
+    }
+    Vec::new()
+}
+
+#[test]
+fn ctrl_c_during_the_last_provider_still_cancels() {
+    let node = Node::healthy();
+    let _signals = signals();
+    let err = node
+        .doctor()
+        .diagnose(&[interrupted_provider], &mut |_| {})
+        .unwrap_err();
+    assert!(err.is_cancelled(), "{err}");
+    assert_eq!(err.report_text(), "操作被信号 15 中断");
+    assert_eq!(crate::sys::signal::pending(), None);
+    // That signal was consumed: the next diagnosis is not cancelled by it.
+    assert!(node.doctor().diagnose(&[], &mut |_| {}).is_ok());
 }
 
 mod features;

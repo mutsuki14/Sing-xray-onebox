@@ -17,6 +17,7 @@ use crate::state::Origin;
 use crate::sys::exec::Cmd;
 use crate::sys::fs::TempDir;
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
+use crate::sys::signal::{self, SignalScope};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::time::Duration;
@@ -33,16 +34,54 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Prefix of a failure downgraded while a configuration operation runs.
 pub const TRANSIENT: &str = "配置操作进行中，可能是暂时的: ";
 
+/// Ctrl+C (INT/TERM/HUP) during a diagnosis. Recording handlers are held
+/// throughout, so an interrupted probe's command returns its output
+/// (`sys::exec` forwards the signal to it) instead of failing, and the
+/// diagnosis stops at the next check with `Error::Cancelled` (exit 130)
+/// instead of reporting the probe's component as broken.
+pub(super) struct Interrupt {
+    start: signal::Received,
+    _scope: SignalScope,
+}
+
+impl Interrupt {
+    pub(super) fn watch() -> Result<Interrupt> {
+        // The baseline first: a signal right after it is counted.
+        let start = signal::received();
+        let scope = SignalScope::install()?;
+        Ok(Interrupt {
+            start,
+            _scope: scope,
+        })
+    }
+
+    /// `Err(Cancelled)` once a signal arrived since [`Interrupt::watch`].
+    /// The signal is consumed, so a menu that goes on does not cancel its
+    /// next operation.
+    pub(super) fn check(&self) -> Result<()> {
+        let now = signal::received();
+        if now.count == self.start.count || now.last == 0 {
+            return Ok(());
+        }
+        signal::clear();
+        Err(Error::Cancelled.wrap(format!("操作被信号 {} 中断", now.last)))
+    }
+}
+
 /// Checks recorded in order, each handed to the sink as it is added.
 struct Run<'s> {
     checks: Vec<Check>,
     sink: &'s mut dyn FnMut(&Check),
     /// A configuration operation runs: failures become warnings.
     transient: bool,
+    interrupt: &'s Interrupt,
 }
 
 impl Run<'_> {
-    fn push(&mut self, check: Check) {
+    /// Record `check`; `Err(Cancelled)` instead once the user pressed
+    /// Ctrl+C (the check may come from a probe cut short).
+    fn push(&mut self, check: Check) -> Result<()> {
+        self.interrupt.check()?;
         let check = if self.transient {
             downgrade(check)
         } else {
@@ -50,12 +89,11 @@ impl Run<'_> {
         };
         (self.sink)(&check);
         self.checks.push(check);
+        Ok(())
     }
 
-    fn extend(&mut self, checks: impl IntoIterator<Item = Check>) {
-        for check in checks {
-            self.push(check);
-        }
+    fn extend(&mut self, checks: impl IntoIterator<Item = Check>) -> Result<()> {
+        checks.into_iter().try_for_each(|check| self.push(check))
     }
 }
 
@@ -75,6 +113,7 @@ pub(super) fn diagnose(
     extra: &[CheckFn],
     sink: &mut dyn FnMut(&Check),
 ) -> Result<Diagnosis> {
+    let interrupt = Interrupt::watch()?;
     let ctx = doctor.ctx;
     let survey = Survey::gather(ctx);
     let running = operation_running(&ctx.paths);
@@ -92,22 +131,25 @@ pub(super) fn diagnose(
         checks: Vec::new(),
         sink,
         transient: false,
+        interrupt: &interrupt,
     };
-    run.extend(state_checks(&survey.node));
-    run.push(journal);
+    run.extend(state_checks(&survey.node))?;
+    run.push(journal)?;
     run.transient = running;
-    run.push(program_check(ctx));
+    run.push(program_check(ctx))?;
     if let Some(cfg) = survey.config() {
-        node_checks(doctor, cfg, &mut run);
+        node_checks(doctor, cfg, &mut run)?;
     }
     if survey.node.present() {
-        run.extend(ledger_checks(ctx, survey.config()));
+        run.extend(ledger_checks(ctx, survey.config()))?;
     }
     let frp = frp_check(&survey.frp);
-    run.extend(frp.map(|check| if frp_running { downgrade(check) } else { check }));
+    run.extend(frp.map(|check| if frp_running { downgrade(check) } else { check }))?;
     for provider in extra {
-        run.extend(provider(doctor, survey.config()));
+        run.extend(provider(doctor, survey.config()))?;
     }
+    // The last probe may have been cut short without adding a line.
+    interrupt.check()?;
     Ok(Diagnosis {
         survey,
         checks: run.checks,
@@ -116,16 +158,16 @@ pub(super) fn diagnose(
 }
 
 /// Everything that needs the loaded configuration.
-fn node_checks(doctor: &Doctor, cfg: &NodeConfig, run: &mut Run) {
+fn node_checks(doctor: &Doctor, cfg: &NodeConfig, run: &mut Run) -> Result<()> {
     // sing-box checks need a working directory; a private one keeps the
     // diagnosis from creating `RUN/check` (G42). Removed on drop.
     let temp = TempDir::new("doctor").map_err(|e| e.to_string());
     let workdir = temp.as_ref().map(TempDir::path).map_err(String::as_str);
-    run.extend(node::core_checks(doctor.ctx, cfg, workdir));
-    run.extend(node::service_checks(&doctor.services(), cfg));
-    run.extend(tls::certificate_checks(doctor, cfg));
-    run.extend(tls::nginx_checks(doctor.ctx, cfg));
-    run.extend(tls::renewal_check(doctor, cfg));
+    run.extend(node::core_checks(doctor.ctx, cfg, workdir))?;
+    run.extend(node::service_checks(&doctor.services(), cfg))?;
+    run.extend(tls::certificate_checks(doctor, cfg))?;
+    run.extend(tls::nginx_checks(doctor.ctx, cfg))?;
+    run.extend(tls::renewal_check(doctor, cfg))
 }
 
 /// `节点配置`: loaded (protocol summary), still in v2 shape (with the
