@@ -354,7 +354,6 @@ class FixtureNode:
         }
 
 
-
 # ---------------------------------------------------------------------------
 # Self-tests (python3 tests/e2e/_selftest.py)
 
