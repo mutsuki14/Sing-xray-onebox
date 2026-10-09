@@ -22,7 +22,7 @@
 | `*.apps.example.com` | 网站模式，泛域名（如 `home.apps.example.com`） | 本机公网 A / AAAA |
 
 - 安装时会解析控制域名和应用域名（泛域名用一个随机子域名检查），所有 A / AAAA 都必须指向本机；残留旧 IP、错误 AAAA 或 CDN 代理地址都会导致检查失败。Cloudflare 记录请设为**仅 DNS**。
-- 域名必须是 DNS 名称，不能是 IP 地址。v2 曾允许 IP：这类旧配置升级后原样保留，但每个 FRP 命令都会提示（作为控制域名时 frpc 无法校验服务端证书），修改该项时必须改为域名。
+- 域名必须是 DNS 名称，不能是 IP 地址。v2 曾允许 IP：这类旧配置升级后原样保留，但读取 FRP 配置的命令（`info`、`plan` / `install` / `configure`、`client`、`start` / `stop` / `restart`、`update`、`renew`、`rotate-token` / `rotate-ca`）都会提示（作为控制域名时 frpc 无法校验服务端证书），`onebox doctor` 也会给出警告；修改该项时必须改为域名。
 - 云安全组放行控制端口，以及网站模式的 HTTPS（和 HTTP 跳转）端口，或 TCP 模式的整个转发范围（TCP 与 UDP）。本机防火墙由 Onebox 自动放行。
 - 安装会检查代理节点（含网站、订阅、Hysteria2 跳跃范围和 HTTP-01 的 80 端口）以及其他进程占用的端口，冲突时停止，不接管已有服务。80 / 443 已被占用时，可改用 `--https-port 8443 --tls cf --redirect-port 0`，访问地址为 `https://app.example.com:8443/`。HTTP-01 必须使用并持续开放 TCP 80。
 - 缺少的 curl、openssl、iproute2、cron 会自动安装；网站模式还需要 nginx：未安装时自动安装发行版的 nginx 包，并停用只提供默认欢迎页的系统 nginx 服务，FRP 只使用自己的 `onebox-frp-web` 实例。
@@ -39,7 +39,7 @@
 6. 网站模式：frps 内部 HTTP 端口、公开 HTTPS 端口、HTTP 跳转端口（HTTP-01 固定为 80，不再询问）
 7. 自备证书：证书完整链与未加密私钥的路径（相对路径按当前目录解析）
 
-回车保留默认值，`b` 返回上一步，`q` 或 Ctrl+D 取消。整体校验失败时显示原因并回到“控制端口”继续修改。选择 Cloudflare DNS 时，如果环境变量和已保存的凭据中都没有 Token，会在确认前隐藏输入。最后显示部署摘要，确认（默认否）后才修改系统。
+回车保留默认值，`b` 返回上一步，`q` 或 Ctrl+D 取消。整体校验失败时显示原因并回到“控制端口”继续修改。向导结束后显示部署摘要；选择 Cloudflare DNS 且环境变量和已保存的凭据中都没有 Token 时，接着隐藏输入 Token；最后确认（默认否）后才修改系统。
 
 带参数时不进入向导：参数叠加在当前配置（未安装时为默认值）上，显示摘要后请求确认，`-y` 自动确认。不适用于所选模式的参数会提示“已忽略”。先用 `plan` 或 `--dry-run` 预览（不联网、不修改系统）：
 
@@ -94,8 +94,8 @@ frpc -c frpc.toml
 
 | 用途 | 证书 | 续期 |
 |---|---|---|
-| frpc ↔ frps 控制连接 | 私有 CA（EC P-256，3650 天）签发的服务端证书（397 天） | 剩余不足 30 天、控制域名变化或与私钥不匹配时重新签发；每日 03:17 和每次 FRP 变更时检查，证书变化且 frps 正在运行时才重启 frps |
-| 浏览器访问的网站 | Let's Encrypt（`http` / `cf`）或自备证书（`custom`） | 每日 03:17 检查，剩余不足 30 天时续期；证书更新后重写配置并重启 `onebox-frp-web`。HTTP-01 需保持 80 可达，网站服务停止时本次跳过 |
+| frpc ↔ frps 控制连接 | 私有 CA（EC P-256，3650 天）签发的服务端证书（397 天） | 剩余不足 30 天、控制域名变化或与私钥不匹配时重新签发。每日 03:17 的计划任务和手动 `onebox frps renew` 会检查，只有证书变化且 frps 正在运行时才重启 frps；安装、配置、更新和轮换时也会检查，这些操作本身就会重启 frps |
+| 浏览器访问的网站 | Let's Encrypt（`http` / `cf`）或自备证书（`custom`） | 每日 03:17 检查，剩余不足 30 天时续期；证书更新后重写配置，`onebox-frp-web` 正在运行时重启它。HTTP-01 需保持 80 可达，网站服务停止时本次跳过 |
 
 两类证书由同一条计划任务 `onebox frps renew --cron` 处理。手动执行 `onebox frps renew` 时会**强制**续期网站证书（不论是否到期，注意 Let's Encrypt 的频率限制）。网站证书续期失败不影响控制证书，原证书保持不变，命令以错误结束。
 
@@ -115,7 +115,9 @@ FRP CA 无效或即将过期；需人工轮换并更新所有客户端（onebox 
 onebox frps                         # 管理菜单（无终端时显示状态）
 onebox frps info                    # 配置摘要与服务状态（别名 status；不显示 token）
 onebox frps configure --port 7001   # 在当前配置上修改；失败自动恢复原配置和服务
-onebox frps start | stop | restart  # stop 保留防火墙规则与开机自启
+onebox frps start                   # 启动
+onebox frps stop                    # 停止；保留防火墙规则与开机自启
+onebox frps restart                 # 重启
 onebox frps log                     # frps 与网站服务最近 80 行日志（别名 logs）
 onebox frps update                  # 更新到官方最新稳定版
 onebox frps update 0.71.0           # 指定版本（不低于 0.71.0）
@@ -126,14 +128,14 @@ onebox frps uninstall               # 单独卸载 FRP
 onebox frps --help
 ```
 
-`configure`、`update`、`rotate-token`、`rotate-ca` 先显示摘要再请求确认，`uninstall` 直接请求确认（都默认否，`-y` 自动确认）；部署期间已有连接会短暂中断。`update` 到正在运行的版本时只提示“无需更新”，不做任何修改。`plan`、`install --dry-run`、`info`、`client` 和 `log` 不修改系统，不要求 root；但已安装时它们要读取仅 root 可读的状态文件，实际仍需以 root 运行。
+`configure`、`update`、`rotate-token`、`rotate-ca` 先显示摘要再请求确认，`uninstall` 直接请求确认（都默认否，`-y` 自动确认）；部署期间已有连接会短暂中断。`update` 的目标版本与已安装的 frps 相同（且配置不变）时，确认后只提示“FRP 已是 X 版本，无需更新”，不改动 FRP。`plan`、`install --dry-run`、`info`、`client` 和 `log` 不修改系统，不要求 root；但已安装时 `plan`、`install --dry-run`、`info`、`client` 要读取仅 root 可读的 `/etc/onebox-frp/` 中的状态文件，`log` 要读取 journald 或 0700 的 `/var/log/onebox-frp/`，实际仍需以 root 运行。
 
 `plan` / `install` / `configure` 的参数：
 
 | 参数 | 含义 / 默认值 |
 |---|---|
 | `--mode web\|tcp` | 网站模式 / TCP、UDP 转发模式，默认 `web` |
-| `--domain 域名` | 控制域名，必填 |
+| `--domain 域名` | 控制域名；首次安装必填，已安装时默认沿用当前值 |
 | `--web-domain 域名` / `--subdomain-host 根域` | 网站模式的单应用域名或泛域名根，二选一 |
 | `--port 7000` | 控制连接端口 |
 | `--http-port 7080` | 网站模式的内部 HTTP 端口（仅本机） |

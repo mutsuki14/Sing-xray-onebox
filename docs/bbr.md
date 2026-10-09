@@ -2,7 +2,7 @@
 
 `onebox bbr` 管理 TCP 拥塞控制：启用当前内核自带的 BBR，或安装 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 构建的 BBRv3 内核。交互安装节点结束时会询问是否启用系统自带 BBR（默认是，使用 `fq` 队列；`--no-bbr` 跳过，无人值守安装不询问）；升级程序、打开菜单和查看状态都不会安装内核。
 
-> TCP BBR 只影响 TCP 协议。Hysteria2 / TUIC 使用 QUIC 自己的拥塞控制，请用 `onebox tune`（见 [performance.md](performance.md)）。
+> TCP BBR 只影响 TCP。Hysteria2 / TUIC 走 QUIC，由代理内核自己做拥塞控制，不受这里的设置影响：sing-box 承载的 Hysteria2 可用 `onebox tune` 调整（见 [performance.md](performance.md)）；TUIC 固定使用 QUIC 的 BBR，没有对应的调优。
 
 ## 启用当前内核的 BBR
 
