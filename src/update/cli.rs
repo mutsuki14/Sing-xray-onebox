@@ -56,15 +56,12 @@ pub const UPDATE_CHECK: CommandSpec = CommandSpec::new(
 .handler(update_check_command);
 
 /// `update-channel [stable|testing]`.
-pub const UPDATE_CHANNEL: CommandSpec = CommandSpec::new(
-    "update-channel",
-    Group::Maintain,
-    "查看或设置程序更新渠道",
-)
-.usage(&["update-channel [stable|testing]"])
-.args(&[ArgSpec::optional("渠道", "stable / testing；省略时只显示")])
-.root(Root::Custom(saves_channel))
-.handler(update_channel_command);
+pub const UPDATE_CHANNEL: CommandSpec =
+    CommandSpec::new("update-channel", Group::Maintain, "查看或设置程序更新渠道")
+        .usage(&["update-channel [stable|testing]"])
+        .args(&[ArgSpec::optional("渠道", "stable / testing；省略时只显示")])
+        .root(Root::Custom(saves_channel))
+        .handler(update_channel_command);
 
 /// Every update command, in help order.
 pub const COMMANDS: [CommandSpec; 4] = [UPDATE, UPDATE_SCRIPT, UPDATE_CHECK, UPDATE_CHANNEL];
@@ -139,8 +136,18 @@ mod tests {
     fn update_forms() {
         let cases: [(&[&str], CoreSelection, Option<&str>, bool); 6] = [
             (&["update"], CoreSelection::All, None, false),
-            (&["update", "all", "latest"], CoreSelection::All, Some("latest"), false),
-            (&["update", "singbox"], CoreSelection::One(Core::Singbox), None, false),
+            (
+                &["update", "all", "latest"],
+                CoreSelection::All,
+                Some("latest"),
+                false,
+            ),
+            (
+                &["update", "singbox"],
+                CoreSelection::One(Core::Singbox),
+                None,
+                false,
+            ),
             (
                 &["update", "sing-box", "1.14.2"],
                 CoreSelection::One(Core::Singbox),
@@ -162,22 +169,26 @@ mod tests {
         ];
         for (argv, selection, version, force) in cases {
             let m = matches(argv).unwrap();
-            assert_eq!(core_args(&m).unwrap(), (selection, version, force), "{argv:?}");
+            assert_eq!(
+                core_args(&m).unwrap(),
+                (selection, version, force),
+                "{argv:?}"
+            );
             assert!(needs_root(argv), "{argv:?}");
         }
         let unknown = matches(&["update", "v2ray"]).unwrap();
         assert_eq!(core_args(&unknown).unwrap_err().to_string(), "未知内核");
         for (argv, message) in [
             (&["update", "xray", "1", "2"][..], "多余的参数: 2"),
-            (
-                &["update", "--dry-run"],
-                "此命令不支持 --dry-run",
-            ),
+            (&["update", "--dry-run"], "此命令不支持 --dry-run"),
             (
                 &["update-script", "--force"],
                 "update-script 不支持选项 --force；请执行 onebox update-script --help",
             ),
-            (&["update-check", "stable", "testing"], "多余的参数: testing"),
+            (
+                &["update-check", "stable", "testing"],
+                "多余的参数: testing",
+            ),
         ] {
             assert_eq!(matches(argv).unwrap_err().to_string(), message, "{argv:?}");
         }
@@ -207,7 +218,10 @@ mod tests {
         let dir = TempDir::new("update-cli").unwrap();
         let (ctx, _, _) = Ctx::test(dir.path());
         assert_eq!(channel_command(&ctx, None).unwrap(), "当前更新渠道: stable");
-        assert!(!ctx.paths.update_channel().exists(), "printing writes nothing");
+        assert!(
+            !ctx.paths.update_channel().exists(),
+            "printing writes nothing"
+        );
         assert_eq!(
             channel_command(&ctx, Some(Channel::Testing)).unwrap(),
             "当前更新渠道: testing"
@@ -216,7 +230,10 @@ mod tests {
             std::fs::read(ctx.paths.update_channel()).unwrap(),
             b"testing\n"
         );
-        assert_eq!(channel_command(&ctx, None).unwrap(), "当前更新渠道: testing");
+        assert_eq!(
+            channel_command(&ctx, None).unwrap(),
+            "当前更新渠道: testing"
+        );
     }
 
     #[test]

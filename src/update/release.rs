@@ -298,17 +298,22 @@ mod tests {
     #[test]
     fn report_shows_versions_and_sanitized_notes() {
         let long = "长".repeat(250);
-        let body = format!(
-            "## 更新\r\n- 修复\t问题\x1b[31m\n\n{long}\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13"
-        );
+        let body =
+            format!("## 更新\r\n- 修复\t问题\x1b[31m\n\n{long}\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13");
         let lines = report_lines(Channel::Stable, "3.0.0", "3.0.1", &body);
-        assert_eq!(lines[..3], ["更新渠道: stable", "当前版本: 3.0.0", "发布版本: 3.0.1"]);
+        assert_eq!(
+            lines[..3],
+            ["更新渠道: stable", "当前版本: 3.0.0", "发布版本: 3.0.1"]
+        );
         assert_eq!(lines.len(), 3 + BODY_LINES);
         assert_eq!(lines[3], "  ## 更新");
         assert_eq!(lines[4], "  - 修复问题[31m");
         assert_eq!(lines[5], "  ");
         assert_eq!(lines[6].chars().count(), 2 + BODY_LINE_CHARS);
         assert_eq!(lines.last().unwrap(), "  11");
-        assert_eq!(report_lines(Channel::Testing, "3.0.0", "testing", "").len(), 3);
+        assert_eq!(
+            report_lines(Channel::Testing, "3.0.0", "testing", "").len(),
+            3
+        );
     }
 }

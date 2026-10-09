@@ -138,7 +138,11 @@ pub fn targets(cfg: &NodeConfig, selection: CoreSelection, wanted: &Wanted) -> R
         .map(|core| target(core, selection, wanted, cfg.versions.pin(core)))
         .collect();
     if let CoreSelection::One(core) = selection {
-        ensure!(!list.is_empty(), "当前配置未使用 {}，无需更新", core.title());
+        ensure!(
+            !list.is_empty(),
+            "当前配置未使用 {}，无需更新",
+            core.title()
+        );
     }
     ensure!(!list.is_empty(), "所选内核未安装");
     let exact_for_two = matches!(wanted, Wanted::Exact(_)) && list.len() > 1;
