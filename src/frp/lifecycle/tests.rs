@@ -355,6 +355,36 @@ fn crashed_transactions_block_net_apply_until_recovered() {
 }
 
 #[test]
+fn onebox_recover_reports_a_partial_rollback_once() {
+    let h = FakeHost::new();
+    let original = install_tcp(&h);
+    let rt = h.runtime();
+    let paths = &h.ctx.paths;
+    {
+        let lock = rt.lock().unwrap();
+        let mut txn = Txn::begin(&rt, &lock, "测试", &journal::targets(paths)).unwrap();
+        txn.phase(Phase::WriteFiles).unwrap();
+        let mut changed = original.clone();
+        changed.bind_port = 7009;
+        model::save(paths, &changed).unwrap();
+        rt.services().stop(FRPS).unwrap();
+    }
+    h.break_unit(FRPS, true);
+    let lock = rt.lock().unwrap();
+    let err = recover_with(&rt, &lock).unwrap_err().to_string();
+    assert!(
+        err.starts_with("FRP 事务已回滚；已恢复旧 FRP 配置，但以下步骤未完成: 启动 onebox-frps: "),
+        "{err}"
+    );
+    assert_eq!(model::load(paths).unwrap().unwrap(), original);
+    // The journal is gone: the next recover has nothing to do and the boot
+    // hook works.
+    recover_with(&rt, &lock).unwrap();
+    drop(lock);
+    net_apply(&h.ctx).unwrap();
+}
+
+#[test]
 fn every_mutation_recovers_first() {
     let h = FakeHost::new();
     let original = install_tcp(&h);

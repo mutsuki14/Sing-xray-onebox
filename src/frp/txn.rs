@@ -316,7 +316,7 @@ pub fn recover_locked(rt: &Runtime, lock: &FileLock) -> Result<bool> {
         }
         Recovery::RolledBack(missed) => {
             out::warn(format!(
-                "已恢复未完成的 FRP 事务{}",
+                "未完成的 FRP 事务已回滚{}",
                 partly_restored(&missed)
             ));
             Ok(true)
