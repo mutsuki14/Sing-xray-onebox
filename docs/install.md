@@ -81,7 +81,7 @@ onebox install --preset 1 -y --force
 | `--port 协议=端口` | 指定协议端口，可重复 |
 | `--sni 域名` | REALITY 与 ShadowTLS 的伪装域名，握手目标为 `域名:443` |
 | `--reality-dest 主机:端口` | 单独指定 REALITY 握手目标（SNI 不变）；与 `--sni` 同时给出时在其后生效 |
-| `--reality-site 域名` | 以自有域名网站作为 REALITY 目标（域名需解析到本机），见 [website.md](website.md)；不能与 `--sni`、`--reality-dest` 同用。无人值守时网站证书使用 HTTP-01，交互向导可选其他方式 |
+| `--reality-site 域名` | 以自有域名网站作为 REALITY 目标（域名需解析到本机），见 [website.md](website.md)；不能与 `--sni`、`--reality-dest` 同用。用此选项时网站证书为 HTTP-01（在交互向导第 2 步选择建站才能选其他方式，安装后也可用 `onebox site enable 域名 --tls cf\|custom` 更换） |
 | `--site-title 标题` | 自动生成主页的标题，默认“山间手记”；只能与 `--reality-site` 同用 |
 | `--site-https on\|off` | 网站的 HTTPS 443 入口，默认 `on`；只能与 `--reality-site` 同用 |
 | `--tls self\|acme\|cf\|custom` | 代理证书：自签 / HTTP-01（`http` 同 `acme`）/ Cloudflare DNS / 自备；后三种需要 `--domain` |
