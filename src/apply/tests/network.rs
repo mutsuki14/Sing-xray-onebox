@@ -120,22 +120,22 @@ fn masked(world: World) -> World {
     world
 }
 
-/// A fault after apply-network rolls the hop back to the old range. The
-/// old range is installed again, so its record carries a new token
-/// (`host::hop` always installs before it retires); everything else is
-/// byte-identical.
+/// A failure at any stage of a Hysteria2 change (certificate, hops) rolls
+/// back to the old generation; from apply-network on, the hop goes back
+/// to the old range. That range is installed again, so its record carries
+/// a new token (`host::hop` always installs before it retires);
+/// everything else is byte-identical.
 #[test]
 fn a_fault_after_apply_network_rolls_the_hops_back() {
-    for point in [
-        Phase::ApplyNetwork,
-        Phase::StartCores,
-        Phase::PublishClients,
-    ] {
+    let replace_cores = Checkpoint::Stage(Phase::ReplaceCores);
+    for point in uncommitted_points()
+        .into_iter()
+        .filter(|p| *p != replace_cores)
+    {
         let host = Host::new();
         host.install(hy2(8443, Some((20000, 30000))));
         let before = host.world();
-        host.features
-            .inject(Fault::Fail(Checkpoint::Stage(point.clone())));
+        host.features.inject(Fault::Fail(point.clone()));
         let req = host.change(hy2(9443, Some((40000, 50000))), "修改跳跃");
         let text = err_text(&host.apply(req).unwrap_err());
         assert!(text.starts_with("配置未应用，已恢复原状态"), "{text}");
