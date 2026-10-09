@@ -11,22 +11,28 @@ Phases:
   ``add --dry-run`` never create ``ONEBOX_DIR``;
 * full (root), once with the compiled fixture core and, when
   ``ONEBOX_TEST_SINGBOX`` (or ``--singbox``) names a real sing-box, once more
-  with it: install, port change, ``add anytls-reality``, client exports,
-  backup/restore, conflicting port changes, (fixture core only) an injected
-  start failure whose rollback also fails and ``recover``, a v2 state +
-  subscription migration through ``regen``, the 1.x refusal and uninstall.
+  with it: install, the boot-time ``service onebox-network start`` reaching
+  only the tripwires (when the host programs are masked), port change,
+  ``add anytls-reality``, client exports, backup/restore, conflicting port
+  changes, (fixture core only) an injected start failure whose rollback
+  also fails and ``recover``, a v2 state + subscription migration through
+  ``regen`` (open firewall ports, no renew line), the 1.x refusal and
+  uninstall (with leftovers this node never wrote, which must go too).
 
-``ONEBOX_TEST_REQUIRE_FULL=1`` turns every skip (not root, no real core) into
-a failure.
+``ONEBOX_TEST_REQUIRE_FULL=1`` turns every skip (not root, no real core,
+host programs not maskable) into a failure.
 
 Changes from v2 (deliberate, COMPLETENESS G27/G11):
-- ``client mihomo`` is YAML (parsed strictly) instead of JSON;
+- ``client mihomo`` is YAML (parsed strictly by ``_yaml.load_yaml``)
+  instead of JSON;
 - the v1 ``onebox.conf`` migration phase is replaced by a v2
   ``{"values"}`` state + ``subscription/settings.json`` migration (v1 is no
   longer migrated: an ``onebox.conf``-only host gets the exact 1.x message);
 - uninstall is checked against the v3 keep/remove list;
-- every recorded external call is checked: no blocked program ever runs and
-  ``curl`` is only used for the public-address probe.
+- every recorded external call is checked: no blocked program runs, no
+  emulated program is called in a way the sandbox refuses, ``curl`` is only
+  used for the public-address probe, no host program is reached and the
+  host firewall and crontab are unchanged (``_lifecycle_host``).
 """
 from __future__ import annotations
 
@@ -40,7 +46,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lifecycle_fixtures as fx  # noqa: E402
 import _lifecycle_sandbox as sb  # noqa: E402
+from _yaml import load_yaml  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 V1_MESSAGE = (
@@ -51,6 +59,9 @@ V1_MESSAGE = (
 UNINSTALL_MESSAGE = "代理已卸载，网站内容和备份保留于原目录；FRP 可用 onebox frps 管理"
 NODE_SERVICES = ("onebox-sing-box", "onebox-xray", "onebox-subscription", "onebox-subscription-web",
                  "onebox-site", "onebox-network")
+# The services a full pass runs (log/ holds exactly their logs: never
+# onebox-network, a oneshot that would reach the host's real firewall).
+SERVICE_LOGS = ["onebox-sing-box.log", "onebox-subscription.log"]
 
 
 def check(condition: object, message: str) -> None:
@@ -108,6 +119,18 @@ def install_phase(s: sb.Sandbox, ports: Ports) -> dict:
     return state
 
 
+def boot_escape_phase(s: sb.Sandbox) -> None:
+    """The no-init @reboot line runs ``service onebox-network start``: a
+    oneshot (``net-apply``) that Onebox starts with its daemon environment,
+    PATH=SAFE_PATH, outside the sandbox PATH. Under the seal it must reach
+    the tripwires instead of the host firewall (never run unsealed)."""
+    s.run("service", "onebox-network", "start", success=False)
+    reached = s.take_tripwire_calls()
+    check(any(argv[0] in ("iptables", "ip6tables", "nft") for argv in reached),
+          f"net-apply did not reach the masked firewall tools: {reached}")
+    s.check_host()
+
+
 def port_phase(s: sb.Sandbox, ports: Ports, original: dict) -> None:
     s.run("port", "vless-reality", str(ports.second))
     sb.wait_listening(ports.second)
@@ -130,7 +153,7 @@ def add_phase(s: sb.Sandbox, ports: Ports) -> None:
         raise sb.SandboxError("client mihomo is JSON; v3 emits YAML")
     except ValueError:
         pass
-    doc = sb.parse_block_yaml(mihomo)
+    doc = load_yaml(mihomo)
     proxies = doc["proxies"]
     check([p["type"] for p in proxies] == ["vless"], f"mihomo proxies: {proxies}")
     check(proxies[0]["port"] == ports.second, "mihomo proxy port is stale")
@@ -287,6 +310,9 @@ def v2_migration_phase(s: sb.Sandbox, ports: Ports) -> None:
     check(not any("# onebox-rust:" in line or "# onebox-native-cert-" in line for line in cron),
           f"v2 cron markers survived: {cron}")
     check(any(line.endswith("# onebox:boot:onebox-sing-box") for line in cron), "boot line not retagged")
+    # G17: only an ACME or custom certificate needs the renew line.
+    check(not any(line.endswith("# onebox:renew") for line in cron), f"REALITY-only node got a renew line: {cron}")
+    s.assert_proxy_ports_open([ports.second, ports.additional, ports.subscription])
     sb.wait_listening(ports.second)
     sb.wait_listening(ports.additional)
     url = f"http://127.0.0.1:{ports.subscription}/sub/{token}/singbox"
@@ -312,6 +338,24 @@ def v1_refusal_phase(s: sb.Sandbox) -> None:
     check(not s.forbidden_calls(), f"forbidden external calls: {s.forbidden_calls()}")
 
 
+def node_leftovers(s: sb.Sandbox) -> list[Path]:
+    """Node files this ip-mode REALITY node never wrote, created so that
+    uninstall must really remove them (G11, G-8.1#12): the proxy private
+    key, the Xray core and configuration, a 1.x configuration and the
+    standalone subscription's ACME webroot."""
+    files = {
+        s.etc / "tls/key.pem": b"-----BEGIN PRIVATE KEY-----\n",
+        s.etc / "xray.json": b'{"inbounds": []}\n',
+        s.root / "bin/xray": s.core.read_bytes(),
+        s.etc / "onebox.conf": b"PROTOCOLS='vless-reality'\n",
+        s.root / "onebox-subscription-acme/.well-known/acme-challenge/x": b"token\n",
+    }
+    for path, data in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(data)
+    return list(files)
+
+
 def uninstall_phase(s: sb.Sandbox, ports: Ports) -> None:
     """Remove the node, keep site content, backups, ledgers and the manager."""
     backups_before = set(os.listdir(s.etc / "backups"))
@@ -320,17 +364,22 @@ def uninstall_phase(s: sb.Sandbox, ports: Ports) -> None:
     for path in kept:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("user content\n")
+    leftovers = node_leftovers(s)
     proc = s.run("uninstall")
     check(UNINSTALL_MESSAGE in proc.stdout, f"uninstall message missing:\n{proc.stdout}")
     for path in kept:
         check(path.read_text() == "user content\n", f"uninstall removed {path}")
+    check((s.etc / "site").is_dir() and (s.root / "www").is_dir(), "uninstall removed the website")
     for port in (ports.second, ports.additional, ports.subscription):
         sb.wait_listening(port, False)
     for rel in ("state.json", "state.v2.json", "onebox.conf", "sing-box.json", "xray.json", "client",
                 "subscription", "services", "tls", ".transaction"):
         check(not (s.etc / rel).exists(), f"uninstall left {rel}")
+    for path in leftovers:
+        check(not path.exists(), f"uninstall left {path.relative_to(s.root)}")
     check(not (s.run_dir / "subscription.sock").exists(), "uninstall left the subscription socket")
-    check(not (s.root / "bin/sing-box").exists(), "uninstall left the core binary")
+    for core in ("sing-box", "xray"):
+        check(not (s.root / "bin" / core).exists(), f"uninstall left the {core} binary")
     for service in NODE_SERVICES:
         check(s.service_pid(service) is None, f"{service} still running after uninstall")
     backups = set(os.listdir(s.etc / "backups"))
@@ -339,6 +388,7 @@ def uninstall_phase(s: sb.Sandbox, ports: Ports) -> None:
               for b in backups - backups_before]
     check(labels == ["before-uninstall"], f"unexpected safety backups: {labels}")
     check(not (s.root / "onebox-subscription-acme").exists(), "uninstall left the subscription webroot")
+    check((s.etc / "backups").is_dir(), "uninstall removed the backups")
     check(s.exe.is_file(), "uninstall removed the manager (FRP units still call it)")
     check((s.etc / "firewall-v2.json").is_file(), "uninstall removed the firewall ledger")
     check(not any(s.firewall_rules().values()), f"firewall rules left: {s.firewall_rules()}")
@@ -350,6 +400,8 @@ def uninstall_phase(s: sb.Sandbox, ports: Ports) -> None:
 def full_lifecycle(s: sb.Sandbox, fixture_core: bool) -> None:
     ports = Ports()
     original = install_phase(s, ports)
+    if s.tripwire:
+        boot_escape_phase(s)
     port_phase(s, ports, original)
     add_phase(s, ports)
     backup_restore_phase(s, ports)
@@ -359,6 +411,7 @@ def full_lifecycle(s: sb.Sandbox, fixture_core: bool) -> None:
     v2_migration_phase(s, ports)
     uninstall_phase(s, ports)
     check(not s.forbidden_calls(), f"forbidden external calls: {s.forbidden_calls()}")
+    check(s.logs() == SERVICE_LOGS, f"unexpected service logs: {s.logs()}")
 
 
 # ----- driver ------------------------------------------------------------
@@ -372,11 +425,12 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def run_pass(work: Path, label: str, binary: Path, core: Path, fixture_core: bool) -> None:
-    sandbox = sb.Sandbox(work / label, binary, core)
+def run_pass(work: Path, label: str, binary: Path, core: Path, fixture_core: bool,
+             tripwire) -> None:
+    sandbox = sb.Sandbox(work / label, binary, core, tripwire=tripwire)
     try:
         full_lifecycle(sandbox, fixture_core)
-        refusal = sb.Sandbox(work / f"{label}-v1", binary, core)
+        refusal = sb.Sandbox(work / f"{label}-v1", binary, core, tripwire=tripwire)
         try:
             v1_refusal_phase(refusal)
         finally:
@@ -394,19 +448,24 @@ def main() -> int:
     real_core = sb.executable(args.singbox, "ONEBOX_TEST_SINGBOX")
     work = Path(tempfile.mkdtemp(prefix="onebox-lifecycle-"))
     try:
-        # The read-only phase never starts a core (nor needs rustc).
-        read_only_phase(sb.Sandbox(work / "read-only", binary, binary))
-        print("PASS lifecycle read-only CLI")
         blocker = sb.full_run_blocker()
+        tripwire = None if blocker else sb.seal_host(work)
+        # The read-only phase never starts a core (nor needs rustc).
+        read_only = sb.Sandbox(work / "read-only", binary, binary, tripwire=tripwire)
+        try:
+            read_only_phase(read_only)
+        finally:
+            read_only.cleanup()
+        print("PASS lifecycle read-only CLI")
         if blocker:
             sb.skip_or_fail(f"full lifecycle: {blocker}")
             return 0
         build = work / "build"
         build.mkdir()
-        fixture_core = sb.compile_fake_core(build)
-        run_pass(work, "fixture-core", binary, fixture_core, True)
+        fixture_core = fx.compile_fake_core(build)
+        run_pass(work, "fixture-core", binary, fixture_core, True, tripwire)
         if real_core:
-            run_pass(work, "real-sing-box", binary, real_core, False)
+            run_pass(work, "real-sing-box", binary, real_core, False, tripwire)
         else:
             sb.skip_or_fail("real-core lifecycle pass: ONEBOX_TEST_SINGBOX is not set")
         return 0

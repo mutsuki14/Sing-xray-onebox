@@ -11,15 +11,15 @@ VLESS-REALITY, enables an ip-mode subscription and adds a second device:
    ``ONEBOX_INHERITED_LOCK_FD=198`` (exactly what v2's update-script does
    after replacing the manager): credentials, ports and device hashes are
    kept, ``devices.json`` is written, ``state.v2.json`` and v2's
-   ``settings.json`` are kept, cron lines are retagged ``# onebox:``,
-   service specs are rewritten (the v2 nginx front is retired) and the
-   subscription worker is restarted on the new binary, serving the old
-   device URLs directly;
+   ``settings.json`` are kept, cron lines are retagged ``# onebox:`` (no
+   ``renew`` line for a REALITY-only node, G17), service specs are
+   rewritten (the v2 nginx front is retired), the core and subscription
+   ports stay open in v2's firewall ledger and the subscription worker is
+   restarted on the new binary, serving the old device URLs directly. Then
+   v3 restores a backup v2.0.1 took before the upgrade (ARCH §7.3);
 2. ``rollback`` (fixture core only): the same child fails to start the new
    core; v3 rolls back to byte-identical v2 files, exits non-zero, leaves no
-   journal and does not start the worker; restoring the v2 manager and
-   running v2's ``regen`` (what the v2 parent does next) serves the devices
-   again;
+   journal and does not start the worker (G6: the parent owns it);
 3. ``v2-journal``: v2 is SIGKILLed in the middle of a port change (frozen in
    apply-network); v3 ``recover`` restores the v2 files and services;
 4. ``self-update-journal``: v2's own ``update-script`` installs v3 from a
@@ -27,16 +27,28 @@ VLESS-REALITY, enables an ip-mode subscription and adds a second device:
    (journal phase ``replaced`` plus the child's journal); v3 ``recover``
    rolls the child back, restores the v2 manager and configuration, runs
    v2's ``regen`` and exits 75 (the running image is not the restored one);
-5. ``update-script``: v2's ``update-script`` completes the upgrade to v3.
+   the node's files match the v2 node again;
+5. ``update-script``: v2's ``update-script`` completes the upgrade to v3;
+6. ``update-script-rollback`` (fixture core only): the same, but the v3
+   child fails to start the core: it rolls its own journal back and exits
+   non-zero, the real v2 parent recovers (ARCH §7.1: ``更新失败，已恢复原程序``)
+   and the node's files, manager and services are v2's again.
+
+After every scenario no forbidden program was called (``forbidden_calls``)
+and ``log/`` holds exactly the logs of the node's services.
 
 The fixture-core pass always runs; with ``ONEBOX_TEST_SINGBOX`` a second pass
 repeats every scenario that needs no injected start failure with the real
-sing-box. ``ONEBOX_TEST_REQUIRE_FULL=1`` turns every skip into a failure.
+sing-box. ``ONEBOX_TEST_REQUIRE_FULL=1`` turns every skip into a failure,
+including a host where the host programs cannot be masked
+(``_lifecycle_host.seal``).
 
 Notes: v2 cannot supervise a real nginx without an init system (v2 bug
 E-8.1#2), so its ip-mode subscription front is the sandbox's fixture front.
-The self-update journal of scenario 4 is written by v2.0.1 itself, not
-hand-made, so its snapshot is the exact v2 format v3 must validate.
+The self-update journals of scenarios 4 and 6 are written by v2.0.1 itself,
+not hand-made, so their snapshots are the exact v2 format v3 must validate.
+Every v2 regen rewrites ``subscription/published.json`` (its publication
+time), so file comparisons after one leave that file out.
 """
 from __future__ import annotations
 
@@ -54,6 +66,8 @@ import tempfile
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lifecycle_fixtures as fx  # noqa: E402
+import _lifecycle_host as host  # noqa: E402
 import _lifecycle_sandbox as sb  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -62,6 +76,12 @@ STALE_MESSAGE = "自更新恢复已完成；当前进程仍是被替换版本，
 EXIT_STALE = 75
 TOKEN = re.compile(r"/sub/([0-9a-f]{64})/base64")
 ADMIN_CRON = "0 1 * * * /usr/bin/true # admin job"
+# Rewritten by every v2 regen (it records when the snapshot was published),
+# so a v2 parent's or a recovery's regen changes it.
+PUBLISHED = "subscription/published.json"
+# The services of every scenario (log/ holds exactly their logs: never
+# onebox-network, a oneshot that would reach the host's real firewall).
+SERVICE_LOGS = ["onebox-sing-box.log", "onebox-subscription-web.log", "onebox-subscription.log"]
 
 
 def check(condition: object, message: str) -> None:
@@ -77,6 +97,7 @@ class Tools:
     core: Path
     front: Path
     fixture_core: bool
+    tripwire: host.Tripwire | None = None
 
 
 @dataclass
@@ -101,7 +122,7 @@ class V2Node:
 
 
 def install_v2(root: Path, tools: Tools) -> V2Node:
-    s = sb.Sandbox(root, tools.v3, tools.core, front=tools.front)
+    s = sb.Sandbox(root, tools.v3, tools.core, front=tools.front, tripwire=tools.tripwire)
     used: set[int] = set()
     node = V2Node(s, tools, *(sb.free_port(used) for _ in range(3)))
     v2 = tools.v2
@@ -139,10 +160,11 @@ def lock_files(root: Path) -> list[str]:
             if p.is_file() and p.stat().st_size == 0]
 
 
-def v2_files(s: sb.Sandbox) -> dict[str, object]:
-    """Everything a v2 node owns that a rollback must restore byte for byte."""
+def v2_files(s: sb.Sandbox, exclude: tuple[str, ...] = ()) -> dict[str, object]:
+    """Everything a v2 node owns that a rollback must restore byte for byte
+    (EXCLUDE: ONEBOX_DIR paths a v2 regen rewrites legitimately)."""
     return {
-        "etc": sb.tree_digest(s.etc, exclude=lock_files(s.etc)),
+        "etc": sb.tree_digest(s.etc, exclude=[*lock_files(s.etc), *exclude]),
         "bin": sb.tree_digest(s.root / "bin"),
         "crontab": s.crontab(),
         "firewall": s.firewall_rules(),
@@ -168,6 +190,12 @@ def assert_same_files(before: dict, after: dict, what: str, *, cron_order: bool 
         if key == "crontab" and not cron_order:
             old, new = cron_groups(old), cron_groups(new)
         check(old == new, f"{what}: {key} changed:\n{old}\n{new}")
+
+
+def add_admin_cron(s: sb.Sandbox) -> None:
+    """Put a foreign line in front of v2's cron lines."""
+    table = s.root / "crontab.txt"
+    table.write_text(ADMIN_CRON + "\n" + table.read_text())
 
 
 def assert_no_journals(s: sb.Sandbox) -> None:
@@ -206,6 +234,9 @@ def assert_migrated(node: V2Node, worker_before: dict, front_before: int) -> Non
     check((s.etc / "subscription/settings.json").read_bytes() == node.settings_bytes,
           "v3 rewrote v2's settings.json")
     assert_v3_services(node, worker_before, front_before)
+    # ARCH §7.4: v3 keeps using v2's firewall ledger; ip mode serves the
+    # subscription itself, so its port must be open too.
+    s.assert_proxy_ports_open([node.core_port, node.sub_port])
     sb.wait_listening(node.core_port)
     assert_devices_served(node)
     assert_no_journals(s)
@@ -219,6 +250,8 @@ def assert_v3_services(node: V2Node, worker_before: dict, front_before: int) -> 
     check(not any("# onebox-rust:" in line for line in cron), f"v2 cron markers survived: {cron}")
     for service in ("onebox-sing-box", "onebox-network", "onebox-subscription"):
         check(any(line.endswith(f"# onebox:boot:{service}") for line in cron), f"no boot line for {service}")
+    # G17: only an ACME or custom certificate needs the renew line.
+    check(not any(line.endswith("# onebox:renew") for line in cron), f"REALITY-only node got a renew line: {cron}")
     check(not any("onebox-subscription-web" in line for line in cron), "the v2 front still autostarts")
     check(not (s.etc / "subscription/nginx.conf").exists(), "the v2 front config survived")
     expected = {  # service → (program, args) of the specs v3 writes without an init system
@@ -240,6 +273,22 @@ def assert_v3_services(node: V2Node, worker_before: dict, front_before: int) -> 
     check(s.service_pid("onebox-subscription-web") is None, "a subscription front still runs")
 
 
+def assert_restored_v2(node: V2Node, before: dict) -> None:
+    """The v2 node of BEFORE (``v2_files`` without PUBLISHED) runs again
+    on the v2 manager after a failed or interrupted upgrade."""
+    s, tools = node.sandbox, node.tools
+    assert_no_journals(s)
+    check(sb.sha256_file(s.exe) == sb.sha256_file(tools.v2), "the v2 manager was not restored")
+    check(s.state()["values"] == node.values, "the v2 state was not restored")
+    # v2's regen rewrites its own cron lines (positions are not kept).
+    assert_same_files(before, v2_files(s, exclude=(PUBLISHED,)), "the restored v2 node", cron_order=False)
+    check(s.crontab()[0] == ADMIN_CRON, f"a foreign cron line moved: {s.crontab()}")
+    sb.wait_listening(node.core_port)
+    worker = s.service_pid("onebox-subscription")
+    check(worker and s.process_exe(worker) == s.exe, "the worker does not run the restored manager")
+    assert_devices_served(node)
+
+
 # ----- scenarios ---------------------------------------------------------
 
 def v2_subscription_services(s: sb.Sandbox) -> tuple[dict, int]:
@@ -251,19 +300,32 @@ def v2_subscription_services(s: sb.Sandbox) -> tuple[dict, int]:
 
 
 def scenario_regen(node: V2Node) -> None:
-    """(1) v3 regen as the self-update child of a v2 parent."""
+    """(1) v3 regen as the self-update child of a v2 parent; then v3
+    restores a backup the real v2.0.1 wrote (ARCH §7.3)."""
     s = node.sandbox
     worker, front = v2_subscription_services(s)
+    backup_id = s.run("backup", "pre-upgrade", binary=node.tools.v2).stdout.strip().splitlines()[-1]
+    check((s.etc / "backups" / backup_id / "manifest.json").is_file(), f"no v2 backup {backup_id}")
     s.install_exe(node.tools.v3)
     with s.hold_node_lock() as lock_env:
         busy = s.run("recover", success=False)
         check("另一个配置操作正在进行" in busy.stderr, f"the held lock was not honored:\n{busy.stderr}")
         s.run("regen", binary=s.exe, env=lock_env, pass_fds=(sb.INHERITED_LOCK_FD,))
     assert_migrated(node, worker, front)
+    s.run("port", "vless-reality", str(node.spare_port))
+    sb.wait_listening(node.spare_port)
+    s.run("restore", backup_id)
+    inbounds = s.state()["inbounds"]
+    check(inbounds == [{"protocol": "vless-reality", "port": node.core_port, "core": "singbox"}],
+          f"restoring the v2 backup did not bring the port back: {inbounds}")
+    sb.wait_listening(node.core_port)
+    sb.wait_listening(node.spare_port, False)
+    assert_devices_served(node)
 
 
 def scenario_rollback(node: V2Node) -> None:
-    """(2) a failed child regen leaves byte-identical v2 files."""
+    """(2) a failed child regen leaves byte-identical v2 files and leaves
+    the worker to the parent (G6); scenario 6 runs the real parent."""
     s = node.sandbox
     before = v2_files(s)
     s.install_exe(node.tools.v3)
@@ -277,19 +339,12 @@ def scenario_rollback(node: V2Node) -> None:
     check(s.service_pid("onebox-sing-box"), "the old core is not running")
     check(s.service_pid("onebox-subscription") is None,
           "a self-update child's rollback must leave the worker to the parent (G6)")
-    # The v2 parent restores its manager and regenerates with it.
-    s.install_exe(node.tools.v2)
-    with s.hold_node_lock() as lock_env:
-        s.run("regen", binary=s.exe, env=lock_env, pass_fds=(sb.INHERITED_LOCK_FD,))
-    check(s.state()["values"] == node.values, "v2's regen after the rollback changed the state")
-    assert_devices_served(node)
 
 
 def scenario_v2_journal(node: V2Node) -> None:
     """(3) v3 recovers a journal v2 left when it was killed mid-apply."""
     s = node.sandbox
-    table = s.root / "crontab.txt"
-    table.write_text(ADMIN_CRON + "\n" + table.read_text())
+    add_admin_cron(s)
     before = v2_files(s)
     with s.hang("ufw", "status") as frozen:
         v2 = s.spawn("port", "vless-reality", str(node.spare_port), binary=node.tools.v2)
@@ -316,6 +371,8 @@ def scenario_v2_journal(node: V2Node) -> None:
 def scenario_self_update_journal(node: V2Node) -> None:
     """(4) v3 recovers a v2 self-update killed during the v3 child's regen."""
     s, tools = node.sandbox, node.tools
+    add_admin_cron(s)
+    before = v2_files(s, exclude=(PUBLISHED,))
     s.publish_release(tools.v3, tools.v3_version)
     with s.hang("ufw", "status") as frozen:
         parent = s.spawn("update-script", binary=tools.v2)
@@ -335,13 +392,7 @@ def scenario_self_update_journal(node: V2Node) -> None:
     proc = s.run("recover", success=None)
     check(proc.returncode == EXIT_STALE, f"recover exited {proc.returncode}:\n{proc.stderr}\n{proc.stdout}")
     check(STALE_MESSAGE in proc.stderr + proc.stdout, f"missing the stale-process message:\n{proc.stderr}")
-    assert_no_journals(s)
-    check(sb.sha256_file(s.exe) == sb.sha256_file(tools.v2), "the v2 manager was not restored")
-    check(s.state()["values"] == node.values, "the v2 state was not restored")
-    sb.wait_listening(node.core_port)
-    worker = s.service_pid("onebox-subscription")
-    check(worker and s.process_exe(worker) == s.exe, "the worker does not run the restored manager")
-    assert_devices_served(node)
+    assert_restored_v2(node, before)
 
 
 def scenario_update_script(node: V2Node) -> None:
@@ -355,6 +406,21 @@ def scenario_update_script(node: V2Node) -> None:
     assert_migrated(node, worker, front)
 
 
+def scenario_update_script_rollback(node: V2Node) -> None:
+    """(6) v2's update-script installs v3, whose child regen fails to start
+    the core: v3 rolls its own journal back and exits non-zero, then the v2
+    parent recovers (ARCH §7.1) and the node runs v2 again."""
+    s, tools = node.sandbox, node.tools
+    add_admin_cron(s)
+    before = v2_files(s, exclude=(PUBLISHED,))
+    s.publish_release(tools.v3, tools.v3_version)
+    s.fail_starts(1)
+    proc = s.run("update-script", binary=tools.v2, success=False)
+    check("更新失败，已恢复原程序" in proc.stderr, f"unexpected failure:\n{proc.stderr}\n{proc.stdout}")
+    check("配置未应用，已恢复原状态" in proc.stderr, f"the v3 child did not roll back:\n{proc.stderr}")
+    assert_restored_v2(node, before)
+
+
 Scenario = Callable[[V2Node], None]
 SCENARIOS: list[tuple[str, Scenario, bool]] = [
     # (name, function, needs the fixture core)
@@ -363,6 +429,7 @@ SCENARIOS: list[tuple[str, Scenario, bool]] = [
     ("v2-journal", scenario_v2_journal, False),
     ("self-update-journal", scenario_self_update_journal, False),
     ("update-script", scenario_update_script, False),
+    ("update-script-rollback", scenario_update_script_rollback, True),
 ]
 
 
@@ -376,6 +443,8 @@ def run_pass(work: Path, label: str, tools: Tools) -> None:
         try:
             scenario(node)
             assert_clean_calls(node.sandbox)
+            logs = node.sandbox.logs()
+            check(logs == SERVICE_LOGS, f"unexpected service logs: {logs}")
         finally:
             node.sandbox.cleanup()
         print(f"PASS upgrade ({label}): {name}")
@@ -414,13 +483,14 @@ def main() -> int:
         return 0
     work = Path(tempfile.mkdtemp(prefix="onebox-upgrade-"))
     try:
+        tripwire = sb.seal_host(work)
         build = work / "build"
         build.mkdir()
-        fixture_core, front = sb.compile_fake_core(build), sb.compile_fake_front(build)
+        fixture_core, front = fx.compile_fake_core(build), fx.compile_fake_front(build)
         version = version_of(v3)
-        run_pass(work, "fixture-core", Tools(v2, v3, version, fixture_core, front, True))
+        run_pass(work, "fixture-core", Tools(v2, v3, version, fixture_core, front, True, tripwire))
         if real_core:
-            run_pass(work, "real-sing-box", Tools(v2, v3, version, real_core, front, False))
+            run_pass(work, "real-sing-box", Tools(v2, v3, version, real_core, front, False, tripwire))
         else:
             sb.skip_or_fail("real-core upgrade pass: ONEBOX_TEST_SINGBOX is not set")
         return 0

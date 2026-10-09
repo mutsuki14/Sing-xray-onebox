@@ -2,28 +2,24 @@
 
 A sandbox is an isolated Onebox installation under one temporary directory:
 every path override points inside it, ``ONEBOX_INIT=none`` makes Onebox run
-its own daemon supervisor instead of an init system, and ``PATH`` contains
-only *recorder* helpers. Each helper appends its argv to ``commands.jsonl``
-and then either emulates a host tool against files inside the sandbox (``ip``,
+its own daemon supervisor instead of an init system, and the ``PATH`` the
+suite gives Onebox contains only *recorder* helpers
+(``_lifecycle_fixtures``). Each helper logs its argv to ``commands.jsonl``
+and then emulates a host tool against files inside the sandbox (``ip``,
 ``ufw``, ``firewall-cmd``, ``nft``, ``iptables``/``ip6tables``, ``crontab``,
 ``tail``, an offline ``curl``), passes a read-only tool through (``openssl``,
 ``uname``, ``id``, ``getent``) or refuses: package managers, init tools,
-``wget``, shells, interpreters, ``sysctl`` and the like print ``BLOCKED …``
-and exit 97, so an unexpected host mutation fails closed.
+``wget``, shells, interpreters, ``sysctl``, and every emulated tool called
+with arguments it does not emulate, print ``BLOCKED …``, are logged to
+``refused.jsonl`` and exit 97. :meth:`Sandbox.forbidden_calls` reports all
+of them.
 
-Fixture programs compiled with ``rustc`` (neither implements a protocol):
-
-* the *core* reports ``sing-box version 1.14.2``, accepts ``check``, and on
-  ``run`` binds every ``"listen_port"`` of its configuration on 127.0.0.1 and
-  sleeps. The next N starts fail (exit 74) while ``<sandbox>/fail-start``
-  holds N. Onebox starts daemons with a cleared environment, so the core finds
-  that counter next to its configuration directory, not through a variable.
-* the *front* stands in for nginx as v2's ip-mode subscription front
-  (``onebox-subscription-web``): it forwards ``/sub/`` requests from the
-  configured ``listen`` ports to the ``proxy_pass`` Unix socket. v2 cannot
-  supervise a real nginx without an init system (v2 bug E-8.1#2: nginx
-  rewrites its argv into a process title, so v2 never sees it running); the
-  front keeps its argv, as v2 expects.
+That PATH does not reach everything: Onebox also searches the fixed
+``SAFE_PATH`` and starts its daemons and oneshots with ``PATH=SAFE_PATH``.
+``_lifecycle_host`` covers that gap: each sandbox snapshots the host firewall
+and root's crontab when it is created and fails its cleanup when they
+changed, and a suite running as root first masks the host-changing programs
+of ``SAFE_PATH`` with logging tripwires (:func:`_lifecycle_host.seal`).
 
 Changes from the v2 helpers (tests/native_lifecycle.py):
 - the start-failure counter lives next to the configuration
@@ -31,13 +27,15 @@ Changes from the v2 helpers (tests/native_lifecycle.py):
   environment (v2 bug E-8.1#3), so ``ONEBOX_TEST_START_FAILURES`` cannot
   reach them;
 - ``commands.jsonl`` rows are objects ``{"argv": [...], "caller": ...}``
-  naming the executable that ran the command (v2 or v3);
+  naming the executable that ran the command (v2 or v3), and refused calls
+  are reported even when Onebox tolerated the failure;
 - ``curl`` is an offline network instead of a blocked program: public-address
   probes fail like a host without connectivity, and only URLs registered with
   ``Sandbox.serve_downloads`` are "downloaded" (the v2 self-update flow);
 - ``id``/``getent`` pass through (the v2 subscription needs the nginx worker
   identity); a *hang point* freezes one helper call so a suite can crash an
   apply at a deterministic stage;
+- the host itself is guarded (above);
 - cleanup kills every process whose executable or command line lies inside
   the sandbox (v2 only matched the core).
 """
@@ -59,317 +57,10 @@ import time
 import urllib.parse
 from typing import Iterable, Iterator, Mapping, Sequence
 
-FAKE_CORE_SOURCE = r'''
-// Lifecycle fixture core: NOT a protocol implementation.
-use std::collections::BTreeSet;
-use std::net::TcpListener;
-use std::path::Path;
-use std::{env, fs, process, thread, time::Duration};
+import _lifecycle_fixtures as fx
+from _lifecycle_fixtures import BLOCKED
+import _lifecycle_host as host
 
-fn fail(message: &str) -> ! {
-    eprintln!("fixture core: {message}");
-    process::exit(2)
-}
-
-/// Value after `-c`/`--config`.
-fn config_path(args: &[String]) -> String {
-    match args.windows(2).find(|w| w[0] == "-c" || w[0] == "--config") {
-        Some(w) => w[1].clone(),
-        None => fail("missing -c CONFIG"),
-    }
-}
-
-/// Every numeric `"listen_port"` value of a JSON document.
-fn listen_ports(text: &str) -> BTreeSet<u16> {
-    let mut ports = BTreeSet::new();
-    for tail in text.split("\"listen_port\"").skip(1) {
-        let value = tail.trim_start().trim_start_matches(':').trim_start();
-        let digits: String = value.chars().take_while(|c| c.is_ascii_digit()).collect();
-        match digits.parse::<u16>() {
-            Ok(port) => {
-                ports.insert(port);
-            }
-            Err(_) => fail("non-numeric listen_port"),
-        }
-    }
-    ports
-}
-
-/// Consumes one injected start failure from `<config dir>/../fail-start`.
-fn injected_failure(config: &str) -> bool {
-    let Some(root) = Path::new(config).parent().and_then(Path::parent) else {
-        return false;
-    };
-    let counter = root.join("fail-start");
-    let remaining = fs::read_to_string(&counter)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    if remaining == 0 {
-        return false;
-    }
-    if fs::write(&counter, (remaining - 1).to_string()).is_err() {
-        fail("cannot update fail-start");
-    }
-    true
-}
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.iter().any(|a| a == "version") {
-        println!("sing-box version 1.14.2");
-        return;
-    }
-    let config = config_path(&args);
-    let text = fs::read_to_string(&config).unwrap_or_else(|_| fail("configuration unreadable"));
-    if !text.contains("\"inbounds\"") {
-        fail("configuration has no inbounds");
-    }
-    if args.iter().any(|a| a == "check") {
-        return;
-    }
-    if injected_failure(&config) {
-        process::exit(74);
-    }
-    let ports = listen_ports(&text);
-    if ports.is_empty() {
-        fail("no listen_port");
-    }
-    let _listeners: Vec<TcpListener> = ports
-        .into_iter()
-        .map(|p| TcpListener::bind(("127.0.0.1", p)).unwrap_or_else(|_| fail("port in use")))
-        .collect();
-    loop {
-        thread::sleep(Duration::from_secs(60));
-    }
-}
-'''
-
-FAKE_FRONT_SOURCE = r'''
-// Fixture stand-in for v2's ip-mode subscription nginx: NOT nginx. It reads
-// the `listen` ports and the `proxy_pass "http://unix:PATH:"` socket of its
-// configuration and forwards `/sub/` requests there, one thread each.
-use std::collections::BTreeSet;
-use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
-use std::{env, fs, process, thread};
-
-fn fail(message: &str) -> ! {
-    eprintln!("fixture front: {message}");
-    process::exit(1)
-}
-
-fn arg_after(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
-}
-
-fn listen_ports(conf: &str) -> BTreeSet<u16> {
-    let mut ports = BTreeSet::new();
-    for tail in conf.split("listen ").skip(1) {
-        let token = tail.split(|c| c == ';' || c == ' ').next().unwrap_or("");
-        let digits = token.rsplit(':').next().unwrap_or("");
-        if let Ok(port) = digits.parse::<u16>() {
-            ports.insert(port);
-        }
-    }
-    ports
-}
-
-fn upstream(conf: &str) -> Option<String> {
-    let rest = conf.split("proxy_pass \"http://unix:").nth(1)?;
-    Some(rest.split(":\"").next()?.to_string())
-}
-
-/// Reads the request head (bounded); None on EOF or error.
-fn read_head(client: &mut TcpStream) -> Option<Vec<u8>> {
-    let mut head = Vec::new();
-    let mut chunk = [0u8; 1024];
-    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = client.read(&mut chunk).ok()?;
-        if n == 0 || head.len() > 8192 {
-            return None;
-        }
-        head.extend_from_slice(&chunk[..n]);
-    }
-    Some(head)
-}
-
-fn serve(mut client: TcpStream, socket: &str) -> io::Result<()> {
-    let Some(head) = read_head(&mut client) else { return Ok(()) };
-    if !head.starts_with(b"GET /sub/") && !head.starts_with(b"HEAD /sub/") {
-        return client.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    }
-    let mut backend = UnixStream::connect(socket)?;
-    backend.write_all(&head)?;
-    io::copy(&mut backend, &mut client)?;
-    Ok(())
-}
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.iter().any(|a| a == "-v" || a == "-V") {
-        eprintln!("nginx version: onebox-fixture-front");
-        return;
-    }
-    let path = arg_after(&args, "-c").unwrap_or_else(|| fail("missing -c CONFIG"));
-    let conf = fs::read_to_string(&path).unwrap_or_else(|_| fail("configuration unreadable"));
-    let ports = listen_ports(&conf);
-    let socket = upstream(&conf).unwrap_or_else(|| fail("no proxy_pass unix socket"));
-    if ports.is_empty() {
-        fail("no listen port");
-    }
-    if args.iter().any(|a| a == "-t") {
-        eprintln!("nginx: configuration file {path} test is successful");
-        return;
-    }
-    if arg_after(&args, "-s").is_some() {
-        fail("signals are not supported");
-    }
-    let mut workers = Vec::new();
-    for port in ports {
-        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap_or_else(|_| fail("port in use"));
-        let socket = socket.clone();
-        workers.push(thread::spawn(move || {
-            for client in listener.incoming().flatten() {
-                let socket = socket.clone();
-                thread::spawn(move || {
-                    let _ = serve(client, &socket);
-                });
-            }
-        }));
-    }
-    for worker in workers {
-        let _ = worker.join();
-    }
-}
-'''
-
-# The recorder. Its interpreter is given by the shebang line written in front
-# of it, so it never depends on the sandbox PATH (which holds no python3).
-RECORDER_SOURCE = r'''
-import json, os, pathlib, sys, time
-
-root = pathlib.Path(os.environ["ONEBOX_TEST_ROOT"])
-name = pathlib.Path(sys.argv[0]).name
-args = sys.argv[1:]
-
-
-def caller():
-    try:
-        return os.readlink("/proc/%d/exe" % os.getppid())
-    except OSError:
-        return ""
-
-
-with (root / "commands.jsonl").open("a") as log:
-    log.write(json.dumps({"argv": [name, *args], "caller": caller()}) + "\n")
-
-
-def inside(value):
-    path = pathlib.Path(value).resolve()
-    if not path.is_relative_to(root):
-        raise SystemExit("path outside the sandbox: %s" % path)
-    return path
-
-
-def hang_point():
-    """Freeze while <root>/hang-point names this call (see Sandbox.hang)."""
-    try:
-        wanted = (root / "hang-point").read_text().split()
-    except OSError:
-        return
-    if wanted and wanted[0] == name and args[: len(wanted) - 1] == wanted[1:]:
-        (root / "hang.pid").write_text(str(os.getpid()))
-        time.sleep(600)
-        raise SystemExit(98)
-
-
-hang_point()
-passthrough = json.loads(os.environ["ONEBOX_TEST_PASSTHROUGH"])
-if name in passthrough:
-    os.execv(passthrough[name], [name, *args])
-if name == "ip" and args[:2] in (["-j", "address"], ["-j", "addr"]):
-    print('[{"ifname":"eth0","addr_info":[{"family":"inet","local":"198.18.0.1","prefixlen":15}]}]')
-    raise SystemExit(0)
-if name == "ufw" and args[:1] == ["status"]:
-    print("Status: inactive")
-    raise SystemExit(0)
-if name == "firewall-cmd" and args == ["--state"]:
-    print("not running")
-    raise SystemExit(252)
-if name == "nft" and args in (["-j", "list", "ruleset"], ["-j", "-a", "list", "ruleset"]):
-    print('{"nftables":[]}')
-    raise SystemExit(0)
-if name in ("iptables", "ip6tables"):
-    if args[:2] == ["-w", "5"]:
-        args = args[2:]
-    table = "filter"
-    if args[:1] == ["-t"]:
-        table, args = args[1], args[2:]
-    store = root / ("%s-%s.json" % (name, table))
-    rows = json.loads(store.read_text()) if store.exists() else []
-    op = args[0] if args else ""
-    if op == "-S":
-        for row in rows:
-            print(" ".join(row))
-        raise SystemExit(0)
-    row = ["-A", *args[1:]]
-    if op == "-I" and len(args) > 2 and args[2].isdigit():
-        row = ["-A", args[1], *args[3:]]
-    if op == "-C":
-        raise SystemExit(0 if row in rows else 1)
-    if op in ("-I", "-A"):
-        rows.append(row)
-    elif op == "-D":
-        if row not in rows:
-            raise SystemExit(1)
-        rows.remove(row)
-    else:
-        print("BLOCKED unsupported firewall operation %r" % args, file=sys.stderr)
-        raise SystemExit(97)
-    store.write_text(json.dumps(rows))
-    raise SystemExit(0)
-if name == "crontab":
-    table = root / "crontab.txt"
-    if args == ["-l"]:
-        if table.exists():
-            sys.stdout.write(table.read_text())
-            raise SystemExit(0)
-        print("no crontab for root", file=sys.stderr)
-        raise SystemExit(1)
-    if len(args) == 1 and args[0] != "-":
-        table.write_text(inside(args[0]).read_text())
-        raise SystemExit(0)
-if name == "tail" and args[:3] == ["-n", "200", "--"] and len(args) == 4:
-    lines = inside(args[3]).read_text(errors="replace").splitlines(keepends=True)
-    sys.stdout.write("".join(lines[-200:]))
-    raise SystemExit(0)
-if name == "curl":
-    served_file = root / "downloads.json"
-    served = json.loads(served_file.read_text()) if served_file.exists() else {}
-    url = args[-1] if args else ""
-    if url in served and "--output" in args:
-        target = inside(args[args.index("--output") + 1])
-        target.write_bytes(pathlib.Path(served[url]).read_bytes())
-        raise SystemExit(0)
-    print("curl: (6) Could not resolve host (offline sandbox)", file=sys.stderr)
-    raise SystemExit(6)
-print("BLOCKED unexpected external operation: %s %r" % (name, args), file=sys.stderr)
-raise SystemExit(97)
-'''
-
-# Programs reachable through PATH. Everything neither emulated nor passed
-# through is blocked (exit 97) and must never appear in commands.jsonl.
-EMULATED = ("ip", "ufw", "firewall-cmd", "nft", "iptables", "ip6tables", "crontab", "tail", "curl")
-PASSTHROUGH = ("openssl", "uname", "id", "getent")
-BLOCKED = (
-    "wget", "systemctl", "service", "rc-service", "rc-update", "openrc",
-    "apt-get", "apt", "dpkg", "dnf", "yum", "apk", "pacman", "zypper", "rpm",
-    "sysctl", "modprobe", "tc", "bash", "sh", "dash", "python", "python3",
-    "nginx", "acme.sh", "socat", "unzip", "reboot", "shutdown", "journalctl",
-)
-BLOCKED_EXIT = 97
 # Address probes Onebox may attempt (they fail offline and are tolerated).
 ADDRESS_PROBES = ("https://api.ipify.org", "https://api6.ipify.org")
 
@@ -427,6 +118,17 @@ def full_run_blocker() -> str | None:
     return None
 
 
+def seal_host(work: Path) -> host.Tripwire | None:
+    """Mask the host programs (``_lifecycle_host.seal``) for the rest of
+    this process; None (a skip, or a failure under
+    ONEBOX_TEST_REQUIRE_FULL=1) when this host cannot."""
+    try:
+        return host.seal(work)
+    except host.SealUnavailable as reason:
+        skip_or_fail(f"host programs are not masked: {reason}")
+        return None
+
+
 def proc_matches(pid: int, executable: str | os.PathLike) -> bool:
     """True when /proc/PID/exe is EXECUTABLE."""
     try:
@@ -443,26 +145,6 @@ def executable(value: str | None, what: str) -> Path | None:
     if not path.is_file() or not os.access(path, os.X_OK):
         raise SandboxError(f"{what} is not an executable file: {path}")
     return path
-
-
-def compile_fixture(source: str, name: str, workdir: Path) -> Path:
-    """Compile a fixture program with $RUSTC (or rustc from PATH)."""
-    rustc = os.environ.get("RUSTC") or shutil.which("rustc")
-    if not rustc:
-        raise SandboxError("rustc is required for the fixture programs (set RUSTC)")
-    src, out = workdir / f"{name}.rs", workdir / name
-    src.write_text(source)
-    subprocess.run([rustc, "--edition", "2021", "-O", str(src), "-o", str(out)],
-                   check=True, stdin=subprocess.DEVNULL)
-    return out
-
-
-def compile_fake_core(workdir: Path) -> Path:
-    return compile_fixture(FAKE_CORE_SOURCE, "fixture-core", workdir)
-
-
-def compile_fake_front(workdir: Path) -> Path:
-    return compile_fixture(FAKE_FRONT_SOURCE, "fixture-front", workdir)
 
 
 def free_port(used: set[int], start: int = 22000, end: int = 32000) -> int:
@@ -578,112 +260,6 @@ def assert_same_tree(before: Mapping[str, str], after: Mapping[str, str], what: 
         raise SandboxError(f"{what} changed:\n{describe_diff(before, after)}")
 
 
-def parse_block_yaml(text: str):
-    """Strictly parse the block-style YAML Onebox emits (mihomo, provider).
-
-    Supported: nested block mappings and sequences (``- key: value`` items
-    included), JSON-quoted keys and strings, bare keys, integers, booleans,
-    null and the empty flow collections ``[]``/``{}``. Anything else (tabs,
-    bare string scalars, anchors, flow content) is a ValueError, so a format
-    regression cannot pass as "parsed".
-    """
-    lines = []
-    for number, raw in enumerate(text.splitlines(), 1):
-        if not raw.strip():
-            continue
-        if "\t" in raw:
-            raise ValueError(f"line {number}: tab character")
-        lines.append([len(raw) - len(raw.lstrip(" ")), raw.strip(), number])
-    if not lines:
-        raise ValueError("empty document")
-    value, pos = _yaml_block(lines, 0, lines[0][0])
-    if pos != len(lines):
-        raise ValueError(f"line {lines[pos][2]}: unexpected indentation")
-    return value
-
-
-def _yaml_block(lines: list, pos: int, indent: int):
-    if lines[pos][1] == "-" or lines[pos][1].startswith("- "):
-        return _yaml_sequence(lines, pos, indent)
-    return _yaml_mapping(lines, pos, indent)
-
-
-def _yaml_nested(lines: list, pos: int, indent: int):
-    """The block below an entry whose value is on the following lines."""
-    if pos >= len(lines) or lines[pos][0] <= indent:
-        raise ValueError(f"line {lines[pos - 1][2]}: missing nested value")
-    return _yaml_block(lines, pos, lines[pos][0])
-
-
-def _yaml_sequence(lines: list, pos: int, indent: int):
-    items = []
-    while pos < len(lines) and lines[pos][0] == indent and (lines[pos][1] == "-" or lines[pos][1].startswith("- ")):
-        rest = lines[pos][1][1:].lstrip(" ")
-        if not rest:
-            value, pos = _yaml_nested(lines, pos + 1, indent)
-        elif _yaml_key(rest) is not None:
-            # "- key: value" opens a mapping whose content column is after "- ".
-            lines[pos] = [indent + 2, rest, lines[pos][2]]
-            value, pos = _yaml_mapping(lines, pos, indent + 2)
-        else:
-            value, pos = _yaml_scalar(rest, lines[pos][2]), pos + 1
-        items.append(value)
-    return items, pos
-
-
-def _yaml_mapping(lines: list, pos: int, indent: int):
-    mapping: dict = {}
-    while pos < len(lines) and lines[pos][0] == indent:
-        text, number = lines[pos][1], lines[pos][2]
-        parsed = _yaml_key(text)
-        if parsed is None:
-            raise ValueError(f"line {number}: expected 'key: value'")
-        key, rest = parsed
-        if key in mapping:
-            raise ValueError(f"line {number}: duplicate key {key!r}")
-        if rest:
-            mapping[key], pos = _yaml_scalar(rest, number), pos + 1
-        else:
-            mapping[key], pos = _yaml_nested(lines, pos + 1, indent)
-    return mapping, pos
-
-
-def _yaml_key(text: str) -> tuple[str, str] | None:
-    """(key, rest) of 'key: rest' / 'key:'; None when TEXT is no entry."""
-    if text.startswith('"'):
-        try:
-            key, end = json.JSONDecoder().raw_decode(text)
-        except ValueError:
-            return None
-        tail = text[end:]
-    else:
-        end = 0
-        while end < len(text) and (text[end].isalnum() or text[end] in "_.-/+"):
-            end += 1
-        key, tail = text[:end], text[end:]
-        if not key:
-            return None
-    if tail == ":":
-        return str(key), ""
-    if tail.startswith(": "):
-        return str(key), tail[2:].strip()
-    return None
-
-
-def _yaml_scalar(text: str, number: int):
-    if text.startswith('"'):
-        value, end = json.JSONDecoder().raw_decode(text)
-        if text[end:].strip():
-            raise ValueError(f"line {number}: trailing text after string")
-        return value
-    fixed = {"true": True, "false": False, "null": None, "[]": [], "{}": {}}
-    if text in fixed:
-        return fixed[text]
-    if text.lstrip("-").isdigit():
-        return int(text)
-    raise ValueError(f"line {number}: unsupported scalar {text!r}")
-
-
 def release_arch() -> str:
     """Release asset architecture of this machine (v2/v3 naming)."""
     machine = platform.machine()
@@ -695,10 +271,20 @@ def release_arch() -> str:
 
 
 class Sandbox:
-    """One isolated Onebox installation (see the module documentation)."""
+    """One isolated Onebox installation (see the module documentation).
 
-    def __init__(self, root: Path, binary: Path, core: Path, *, front: Path | None = None):
+    TRIPWIRE is the suite's :func:`seal_host` result (None when unsealed);
+    HOST_PROBES replaces the host-state probes (tests).
+    """
+
+    def __init__(self, root: Path, binary: Path, core: Path, *, front: Path | None = None,
+                 tripwire: host.Tripwire | None = None,
+                 host_probes: Sequence[Sequence[str]] | None = None):
         self.root, self.binary, self.core = root, binary, core
+        self.tripwire = tripwire
+        self._tripwire_seen = len(tripwire.calls()) if tripwire else 0
+        self._host_probes = host.host_probes() if host_probes is None else host_probes
+        self._host_before = host.host_state(self._host_probes)
         root.mkdir(parents=True)
         for rel in ("tmp", "home"):
             (root / rel).mkdir(mode=0o700)
@@ -707,21 +293,17 @@ class Sandbox:
             raise SandboxError(f"sandbox path too long for Unix sockets: {socket_path} "
                                "(use a shorter TMPDIR)")
         self.env = self._environment(front)
-        self._write_helpers()
-
-    # ----- construction -------------------------------------------------
+        self.helpers.mkdir()
+        fx.install_recorders(self.helpers, self.root)
 
     def _environment(self, front: Path | None) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("ONEBOX_") and k not in STRIPPED}
         env.update({k: str(self.root / v) for k, v in LAYOUT.items()})
-        passthrough = {name: real for name in PASSTHROUGH if (real := shutil.which(name))}
         env.update(
             ONEBOX_INIT="none",
             ONEBOX_AUTO="1",
             ONEBOX_SINGBOX_BIN=str(self.core),
-            ONEBOX_TEST_ROOT=str(self.root),
-            ONEBOX_TEST_PASSTHROUGH=json.dumps(passthrough),
             HOME=str(self.root / "home"),
             TMPDIR=str(self.root / "tmp"),
             NO_COLOR="1",
@@ -731,14 +313,6 @@ class Sandbox:
         if front:
             env["ONEBOX_NGINX_BIN"] = str(front)
         return env
-
-    def _write_helpers(self) -> None:
-        self.helpers.mkdir()
-        source = "#!" + sys.executable + " -I\n" + RECORDER_SOURCE
-        for name in (*EMULATED, *PASSTHROUGH, *BLOCKED):
-            path = self.helpers / name
-            path.write_text(source)
-            path.chmod(0o755)
 
     # ----- layout -------------------------------------------------------
 
@@ -831,15 +405,37 @@ class Sandbox:
     def state(self) -> dict:
         return json.loads(self.state_path.read_text())
 
-    def commands(self) -> list[dict]:
-        log = self.root / "commands.jsonl"
+    def _rows(self, name: str) -> list[dict]:
+        log = self.root / name
         if not log.exists():
             return []
         return [json.loads(line) for line in log.read_text().splitlines() if line]
 
+    def commands(self) -> list[dict]:
+        """Every call of a helper (``commands.jsonl``)."""
+        return self._rows("commands.jsonl")
+
+    def refused(self) -> list[dict]:
+        """Every call a helper refused (``refused.jsonl``)."""
+        return self._rows("refused.jsonl")
+
+    def tripwire_calls(self) -> list[dict]:
+        """Host programs reached since this sandbox was created (read-only
+        probes, which the tripwire refuses quietly, left out)."""
+        calls = self.tripwire.calls()[self._tripwire_seen:] if self.tripwire else []
+        return [row for row in calls if not row.get("probe")]
+
+    def take_tripwire_calls(self) -> list[list[str]]:
+        """The host programs reached so far, acknowledged: later checks no
+        longer report them (for a deliberate escape, see lifecycle.py)."""
+        calls = [row["argv"] for row in self.tripwire_calls()]
+        self._tripwire_seen = len(self.tripwire.calls()) if self.tripwire else 0
+        return calls
+
     def forbidden_calls(self) -> list[list[str]]:
-        """Recorded calls that must never happen: blocked programs, and curl
-        for anything but an address probe or a served download."""
+        """Calls that must never happen: blocked programs, refused calls of
+        emulated programs, curl for anything but an address probe or a served
+        download, and host programs reached through a tripwire."""
         served_file = self.root / "downloads.json"
         served = json.loads(served_file.read_text()) if served_file.exists() else {}
         bad = []
@@ -849,6 +445,9 @@ class Sandbox:
                 bad.append(argv)
             elif argv[0] == "curl" and argv[-1] not in ADDRESS_PROBES and argv[-1] not in served:
                 bad.append(argv)
+        # A blocked program is refused too; it is already listed above.
+        bad += [row["argv"] for row in self.refused() if row["argv"][0] not in BLOCKED]
+        bad += [["(host)", *row["argv"]] for row in self.tripwire_calls()]
         return bad
 
     def crontab(self) -> list[str]:
@@ -857,6 +456,37 @@ class Sandbox:
 
     def firewall_rules(self) -> dict[str, list]:
         return {p.name: json.loads(p.read_text()) for p in sorted(self.root.glob("ip*tables-*.json"))}
+
+    def assert_proxy_ports_open(self, ports: Iterable[int]) -> None:
+        """Each TCP PORT has an ``onebox-proxy-*`` ACCEPT rule in every
+        emulated iptables filter table, recorded under the same token in the
+        ``firewall-v2.json`` ledger (ARCH §7.4: v2 and v3 share it)."""
+        ledger = json.loads((self.etc / "firewall-v2.json").read_text())["rules"]
+        tables = {name: rows for name, rows in self.firewall_rules().items()
+                  if name.endswith("-filter.json")}
+        if not tables:
+            raise SandboxError("no iptables filter rules at all")
+        for name, rows in tables.items():
+            accepted = {}
+            for row in rows:
+                if row[-2:] != ["-j", "ACCEPT"] or "--comment" not in row or "--dport" not in row:
+                    continue
+                token = row[row.index("--comment") + 1]
+                first, _, last = row[row.index("--dport") + 1].partition(":")
+                if token.startswith("onebox-proxy-") and "tcp" in row:
+                    accepted.update({p: token for p in range(int(first), int(last or first) + 1)})
+            for port in ports:
+                token = accepted.get(port)
+                if token is None:
+                    raise SandboxError(f"{name}: TCP port {port} is not opened: {rows}")
+                if not any(r["token"] == token and r["port"] <= port <= r["end"] and not r["udp"]
+                           for r in ledger):
+                    raise SandboxError(f"firewall-v2.json does not record {token} (port {port})")
+
+    def logs(self) -> list[str]:
+        """Names of the files in ``log/`` (one per service that ran)."""
+        log = self.root / "log"
+        return sorted(p.name for p in log.iterdir()) if log.is_dir() else []
 
     def pid_record(self, service: str) -> dict | None:
         """The supervisor's PID record of SERVICE, None when absent."""
@@ -940,8 +570,10 @@ class Sandbox:
     # ----- cleanup -----------------------------------------------------
 
     def processes(self) -> list[int]:
-        """PIDs whose executable or command line lies inside the sandbox."""
-        marker = str(self.root).encode()
+        """PIDs whose executable or command line lies inside the sandbox
+        (whole path components: ``<root>-v1`` is another sandbox)."""
+        exact = str(self.root).encode()
+        inside = exact + b"/"
         found = []
         for entry in Path("/proc").iterdir():
             if not entry.name.isdigit() or int(entry.name) == os.getpid():
@@ -951,12 +583,13 @@ class Sandbox:
                 exe = os.readlink(entry / "exe").encode()
             except OSError:
                 continue
-            if exe.startswith(marker) or marker in cmdline:
+            if exe.startswith(inside) or inside in cmdline or exact in cmdline.split(b"\0"):
                 found.append(int(entry.name))
         return found
 
     def cleanup(self) -> None:
-        """Terminate every sandbox process (SIGTERM, then SIGKILL)."""
+        """Terminate every sandbox process (SIGTERM, then SIGKILL), then
+        fail if the host changed or a host program was reached."""
         for sig in (signal.SIGTERM, signal.SIGKILL):
             pids = self.processes()
             for pid in pids:
@@ -966,6 +599,15 @@ class Sandbox:
             while pids and time.monotonic() < end:
                 pids = [p for p in pids if (f := _stat_fields(p)) and f[0] != "Z"]
                 time.sleep(0.05)
+        self.check_host()
+
+    def check_host(self) -> None:
+        """Fail when the host state differs from the sandbox's creation or a
+        process reached a host program through a tripwire."""
+        problems = host.state_changes(self._host_before, host.host_state(self._host_probes))
+        problems += [f"host program called: {row}" for row in self.tripwire_calls()]
+        if problems:
+            raise SandboxError(f"sandbox {self.root.name} reached the host:\n" + "\n".join(problems))
 
 
 def _stat_fields(pid: int) -> list[str] | None:
