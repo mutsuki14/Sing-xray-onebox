@@ -237,6 +237,19 @@ mod tests {
     }
 
     #[test]
+    fn help_pages_show_usage_and_arguments() {
+        let help = crate::cli::help::command_help(&[&UPDATE]);
+        assert!(help.starts_with("更新正在使用的内核\n"), "{help}");
+        assert!(help.contains("  onebox update [singbox|sing-box|xray|all] [版本] [--force]"));
+        assert!(help.contains("--force") && help.contains("允许降级或重新安装相同版本"));
+        let help = crate::cli::help::command_help(&[&UPDATE_CHANNEL]);
+        assert!(
+            help.contains("  onebox update-channel [stable|testing]"),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn specs_are_registered_with_handlers() {
         let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
         assert_eq!(

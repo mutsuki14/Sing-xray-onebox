@@ -413,24 +413,36 @@ impl Updater<'_> {
         } else {
             Some(create_staging(&self.ctx.paths.bin)?)
         };
-        let result = (|| -> Result<()> {
-            let mut staged = Vec::with_capacity(installing.len());
-            if let Some(dir) = &staging {
-                for (core, resolved) in &installing {
-                    let path = cores::download_with(self.ctx, self.env, resolved, dir)?;
-                    staged.push((*core, path));
-                }
-            }
-            let mut req = ApplyRequest::from_loaded(loaded, config, REASON);
-            req.intents.replace_cores = staged;
-            self.engine.apply(self.ctx, lock, req)
-        })();
+        let result = self
+            .download_all(staging.as_deref(), &installing)
+            .and_then(|staged| {
+                let mut req = ApplyRequest::from_loaded(loaded, config, REASON);
+                req.intents.replace_cores = staged;
+                self.engine.apply(self.ctx, lock, req)
+            });
         if let Some(dir) = &staging {
             settle_staging(dir, result.is_ok());
         }
         result?;
         out::ok(DONE);
         Ok(())
+    }
+
+    /// Download and verify each core into `dir` (`{dir}/{binary}`).
+    fn download_all(
+        &self,
+        dir: Option<&Path>,
+        installing: &[(Core, &Resolved)],
+    ) -> Result<Vec<(Core, PathBuf)>> {
+        let Some(dir) = dir else {
+            return Ok(Vec::new());
+        };
+        installing
+            .iter()
+            .map(|(core, resolved)| {
+                cores::download_with(self.ctx, self.env, resolved, dir).map(|path| (*core, path))
+            })
+            .collect()
     }
 }
 
