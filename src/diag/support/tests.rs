@@ -1,5 +1,5 @@
 use super::*;
-use crate::diag::fixture::{check, two_core_config, Node, NOW};
+use crate::diag::fixture::{check, interrupted, signals, two_core_config, Node, NOW};
 use crate::diag::redact::contains_ip;
 use crate::diag::CheckStatus;
 use crate::domain::config::ProxyTls;
@@ -12,6 +12,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 fn report_of(node: &Node, extra: &[CheckFn]) -> SupportReport {
+    let _signals = signals();
     let doctor = node.doctor();
     let diagnosis = doctor.diagnose(extra, &mut |_| {}).unwrap();
     SupportReport::build(&doctor, &diagnosis)
@@ -147,12 +148,38 @@ fn reports_are_private_exclusive_and_collision_free() {
 #[test]
 fn write_support_creates_the_report_under_root() {
     let node = Node::healthy();
-    let path = write_support(&node.doctor(), &[]).unwrap();
+    let path = {
+        let _signals = signals();
+        write_support(&node.doctor(), &[]).unwrap()
+    };
     assert_eq!(path.parent(), Some(node.ctx.paths.root.as_path()));
     let name = path.file_name().unwrap().to_str().unwrap();
     assert!(name.starts_with(&format!("support-{NOW}-")) && name.ends_with(".json"));
     let doc: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(doc["state"], "v3");
+}
+
+#[test]
+fn ctrl_c_writes_no_report() {
+    // During a check, and while the report is built after the checks.
+    for (program, first) in [("onebox", "version"), ("uname", "-m")] {
+        let node = Node::new(two_core_config());
+        interrupted(&node.fake, program, first);
+        let node = node.finish();
+        let err = {
+            let _signals = signals();
+            write_support(&node.doctor(), &[]).unwrap_err()
+        };
+        assert!(err.is_cancelled(), "{program}: {err}");
+        let reports = fs::read_dir(&node.ctx.paths.root)
+            .unwrap()
+            .filter(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                name.to_string_lossy().starts_with("support-")
+            })
+            .count();
+        assert_eq!(reports, 0, "{program}");
+    }
 }
 
 fn leaky_provider(_: &Doctor, cfg: Option<&NodeConfig>) -> Vec<Check> {

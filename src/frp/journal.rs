@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const VERSION: u8 = 1;
-pub const DIR_NAME: &str = ".onebox-frp-journal";
-/// Staging directories (`{DIR_NAME}-{hex}`) left by a crash are removed.
+/// Staging directories (`.onebox-frp-journal-{hex}`) left by a crash are
+/// removed.
 const STAGE_PREFIX: &str = ".onebox-frp-journal-";
 pub const JOURNAL_FILE: &str = "journal.json";
 pub const FILES_DIR: &str = "files";
@@ -165,9 +165,9 @@ pub struct Journal {
     pub snapshot: Snapshot,
 }
 
-/// `{parent of FRP_ROOT}/.onebox-frp-journal`.
+/// `{parent of FRP_ROOT}/.onebox-frp-journal` ([`Paths::frp_journal`]).
 pub fn dir(paths: &Paths) -> PathBuf {
-    paths.frp_lock().with_file_name(DIR_NAME)
+    paths.frp_journal()
 }
 
 pub fn files_dir(paths: &Paths) -> PathBuf {

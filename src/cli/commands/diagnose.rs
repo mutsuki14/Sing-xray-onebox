@@ -79,4 +79,34 @@ mod tests {
             assert!(provider(&doctor, None).is_empty());
         }
     }
+
+    #[test]
+    fn a_crashed_frp_install_on_a_host_without_a_node_is_diagnosed() {
+        let dir = crate::sys::fs::TempDir::new("diagnose-frp-journal").unwrap();
+        let (ctx, fake, _) = Ctx::test(dir.path());
+        fake.on(
+            "onebox",
+            &["version"],
+            crate::sys::exec::Output::success(crate::VERSION),
+        );
+        // `frps install` died before writing its state: only the journal.
+        let parent = ctx.paths.frp_lock().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(parent).unwrap();
+        crate::frp::journal::create(&ctx.paths, "安装", Default::default(), &[]).unwrap();
+        let doctor = Doctor {
+            ctx: &ctx,
+            init: crate::host::init::InitSystem::Systemd,
+            now: 0,
+        };
+        let _signals = crate::diag::fixture::signals();
+        let checks = doctor.diagnose(PROVIDERS, &mut |_| {}).unwrap().checks;
+        let journal = checks.iter().find(|c| c.name == "FRP 事务").unwrap();
+        assert_eq!(
+            journal,
+            &Check::fail(
+                "FRP 事务",
+                "未完成的 FRP 事务（安装，阶段 prepared）；请执行 onebox recover"
+            )
+        );
+    }
 }

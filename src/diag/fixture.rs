@@ -30,7 +30,7 @@ use crate::sys::time::Civil;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard, PoisonError};
 
 /// The fixed "now" of every diagnosis (2027-01-15).
 pub const NOW: u64 = 1_800_000_000;
@@ -39,6 +39,33 @@ pub const DAY: u64 = 86_400;
 pub const VALID_UNTIL: u64 = NOW + 90 * DAY;
 pub const SINGBOX_VERSION: &str = "1.14.2";
 pub const XRAY_VERSION: &str = "26.3.27";
+
+/// Held while a test diagnoses: a diagnosis installs recording signal
+/// handlers (Ctrl+C cancels it), so it must neither see nor disturb the
+/// tests that raise signals or check dispositions (`sys::signal::TEST_LOCK`).
+pub fn signals() -> MutexGuard<'static, ()> {
+    crate::sys::signal::TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The user presses Ctrl+C while `program FIRST…` runs: the signal is
+/// recorded and the child dies of it (`sys::exec` forwards it). Only for
+/// commands run while a diagnosis holds its handlers (and the test holds
+/// [`signals`]); unhandled, the signal would end the test process.
+pub fn interrupted(fake: &FakeExec, program: &'static str, first: &'static str) {
+    fake.on_fn(
+        move |cmd| cmd.program_name() == program && cmd.args.first().is_some_and(|a| a == first),
+        |_| {
+            // SAFETY: raises a signal on this thread; the diagnosis has
+            // installed the recording handler.
+            unsafe {
+                libc::raise(libc::SIGINT);
+            }
+            Ok(Output::failure(128 + libc::SIGINT, ""))
+        },
+    );
+}
 
 /// What the fake crontab holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,8 +295,9 @@ impl Node {
         }
     }
 
-    /// Diagnose without extra providers.
+    /// Diagnose without extra providers (holding [`signals`]).
     pub fn diagnose(&self) -> Diagnosis {
+        let _signals = signals();
         self.doctor().diagnose(&[], &mut |_| {}).unwrap()
     }
 

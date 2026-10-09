@@ -11,6 +11,7 @@
 //! failed to load — then any IP literal or domain-shaped word) and are
 //! capped in length. Nothing is uploaded.
 
+use super::checks::Interrupt;
 use super::redact::Redactor;
 use super::survey::{FrpFound, NodeState, Survey};
 use super::{Check, CheckFn, Diagnosis, Doctor};
@@ -351,8 +352,12 @@ pub fn write_report(root: &Path, now: u64, text: &str, rng: &mut dyn Random) -> 
 
 /// See [`super::support_with`].
 pub(super) fn write_support(doctor: &Doctor, extra: &[CheckFn]) -> Result<PathBuf> {
+    // Ctrl+C while the report is built (host facts, core versions) writes
+    // nothing either.
+    let interrupt = Interrupt::watch()?;
     let diagnosis = doctor.diagnose(extra, &mut |_| {})?;
     let report = SupportReport::build(doctor, &diagnosis);
+    interrupt.check()?;
     write_report(
         &doctor.ctx.paths.root,
         doctor.now,

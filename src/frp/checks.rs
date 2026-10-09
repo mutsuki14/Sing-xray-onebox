@@ -2,22 +2,26 @@
 //! transaction journal is left): a leftover transaction, the binary, the
 //! services, the private CA and control certificate, the website
 //! certificate and the renewal job. The state (readable, mode, warnings)
-//! is the built-in `FRP 服务端` check.
+//! is the built-in `FRP 服务端` check. While an FRP operation holds the FRP
+//! lock, its journal is reported as in progress and failures as warnings
+//! (doctor's rule for node operations).
 //! Read-only: nothing is written, started or asked.
 //!
 //! Changes from v2: v2's `doctor` did not look at FRP at all.
 
 use super::ca::{expires_within, ControlFiles};
-use super::journal;
+use super::journal::{self, Journal};
 use super::model::{self, FrpState};
 use super::release::binary_version;
 use super::runtime::Runtime;
 use crate::cert;
 use crate::ctx::Ctx;
-use crate::diag::{Check, CheckStatus};
+use crate::diag::{probe, Check, CheckStatus};
 use crate::domain::defaults::CERT_WARNING_DAYS;
+use crate::error::Result;
 use crate::host::cron::{self, Crontab, Tag};
 
+const JOURNAL: &str = "FRP 事务";
 const DAY: u64 = 86_400;
 /// The CA must stay valid this long (the control certificate's window).
 const CA_WINDOW: u64 = 30 * DAY;
@@ -40,16 +44,26 @@ pub fn checks_with(rt: &Runtime) -> Vec<Check> {
     if !installed && !journal::exists(paths) {
         return Vec::new();
     }
-    let mut out = vec![journal_check(rt)];
-    if !installed {
-        return out;
+    let running = probe::frp_operation_running(paths);
+    let mut out = vec![journal_verdict(journal::load(paths), running)];
+    if installed {
+        out.extend(installation_checks(rt));
     }
+    if running {
+        // Services stopped and files swapped on purpose are no fault.
+        out = out.into_iter().map(probe::downgrade).collect();
+    }
+    out
+}
+
+/// The lines of an installation after the journal's.
+fn installation_checks(rt: &Runtime) -> Vec<Check> {
     // The state itself (readable, mode, warnings) is the built-in
     // `FRP 服务端` check; an unreadable one leaves nothing more to check.
-    let Ok(Some(state)) = model::load(paths) else {
-        return out;
+    let Ok(Some(state)) = model::load(rt.paths()) else {
+        return Vec::new();
     };
-    out.push(binary_check(rt, &state));
+    let mut out = vec![binary_check(rt, &state)];
     out.extend(service_checks(rt, &state));
     out.extend(control_checks(rt));
     if state.is_web() {
@@ -59,12 +73,23 @@ pub fn checks_with(rt: &Runtime) -> Vec<Check> {
     out
 }
 
-fn journal_check(rt: &Runtime) -> Check {
-    let name = "FRP 事务";
-    match journal::load(rt.paths()) {
-        Ok(None) => check(name, CheckStatus::Pass, "无未完成事务"),
+/// The `FRP 事务` line for what [`journal::load`] found; `running` = an FRP
+/// operation holds the FRP lock, so its journal (even one caught
+/// half-written) is in progress, not something to recover.
+fn journal_verdict(found: Result<Option<Journal>>, running: bool) -> Check {
+    let busy = |what: &str| {
+        check(
+            JOURNAL,
+            CheckStatus::Warn,
+            format!("另一个 FRP 操作正在进行（{what}）；完成后重新执行 onebox doctor"),
+        )
+    };
+    match found {
+        Ok(None) => check(JOURNAL, CheckStatus::Pass, "无未完成事务"),
+        Ok(Some(j)) if running => busy(&format!("{}，阶段 {}", j.reason, j.phase.id())),
+        Err(_) if running => busy("事务日志正在更新"),
         Ok(Some(j)) if j.phase.is_finished() => check(
-            name,
+            JOURNAL,
             CheckStatus::Warn,
             format!(
                 "已结束的 FRP 事务（{}，阶段 {}）{}",
@@ -74,7 +99,7 @@ fn journal_check(rt: &Runtime) -> Check {
             ),
         ),
         Ok(Some(j)) => check(
-            name,
+            JOURNAL,
             CheckStatus::Fail,
             format!(
                 "未完成的 FRP 事务（{}，阶段 {}）；请执行 onebox recover",
@@ -82,7 +107,7 @@ fn journal_check(rt: &Runtime) -> Check {
                 j.phase.id()
             ),
         ),
-        Err(e) => check(name, CheckStatus::Fail, format!("事务日志无法读取: {e}")),
+        Err(e) => check(JOURNAL, CheckStatus::Fail, format!("事务日志无法读取: {e}")),
     }
 }
 
