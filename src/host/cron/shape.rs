@@ -10,7 +10,8 @@
 //!
 //! | form | shape |
 //! |---|---|
-//! | v3 | `{s} PATH={SAFE_PATH} env {K='v'…} '{exe}' {job} >>'{log}' 2>&1 # onebox:{tag}` (`%` escaped) |
+//! | v3 | `{s} mkdir -p '{log dir}' 2>/dev/null; PATH={SAFE_PATH} env {K='v'…} '{exe}' {job} >>'{log}' 2>&1 # onebox:{tag}` (`%` escaped) |
+//! | early v3 | the same without `mkdir -p '{log dir}' 2>/dev/null; ` |
 //! | v2 autostart | `{s} env {K='v'…} '{exe}' service {name} start >/dev/null 2>&1 # onebox-rust:{name}` |
 //! | v2 certificates | `{s} {exe} cert renew proxy\|site --cron >/dev/null 2>&1 # onebox-native-cert-{t}` (`subscription renew --cron` for `subscription`) |
 //! | v2 FRP | `{s} env {K='v'…} '{exe}' frps renew --cron\|frps start >>'{log}' 2>&1 # onebox-frps-renew\|boot` (`%` escaped) |
@@ -19,7 +20,7 @@
 //! Retired renewal jobs (acme.sh's own cron line, v1 `cert-renew`) have no
 //! exact shape: they are removed but never reinstalled.
 
-use super::line::{assemble, command, env_words, split_schedule};
+use super::line::{assemble, command, env_words, job_command, split_schedule};
 use super::{Form, Ownership, Tag, MARKER};
 use crate::host::service::{env_key_allowed, validate_env, validate_name};
 use crate::sys::exec::SAFE_PATH;
@@ -28,6 +29,9 @@ use std::path::Path;
 
 /// The parts of a job command.
 struct Job {
+    /// Preceded by `mkdir -p '{dir}' 2>/dev/null;` (v3 only; the directory
+    /// is checked by re-rendering).
+    mkdir: bool,
     env: Vec<(String, String)>,
     exe: String,
     args: Vec<String>,
@@ -64,10 +68,11 @@ impl Ownership {
         let Some(log) = job.redirect.strip_prefix(">>") else {
             return false;
         };
+        let render = if job.mkdir { command } else { job_command };
         job.exe == self.exe
             && job_args(tag).is_some_and(|args| job.args == args)
             && Path::new(log).is_absolute()
-            && assemble(schedule, &command(&job.env, &job.exe, &job.args, log), tag) == line
+            && assemble(schedule, &render(&job.env, &job.exe, &job.args, log), tag) == line
     }
 
     fn v2_boot_shape(&self, line: &str, tag: &Tag) -> bool {
@@ -152,12 +157,20 @@ fn job_args(tag: &Tag) -> Option<Vec<String>> {
     Some(words.into_iter().map(str::to_owned).collect())
 }
 
-/// `[PATH=SAFE_PATH] env {K=v…} {exe} {args…} {redirect} 2>&1` from decoded
-/// words; the assignments must be allowlisted and unique.
+/// `[[mkdir -p {dir} 2>/dev/null;] PATH=SAFE_PATH] env {K=v…} {exe} {args…}
+/// {redirect} 2>&1` from decoded words; the assignments must be allowlisted
+/// and unique.
 fn parse_job(text: &str, path_prefix: bool) -> Option<Job> {
     let words = shell_words(text)?;
     let mut rest = words.as_slice();
+    let mut mkdir = false;
     if path_prefix {
+        if let [first, flag, _, quiet, tail @ ..] = rest {
+            if first == "mkdir" && flag == "-p" && quiet == "2>/dev/null;" {
+                mkdir = true;
+                rest = tail;
+            }
+        }
         let (first, tail) = rest.split_first()?;
         if *first != format!("PATH={SAFE_PATH}") {
             return None;
@@ -182,6 +195,7 @@ fn parse_job(text: &str, path_prefix: bool) -> Option<Job> {
     let (last, rest) = rest.split_last()?;
     let (redirect, args) = rest.split_last()?;
     (last == "2>&1").then(|| Job {
+        mkdir,
         env,
         exe: exe.clone(),
         args: args.to_vec(),

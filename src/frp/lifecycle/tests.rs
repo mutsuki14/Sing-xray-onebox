@@ -79,7 +79,11 @@ fn tcp_install_deploys_everything_and_commits() {
         paths.frp_log.join("renew.log").display()
     );
     let tab = h.crontab();
-    assert!(tab.starts_with("17 3 * * * PATH="), "{tab}");
+    let mkdir = format!(
+        "17 3 * * * mkdir -p '{}' 2>/dev/null; PATH=",
+        paths.frp_log.display()
+    );
+    assert!(tab.starts_with(&mkdir), "{tab}");
     assert!(tab.trim_end().ends_with(&renew_tail), "{tab}");
     assert!(!journal::exists(paths));
     let ledger = fs::read_to_string(paths.frp_root.join("firewall-v2.json")).unwrap();

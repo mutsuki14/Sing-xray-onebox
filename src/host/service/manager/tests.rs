@@ -405,10 +405,11 @@ fn no_init_autostart_is_one_owned_crontab_line() {
     let lines: Vec<&str> = installed.lines().collect();
     assert_eq!(lines[..2], ["MAILTO=root", "0 1 * * * backup"]);
     assert_eq!(lines.len(), 3);
-    assert!(
-        lines[2].starts_with("@reboot PATH=/usr/local/sbin:"),
-        "{installed}"
+    let mkdir = format!(
+        "@reboot mkdir -p '{}' 2>/dev/null; PATH=/usr/local/sbin:",
+        f.ctx.paths.log.display()
     );
+    assert!(lines[2].starts_with(&mkdir), "{installed}");
     assert!(lines[2].contains("ONEBOX_INIT='none'"));
     assert!(lines[2].contains(&format!(
         "'{}' service onebox-xray start >>'{}/boot.log' 2>&1 # onebox:boot:onebox-xray",

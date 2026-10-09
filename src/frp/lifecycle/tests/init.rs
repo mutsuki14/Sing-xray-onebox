@@ -67,7 +67,11 @@ fn without_an_init_system_frps_is_supervised_and_starts_from_crontab() {
         .iter()
         .find(|l| l.ends_with("# onebox:boot:onebox-frps"))
         .unwrap();
-    assert!(boot.starts_with("@reboot PATH="), "{boot}");
+    let mkdir = format!(
+        "@reboot mkdir -p '{}' 2>/dev/null; PATH=",
+        paths.frp_log.display()
+    );
+    assert!(boot.starts_with(&mkdir), "{boot}");
     assert!(boot.contains(" service onebox-frps start >>"), "{boot}");
     assert!(h.enabled(FRPS));
     // No unit files: Onebox runs the service itself.

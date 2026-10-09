@@ -33,7 +33,9 @@
 //!   and reordered the crontab on rollback (B-9.1#23);
 //! - jobs run with `PATH=/usr/local/sbin:…:/bin` and the service variables
 //!   (F-8.1#1: Debian cron's `PATH=/usr/bin:/bin` hid nginx and the
-//!   firewall tools) and log to a file instead of `/dev/null`;
+//!   firewall tools) and log to a file instead of `/dev/null`, recreating
+//!   the log directory first (the shell skips a job whose log it cannot
+//!   open);
 //! - `%` is escaped in every generated line (E-8.1#8);
 //! - markers are matched after trimming trailing blanks/CR everywhere
 //!   (H-8.1#11) and the crontab always ends with a newline;

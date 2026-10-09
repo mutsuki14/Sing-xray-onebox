@@ -21,11 +21,12 @@ const NAMED_SCHEDULES: [&str; 8] = [
     "@hourly",
 ];
 
-/// One owned line:
-/// `{schedule} PATH={SAFE_PATH} env ONEBOX_…='…' '{exe}' {args} >>'{log}' 2>&1 # onebox:{tag}`.
+/// One owned line: `{schedule} mkdir -p '{log dir}' 2>/dev/null; PATH={SAFE_PATH}
+/// env ONEBOX_…='…' '{exe}' {args} >>'{log}' 2>&1 # onebox:{tag}`.
 ///
 /// The job runs the managed executable with the fixed PATH and the service
-/// variables (`ONEBOX_INIT` = `init`), appending its output to `log`. Plain
+/// variables (`ONEBOX_INIT` = `init`), appending its output to `log`; the
+/// line recreates the log directory first (see [`command`]). Plain
 /// arguments stay bare, others are single-quoted; every `%` of the command
 /// is escaped (cron would turn it into a newline).
 pub fn line(
@@ -53,8 +54,28 @@ pub fn line(
     Ok(assemble(schedule, &command, tag))
 }
 
-/// The command of a v3 line before `%` escaping.
+/// The command of a v3 line before `%` escaping: [`job_command`] preceded
+/// by `mkdir -p '{log dir}' 2>/dev/null;`. The shell runs no command whose
+/// redirection it cannot open, and the log directory may vanish long after
+/// the line was written (`/var/log` on tmpfs, an administrator freeing
+/// space): without it renewals and no-init autostart would silently stop.
 pub(super) fn command(env: &[(String, String)], exe: &str, args: &[String], log: &str) -> String {
+    let dir = Path::new(log).parent().unwrap_or(Path::new("/"));
+    format!(
+        "mkdir -p {} 2>/dev/null; {}",
+        quote_shell(&dir.to_string_lossy()),
+        job_command(env, exe, args, log)
+    )
+}
+
+/// `PATH={SAFE_PATH} env {K='v'…} '{exe}' {args} >>'{log}' 2>&1` (the whole
+/// command of the lines earlier v3 builds wrote).
+pub(super) fn job_command(
+    env: &[(String, String)],
+    exe: &str,
+    args: &[String],
+    log: &str,
+) -> String {
     let mut words = vec![format!("PATH={SAFE_PATH}"), "env".to_owned()];
     words.push(env_words(env));
     words.push(quote_shell(exe));
@@ -154,8 +175,9 @@ mod tests {
         assert_eq!(
             got,
             format!(
-                "@reboot PATH={SAFE_PATH} {ENV_NONE} '/usr/local/bin/onebox' service onebox-xray \
-                 start >>'/var/log/onebox/boot.log' 2>&1 # onebox:boot:onebox-xray"
+                "@reboot mkdir -p '/var/log/onebox' 2>/dev/null; PATH={SAFE_PATH} {ENV_NONE} \
+                 '/usr/local/bin/onebox' service onebox-xray start >>'/var/log/onebox/boot.log' \
+                 2>&1 # onebox:boot:onebox-xray"
             )
         );
         let renew = line(
@@ -168,7 +190,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            renew.starts_with("17 4 * * * PATH=/usr/local/sbin:"),
+            renew.starts_with(
+                "17 4 * * * mkdir -p '/var/log/onebox' 2>/dev/null; PATH=/usr/local/sbin:"
+            ),
             "{renew}"
         );
         assert!(renew.contains("ONEBOX_INIT='systemd' '/usr/local/bin/onebox' renew --cron >>"));
@@ -184,17 +208,51 @@ mod tests {
             &p,
             InitSystem::Openrc,
             &["frps", "it's", "a b", "100%"],
-            Path::new("/var/log/x%y.log"),
+            Path::new("/var/log/x%y/run.log"),
             &Tag::frp_renew(),
         )
         .unwrap();
+        assert!(
+            got.starts_with(r"0 3 * * 1 mkdir -p '/var/log/x\%y' 2>/dev/null; PATH="),
+            "{got}"
+        );
         assert!(
             got.contains(r"ONEBOX_EXE='/opt/my tools/50\%/onebox'"),
             "{got}"
         );
         assert!(got.contains(r"'/opt/my tools/50\%/onebox' frps 'it'\''s' 'a b' '100\%'"));
-        assert!(got.contains(r">>'/var/log/x\%y.log' 2>&1 # onebox:frp-renew"));
+        assert!(got.contains(r">>'/var/log/x\%y/run.log' 2>&1 # onebox:frp-renew"));
         assert_eq!(got.matches('%').count(), got.matches(r"\%").count());
+    }
+
+    /// The shell runs no command whose redirection it cannot open: the
+    /// line recreates a vanished log directory (tmpfs `/var/log`, deleted
+    /// by an administrator) instead of silently skipping the job.
+    #[test]
+    fn jobs_run_when_the_log_directory_is_gone() {
+        let tmp = crate::sys::fs::TempDir::new("cron-log").unwrap();
+        let run = |command: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", command])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+        };
+        let read = |log: &Path| std::fs::read_to_string(log).unwrap();
+        let args = ["-c".to_owned(), "echo ran".to_owned()];
+        let env = [("ONEBOX_DIR".to_owned(), "/etc/onebox".to_owned())];
+        // What earlier builds wrote: the job never starts.
+        let old = tmp.join("old/renew.log");
+        run(&job_command(&env, "/bin/sh", &args, &old.to_string_lossy()));
+        assert!(!old.exists());
+        for log in [tmp.join("new/renew.log"), tmp.join("deep/onebox/renew.log")] {
+            let command = command(&env, "/bin/sh", &args, &log.to_string_lossy());
+            assert!(run(&command).success(), "{command}");
+            assert_eq!(read(&log), "ran\n", "{command}");
+            // An existing directory and log are kept and appended to.
+            assert!(run(&command).success());
+            assert_eq!(read(&log), "ran\nran\n");
+        }
     }
 
     #[test]
