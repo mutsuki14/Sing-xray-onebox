@@ -76,7 +76,15 @@ pub fn plan_addr(session: &Session, args: &AddrArgs) -> Result<Option<ApplyReque
             opt::host(answer).map(|h| h.to_string())
         };
         let addr = ui.input_with("连接 IP 或域名", &cfg.server.addr.to_string(), &check)?;
-        let name = ui.input("节点名称", &cfg.node_name)?;
+        let name = ui.input_with("节点名称", &cfg.node_name, &|name: &str| {
+            if crate::domain::validate::valid_label(name) {
+                Ok(name.to_owned())
+            } else {
+                Err(Error::msg(
+                    "节点名称不能为空或超过 128 个字符，且不能包含控制字符",
+                ))
+            }
+        })?;
         let addr = (!addr.is_empty()).then(|| opt::host(&addr)).transpose()?;
         (addr, Some(name))
     } else {

@@ -35,7 +35,12 @@ fn every_preset_asks_exactly_its_steps() {
     let cases: [(&str, &[Protocol], bool, bool); 6] = [
         ("1", &[VlessReality, Hysteria2, Tuic], true, true),
         ("2", &[VlessReality, VlessXhttp, Shadowsocks], true, false),
-        ("3", &[VlessReality, VlessXhttp, Hysteria2, Tuic, Anytls], true, true),
+        (
+            "3",
+            &[VlessReality, VlessXhttp, Hysteria2, Tuic, Anytls],
+            true,
+            true,
+        ),
         (
             "4",
             &[

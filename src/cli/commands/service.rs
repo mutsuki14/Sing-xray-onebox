@@ -163,10 +163,12 @@ fn lock(session: &Session, scope: Scope, action: Action) -> Result<FileLock> {
         Scope::Node => BUSY_MESSAGE,
         Scope::Frp => FRP_BUSY,
     };
-    if action == Action::Start {
-        FileLock::acquire_waiting(&path, busy, START_WAIT, Duration::from_secs(1))
-    } else {
-        FileLock::acquire(&path, busy)
+    match FileLock::acquire(&path, busy) {
+        Err(Error::Busy(_)) if action == Action::Start => {
+            session.info("另一个配置操作正在进行，等待其完成后启动…");
+            FileLock::acquire_waiting(&path, busy, START_WAIT, Duration::from_secs(1))
+        }
+        other => other,
     }
 }
 
