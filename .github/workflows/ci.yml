@@ -67,6 +67,8 @@ jobs:
           set -euo pipefail
           python3 tests/fetch_tools.py --check
           find tests -name '*.py' -not -path '*/__pycache__/*' -print0 | xargs -0 -r python3 -m py_compile
+          # Sandbox helpers of the lifecycle and upgrade suites (no root needed).
+          python3 tests/e2e/_lifecycle_sandbox_test.py
 
   integration:
     name: Integration with real cores, FRP and nginx
