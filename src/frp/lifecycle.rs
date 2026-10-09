@@ -9,7 +9,8 @@
 //! holding both take the node lock first.
 //!
 //! Apply order (v2's, with the prerequisites moved before the snapshot):
-//! paths → recovery → packages, nginx (distro service neutralized,
+//! paths → recovery → (for `update`: the release, stopping when nothing
+//! changes) → packages, nginx (distro service neutralized,
 //! H-8.1#2), cron daemon (checked up front, H-8.1#17), DNS → frps binary
 //! (downloaded only when the version changes, H-8.1#4) → journal + snapshot
 //! → stop services → port checks → directories, token, private CA,
@@ -21,7 +22,8 @@
 //! - Cloudflare credentials arrive resolved (the CLI looked them up or
 //!   asked before the confirmation) and are persisted by the certificate
 //!   engine inside the transaction, after the directories exist (H-8.1#1);
-//! - `update` to the installed version changes nothing;
+//! - `update` to the installed version changes nothing: only the release
+//!   is resolved, before packages, the cron daemon or DNS are checked;
 //! - switching to tcp mode removes the stale `nginx.conf` (the web
 //!   certificate directory and its ACME account are kept for a switch back);
 //! - a failed website renewal no longer rolls back the control
@@ -116,21 +118,27 @@ pub fn apply_locked(rt: &Runtime, lock: &FileLock, state: FrpState, change: Chan
         Some(previous) => state.validate_change(Some(previous))?,
     }
     let _signals = SignalScope::install()?;
+    // `update` resolves the release first: when nothing would change, no
+    // package, scheduler or DNS check may touch the host or fail it.
+    let early = if change.skip_unchanged {
+        fetch::ensure_curl_as(ctx, rt.root)?;
+        let staged = stage(rt, &state)?;
+        if unchanged(previous.as_ref(), &state, &staged) {
+            out::ok(format!("FRP 已是 {} 版本，无需更新", staged.version));
+            return Ok(());
+        }
+        Some(staged)
+    } else {
+        None
+    };
     let nginx = prerequisites(rt, &state)?;
     check_dns(ctx, &state)?;
     signal::check()?;
-    let staged = release::prepare(
-        ctx,
-        rt.env,
-        &state.version,
-        &rt.paths().frp_bin.join("frps"),
-        &stage_parent(rt)?,
-    )?;
+    let staged = match early {
+        Some(staged) => staged,
+        None => stage(rt, &state)?,
+    };
     signal::check()?;
-    if change.skip_unchanged && unchanged(previous.as_ref(), &state, &staged) {
-        out::ok(format!("FRP 已是 {} 版本，无需更新", staged.version));
-        return Ok(());
-    }
     let mut state = state;
     Txn::run(
         rt,
@@ -148,6 +156,18 @@ fn unchanged(previous: Option<&FrpState>, state: &FrpState, staged: &Staged) -> 
     let mut next = state.clone();
     next.version.clone_from(&staged.version);
     staged.binary.is_none() && previous == Some(&next)
+}
+
+/// The frps binary of `state.version`: the installed one, or a verified
+/// download staged for the deployment.
+fn stage(rt: &Runtime, state: &FrpState) -> Result<Staged> {
+    release::prepare(
+        rt.ctx,
+        rt.env,
+        &state.version,
+        &rt.paths().frp_bin.join("frps"),
+        &stage_parent(rt)?,
+    )
 }
 
 /// Where downloads are staged: next to the FRP lock (not a noexec /tmp).

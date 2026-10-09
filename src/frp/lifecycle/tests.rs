@@ -12,6 +12,7 @@ use crate::frp::testing::{fake_frps, tcp_state, web_state, FakeHost};
 use crate::frp::txn::ROLLED_BACK;
 use crate::host::service::unit_file;
 use crate::state::StateStore;
+use crate::sys::exec::Output;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -254,10 +255,26 @@ fn update_to_the_running_version_changes_nothing() {
         skip_unchanged: true,
         ..Change::default()
     };
+    // Nothing but the release lookup runs: no packages, no scheduler, no
+    // DNS (a stale AAAA record cannot fail a no-op).
+    h.exec.on("getent", &[], Output::failure(2, ""));
     apply(&h.runtime(), latest, update).unwrap();
-    assert!(!h.history().iter().any(|c| c.starts_with("systemctl stop")));
+    let history = h.history();
+    let frps = h.ctx.paths.frp_bin.join("frps");
+    let probe = format!("{} -v", frps.display());
+    assert!(
+        history
+            .iter()
+            .all(|c| c.starts_with("curl ") || *c == probe || c == "uname -m"),
+        "{history:?}"
+    );
+    assert!(
+        history.iter().any(|c| c.starts_with("curl ")),
+        "{history:?}"
+    );
     assert_eq!(model::load(&h.ctx.paths).unwrap().unwrap(), state);
     assert!(h.running(FRPS));
+    assert!(!journal::exists(&h.ctx.paths));
 }
 
 #[test]
