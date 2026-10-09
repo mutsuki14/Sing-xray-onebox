@@ -3,7 +3,7 @@
 ## 服务与日志
 
 ```bash
-onebox status                        # 各代理内核是否运行（不需要 root）
+onebox status                        # 各代理内核是否运行
 onebox start | stop | restart        # 启动 / 停止 / 重启代理内核
 onebox log                           # sing-box 日志（最近 200 行，别名 logs）
 onebox log xray                      # Xray 日志
@@ -11,7 +11,7 @@ onebox service onebox-site restart   # 单独控制某个 Onebox 服务
 onebox service onebox-site log
 ```
 
-`service 服务名 [操作]` 支持的操作：`start`、`stop`、`restart`、`enable`、`disable`、`remove`、`status`（默认）、`log`。服务没有 `reload`，请用 `restart`。`status` 和 `log` 不需要 root；`start` 遇到正在进行的配置变更时会等待其结束（最长 5 分钟）再启动，并确认服务已经运行。
+`service 服务名 [操作]` 支持的操作：`start`、`stop`、`restart`、`enable`、`disable`、`remove`、`status`（默认）、`log`。服务没有 `reload`，请用 `restart`。`onebox status` 要读取节点状态文件，需要 root；`service` 的 `status` 和 `log` 不需要 root，非 root 用户可用 `onebox service onebox-sing-box status` 查看内核是否运行（无 init 环境除外：服务定义只有 root 可读，非 root 查询总显示 `已停止`）。`start` 遇到正在进行的配置变更时会等待其结束（最长 5 分钟）再启动，并确认服务已经运行。
 
 日志位置：systemd 上来自 `journalctl`；OpenRC 和无 init 环境写入 `/var/log/onebox/<服务名>.log`（FRP 服务写入 `/var/log/onebox-frp/`）。
 
@@ -68,7 +68,7 @@ onebox regen      # 按当前状态重新生成并应用全部配置（凭据不
 
 ```bash
 onebox update-check              # 只检查，不下载（不需要 root）
-onebox update-script             # 更新 Onebox 程序（保留旧命令名）
+onebox update-script             # 更新 Onebox 程序本身
 onebox update-channel            # 查看更新渠道；update-channel testing 切换
 onebox update                    # 更新正在使用的内核
 onebox update singbox 1.14.2     # 指定内核版本（并固定该版本）
@@ -110,7 +110,7 @@ Onebox 只管理自己带标记的 crontab 行，不改动其他行：
 | `# onebox:boot:服务名` | `@reboot` | 仅无 init 环境：开机执行 `onebox service 服务名 start` | `/var/log/onebox/boot.log`（FRP 为 `/var/log/onebox-frp/boot.log`） |
 
 - `renew` 行只在存在 Let's Encrypt 或自备证书（代理、网站或独立订阅）时安装；只有自签证书的节点不需要计划任务。需要 Let's Encrypt 证书但 cron 未运行时，配置变更会在开始前报错；自备证书只给出警告。
-- 续期等待正在进行的配置操作结束（最长 10 分钟），只续期到期的证书，并只重启受影响的服务：代理证书 → 代理内核，网站证书 → `onebox-site`，独立订阅证书 → `onebox-subscription-web`。只有代理证书的指纹或公共信任状态发生变化（例如自签证书重新生成）时，才执行一次完整配置事务，重新发布客户端配置与订阅。无事可做时不输出。
+- 续期等待正在进行的配置操作结束（最长 10 分钟），只续期到期的证书，并只重启受影响的服务：代理证书 → 代理内核，网站证书 → `onebox-site`，独立订阅证书 → `onebox-subscription-web`。只有客户端固定了代理证书指纹（自签证书，或不受公共信任的自备证书）且证书被更换，或证书的公共信任状态改变时，才执行一次完整配置事务，重新发布客户端配置与订阅；Let's Encrypt 代理证书的常规续期只重启代理内核。无事可做时不输出。
 - 时间按系统时区。每行都带固定的 `PATH` 和 Onebox 的路径环境变量，不含任何凭据。
 - 手动执行 `onebox renew` 会强制续期全部证书（单个证书：`onebox cert renew proxy|site|subscription`）。
 
@@ -125,7 +125,7 @@ onebox frps uninstall      # 单独卸载 FRP
 
 - **删除**：服务 `onebox-sing-box`、`onebox-xray`、`onebox-site`、`onebox-subscription`、`onebox-subscription-web`、`onebox-network`；受管防火墙规则与端口跳跃规则；节点的计划任务；sing-box / Xray 内核与服务端配置；`/etc/onebox/client/`、`/etc/onebox/subscription/`（含订阅设备）、代理证书目录 `/etc/onebox/tls/`（含私钥）、服务定义；最后删除 `state.json` 与 `state.v2.json`。
 - **保留**：网站管理目录与证书、网站网页及其内容备份、`/etc/onebox/backups/`、`onebox` 程序、FRP（独立管理）、系统安装的 nginx 软件包，以及 BBR 设置与通过 `onebox bbr` 安装的系统内核。
-- 某一步失败时其余步骤照常执行，最后汇总报错，状态文件保留；解决问题后再次执行 `onebox uninstall` 即可。
+- 某一步失败时其余步骤照常执行（但有服务未能删除时跳过全部文件删除，保留服务定义、内核、配置与证书等文件，并提示 `服务未能全部删除，已保留服务定义、内核与配置文件`），最后汇总报错，状态文件保留；解决问题后再次执行 `onebox uninstall` 即可。
 
 ## 文件位置
 

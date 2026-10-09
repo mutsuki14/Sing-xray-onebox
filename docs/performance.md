@@ -15,7 +15,7 @@ onebox tune resource balanced --apply           # 撤销接收窗口覆盖，保
 onebox tune reset --apply                       # 恢复默认：不调优 Hysteria2，资源档位 balanced
 ```
 
-不加 `--apply` 只打印 `调优预览: …`，不修改任何配置；加 `--apply` 后需要 root，按普通配置变更执行（内核校验，失败自动回滚）。应用后需重新导入客户端配置或刷新订阅。
+不加 `--apply` 只打印 `调优预览: …`，不修改任何配置；加 `--apply` 后按普通配置变更执行（内核校验，失败自动回滚）。`tune status`、预览与应用都要读取 `/etc/onebox/state.json`，因此都需要 root。应用后需重新导入客户端配置或刷新订阅。
 
 | 选项 | 实际改变 | 适用范围 |
 |---|---|---|
@@ -69,12 +69,12 @@ onebox probe export /root/probe.json
 ### 多入口回退
 
 ```bash
-./onebox failover probe.json          # 默认：首个 TCP 入口为主，首个仅 UDP 的入口为备
+./onebox failover probe.json          # 默认：首个 TCP 入口为主，首个仅 UDP 入口（Hysteria2 / TUIC）为备
 ./onebox failover combined.json --entries n1-vless-reality,n2-hysteria2 \
   --port 2080 --interval 15 --failures 3 --recoveries 3 --cooldown 60
 ```
 
-应用程序连接 `socks5h://127.0.0.1:2080`（只监听本机）。`--entries` 从左到右为优先级（2–8 个）；每 `--interval` 秒检测一次各入口，连续失败 `--failures` 次才切换，优先入口连续恢复 `--recoveries` 次且冷却期 `--cooldown` 秒已过才切回；全部失败时拒绝新连接，不直连。只支持 SOCKS5 CONNECT（TCP），不提供 UDP ASSOCIATE、HTTP 代理或 TUN；只切换新连接，既有连接不迁移。运行事件以 JSON 行输出到标准输出，退出的临时内核会自动重启。Ctrl+C 结束并清理临时内核。同一 IP 的多协议无法应对整个 IP 不可达，IP 冗余需要合并不同服务器的配置。
+应用程序连接 `socks5h://127.0.0.1:2080`（只监听本机）。没有仅 UDP 入口时（例如只有 VLESS-Reality 与 AnyTLS），默认只能选出一个入口，会提示 `回退需要 2 至 8 个入口；使用 --entries 指定顺序，或 probe merge 合并服务器配置`，此时须用 `--entries` 指定。`--entries` 从左到右为优先级（2–8 个）；每 `--interval` 秒检测一次各入口，连续失败 `--failures` 次才切换，优先入口连续恢复 `--recoveries` 次且冷却期 `--cooldown` 秒已过才切回；全部失败时拒绝新连接，不直连。只支持 SOCKS5 CONNECT（TCP），不提供 UDP ASSOCIATE、HTTP 代理或 TUN；只切换新连接，既有连接不迁移。运行事件以 JSON 行输出到标准输出，退出的临时内核会自动重启。Ctrl+C 结束并清理临时内核。同一 IP 的多协议无法应对整个 IP 不可达，IP 冗余需要合并不同服务器的配置。
 
 ### REALITY 一致性检查
 
@@ -84,7 +84,7 @@ sudo onebox reality-check                     # 服务器：本机回环检查�
 ./onebox reality-check probe.json --entries vless-reality --output reality-report.json
 ```
 
-对每个 REALITY 入口：用普通 TLS 访问节点，检查证书与信任链、TLS 1.3、HTTP/2，并与参考站点比较证书、ALPN、HTTP 状态、跳转和首页前 64 KiB；再分别用正确凭据和错误 short ID 启动真实客户端，确认前者能代理、后者被拒绝。未协商 HTTP/2 和页面内容不同只算警告——动态页面或负载均衡证书可能产生差异，需人工核对。检查结果不能证明不可识别，也不证明公网可达。`--ca` 可指定自有测试 CA。
+对每个 REALITY 入口：用普通 TLS 访问节点，检查证书与信任链、TLS 1.3、HTTP/2，并与参考站点比较证书、ALPN、HTTP 状态、跳转和首页前 64 KiB；再分别用正确凭据和错误 short ID 启动真实客户端，确认前者能代理、后者被拒绝。未协商 HTTP/2 和首页前 64 KiB 内容不同只算警告（动态页面可能产生差异，需人工核对）；证书、ALPN、HTTP 状态或跳转不一致算失败（参考站点使用多张负载均衡证书时也可能失败，可重试或更换伪装目标）。检查结果不能证明不可识别，也不证明公网可达。`--ca` 可指定自有测试 CA。
 
 ### 退出码
 

@@ -18,9 +18,13 @@ v2 的 `update-script` 从 GitHub 最新 Release 下载 `onebox-linux-{架构}-m
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh -o onebox.sh
 sh onebox.sh regen
+
+# 无法直连 GitHub 时，脚本本身和发布文件都经加速前缀下载
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh -o onebox.sh
+GH_PROXY=https://ghfast.top/ sh onebox.sh regen
 ```
 
-引导脚本下载 3.0.0 程序并执行 `regen`，迁移时把自己安装到 `/usr/local/bin/onebox`；失败同样整体回滚，保留 v2。
+引导脚本下载 3.0.0 程序并执行 `regen`，迁移时把自己安装到 `/usr/local/bin/onebox`；失败同样整体回滚，保留 v2。`GH_PROXY` 镜像同时提供程序和校验文件 `SHA256SUMS`，可以同时替换二者，请只使用可信的前缀。
 
 **不要用 `install` 代替迁移**，重装会生成新凭据并清除订阅设备。升级后客户端无需重新导入；不过 v3 修复了若干客户端配置问题（见下文），重新导入或刷新订阅可获得修复。
 
@@ -47,7 +51,7 @@ v3 不再读取 1.x 的 `/etc/onebox/onebox.conf`，也不能恢复 1.x 格式�
 - **命令行**：v2 的命令名、别名和选项名保持不变，但每个命令只接受属于自己的选项（见[不再接受的 v2 写法](#不再接受的-v2-写法)）。v2 写入的服务单元与计划任务所调用的命令（`net-apply`、`cert renew … --cron`、`subscription renew --cron`、`subscription serve`、`service 名称 start`、`frps net-apply`、`frps renew --cron`、`frps start`）在被重写前仍然有效。
 - **协议与预设**：协议 ID、预设 1–7 及其协议列表、客户端文件名（`/etc/onebox/client/` 下）。
 - **订阅**：设备 ID、令牌（只存哈希）和 `/sub/令牌/格式` 链接不变。
-- **备份**：v2 备份（schema 2）可直接 `restore`（自动迁移，带回其中的订阅设备）；v3 写出的备份格式与之兼容。
+- **备份**：v2 备份（schema 2）可直接 `restore`（自动迁移，带回其中的订阅设备）。v3 写出的备份沿用同一清单格式（schema 2），但其中的 `state.json` 是 schema 3，只能由 v3 恢复。
 - **事务恢复**：v2 留下的未完成配置事务和程序更新日志，v3 的 `onebox recover` 都能恢复。
 
 ## 变化
@@ -91,7 +95,7 @@ v2 的多条计划任务合并为带统一标记的行，固定 `PATH`，输出�
 
 - 节点的行在升级时的 `regen` 中改写。`renew` 行只在存在 Let's Encrypt 或自备证书时安装；只有自签证书的节点会删除 v2 的三条续期行，不再需要计划任务。
 - FRP 的行在下一次 FRP 事务中改写：任意 FRP 变更，或每天 03:17 由旧行触发的 `frps renew --cron`。在此之前 v2 的行继续有效。
-- 续期不再执行完整配置事务，只重启受影响的服务（见 [maintenance.md](maintenance.md#计划任务)）。
+- 续期不再每次执行完整配置事务，通常只重启受影响的服务（见 [maintenance.md](maintenance.md#计划任务)）。
 
 ### 交互与命令行
 
@@ -141,7 +145,7 @@ v2 对所有命令接受同一组选项（无关的选项被忽略，个别甚�
 **证书与网站**
 
 - 计划任务带固定 `PATH` 并记录日志，精简 cron 环境下续期也能找到 nginx 和防火墙工具（v2 可能静默失败直到证书过期）；三个续期任务合并为一个，不再同时抢锁。
-- 证书续期不再执行完整配置事务、重启全部服务：只重启受影响的服务，代理证书指纹或信任状态变化时才重新发布客户端配置与订阅。
+- 证书续期不再执行完整配置事务、重启全部服务：只重启受影响的服务；只有客户端固定了证书指纹（自签证书，或不受公共信任的自备证书）且证书更换，或公共信任状态改变时，才重新发布客户端配置与订阅。
 - 只有自签证书时不再要求 cron 运行（v2 在无 cron 的容器中连自签安装也会失败）。
 - 重启后网站与订阅入口的 nginx 临时目录在服务启动时自动重建（v2 重启后可能无法启动）。
 - 手动续期真正强制续期。
