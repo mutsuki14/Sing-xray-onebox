@@ -7,8 +7,11 @@
 //! are v6-only (`net.ipv6.bindv6only=1`); without IPv6 only `0.0.0.0`.
 //!
 //! Bounds: requests are parsed with `httparse` from at most 8 KiB of
-//! headers, sockets have 5 s read/write timeouts, at most 32 connections
-//! are served at once (more are closed immediately), tokens are
+//! headers; the request head must be complete 5 s after `accept` and the
+//! response written within 5 s more, each read or write waiting at most
+//! for the time left (a client trickling bytes cannot hold a slot longer);
+//! at most 32 connections are served at once (more are closed
+//! immediately); tokens are
 //! `[A-Za-z0-9_-]{1,255}` and challenge files at most 16 KiB regular files
 //! (no symlinks). [`Responder::stop`] (or drop) ends the accept loops and
 //! waits briefly for open connections.
@@ -16,6 +19,11 @@
 //! Changes from v2: replaces acme.sh `--standalone`, which needed `socat`
 //! (never installed) and could not bind while an nginx held TCP 80
 //! (F-8.1#4/#5).
+//!
+//! The deadlines cover whole phases, as in the subscription worker
+//! (`subscription::http::Limits`): with per-read timeouts only, 32 clients
+//! sending a byte every few seconds held every slot for hours and the
+//! validation requests were closed unanswered.
 
 use crate::error::{Error, Result};
 use crate::sys::fs::read_bounded;
@@ -35,9 +43,23 @@ const CHALLENGE_PREFIX: &str = "/.well-known/acme-challenge/";
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_CONNECTIONS: usize = 32;
 const MAX_TOKEN_FILE: u64 = 16 * 1024;
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const LIMITS: Limits = Limits {
+    head: Duration::from_secs(5),
+    write: Duration::from_secs(5),
+};
+/// Shortest wait handed to a socket (a zero timeout would block forever).
+const MIN_WAIT: Duration = Duration::from_millis(1);
 const POLL: Duration = Duration::from_millis(20);
 const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// Time limits of one connection, each for a whole phase (module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Limits {
+    /// The request head must be complete this long after `accept`.
+    head: Duration,
+    /// The response must be written within this long.
+    write: Duration,
+}
 
 /// A running responder; stops when dropped.
 pub struct Responder {
@@ -51,6 +73,16 @@ impl Responder {
     /// Bind `port` (0 = any free port, for tests) and serve `webroot`.
     /// `system_root` locates `/proc` for the IPv6 facts.
     pub fn start(webroot: &Path, port: u16, system_root: &Path) -> Result<Responder> {
+        Self::start_with(webroot, port, system_root, LIMITS)
+    }
+
+    /// [`Responder::start`] with explicit time limits (tests).
+    fn start_with(
+        webroot: &Path,
+        port: u16,
+        system_root: &Path,
+        limits: Limits,
+    ) -> Result<Responder> {
         let listeners = bind(port, system_root)?;
         let port = listeners
             .first()
@@ -67,6 +99,7 @@ impl Responder {
                 webroot: webroot.to_path_buf(),
                 stop: stop.clone(),
                 active: active.clone(),
+                limits,
             };
             threads.push(std::thread::spawn(move || server.accept_loop(listener)));
         }
@@ -133,6 +166,7 @@ struct Server {
     webroot: PathBuf,
     stop: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
+    limits: Limits,
 }
 
 impl Server {
@@ -140,21 +174,21 @@ impl Server {
         let server = Arc::new(self);
         while !server.stop.load(Ordering::SeqCst) {
             match listener.accept() {
-                Ok((stream, _)) => server.dispatch(stream),
+                Ok((stream, _)) => server.dispatch(stream, Instant::now()),
                 Err(_) => std::thread::sleep(POLL),
             }
         }
     }
 
     /// Serve on a thread, or drop the connection when at capacity.
-    fn dispatch(self: &Arc<Self>, stream: TcpStream) {
+    fn dispatch(self: &Arc<Self>, stream: TcpStream, accepted: Instant) {
         if self.active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
             self.active.fetch_sub(1, Ordering::SeqCst);
             return;
         }
         let server = Arc::clone(self);
         let spawned = std::thread::Builder::new().spawn(move || {
-            let _ = server.serve(stream);
+            let _ = server.serve(stream, accepted);
             server.active.fetch_sub(1, Ordering::SeqCst);
         });
         if spawned.is_err() {
@@ -162,28 +196,46 @@ impl Server {
         }
     }
 
-    fn serve(&self, mut stream: TcpStream) -> std::io::Result<()> {
+    fn serve(&self, mut stream: TcpStream, accepted: Instant) -> std::io::Result<()> {
         stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(IO_TIMEOUT))?;
-        let Some((method, path)) = read_request(&mut stream)? else {
+        let head_by = deadline(accepted, self.limits.head);
+        let Some((method, path)) = read_request(&mut stream, head_by)? else {
             return Ok(());
         };
         let response = respond(&self.webroot, &method, &path);
-        stream.write_all(&response)?;
-        stream.flush()
+        write_by(
+            &mut stream,
+            &response,
+            deadline(Instant::now(), self.limits.write),
+        )
     }
 }
 
-/// Read until the header block is complete; `None` for malformed input.
-fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<(String, String)>> {
+/// `from + span`, saturating instead of overflowing.
+fn deadline(from: Instant, span: Duration) -> Instant {
+    from.checked_add(span).unwrap_or(from)
+}
+
+/// Read until the header block is complete; `None` for malformed input or
+/// a head not complete by `deadline` (each read waits for the time left).
+fn read_request(
+    stream: &mut TcpStream,
+    deadline: Instant,
+) -> std::io::Result<Option<(String, String)>> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     loop {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
             return Ok(None);
         }
+        stream.set_read_timeout(Some(left.max(MIN_WAIT)))?;
+        let n = match stream.read(&mut chunk) {
+            Ok(0) => return Ok(None),
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         buf.extend_from_slice(&chunk[..n]);
         let mut headers = [httparse::EMPTY_HEADER; 32];
         let mut request = httparse::Request::new(&mut headers);
@@ -197,6 +249,26 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<(String, Strin
             _ => return Ok(None),
         }
     }
+}
+
+/// Write all of `bytes` before `deadline`; each write waits at most for
+/// the time left, so a client reading slowly cannot stretch it.
+fn write_by(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ErrorKind::TimedOut.into());
+        }
+        stream.set_write_timeout(Some(left.max(MIN_WAIT)))?;
+        match stream.write(rest) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => rest = &rest[n..],
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    stream.flush()
 }
 
 /// The full HTTP response for one request (pure; unit-tested).
