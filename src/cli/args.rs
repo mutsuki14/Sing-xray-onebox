@@ -81,7 +81,11 @@ pub struct OptSpec {
     /// Name without the leading dashes, e.g. `"protocols"`.
     pub long: &'static str,
     pub value: Option<&'static str>,
+    /// May be given several times (every value is kept).
     pub repeat: bool,
+    /// Repeats are accepted but only the last value counts (v2's `frps`
+    /// options); help does not call such an option repeatable.
+    pub last_wins: bool,
     pub help: &'static str,
 }
 
@@ -91,6 +95,7 @@ impl OptSpec {
             long,
             value: None,
             repeat: false,
+            last_wins: false,
             help,
         }
     }
@@ -100,6 +105,7 @@ impl OptSpec {
             long,
             value: Some(value),
             repeat: false,
+            last_wins: false,
             help,
         }
     }
@@ -107,6 +113,13 @@ impl OptSpec {
     /// May be given several times (values accumulate in order).
     pub const fn repeated(mut self) -> OptSpec {
         self.repeat = true;
+        self
+    }
+
+    /// May be given several times; read it with `values(..).last()`.
+    pub const fn last_wins(mut self) -> OptSpec {
+        self.repeat = true;
+        self.last_wins = true;
         self
     }
 

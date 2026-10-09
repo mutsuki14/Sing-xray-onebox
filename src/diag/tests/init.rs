@@ -126,3 +126,29 @@ fn no_init_stopped_daemon_missing_boot_lines_and_no_cron_process() {
     );
     assert_eq!(check(&checks, "证书自动续期").status, CheckStatus::Fail);
 }
+
+/// Without init and `crontab`, the autostart advice is not `onebox regen`
+/// (which cannot help) but what can.
+#[test]
+fn no_init_without_crontab_explains_what_restores_services() {
+    let mut node = Node::with_init(acme_config(), InitSystem::None);
+    node.cron = Cron::Missing;
+    let node = node.finish();
+    let checks = node.diagnose().checks;
+    for name in SERVICES {
+        let found = check(&checks, name);
+        assert_eq!(found.status, CheckStatus::Warn, "{found:?}");
+        assert!(
+            found.detail.ends_with(crate::diag::node::NO_AUTOSTART_HINT),
+            "{found:?}"
+        );
+        assert!(!found.detail.contains("执行 onebox regen；"), "{found:?}");
+    }
+    assert_eq!(
+        check(&checks, "服务 onebox-network").detail,
+        format!(
+            "重启后防火墙与端口跳跃规则不会自动恢复；{}",
+            crate::diag::node::NO_AUTOSTART_HINT
+        )
+    );
+}

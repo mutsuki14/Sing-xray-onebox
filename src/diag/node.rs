@@ -153,8 +153,25 @@ pub fn service_check(services: &Services, name: &str, role: Role, fix: &str) -> 
         return Check::fail(service_name(name), format!("未配置；执行 {fix}"));
     }
     let running = role == Role::Daemon && services.running(name);
+    if !services.autostart_available() && (running || role == Role::Boot) {
+        return no_autostart_verdict(name, role);
+    }
     service_verdict(name, role, running, services.enabled(name), fix)
 }
+
+/// A configured service on a host without init or `crontab`: nothing can
+/// start it at boot, and `onebox regen` cannot change that.
+pub fn no_autostart_verdict(name: &str, role: Role) -> Check {
+    let what = match role {
+        Role::Daemon => "运行中；",
+        Role::Boot => "重启后防火墙与端口跳跃规则不会自动恢复；",
+    };
+    Check::warn(service_name(name), format!("{what}{NO_AUTOSTART_HINT}"))
+}
+
+/// What to do about autostart without init or `crontab`.
+pub const NO_AUTOSTART_HINT: &str =
+    "未找到 init 或 crontab，无法开机自启：安装 cron 后执行 onebox regen，或在重启后执行 onebox net-apply && onebox start";
 
 /// The verdict for a configured service from its facts.
 pub fn service_verdict(

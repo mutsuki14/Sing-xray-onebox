@@ -151,8 +151,9 @@ pub fn run(ctx: &Ctx, action: Action) -> Result<()> {
     .run(action)
 }
 
+/// A configuration option: repeats are accepted, the last value counts (v2).
 const fn option(long: &'static str, value: &'static str, help: &'static str) -> OptSpec {
-    OptSpec::value(long, value, help).repeated()
+    OptSpec::value(long, value, help).last_wins()
 }
 
 const CONFIG_OPTIONS: &[OptSpec] = &[

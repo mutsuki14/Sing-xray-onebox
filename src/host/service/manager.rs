@@ -31,6 +31,7 @@ use crate::sys::lock::FileLock;
 use crate::ui::out;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long callers usually give a service to come up (v2: 20 × 100 ms).
@@ -44,6 +45,8 @@ const SYSTEMD_NOT_LOADED: i32 = 5;
 const NO_AUTOSTART: &str =
     "未找到 init 或 crontab；服务不会开机自启，重启后请执行 onebox net-apply && onebox start";
 const NO_LOG: &str = "服务日志尚不存在";
+/// [`NO_AUTOSTART`] was printed by this process.
+static AUTOSTART_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Service operations for one init system.
 pub struct Services<'a> {
@@ -226,6 +229,12 @@ impl<'a> Services<'a> {
     /// Whether `name` starts at boot. systemd: `is-enabled` exit 0 (codes
     /// above 4 are errors); OpenRC: listed in the default runlevel; no
     /// init: its autostart crontab line exists.
+    /// Whether services can start at boot at all: an init system, or a
+    /// `crontab` for the `@reboot` lines.
+    pub fn autostart_available(&self) -> bool {
+        self.init != InitSystem::None || cron::available(self.ctx)
+    }
+
     pub fn enabled(&self, name: &str) -> Result<bool> {
         if !self.exists(name) {
             return Ok(false);
@@ -446,7 +455,10 @@ impl<'a> Services<'a> {
     fn enable_boot_line(&self, name: &str) -> Result<()> {
         let (def, _) = self.load(name)?;
         if !cron::available(self.ctx) {
-            out::warn(NO_AUTOSTART);
+            // Once per run: an apply enables several services.
+            if !AUTOSTART_WARNED.swap(true, Ordering::Relaxed) {
+                out::warn(NO_AUTOSTART);
+            }
             return Ok(());
         }
         super::prepare_dir(&def.log_dir)?;

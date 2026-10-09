@@ -100,7 +100,7 @@ fn option_rows(spec: &CommandSpec) -> Vec<(String, String)> {
                 Some(value) => format!("--{} {value}", o.long),
                 None => format!("--{}", o.long),
             };
-            let right = if o.repeat {
+            let right = if o.repeat && !o.last_wins {
                 format!("{}（可重复）", o.help)
             } else {
                 o.help.to_string()
@@ -234,6 +234,15 @@ mod tests {
 
 通用选项: -y/--yes 无人值守（使用默认值并自动确认）  -h/--help 显示帮助";
         assert_eq!(command_help(&[&COMMANDS[0]]), expected);
+    }
+
+    #[test]
+    fn last_wins_options_are_not_called_repeatable() {
+        static TUNE: [CommandSpec; 1] = [CommandSpec::new("tune", Group::Node, "调优")
+            .options(&[OptSpec::value("mode", "web|tcp", "模式").last_wins()])];
+        let help = command_help(&[&TUNE[0]]);
+        assert!(help.contains("--mode web|tcp  模式\n"), "{help}");
+        assert!(!help.contains("可重复"), "{help}");
     }
 
     #[test]
