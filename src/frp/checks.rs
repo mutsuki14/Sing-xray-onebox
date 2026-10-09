@@ -120,7 +120,11 @@ fn control_checks(rt: &Runtime) -> Vec<Check> {
         check("FRP 私有 CA", CheckStatus::Pass, "有效")
     };
     let control = if expires_within(rt.ctx, &files.cert(), 0) {
-        check("FRP 控制证书", CheckStatus::Fail, "已过期或无法读取；请执行 onebox frps renew")
+        check(
+            "FRP 控制证书",
+            CheckStatus::Fail,
+            "已过期或无法读取；请执行 onebox frps renew",
+        )
     } else if expires_within(rt.ctx, &files.cert(), CERT_WARNING_DAYS * DAY) {
         check(
             "FRP 控制证书",
@@ -138,9 +142,7 @@ fn web_cert_check(rt: &Runtime) -> Check {
     match cert::status(rt.ctx, &rt.paths().frp_root.join("web-tls")) {
         Ok(None) => check(name, CheckStatus::Fail, "尚未部署网站证书"),
         Ok(Some(status)) => match status.warning(CERT_WARNING_DAYS) {
-            Some(w) if status.days_left.is_some_and(|d| d < 0) => {
-                check(name, CheckStatus::Fail, w)
-            }
+            Some(w) if status.days_left.is_some_and(|d| d < 0) => check(name, CheckStatus::Fail, w),
             Some(w) => check(name, CheckStatus::Warn, w),
             None => check(
                 name,

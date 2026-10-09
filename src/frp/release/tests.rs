@@ -87,7 +87,10 @@ fn downloads_verifies_and_stages_the_binary() {
     frps_versions(&f.exec, &f.installed(), None, "0.71.0");
     let staged = f.prepare("0.71.0").unwrap();
     let binary = staged.binary.clone().unwrap();
-    assert_eq!(fs::read(&binary).unwrap(), b"\x7fELF fake frps");
+    assert_eq!(
+        fs::read(&binary).unwrap(),
+        crate::frp::testing::fake_frps("0.71.0")
+    );
     let mode = fs::metadata(&binary).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
     assert!(binary.starts_with(f.dir.join("stage")));

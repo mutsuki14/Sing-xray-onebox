@@ -223,7 +223,11 @@ fn write_files(rt: &Runtime, state: &mut FrpState, change: &Change, staged: &Sta
     }
     state.version.clone_from(&staged.version);
     let config = paths.frp_root.join("frps.toml");
-    atomic_write(&config, server_toml(state, &paths.frp_root).as_bytes(), 0o600)?;
+    atomic_write(
+        &config,
+        server_toml(state, &paths.frp_root).as_bytes(),
+        0o600,
+    )?;
     let verify = Cmd::new(binary.to_string_lossy())
         .args(["verify", "-c"])
         .arg(config.to_string_lossy())

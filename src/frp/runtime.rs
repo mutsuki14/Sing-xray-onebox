@@ -37,6 +37,9 @@ use std::time::Duration;
 /// Contention message of the FRP lock (v2 wording).
 pub const BUSY: &str = "另一个 FRP 管理操作正在进行";
 
+/// How long [`Runtime::lock`] waits for a concurrent holder.
+const LOCK_GRACE: Duration = Duration::from_secs(2);
+
 /// How the TLS health check retries (v2: 10 × 300 ms).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Health {
@@ -85,19 +88,21 @@ impl<'a> Runtime<'a> {
         Services::new(self.ctx, self.init)
     }
 
-    /// The FRP lock, non-blocking.
+    /// The FRP lock. Contention fails after a short grace period, which
+    /// also covers a lock that was just released while a child forked by
+    /// another thread still held its descriptor.
     pub fn lock(&self) -> Result<FileLock> {
-        FileLock::acquire(&self.paths().frp_lock(), BUSY)
+        FileLock::acquire_waiting(
+            &self.paths().frp_lock(),
+            BUSY,
+            LOCK_GRACE,
+            Duration::from_millis(100),
+        )
     }
 
     /// The FRP lock, waiting up to `wait` (scheduled renewals).
     pub fn lock_waiting(&self, wait: Duration) -> Result<FileLock> {
-        FileLock::acquire_waiting(
-            &self.paths().frp_lock(),
-            BUSY,
-            wait,
-            Duration::from_secs(5),
-        )
+        FileLock::acquire_waiting(&self.paths().frp_lock(), BUSY, wait, Duration::from_secs(5))
     }
 
     /// Start `name`. `onebox-frps`'s pre-start hook gets the held FRP lock

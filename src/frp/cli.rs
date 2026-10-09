@@ -152,15 +152,31 @@ const fn option(long: &'static str, value: &'static str, help: &'static str) -> 
 }
 
 const CONFIG_OPTIONS: &[OptSpec] = &[
-    option("mode", "web|tcp", "web = HTTPS 网站（默认），tcp = TCP / UDP 转发"),
+    option(
+        "mode",
+        "web|tcp",
+        "web = HTTPS 网站（默认），tcp = TCP / UDP 转发",
+    ),
     option("domain", "域名", "控制域名：frpc 连接并校验证书的名字"),
     option("port", "端口", "控制端口（默认 7000）"),
-    option("http-port", "端口", "web：frps 内部 HTTP 端口（默认 7080，仅本机）"),
+    option(
+        "http-port",
+        "端口",
+        "web：frps 内部 HTTP 端口（默认 7080，仅本机）",
+    ),
     option("https-port", "端口", "web：公开 HTTPS 端口（默认 443）"),
-    option("redirect-port", "端口", "web：HTTP 跳转端口（默认 80，0 关闭）"),
+    option(
+        "redirect-port",
+        "端口",
+        "web：HTTP 跳转端口（默认 80，0 关闭）",
+    ),
     option("web-domain", "域名", "web：应用域名（单域名）"),
     option("subdomain-host", "域名", "web：泛域名根（*.根）"),
-    option("allow-ports", "起始-结束", "tcp：允许转发端口范围（默认 20000-20100）"),
+    option(
+        "allow-ports",
+        "起始-结束",
+        "tcp：允许转发端口范围（默认 20000-20100）",
+    ),
     option("tls", "http|cf|custom", "web：网站证书方式"),
     option("cert", "路径", "web：自备证书完整链（--tls custom）"),
     option("key", "路径", "web：自备证书未加密私钥（--tls custom）"),
@@ -170,7 +186,11 @@ const CONFIG_OPTIONS: &[OptSpec] = &[
 const EXPORT_OPTIONS: &[OptSpec] = &[
     OptSpec::value("type", "http|tcp|udp", "代理类型（web 模式为 http）"),
     OptSpec::value("local-port", "端口", "内网服务端口（默认 8080）"),
-    OptSpec::value("remote-port", "端口", "tcp/udp：公网转发端口（默认范围起点）"),
+    OptSpec::value(
+        "remote-port",
+        "端口",
+        "tcp/udp：公网转发端口（默认范围起点）",
+    ),
     OptSpec::value("subdomain", "标签", "泛域名部署的子域标签（默认 www）"),
 ];
 
@@ -324,7 +344,10 @@ impl Session<'_> {
         };
         flags.apply(&mut draft);
         for option in flags.ignored(draft.mode) {
-            out::warn(format!("{option} 不适用于 {} 模式，已忽略", draft.mode.id()));
+            out::warn(format!(
+                "{option} 不适用于 {} 模式，已忽略",
+                draft.mode.id()
+            ));
         }
         let wizard = !dry_run && flags.is_empty() && ctx.ui.interactive();
         let state = if wizard {
@@ -341,7 +364,11 @@ impl Session<'_> {
         if !ctx.ui.confirm(CONFIRM_DEPLOY, false)? {
             return Ok(());
         }
-        let reason = if previous.is_some() { "配置" } else { "安装" };
+        let reason = if previous.is_some() {
+            "配置"
+        } else {
+            "安装"
+        };
         lifecycle::apply(
             &self.rt,
             state,

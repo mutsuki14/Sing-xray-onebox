@@ -121,7 +121,9 @@ impl<'r, 'a> Txn<'r, 'a> {
                 ));
                 Ok(())
             }
-            (Err(e), Err(_)) => Err(e.wrap("FRP 配置已提交，但事务清理失败；请执行 onebox recover")),
+            (Err(e), Err(_)) => {
+                Err(e.wrap("FRP 配置已提交，但事务清理失败；请执行 onebox recover"))
+            }
         }
     }
 
