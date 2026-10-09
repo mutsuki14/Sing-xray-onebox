@@ -417,14 +417,27 @@ impl<'a> Services<'a> {
         }
     }
 
-    /// `{name}: 运行中` / `{name}: 已停止`.
-    pub fn status_line(&self, name: &str) -> String {
+    /// `{name}: 运行中` / `{name}: 已停止`. Without an init system the
+    /// state comes from the saved spec: one that is missing means stopped,
+    /// but one that exists and cannot be read or parsed (EACCES for a
+    /// non-root user, a damaged file) is an error, never "stopped".
+    pub fn status_line(&self, name: &str) -> Result<String> {
+        validate_name(name)?;
+        if self.init == InitSystem::None {
+            if let Err(e) = self.load(name) {
+                let missing = fs::symlink_metadata(self.spec_path(name))
+                    .is_err_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+                if !missing {
+                    return Err(e);
+                }
+            }
+        }
         let state = if self.running(name) {
             "运行中"
         } else {
             "已停止"
         };
-        format!("{name}: {state}")
+        Ok(format!("{name}: {state}"))
     }
 
     /// The last `lines` log lines: the journal under systemd, else the

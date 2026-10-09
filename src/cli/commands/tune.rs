@@ -1,6 +1,7 @@
 //! `tune status | hy2 [MODE] [--up N --down N] [--obfs on|off]
 //! [--hop 起-止|off] | resource MODE | reset`, each a preview unless
-//! `--apply` is given (root only then).
+//! `--apply` is given. Every form needs root, previews and `status`
+//! included: they read the node state in the root-only ROOT.
 //!
 //! Changes from v2 (spec B §3.12, B-9.1#20, C-8.1#1): options are parsed by
 //! name, so `tune hy2 --apply` reports the missing mode instead of reading
@@ -11,9 +12,10 @@
 //! planning time; `tune hy2 --obfs/--hop` changes Salamander obfuscation
 //! and port hopping after install (v2 needed a reinstall with new
 //! credentials), checked against every other UDP listener and FRP, and
-//! says that clients must re-import.
+//! says that clients must re-import; `status` and previews are declared
+//! root-only (they failed for non-root users anyway).
 
-use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
+use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec};
 use crate::cli::options as opt;
 use crate::cli::session::{request, with_system, LiveProbe, Session};
 use crate::ctx::Ctx;
@@ -21,7 +23,7 @@ use crate::domain::config::{Hy2Profile, NodeConfig, PortRange, ResourceProfile};
 use crate::domain::plan::{self, PlanEnv};
 use crate::error::{Error, Result};
 
-const APPLY: OptSpec = OptSpec::flag("apply", "应用（默认只预览，不需要 root）");
+const APPLY: OptSpec = OptSpec::flag("apply", "应用（默认只预览）");
 const UP: OptSpec = OptSpec::value("up", "Mbps", "客户端上传带宽（measured）");
 const DOWN: OptSpec = OptSpec::value("down", "Mbps", "客户端下载带宽（measured）");
 const OBFS: OptSpec = OptSpec::value("obfs", "on|off", "Salamander 混淆（客户端需重新导入）");
@@ -35,10 +37,6 @@ const NEEDS_HY2_CHANGE: &str = "需要 auto/conservative/measured，或 --obfs /
 /// After an applied obfuscation or hopping change.
 pub const REIMPORT: &str = "Hysteria2 混淆或端口跳跃已更改，客户端需要重新导入配置或刷新订阅";
 
-fn apply_flag(m: &Matches) -> bool {
-    m.flag("apply")
-}
-
 pub const TUNE: CommandSpec =
     CommandSpec::new("tune", Group::Node, "Hysteria2 与资源调优（默认只预览）")
         .usage(&[
@@ -49,9 +47,7 @@ pub const TUNE: CommandSpec =
             "tune reset [--apply]",
         ])
         .subcommands(&[
-            CommandSpec::new("status", Group::Node, "当前调优设置")
-                .root(Root::NotRequired)
-                .handler(tune_command),
+            CommandSpec::new("status", Group::Node, "当前调优设置").handler(tune_command),
             CommandSpec::new(
                 "hy2",
                 Group::Node,
@@ -62,7 +58,6 @@ pub const TUNE: CommandSpec =
                 "auto / conservative / measured（只改 --obfs/--hop 时可省略）",
             )])
             .options(&[UP, DOWN, OBFS, HOP, APPLY])
-            .root(Root::Custom(apply_flag))
             .handler(tune_command),
             CommandSpec::new("resource", Group::Node, "QUIC 接收窗口与并发流档位")
                 .args(&[ArgSpec::optional(
@@ -70,14 +65,11 @@ pub const TUNE: CommandSpec =
                     "balanced / low-memory / throughput",
                 )])
                 .options(&[APPLY])
-                .root(Root::Custom(apply_flag))
                 .handler(tune_command),
             CommandSpec::new("reset", Group::Node, "恢复默认调优")
                 .options(&[APPLY])
-                .root(Root::Custom(apply_flag))
                 .handler(tune_command),
         ])
-        .root(Root::NotRequired)
         .handler(tune_command);
 
 /// One tuning change.
@@ -193,8 +185,9 @@ fn tune_command(ctx: &Ctx, m: &Matches) -> Result<()> {
     })
 }
 
-/// `tune status`: v2's four `KEY=value` lines.
+/// `tune status`: v2's four `KEY=value` lines (root: the node state).
 pub fn status(session: &Session) -> Result<()> {
+    session.require_root()?;
     session.data(&status_text(&session.load()?.config))
 }
 
@@ -279,15 +272,16 @@ pub fn needs_reimport(cfg: &NodeConfig, next: &NodeConfig) -> bool {
     cfg.hy2.obfs != next.hy2.obfs || cfg.hy2.hop != next.hy2.hop
 }
 
-/// Preview `change`; with `apply`, run it (root only).
+/// Preview `change`; with `apply`, run it (root either way: the node
+/// state is root-only).
 pub fn tune(session: &Session, change: Tune, apply: bool) -> Result<()> {
+    session.require_root()?;
     let loaded = session.load()?;
     let next = plan_live(session, &loaded.config, change)?;
     session.data(&preview_text(&next, change))?;
     if !apply {
         return session.data("添加 --apply 才会应用");
     }
-    session.require_root()?;
     let reimport = needs_reimport(&loaded.config, &next);
     session.apply(request(&loaded, next, "调优"))?;
     if reimport {

@@ -58,13 +58,19 @@ fn parsing_by_name() {
 }
 
 #[test]
-fn root_only_with_apply() {
-    assert!(!root("tune"));
-    assert!(!root("tune status"));
-    assert!(!root("tune hy2 auto"));
-    assert!(root("tune hy2 auto --apply"));
-    assert!(!root("tune resource throughput"));
-    assert!(root("tune reset --apply"));
+fn root_for_every_form() {
+    // Previews and status read the root-only node state too.
+    for line in [
+        "tune",
+        "tune status",
+        "tune hy2 auto",
+        "tune hy2 auto --apply",
+        "tune resource throughput",
+        "tune reset --apply",
+    ] {
+        assert!(root(line), "{line}");
+    }
+    assert!(!APPLY.help.contains("root"), "{}", APPLY.help);
 }
 
 fn hy2_node() -> NodeConfig {

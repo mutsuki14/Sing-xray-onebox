@@ -59,15 +59,16 @@ impl Menu<'_> {
         })
     }
 
-    /// Preview a tuning change, apply it when confirmed (root).
+    /// Preview a tuning change, apply it when confirmed (root, which the
+    /// preview needs too: the node state is root-only).
     fn tune(&self, change: Tune) -> Result<()> {
+        self.session.require_root()?;
         let loaded = self.loaded()?;
         let next = tune::plan_live(self.session, &loaded.config, change)?;
         self.session.data(&tune::preview_text(&next, change))?;
         if !self.session.ui().confirm("应用此调优配置？", true)? {
             return Ok(());
         }
-        self.session.require_root()?;
         let reimport = tune::needs_reimport(&loaded.config, &next);
         self.session.apply(request(&loaded, next, "调优"))?;
         if reimport {
