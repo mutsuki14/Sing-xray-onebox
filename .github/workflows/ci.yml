@@ -101,6 +101,37 @@ jobs:
           dpkg-deb -x nginx_*.deb "$RUNNER_TEMP/nginx-root"
           test -x "$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
           "$RUNNER_TEMP/nginx-root/usr/sbin/nginx" -v
+      - name: Fetch the released Onebox v2.0.1 for the upgrade suite (pinned SHA-256)
+        env:
+          # tests/e2e/upgrade.py upgrades nodes installed by the v2.0.1 release
+          # in place. The published static asset is used, not a source build:
+          # it is the exact program v2 hosts run, and needs no second toolchain.
+          # Its digest is pinned here, so a replaced release asset fails CI
+          # instead of being trusted through the SHA256SUMS of the same release.
+          V2_BASE: https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1
+          V2_ASSET: onebox-linux-amd64-musl
+          V2_SHA256: df929290d37855b5547940ce2b4b062f667526028b55351d901074d28cef881d
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/onebox-v2"
+          mkdir -p "$dir"
+          cd "$dir"
+          for file in "$V2_ASSET" SHA256SUMS; do
+            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+              --retry 3 --retry-all-errors --max-time 300 --output "$file" "$V2_BASE/$file"
+          done
+          listed=$(awk -v name="$V2_ASSET" '$2 == name || $2 == "*" name { print $1 }' SHA256SUMS)
+          if [[ "$listed" != "$V2_SHA256" ]]; then
+            echo "::error::SHA256SUMS lists '$listed' for $V2_ASSET, expected the pinned $V2_SHA256"
+            exit 1
+          fi
+          echo "$V2_SHA256  $V2_ASSET" | sha256sum --check --strict
+          chmod 755 "$V2_ASSET"
+          reported=$("./$V2_ASSET" version)
+          if [[ "$reported" != 2.0.1 ]]; then
+            echo "::error::$V2_ASSET version printed '$reported', expected 2.0.1"
+            exit 1
+          fi
       - name: Check the real tool paths and record them for the test steps
         id: paths
         run: |
@@ -119,6 +150,7 @@ jobs:
             "ONEBOX_FRPS_BIN=$RUNNER_TEMP/bin/frps"
             "ONEBOX_FRPC_BIN=$RUNNER_TEMP/bin/frpc"
             "ONEBOX_NGINX_BIN=$RUNNER_TEMP/nginx-root/usr/sbin/nginx"
+            "ONEBOX_TEST_V2_BINARY=$RUNNER_TEMP/onebox-v2/onebox-linux-amd64-musl"
           )
           for entry in "${tools[@]}"; do
             if [[ ! -f "${entry#*=}" || ! -x "${entry#*=}" ]]; then
@@ -134,6 +166,7 @@ jobs:
           "$RUNNER_TEMP/bin/frpc" --version
           "$RUNNER_TEMP/nginx-root/usr/sbin/nginx" -v
           "$GITHUB_WORKSPACE/target/debug/onebox" --version
+          "$RUNNER_TEMP/onebox-v2/onebox-linux-amd64-musl" version
           printf '%s\n' "${tools[@]}" ONEBOX_TEST_REQUIRE_FULL=1 > "$RUNNER_TEMP/real-tools.env"
       - name: Unit, ignored and real-process Rust tests (root, one thread)
         # --all-targets leaves out doctests (lint runs them): --include-ignored
