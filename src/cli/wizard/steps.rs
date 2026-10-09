@@ -236,11 +236,14 @@ fn vmess_host(ui: &dyn Prompter) -> Result<Option<String>> {
 }
 
 /// Step 4a: the connection address (the detected IP as the default).
+/// With `--addr` nothing is asked, but the public IPs are still detected,
+/// as an unattended install does: they decide the server's DNS families,
+/// so `install --addr X` must give the same node with or without `-y`.
 pub fn address(session: &Session, args: &InstallArgs) -> Result<Detected> {
-    if args.addr.is_some() {
-        return Ok(Detected::default());
-    }
     let mut detected = Detected::detect(session);
+    if args.addr.is_some() {
+        return Ok(detected);
+    }
     let shown = |ip: Option<String>| ip.unwrap_or_else(|| "未检测到".to_owned());
     let title = header(
         4,

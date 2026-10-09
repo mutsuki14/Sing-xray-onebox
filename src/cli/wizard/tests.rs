@@ -297,6 +297,27 @@ fn command_line_options_skip_their_steps() {
     assert_eq!(cfg.reality.sni, "www.apple.com");
 }
 
+/// `--addr` skips the address question, not the detection: the wizard and
+/// an unattended install of the same options produce the same node (the
+/// detected families drive the server's DNS strategy).
+#[test]
+fn addr_option_gives_the_same_node_interactive_or_unattended() {
+    let mut bench = Bench::new();
+    bench.live.ipv6_addr = Some("2001:db8::10".parse().unwrap());
+    let line = "install --preset 2 --sni www.apple.com --addr 198.51.100.9";
+    let interactive = wizard(&bench, line, &["", ""]).unwrap();
+    let unattended =
+        crate::cli::commands::install::unattended(&bench.session(), &args(line), None).unwrap();
+    assert_eq!(interactive, unattended);
+    let server = &interactive.server;
+    assert_eq!(server.addr.to_string(), "198.51.100.9");
+    assert_eq!(
+        server.ipv6.map(|ip| ip.to_string()).as_deref(),
+        Some("2001:db8::10"),
+        "dual stack kept"
+    );
+}
+
 #[test]
 fn eof_cancels_the_wizard() {
     let bench = Bench::new();
