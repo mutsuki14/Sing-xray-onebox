@@ -1,6 +1,7 @@
 use super::*;
 use crate::domain::protocol::Core;
 use crate::host::cron::testing::{fake_crontab, text};
+use crate::host::service::NETWORK;
 use crate::host::supervisor::fixture::FakeProc;
 use crate::host::supervisor::{Supervisor, Timing};
 use crate::sys::exec::{FakeExec, Output, FAKE_PID_BASE};
@@ -163,6 +164,38 @@ fn actions_map_to_each_init_system() {
         assert_eq!(f.exec.history(), [want], "{init:?} {action}");
         let cmd = &f.exec.calls()[0];
         assert!(cmd.timeout.is_some(), "service managers run with a timeout");
+    }
+}
+
+/// Starting a oneshot through systemd or OpenRC runs its whole command
+/// (`onebox net-apply`: lock wait, maybe a full apply); killing
+/// `rc-service` at the usual action bound would kill it mid-transaction.
+#[test]
+fn oneshot_starts_get_the_oneshot_bound() {
+    let cases = [
+        (InitSystem::Systemd, "start", NETWORK, ONESHOT_TIMEOUT),
+        (InitSystem::Systemd, "restart", NETWORK, ONESHOT_TIMEOUT),
+        (InitSystem::Openrc, "start", NETWORK, ONESHOT_TIMEOUT),
+        (InitSystem::Openrc, "restart", NETWORK, ONESHOT_TIMEOUT),
+        (InitSystem::Systemd, "start", XRAY_NAME, ACTION_TIMEOUT),
+        (InitSystem::Openrc, "restart", XRAY_NAME, ACTION_TIMEOUT),
+        (InitSystem::Systemd, "stop", NETWORK, ACTION_TIMEOUT),
+    ];
+    for (init, action, name, want) in cases {
+        let f = Fixture::new();
+        f.answer_all(Output::success(""));
+        fs::create_dir_all(&f.ctx.paths.initd).unwrap();
+        fs::write(script_file(&f.ctx.paths, name), "").unwrap();
+        let services = f.services(init);
+        match action {
+            "start" => services.start(name),
+            "restart" => services.restart(name),
+            _ => services.stop(name),
+        }
+        .unwrap();
+        let calls = f.exec.calls();
+        assert_eq!(calls.len(), 1, "{init:?} {action} {name}");
+        assert_eq!(calls[0].timeout, Some(want), "{init:?} {action} {name}");
     }
 }
 

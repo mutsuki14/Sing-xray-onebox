@@ -27,6 +27,7 @@ use super::recover;
 use super::request::ApplyRequest;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::host::service::ONESHOT_TIMEOUT;
 use crate::paths::Paths;
 use crate::state::StateStore;
 use crate::sys::lock::{inherited_lock_offered, FileLock, BUSY_MESSAGE};
@@ -37,6 +38,10 @@ use std::time::Duration;
 pub const REFRESH_REASON: &str = "更新本机地址";
 /// How long boot waits for the node lock (the `--cron` retry policy).
 pub const LOCK_WAIT: Duration = Duration::from_secs(600);
+// The `onebox-network` oneshot running boot is killed after
+// ONESHOT_TIMEOUT (supervisor, systemctl, rc-service): the lock wait must
+// leave a full apply (address refresh) at least an hour.
+const _: () = assert!(LOCK_WAIT.as_secs() + 3600 <= ONESHOT_TIMEOUT.as_secs());
 /// How often boot retries the node lock meanwhile.
 pub const LOCK_POLL: Duration = Duration::from_millis(200);
 

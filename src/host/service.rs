@@ -51,6 +51,7 @@ use crate::sys::text::quote_unit;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const SING_BOX: &str = "onebox-sing-box";
 pub const XRAY: &str = "onebox-xray";
@@ -68,12 +69,23 @@ pub const TARGETS: [&str; 2] = ["network-online.target", "nss-lookup.target"];
 /// Largest spec JSON accepted (v2 specs are ~1.5 KiB).
 const SPEC_MAX_BYTES: u64 = 64 * 1024;
 
+/// How long starting a oneshot (`onebox-network`: `onebox net-apply`) may
+/// take before it is killed, through the supervisor, `systemctl` or
+/// `rc-service` alike. The command waits up to 10 minutes for the node
+/// lock (`apply::boot::LOCK_WAIT`, which checks that it leaves a full apply
+/// at least an hour) and may then run a full apply (address refresh).
+/// systemd and OpenRC give a oneshot no limit, and a kill mid-transaction
+/// leaves the rules unrestored until the next boot: this is only a
+/// backstop against a hung command.
+pub const ONESHOT_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceKind {
     /// A long-running process, restarted on failure.
     Daemon,
     /// A run-to-completion action at boot (systemd `Type=oneshot` with
-    /// `RemainAfterExit`); the supervisor runs it synchronously.
+    /// `RemainAfterExit`); the supervisor runs it synchronously. Starting
+    /// it may take up to [`ONESHOT_TIMEOUT`].
     Oneshot,
 }
 
