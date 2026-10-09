@@ -10,6 +10,11 @@
 //! that lock (`onebox-network`, `onebox-frps`) is started without it.
 //! `status` and `log` take no lock and need no root.
 //!
+//! A started daemon must be running within [`WAIT_RUNNING`]; a oneshot
+//! (`onebox-network`) has no process once it finished, so its start
+//! command's own result is the answer (under no init the supervisor runs it
+//! synchronously; systemd and OpenRC wait for it as well).
+//!
 //! Changes from v2 (spec B §2.4, §2.8, E §2.1, E-8.1#10/#11): `reload` is
 //! refused with a hint (units define no reload); service changes are
 //! serialized with configuration changes; `start` waits until the service
@@ -21,7 +26,7 @@ use crate::cli::session::{with_system, Session};
 use crate::ctx::Ctx;
 use crate::domain::protocol::Core;
 use crate::error::{Error, Result};
-use crate::host::service::{validate_name, Scope, ServiceDef, WAIT_RUNNING};
+use crate::host::service::{validate_name, Scope, ServiceDef, ServiceKind, Services, WAIT_RUNNING};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
 
@@ -172,21 +177,16 @@ fn lock(session: &Session, scope: Scope, action: Action) -> Result<FileLock> {
     }
 }
 
-/// Run one mutating action on `name`.
-fn act(
-    session: &Session,
-    services: &crate::host::service::Services,
-    name: &str,
-    action: Action,
-) -> Result<()> {
+/// Run one action on `name`.
+fn act(session: &Session, services: &Services, name: &str, action: Action) -> Result<()> {
     match action {
         Action::Start => {
             services.start(name)?;
-            services.wait_running(name, WAIT_RUNNING)
+            wait_running(session, services, name)
         }
         Action::Restart => {
             services.restart(name)?;
-            services.wait_running(name, WAIT_RUNNING)
+            wait_running(session, services, name)
         }
         Action::Stop => services.stop(name),
         Action::Enable => services.enable(name),
@@ -195,6 +195,15 @@ fn act(
         Action::Status => session.data(&services.status_line(name)),
         Action::Log => session.data(&services.logs(name, LOG_LINES)?),
     }
+}
+
+/// A started daemon must come up; a oneshot is done once its start
+/// command succeeded (it leaves no process to wait for).
+fn wait_running(session: &Session, services: &Services, name: &str) -> Result<()> {
+    if ServiceDef::skeleton(&session.ctx.paths, name).kind() == ServiceKind::Oneshot {
+        return Ok(());
+    }
+    services.wait_running(name, WAIT_RUNNING)
 }
 
 fn log_command(ctx: &Ctx, m: &Matches) -> Result<()> {

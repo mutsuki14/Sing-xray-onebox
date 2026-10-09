@@ -88,6 +88,24 @@ fn installed_main_menu_layout() {
     assert_eq!(bench.ui.prompts(), [expected]);
 }
 
+/// `onebox` without arguments and without a terminal prints the command
+/// overview; it never reaches the host (the unit test context is isolated).
+#[test]
+fn without_a_terminal_the_overview_is_printed() {
+    let bench = Bench::installed(&node());
+    bench.ui.set_interactive(false);
+    let help = unanswerable(bench.ui.as_ref()).unwrap();
+    assert!(help.contains("不带参数运行 onebox 打开交互菜单"), "{help}");
+    run(&bench.ctx).unwrap();
+    assert!(bench.ui.prompts().is_empty(), "no menu shown");
+    assert!(bench.exec.history().is_empty(), "the host is not queried");
+    // A terminal, or -y (which picks 0) opens the menu.
+    bench.ui.set_interactive(true);
+    assert!(unanswerable(bench.ui.as_ref()).is_none());
+    bench.unattended();
+    assert!(unanswerable(bench.ui.as_ref()).is_none());
+}
+
 #[test]
 fn header_core_states() {
     let bench = Bench::installed(&node());

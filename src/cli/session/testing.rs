@@ -93,6 +93,7 @@ impl Engine for Recorder {
 
 /// Scripted host facts (IPv6 on, nothing listening, no FRP, systemd).
 pub struct FakeLive {
+    pub init: InitSystem,
     pub ipv6: bool,
     pub busy: Mutex<Vec<(u16, Transport)>>,
     pub frp: Vec<Reservation>,
@@ -105,6 +106,7 @@ pub struct FakeLive {
 impl Default for FakeLive {
     fn default() -> Self {
         FakeLive {
+            init: InitSystem::Systemd,
             ipv6: true,
             busy: Mutex::new(Vec::new()),
             frp: Vec::new(),
@@ -151,7 +153,7 @@ impl Live for FakeLive {
         Box::new(SeqRandom(7))
     }
     fn init(&self) -> InitSystem {
-        InitSystem::Systemd
+        self.init
     }
     fn running(&self, service: &str) -> bool {
         lock(&self.running).iter().any(|s| s == service)

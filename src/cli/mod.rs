@@ -97,6 +97,8 @@ mod tests {
         assert!(!auto_from_env(None));
     }
 
+    /// Never `run(&[])`: with a controlling terminal it opens the real menu
+    /// against the real host (see `menu::tests` for the menu entry).
     #[test]
     fn builtins_and_help_dispatch() {
         for argv in [
@@ -109,7 +111,6 @@ mod tests {
             &["--help"],
             &["-h", "help"],
             &["version", "--help"],
-            &[],
         ] {
             run(os(argv)).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
         }

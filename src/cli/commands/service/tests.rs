@@ -4,6 +4,7 @@ use crate::cli::session::testing::{Bench, Call};
 use crate::domain::fixtures::config;
 use crate::domain::protocol::Core::{Singbox as SB, Xray as XR};
 use crate::domain::protocol::Protocol::*;
+use crate::host::init::InitSystem;
 use crate::sys::exec::Output;
 
 fn root(line: &str) -> bool {
@@ -144,6 +145,48 @@ fn start_reports_a_service_that_does_not_come_up() {
         .on("systemctl", &["start", "onebox-xray"], Output::success(""));
     let err = cores(&bench.session(), Action::Start).unwrap_err();
     assert_eq!(err.to_string(), "onebox-xray 未能正常运行");
+}
+
+/// No init system: `onebox-network` is a oneshot the supervisor runs to
+/// completion, so it never "runs" afterwards; start and restart succeed on
+/// the command's own result (the no-init `@reboot … service onebox-network
+/// start` line must not log a failure on every boot).
+#[test]
+fn a_oneshot_start_without_init_does_not_wait_for_a_process() {
+    let mut bench = Bench::new();
+    bench.live.init = InitSystem::None;
+    let paths = &bench.ctx.paths;
+    Services::new(&bench.ctx, InitSystem::None)
+        .write(&ServiceDef::network(paths))
+        .unwrap();
+    let exe = paths.executable.to_string_lossy().into_owned();
+    bench.exec.on(&exe, &["net-apply"], Output::success(""));
+    service(&bench.session(), "onebox-network", Action::Start).unwrap();
+    service(&bench.session(), "onebox-network", Action::Restart).unwrap();
+    assert_eq!(
+        bench.notes(),
+        [
+            "[完成] onebox-network 已启动",
+            "[完成] onebox-network 已重启"
+        ]
+    );
+    assert_eq!(
+        bench.exec.history(),
+        [format!("{exe} net-apply"), format!("{exe} net-apply")]
+    );
+    // A failing restore still fails the command.
+    let mut bench = Bench::new();
+    bench.live.init = InitSystem::None;
+    let paths = &bench.ctx.paths;
+    Services::new(&bench.ctx, InitSystem::None)
+        .write(&ServiceDef::network(paths))
+        .unwrap();
+    let exe = paths.executable.to_string_lossy().into_owned();
+    bench
+        .exec
+        .on(&exe, &["net-apply"], Output::failure(1, "规则恢复失败"));
+    let err = service(&bench.session(), "onebox-network", Action::Start).unwrap_err();
+    assert!(err.to_string().contains("规则恢复失败"), "{err}");
 }
 
 #[test]

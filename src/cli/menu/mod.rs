@@ -54,8 +54,8 @@ impl Dispatcher for Registry {
 /// `onebox` without arguments. Without a terminal (and without `-y`) the
 /// command overview is printed instead, as a menu could not be answered.
 pub fn run(ctx: &Ctx) -> Result<()> {
-    if !ctx.ui.interactive() && !ctx.ui.assume_yes() {
-        return crate::ui::out::data(&crate::cli::help::global_help(registry::COMMANDS));
+    if let Some(help) = unanswerable(ctx.ui.as_ref()) {
+        return crate::ui::out::data(&help);
     }
     with_system(ctx, |session| {
         Menu {
@@ -64,6 +64,13 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         }
         .main()
     })
+}
+
+/// The command overview to print instead of a menu nobody can answer
+/// (no terminal and no `-y`); `None` when the menu runs.
+pub fn unanswerable(ui: &dyn crate::ui::Prompter) -> Option<String> {
+    (!ui.interactive() && !ui.assume_yes())
+        .then(|| crate::cli::help::global_help(registry::COMMANDS))
 }
 
 pub struct Menu<'a> {
