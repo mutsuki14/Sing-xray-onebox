@@ -618,6 +618,31 @@ fn a_symlinked_manager_is_refused() {
 }
 
 #[test]
+fn orphaned_work_dirs_are_swept_but_never_a_journaled_one() {
+    let fx = Fx::new(false, Some("3.0.0"));
+    let parent = fx.paths().executable.parent().unwrap().to_path_buf();
+    let orphan = parent.join(format!("{WORK_PREFIX}{}", "a".repeat(24)));
+    write(&orphan.join(NEW_FILE), 0o700, b"left by a killed update");
+    let rel = Rel::stable("3.0.1");
+    fx.serve(&rel);
+    assert_done(fx.run(None, false));
+    assert!(!orphan.exists());
+    assert!(fx.work_dirs().is_empty());
+
+    // With a journal present (recovery failed earlier) nothing is swept,
+    // and the update does not start.
+    let mut fx = Fx::new(false, Some("3.0.0"));
+    fx.engine = FakeEngine::new(Recover::FailWithJournal("恢复失败"));
+    let (name, kept) = journal::create_work_dir(fx.paths()).unwrap();
+    let record = ProgramJournal::new(name, None, sha256_hex(b"x"), None);
+    journal::write(fx.paths(), &record).unwrap();
+    fx.serve(&rel);
+    assert_eq!(fx.run(None, false).unwrap_err().to_string(), "恢复失败");
+    assert!(kept.exists());
+    assert_eq!(fx.exe(), program("3.0.0\n"));
+}
+
+#[test]
 fn asset_verification_uses_the_api_digest_or_the_direct_checksum_file() {
     struct Case {
         digest: Digest,

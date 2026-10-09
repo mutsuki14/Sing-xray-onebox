@@ -7,8 +7,8 @@
 //! |-------------------------------|--------------------------------|----------------|
 //! | `update` / `update all`       | the pin, else recommended      | unchanged      |
 //! | `update CORE`                 | recommended                    | cleared        |
-//! | `update [CORE|all] latest`    | latest release                 | cleared        |
-//! | `update [CORE|all] VERSION`   | VERSION                        | VERSION        |
+//! | `update {CORE,all} latest`    | latest release                 | cleared        |
+//! | `update {CORE,all} VERSION`   | VERSION                        | VERSION        |
 //!
 //! Recommended = Xray 26.3.27 (tested with sing-box REALITY clients),
 //! sing-box latest. A target older than the installed core is refused
@@ -30,9 +30,13 @@
 //!   (v2 compared the raw argument, so `v26.3.27` warned, G-8.1#4);
 //! - `all VERSION` is refused when it would apply one version to both
 //!   cores (G-8.1#5); unknown core names are refused before any lock;
-//! - nothing is downloaded or applied when every target is already
-//!   installed and no pin changes; staging is announced as kept only when
-//!   it holds a verified binary.
+//! - an exact target that is already installed (or kept, or a refused
+//!   downgrade) is decided without a release lookup; nothing is downloaded
+//!   or applied when every target is already installed and no pin changes;
+//!   a pin change alone is applied without replacing a binary;
+//! - staging is announced as kept only when it still holds a verified
+//!   binary (v2 also announced an empty directory). Kept directories are
+//!   `.core-*` leftovers that `host::cores` sweeps after an hour.
 
 use super::{Updater, UPDATE_BUSY};
 use crate::apply::ApplyRequest;

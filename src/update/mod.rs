@@ -39,6 +39,7 @@ use crate::apply::{self, ApplyRequest};
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::host::os::{process_env, require_root, EnvLookup};
+use crate::paths::Paths;
 use crate::sys::lock::FileLock;
 
 /// Contention message of the update lock (v2 wording).
@@ -92,6 +93,16 @@ impl<'a> Updater<'a> {
             on_phase: &ignore_phase,
         }
     }
+}
+
+/// The saved update channel (`stable` when none was saved).
+pub fn channel(paths: &Paths) -> Result<Channel> {
+    channel::saved(paths)
+}
+
+/// Save the update channel preference (`ROOT/update-channel`, 0600).
+pub fn set_channel(paths: &Paths, channel: Channel) -> Result<()> {
+    channel::save(paths, channel)
 }
 
 /// `update-script` (`check_only = false`, root) and `update-check`

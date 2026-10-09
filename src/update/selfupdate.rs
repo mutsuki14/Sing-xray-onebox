@@ -5,7 +5,8 @@
 //! print the version report → refuse a stable downgrade → (`update-check`
 //! stops here) → update lock, node lock, `apply::recover_locked` → refuse
 //! an installed node whose manager is missing, an unsupported installed or
-//! target version → work dir `dirname(EXE)/.onebox-update-<24hex>` →
+//! target version → sweep orphaned work dirs → work dir
+//! `dirname(EXE)/.onebox-update-<24hex>` →
 //! download `new` (size and SHA-256 from the API digest or `SHA256SUMS`),
 //! ELF check → identical bytes: done → probe `new version` (no downgrade,
 //! stable: equals the tag) → copy `EXE` to `old`, snapshot the node into
@@ -40,14 +41,17 @@
 //! - the work directory is kept (with `更新工作目录保留供恢复`) only while a
 //!   journal still needs it; otherwise it is removed — it may hold a copy
 //!   of the node's private keys (v2 kept it after early failures and
-//!   announced it even after it was deleted, G-8.1#6).
+//!   announced it even after it was deleted, G-8.1#6); work directories of
+//!   killed updates that no journal refers to are swept by the next one;
+//! - `update-script` installs a missing curl (as every mutating download
+//!   does); `update-check` never installs anything.
 
 use super::channel::{self, Channel};
 use super::release::{self, SelfRelease, CHECKSUMS};
 use super::{Updater, UPDATE_BUSY};
 use crate::apply::program_journal::{
     self as journal, ProgramJournal, ProgramPhase, CONFIG_DIR, NEW_FILE, OLD_FILE,
-    PROGRAM_MAX_BYTES,
+    PROGRAM_MAX_BYTES, WORK_PREFIX,
 };
 use crate::apply::snapshot::{self, node_allowlist, node_targets};
 use crate::error::{Context, Error, Result, EXIT_STALE_PROCESS};
@@ -55,7 +59,7 @@ use crate::host::fetch::{self, is_elf};
 use crate::paths::Paths;
 use crate::state::StateStore;
 use crate::sys::exec::{Cmd, Output};
-use crate::sys::fs::{copy_file, remove_tree_if_exists, sha256_file};
+use crate::sys::fs::{copy_file, remove_tree_if_exists, sha256_file, sweep_stale};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use crate::sys::signal::BlockSignals;
 use crate::ui::out;
@@ -92,6 +96,11 @@ impl Updater<'_> {
     /// see the module docs. Root is the caller's business.
     pub fn self_update(&self, explicit: Option<Channel>, check_only: bool) -> Result<()> {
         let channel = channel::resolve(&self.ctx.paths, explicit)?;
+        if !check_only {
+            // The replacement changes the host anyway: a missing curl is
+            // installed (a check only reports that it is missing).
+            fetch::ensure_curl(self.ctx)?;
+        }
         let found = release::lookup(self.ctx, self.env, channel)?;
         let installed = installed_version(self.ctx)?;
         for line in release::report_lines(channel, &installed, &found.remote, &found.release.body) {
@@ -113,7 +122,7 @@ impl Updater<'_> {
         let lock = FileLock::acquire(&paths.lock(), BUSY_MESSAGE)?;
         self.engine.recover(self.ctx, &lock)?;
         let pre = preflight(self.ctx, found)?;
-        fetch::ensure_curl(self.ctx)?;
+        sweep_orphans(paths);
         let (name, work) = journal::create_work_dir(paths)?;
         let outcome = self.replace_in(found, &pre, &lock, &name, &work);
         settle_work_dir(paths, &name, &work);
@@ -392,6 +401,20 @@ pub fn failure(error: Error, recovery: Option<Result<()>>, work: &Path) -> Error
 /// `更新工作目录保留供恢复: {dir}`.
 pub fn retention_notice(work: &Path) -> String {
     format!("更新工作目录保留供恢复: {}", work.display())
+}
+
+/// Remove work directories of earlier updates that no journal refers to
+/// (a process killed before its journal was written). Runs under the update
+/// lock after recovery, so no updater — v2 or v3, both take
+/// `RUN/update.lock` — is using one; while any journal (or an unreadable
+/// one) is present nothing is touched. Best effort.
+fn sweep_orphans(paths: &Paths) {
+    if !matches!(journal::load(paths), Ok(None)) {
+        return;
+    }
+    if let Some(dir) = paths.executable.parent() {
+        let _ = sweep_stale(dir, WORK_PREFIX, Duration::ZERO);
+    }
 }
 
 /// Keep the work directory only while the journal refers to it (recovery
