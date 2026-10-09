@@ -39,6 +39,8 @@ pub const FILES_DIR: &str = "files";
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// Refusal of operations that must wait for the recovery.
 pub const PENDING: &str = "FRP 存在未完成事务，请先执行 onebox recover";
+/// A finished journal whose removal failed: harmless, only cleanup left.
+pub const CLEANUP: &str = "待清理；执行 onebox recover";
 /// The FRP services, in start order.
 pub const SERVICES: [&str; 2] = [FRPS, FRP_WEB];
 
@@ -233,6 +235,19 @@ fn present(path: &Path) -> Result<bool> {
 /// Whether a journal directory exists (it may be corrupt).
 pub fn exists(paths: &Paths) -> bool {
     present(&dir(paths)).unwrap_or(true)
+}
+
+/// What a leftover journal means for the user (`None` without one): the
+/// [`PENDING`] refusal, or the cleanup notice for a finished journal.
+pub fn notice(paths: &Paths) -> Option<String> {
+    if !exists(paths) {
+        return None;
+    }
+    Some(match load(paths) {
+        Ok(None) => return None,
+        Ok(Some(j)) if j.phase.is_finished() => format!("FRP 事务日志{CLEANUP}"),
+        _ => PENDING.to_owned(),
+    })
 }
 
 /// The pending journal (`None` without one). A journal directory without a

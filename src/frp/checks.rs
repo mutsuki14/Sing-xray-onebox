@@ -1,6 +1,7 @@
-//! FRP checks for `onebox doctor` (none when FRP is not installed): the
-//! state, a pending transaction, the binary, the services, the private CA
-//! and control certificate, the website certificate and the renewal job.
+//! FRP checks for `onebox doctor` (none when FRP is not installed and no
+//! transaction journal is left): a leftover transaction, the state, the
+//! binary, the services, the private CA and control certificate, the
+//! website certificate and the renewal job.
 //! Read-only: nothing is written, started or asked.
 //!
 //! Changes from v2: v2's `doctor` did not look at FRP at all.
@@ -29,13 +30,19 @@ pub fn checks(ctx: &Ctx) -> Vec<Check> {
     checks_with(&Runtime::system(ctx))
 }
 
-/// [`checks`] with an explicit runtime.
+/// [`checks`] with an explicit runtime. A leftover transaction journal is
+/// reported even without an installation (a fresh install that crashed
+/// before writing `state.json` leaves one, with partial trees).
 pub fn checks_with(rt: &Runtime) -> Vec<Check> {
     let paths = rt.paths();
-    if !model::installed(paths) {
+    let installed = model::installed(paths);
+    if !installed && !journal::exists(paths) {
         return Vec::new();
     }
     let mut out = vec![journal_check(rt)];
+    if !installed {
+        return out;
+    }
     let state = match model::load(paths) {
         Ok(Some(state)) => state,
         Ok(None) => return out,
@@ -70,6 +77,16 @@ fn journal_check(rt: &Runtime) -> Check {
     let name = "FRP 事务";
     match journal::load(rt.paths()) {
         Ok(None) => check(name, CheckStatus::Pass, "无未完成事务"),
+        Ok(Some(j)) if j.phase.is_finished() => check(
+            name,
+            CheckStatus::Warn,
+            format!(
+                "已结束的 FRP 事务（{}，阶段 {}）{}",
+                j.reason,
+                j.phase.id(),
+                journal::CLEANUP
+            ),
+        ),
         Ok(Some(j)) => check(
             name,
             CheckStatus::Fail,

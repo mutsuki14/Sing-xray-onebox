@@ -335,6 +335,10 @@ impl Session<'_> {
     /// `info`/`status`: the summary and the service states (stdout).
     fn info(&self) -> Result<()> {
         let paths = &self.ctx().paths;
+        // First: a crashed fresh install leaves a journal and no state.
+        if let Some(notice) = journal::notice(paths) {
+            out::warn(notice);
+        }
         if !model::installed(paths) {
             return out::data(NOT_INSTALLED_INFO);
         }
@@ -351,9 +355,6 @@ impl Session<'_> {
         out::data(&format!("frps: {}", running(FRPS)))?;
         if state.is_web() {
             out::data(&format!("网站: {}", running(FRP_WEB)))?;
-        }
-        if journal::exists(paths) {
-            out::warn(journal::PENDING);
         }
         Ok(())
     }

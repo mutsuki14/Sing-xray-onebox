@@ -63,3 +63,51 @@ fn a_broken_state_fails() {
     assert_eq!(found[1].name, "FRP 状态");
     assert_eq!(found[1].status, CheckStatus::Fail);
 }
+
+#[test]
+fn a_crashed_fresh_install_is_reported_without_a_state() {
+    let h = FakeHost::new();
+    let rt = h.runtime();
+    let paths = &h.ctx.paths;
+    let lock = rt.lock().unwrap();
+    {
+        // The install dies after the trees exist, before state.json.
+        let _txn =
+            crate::frp::txn::Txn::begin(&rt, &lock, "安装", &crate::frp::journal::targets(paths))
+                .unwrap();
+        crate::frp::runtime::mkdirs(paths).unwrap();
+    }
+    assert!(!model::installed(paths));
+    let found = checks_with(&rt);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "FRP 事务");
+    assert_eq!(found[0].status, CheckStatus::Fail);
+    assert!(
+        found[0].detail.contains("未完成的 FRP 事务（安装"),
+        "{:?}",
+        found[0]
+    );
+    assert_eq!(journal::notice(paths).as_deref(), Some(journal::PENDING));
+}
+
+#[test]
+fn finished_journals_only_need_cleanup() {
+    let h = FakeHost::new();
+    let rt = h.runtime();
+    let paths = &h.ctx.paths;
+    let _lock = rt.lock().unwrap();
+    let mut j = journal::create(paths, "配置", journal::Before::default(), &[]).unwrap();
+    j.set_phase(paths, journal::Phase::Committed).unwrap();
+    let found = checks_with(&rt);
+    assert_eq!(
+        statuses(&found),
+        [("FRP 事务".to_owned(), CheckStatus::Warn)]
+    );
+    assert!(found[0].detail.ends_with("待清理；执行 onebox recover"));
+    assert_eq!(
+        journal::notice(paths).unwrap(),
+        "FRP 事务日志待清理；执行 onebox recover"
+    );
+    journal::remove(paths).unwrap();
+    assert_eq!(journal::notice(paths), None);
+}
