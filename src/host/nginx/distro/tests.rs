@@ -13,6 +13,8 @@ const DEFAULT_SITE: &str =
 const CERTBOT_SITE: &str = "server {\n\tserver_name blog.example.com;\n\troot /var/www/html;\n\
     \tlisten 443 ssl; # managed by Certbot\n\tssl_certificate /etc/letsencrypt/live/blog/fullchain.pem;\n}\n";
 const DISABLE: &str = "systemctl disable --now nginx.service";
+const WELCOME: &str = "<h1>Welcome to nginx!</h1>\n";
+const DEBIAN_WELCOME: &str = "/var/www/html/index.nginx-debian.html";
 
 /// Stand-in for MD5 in tests: content-derived, 32 hex characters.
 fn fake_md5(bytes: &[u8]) -> String {
@@ -112,7 +114,20 @@ impl Host {
         self
     }
 
-    /// The Debian package layout with the packaged files untouched.
+    /// `{package}.md5sums` lists `files` (host path, packaged content).
+    fn shipped(&self, package: &str, files: &[(&str, &str)]) -> &Self {
+        let list: String = files
+            .iter()
+            .map(|(path, text)| {
+                let relative = path.trim_start_matches('/');
+                format!("{}  {relative}\n", fake_md5(text.as_bytes()))
+            })
+            .collect();
+        self.file(&format!("/var/lib/dpkg/info/{package}.md5sums"), &list)
+    }
+
+    /// The Debian package layout with the packaged files untouched, and
+    /// the welcome page its postinst copies into `/var/www/html`.
     fn debian_defaults(&self) -> &Self {
         self.file(MAIN_CONF, NGINX_CONF)
             .file("/etc/nginx/sites-available/default", DEFAULT_SITE)
@@ -120,6 +135,8 @@ impl Host {
                 "/etc/nginx/sites-enabled/default",
                 "/etc/nginx/sites-available/default",
             )
+            .file("/usr/share/nginx/html/index.html", WELCOME)
+            .file(DEBIAN_WELCOME, WELCOME)
     }
 
     fn debian_db(&self) -> &Self {
@@ -128,6 +145,13 @@ impl Host {
             ("/etc/nginx/sites-available/default", DEFAULT_SITE),
             ("/etc/nginx/mime.types", "types {}"),
         ])
+        .shipped(
+            "nginx-common",
+            &[
+                ("/usr/share/nginx/html/index.html", WELCOME),
+                ("/usr/share/doc/nginx-common/copyright", "copyright"),
+            ],
+        )
     }
 
     /// rpm: `nginx` owns `owned`; `rpm -V` prints `verify`.
@@ -177,8 +201,137 @@ fn pristine_debian_package_is_neutralized() {
         history[3].ends_with("/etc/nginx/sites-available/default"),
         "link followed"
     );
-    assert_eq!(history[4], DISABLE);
-    assert_eq!(history.len(), 5);
+    assert!(history[4].starts_with("md5sum ") && history[4].ends_with(DEBIAN_WELCOME));
+    assert_eq!(history[5], DISABLE);
+    assert_eq!(history.len(), 6);
+}
+
+#[test]
+fn own_pages_in_the_default_root_are_left_alone() {
+    // (case, files added to the Debian defaults, neutralized)
+    let deep = "/var/www/html/a/b/c/d/page.html";
+    type Files<'a> = &'a [(&'a str, &'a str)];
+    let cases: [(&str, Files, bool); 6] = [
+        ("only the welcome page", &[], true),
+        (
+            "own index.html beside the welcome page",
+            &[("/var/www/html/index.html", "<h1>My blog</h1>")],
+            false,
+        ),
+        (
+            "edited welcome page",
+            &[(DEBIAN_WELCOME, "<h1>Welcome to my shop</h1>")],
+            false,
+        ),
+        (
+            "own files in a subdirectory",
+            &[("/var/www/html/blog/post.html", "post")],
+            false,
+        ),
+        (
+            "a packaged file that is not a welcome page",
+            &[("/var/www/html/copyright", "copyright")],
+            false,
+        ),
+        ("deeper than a welcome page", &[(deep, WELCOME)], false),
+    ];
+    for (case, extra, neutralized) in cases {
+        let h = host(InitSystem::Systemd, true);
+        h.debian_defaults().debian_db();
+        for (path, text) in extra {
+            h.file(path, text);
+        }
+        assert_eq!(h.neutralized(), neutralized, "{case}");
+    }
+
+    // A missing document root serves nothing.
+    let h = host(InitSystem::Systemd, true);
+    h.debian_defaults().debian_db();
+    fs::remove_dir_all(h.ctx.paths.system("/var/www")).unwrap();
+    assert!(h.neutralized(), "no /var/www/html");
+
+    // Without dpkg's file list the welcome page cannot be proven.
+    let h = host(InitSystem::Systemd, true);
+    h.debian_defaults().debian_db();
+    fs::remove_file(
+        h.ctx
+            .paths
+            .system("/var/lib/dpkg/info/nginx-common.md5sums"),
+    )
+    .unwrap();
+    assert!(!h.neutralized(), "no md5sums");
+
+    // Too many files for a welcome page.
+    let h = host(InitSystem::Systemd, true);
+    h.debian_defaults().debian_db();
+    for n in 0..MAX_SERVED_FILES {
+        h.file(&format!("/var/www/html/copy{n}.html"), WELCOME);
+    }
+    assert!(!h.neutralized(), "a whole site");
+}
+
+#[test]
+fn document_roots_must_be_plain_absolute_paths() {
+    let sites = [
+        ("root /srv/$host;", false),
+        ("root html;", false),
+        ("root /srv/site", false),
+        (
+            "# root /srv/site;\n\troot /var/www/html; # the default",
+            true,
+        ),
+        ("root \"/var/www/html/\";", true),
+    ];
+    for (directive, neutralized) in sites {
+        let site = format!("server {{\n\tlisten 80 default_server;\n\t{directive}\n}}\n");
+        let h = host(InitSystem::Systemd, true);
+        h.debian_defaults()
+            .file("/etc/nginx/sites-available/default", &site)
+            .dpkg(&[
+                (MAIN_CONF, NGINX_CONF),
+                ("/etc/nginx/sites-available/default", &site),
+            ])
+            .shipped(
+                "nginx-common",
+                &[("/usr/share/nginx/html/index.html", WELCOME)],
+            );
+        assert_eq!(h.neutralized(), neutralized, "{directive}");
+    }
+    // A packaged configuration without any server root is not understood.
+    let h = host(InitSystem::Systemd, true);
+    h.file(MAIN_CONF, NGINX_CONF)
+        .dpkg(&[(MAIN_CONF, NGINX_CONF)])
+        .shipped(
+            "nginx-common",
+            &[("/usr/share/nginx/html/index.html", WELCOME)],
+        );
+    assert!(!h.neutralized(), "no root directive");
+}
+
+#[test]
+fn nginx_org_package_serves_its_shipped_pages() {
+    const DEFAULT_CONF: &str = "server {\n    listen 80;\n    location / {\n        \
+        root   /usr/share/nginx/html;\n        index  index.html index.htm;\n    }\n}\n";
+    let h = host(InitSystem::Systemd, true);
+    h.file(MAIN_CONF, NGINX_CONF)
+        .file("/etc/nginx/conf.d/default.conf", DEFAULT_CONF)
+        .file("/usr/share/nginx/html/index.html", WELCOME)
+        .file("/usr/share/nginx/html/50x.html", "50x")
+        .dpkg(&[
+            (MAIN_CONF, NGINX_CONF),
+            ("/etc/nginx/conf.d/default.conf", DEFAULT_CONF),
+        ])
+        .shipped(
+            "nginx",
+            &[
+                ("/usr/share/nginx/html/index.html", WELCOME),
+                ("/usr/share/nginx/html/50x.html", "50x"),
+            ],
+        );
+    assert!(h.neutralized());
+    h.exec.clear_history();
+    h.file("/usr/share/nginx/html/50x.html", "my error page");
+    assert!(!h.neutralized(), "edited shipped page");
 }
 
 #[test]
@@ -270,14 +423,23 @@ fn openrc_default_runlevel() {
 // ---- RPM ------------------------------------------------------------------
 
 /// RHEL's packaged nginx.conf carries the default server block itself.
-const RHEL_CONF: &str =
-    "events {}\nhttp {\n include /etc/nginx/conf.d/*.conf;\n server {\n  listen 80;\n }\n}\n";
+const RHEL_CONF: &str = "events {}\nhttp {\n include /etc/nginx/conf.d/*.conf;\n server {\n  \
+    listen 80;\n  root /usr/share/nginx/html;\n }\n}\n";
+const RHEL_INDEX: &str = "/usr/share/nginx/html/index.html";
 
 #[test]
 fn rpm_verification() {
-    let owned = [MAIN_CONF, "/etc/nginx/mime.types", "/etc/nginx/conf.d"];
+    let owned = [
+        MAIN_CONF,
+        "/etc/nginx/mime.types",
+        "/etc/nginx/conf.d",
+        "/usr/share/nginx/html",
+        RHEL_INDEX,
+    ];
     let h = host(InitSystem::Systemd, true);
-    h.file(MAIN_CONF, RHEL_CONF).rpm(&owned, "");
+    h.file(MAIN_CONF, RHEL_CONF)
+        .file(RHEL_INDEX, WELCOME)
+        .rpm(&owned, "");
     let history = h.history();
     assert_eq!(
         &history[1..4],
@@ -292,8 +454,22 @@ fn rpm_verification() {
     // Another file of the package differs: still pristine for us.
     let h = host(InitSystem::Systemd, true);
     h.file(MAIN_CONF, RHEL_CONF)
+        .file(RHEL_INDEX, WELCOME)
         .rpm(&owned, ".M.......  c /etc/nginx/mime.types\n");
     assert!(h.neutralized());
+
+    // The served root: an edited welcome page, an own page.
+    let h = host(InitSystem::Systemd, true);
+    h.file(MAIN_CONF, RHEL_CONF)
+        .file(RHEL_INDEX, "<h1>My site</h1>")
+        .rpm(&owned, &format!("S.5....T.    {RHEL_INDEX}\n"));
+    assert!(!h.neutralized(), "edited welcome page");
+    let h = host(InitSystem::Systemd, true);
+    h.file(MAIN_CONF, RHEL_CONF)
+        .file(RHEL_INDEX, WELCOME)
+        .file("/usr/share/nginx/html/shop.html", "shop")
+        .rpm(&owned, "");
+    assert!(!h.neutralized(), "page not owned by the package");
 
     let refused = [
         "S.5....T.  c /etc/nginx/nginx.conf\n",
