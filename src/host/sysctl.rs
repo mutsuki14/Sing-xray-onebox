@@ -81,6 +81,11 @@ pub struct SysctlTxn {
 /// `EACCES` — is not about the value and keeps the raw error.
 pub const UNSUPPORTED_VALUE: [&str; 2] = ["No such file or directory", "Invalid argument"];
 
+/// `sysctl` in the C locale, so its errno texts match [`UNSUPPORTED_VALUE`].
+fn sysctl() -> Cmd {
+    Cmd::new("sysctl").c_locale()
+}
+
 fn key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || "._-/".contains(c)
 }
@@ -105,10 +110,7 @@ fn rejected_value<'a>(stderr: &'a str, key: &str) -> Option<&'a str> {
 
 /// The current value of `key` (`sysctl -n`, trimmed).
 pub fn read(ctx: &Ctx, key: &str) -> Result<String> {
-    Ok(ctx
-        .check(&Cmd::new("sysctl").args(["-n", key]))?
-        .trim()
-        .to_string())
+    Ok(ctx.check(&sysctl().args(["-n", key]))?.trim().to_string())
 }
 
 /// Keys are dotted names; values are words or space-separated numbers.
@@ -241,7 +243,7 @@ impl SysctlTxn {
     /// One `sysctl -w` with every setting, then read every key back.
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let assignments = self.settings.iter().map(|(k, v)| format!("{k}={v}"));
-        let cmd = Cmd::new("sysctl").arg("-w").args(assignments);
+        let cmd = sysctl().arg("-w").args(assignments);
         let out = ctx.run(&cmd)?;
         if !out.ok() {
             // Only stderr names failing keys; stdout echoes the assignments
@@ -274,7 +276,7 @@ impl SysctlTxn {
     fn restore_values(&self, ctx: &Ctx, old: &[String]) {
         for ((key, _), value) in self.settings.iter().zip(old) {
             let assignment = format!("{key}={value}");
-            let restored = ctx.run(&Cmd::new("sysctl").args(["-w", &assignment]));
+            let restored = ctx.run(&sysctl().args(["-w", &assignment]));
             if !restored.is_ok_and(|out| out.ok()) {
                 out::warn(format!(
                     "{}: {assignment}",

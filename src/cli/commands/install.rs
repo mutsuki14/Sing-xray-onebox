@@ -173,6 +173,20 @@ impl InstallArgs {
         })
     }
 
+    /// Cores whose version option (or environment default) is `latest`:
+    /// a missing one is installed in its newest release, unpinned.
+    pub fn latest_cores(&self) -> Vec<Core> {
+        let latest = |v: &Option<String>| v.as_deref().map(str::trim) == Some("latest");
+        [
+            (Core::Singbox, &self.singbox_version),
+            (Core::Xray, &self.xray_version),
+        ]
+        .into_iter()
+        .filter(|(_, version)| latest(version))
+        .map(|(core, _)| core)
+        .collect()
+    }
+
     /// The planner request for these options, with `addr` as the
     /// connection address when no `--addr` was given.
     pub fn request(&self, detected: Detected) -> InstallRequest {
@@ -364,6 +378,7 @@ pub fn install(session: &Session, args: &InstallArgs) -> Result<()> {
     };
     let mut req = ApplyRequest::install(session.ctx, cfg.clone(), "安装")?;
     req.intents.clear_devices = previous.is_some();
+    req.intents.latest_cores = args.latest_cores();
     session.apply(req)?;
     offer_bbr(session, args);
     let installed = session.load_optional()?.map_or(cfg, |l| l.config);

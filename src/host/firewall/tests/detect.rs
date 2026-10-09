@@ -52,7 +52,20 @@ fn ruleset_classification_keeps_iptables_nft_tables_out_of_nft() {
     ]))
     .unwrap();
     let scan = nft::parse_ruleset(&doc).unwrap();
-    assert!(scan.compat_v4 && scan.compat_v6);
+    assert_eq!(
+        scan.filter_input,
+        [
+            nft::FilterInput {
+                chain: nft_chain("ip", "filter", "INPUT"),
+                blocks: true
+            },
+            nft::FilterInput {
+                chain: nft_chain("ip6", "filter", "INPUT"),
+                blocks: true
+            },
+        ],
+        "iptables decides who owns `filter INPUT` (see detect)"
+    );
     assert_eq!(
         scan.native,
         [
@@ -72,7 +85,7 @@ fn ruleset_classification_keeps_iptables_nft_tables_out_of_nft() {
     let mangle_only: serde_json::Value =
         serde_json::from_str(&ruleset(&[chain_json("ip", "mangle", "INPUT", "input")])).unwrap();
     let scan = nft::parse_ruleset(&mangle_only).unwrap();
-    assert!(!scan.compat_v4 && scan.native.is_empty());
+    assert!(scan.filter_input.is_empty() && scan.native.is_empty());
     assert!(nft::parse_ruleset(&serde_json::json!({})).is_err());
 }
 
@@ -273,6 +286,7 @@ fn native_nft_chains_with_iptables_nft_compat_tables() {
             chain_json("ip", "filter", "INPUT", "input"),
         ])),
     )
+    .on("iptables", &["-V"], Output::success(IPTABLES_NFT))
     .on(
         "iptables",
         &["-w", "5", "-S", "INPUT"],
@@ -304,6 +318,12 @@ fn compat_only_hosts_use_iptables_and_ipv6_needs_proc_support() {
             chain_json("ip6", "filter", "INPUT", "input"),
         ])),
     )
+    .on("iptables", &["-V"], Output::success(IPTABLES_NFT))
+    .on(
+        "ip6tables",
+        &["-V"],
+        Output::success("ip6tables v1.8.10 (nf_tables)\n"),
+    )
     .on("iptables", &["-w", "5", "-S"], Output::success(""))
     .on("ip6tables", &["-w", "5", "-S"], Output::success(""));
     assert_eq!(
@@ -317,6 +337,142 @@ fn compat_only_hosts_use_iptables_and_ipv6_needs_proc_support() {
     std::fs::create_dir_all(disable.parent().unwrap()).unwrap();
     std::fs::write(&disable, "1\n").unwrap();
     assert!(!crate::sys::net::ipv6_available(&ctx.paths.system_root));
+}
+
+const IPTABLES_NFT: &str = "iptables v1.8.10 (nf_tables)\n";
+const IPTABLES_LEGACY: &str = "iptables v1.8.10 (legacy)\n";
+/// What iptables-nft 1.8.10 prints for a chain holding native nft
+/// expressions (exit 1).
+const INCOMPATIBLE: &str =
+    "iptables v1.8.10 (nf_tables): chain `INPUT' in table `filter' is incompatible, use 'nft' tool.";
+
+/// `nft -j list ruleset` after `nft -f` of what `iptables-restore-translate`
+/// (iptables 1.8.10) makes of a policy-DROP rules.v4: `ct state` is a
+/// native expression iptables-nft cannot list.
+const TRANSLATED: &str = r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "ip", "name": "filter", "handle": 1}}, {"chain": {"family": "ip", "table": "filter", "name": "INPUT", "handle": 1, "type": "filter", "hook": "input", "prio": 0, "policy": "drop"}}, {"chain": {"family": "ip", "table": "filter", "name": "FORWARD", "handle": 2, "type": "filter", "hook": "forward", "prio": 0, "policy": "accept"}}, {"chain": {"family": "ip", "table": "filter", "name": "OUTPUT", "handle": 3, "type": "filter", "hook": "output", "prio": 0, "policy": "accept"}}, {"rule": {"family": "ip", "table": "filter", "chain": "INPUT", "handle": 4, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "lo"}}, {"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}}, {"rule": {"family": "ip", "table": "filter", "chain": "INPUT", "handle": 5, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": ["established", "related"]}}, {"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}}, {"rule": {"family": "ip", "table": "filter", "chain": "INPUT", "handle": 6, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 22}}, {"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}}]}"#;
+
+#[test]
+fn filter_input_belongs_to_iptables_only_when_iptables_nft_lists_it() {
+    let translated_accept = ruleset(&[
+        policy_chain("ip", "filter", "INPUT", "input", "accept"),
+        rule_json(
+            "ip",
+            "filter",
+            "INPUT",
+            r#"[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"invalid"}},{"drop":null}]"#,
+        ),
+    ]);
+    let with_inet = ruleset(&[
+        chain_json("inet", "filter", "input", "input"),
+        chain_json("ip", "filter", "INPUT", "input"),
+    ]);
+    let native = || Location::Nft(nft_chain("ip", "filter", "INPUT"));
+    let v4 = || Location::Iptables(Iptables { v6: false });
+    // (case, ruleset, `iptables -V` (None: no binary), `-S INPUT` result, locations)
+    type Case<'a> = (&'a str, &'a str, Option<&'a str>, Output, Vec<Location>);
+    let cases: [Case; 7] = [
+        (
+            "translated policy drop, iptables-nft refuses it",
+            TRANSLATED,
+            Some(IPTABLES_NFT),
+            Output::failure(1, INCOMPATIBLE),
+            vec![native()],
+        ),
+        (
+            "translated policy drop beside iptables-legacy",
+            TRANSLATED,
+            Some(IPTABLES_LEGACY),
+            Output::success("-P INPUT ACCEPT\n"),
+            vec![native()],
+        ),
+        (
+            "translated policy drop without iptables",
+            TRANSLATED,
+            None,
+            Output::failure(127, "unused"),
+            vec![native()],
+        ),
+        (
+            "iptables-nft's own chain",
+            &ruleset(&[chain_json("ip", "filter", "INPUT", "input")]),
+            Some(IPTABLES_NFT),
+            Output::success("-P INPUT DROP\n"),
+            vec![v4()],
+        ),
+        (
+            "native accept-policy chain iptables-nft refuses: nothing to open",
+            &translated_accept,
+            Some(IPTABLES_NFT),
+            Output::failure(1, INCOMPATIBLE),
+            vec![],
+        ),
+        (
+            "native accept-policy chain beside iptables-legacy keeps the legacy rules",
+            &translated_accept,
+            Some(IPTABLES_LEGACY),
+            Output::success("-P INPUT DROP\n"),
+            vec![v4()],
+        ),
+        (
+            "both native chains get nft rules",
+            &with_inet,
+            Some(IPTABLES_NFT),
+            Output::failure(1, INCOMPATIBLE),
+            vec![
+                Location::Nft(nft_chain("inet", "filter", "input")),
+                native(),
+            ],
+        ),
+    ];
+    for (case, listed, version, list, expected) in cases {
+        let (_dir, ctx, exec) = setup();
+        exec.provide("nft");
+        exec.on("nft", &["-j", "list", "ruleset"], Output::success(listed));
+        if let Some(version) = version {
+            exec.provide("iptables");
+            exec.on("iptables", &["-V"], Output::success(version)).on(
+                "iptables",
+                &["-w", "5", "-S", "INPUT"],
+                list,
+            );
+        }
+        assert_eq!(detect(&ctx).unwrap(), expected, "{case}");
+    }
+}
+
+#[test]
+fn translated_ruleset_is_managed_with_nft_rules() {
+    let (_dir, ctx, exec) = setup();
+    exec.provide("nft").provide("iptables");
+    exec.on(
+        "nft",
+        &["-j", "list", "ruleset"],
+        Output::success(TRANSLATED),
+    )
+    .on("iptables", &["-V"], Output::success(IPTABLES_NFT))
+    .on(
+        "iptables",
+        &["-w", "5", "-S", "INPUT"],
+        Output::failure(1, INCOMPATIBLE),
+    )
+    .on("nft", &["-j", "list", "chain"], Output::success(TRANSLATED))
+    .on("nft", &["insert", "rule"], Output::success(""));
+    let report = reconcile_owner(&ctx, "proxy", &[(443, 443, Transport::Tcp)]).unwrap();
+    assert_eq!(report.created, ["nft ip filter INPUT 443/tcp"]);
+    let inserted = exec
+        .history()
+        .into_iter()
+        .filter(|line| line.starts_with("nft insert rule"))
+        .collect::<Vec<_>>();
+    assert_eq!(inserted.len(), 1);
+    assert!(
+        inserted[0].starts_with("nft insert rule ip filter INPUT tcp dport 443 accept comment"),
+        "{inserted:?}"
+    );
+    assert!(
+        !exec.history().iter().any(|line| line.contains("-I INPUT")),
+        "iptables-nft cannot edit the translated chain"
+    );
 }
 
 #[test]

@@ -100,7 +100,7 @@ onebox install --preset 1 -y --force
 | `-y` / `--yes` | 通用选项：无人值守（使用默认值并自动确认） |
 
 - `--singbox-version` / `--xray-version`（及 `ONEBOX_SINGBOX_VERSION` / `ONEBOX_XRAY_VERSION`）只决定尚未安装的内核下载哪个版本，并记为固定版本；重装时已安装且能运行的内核原样保留，指定的版本号与之不同时只提示 `已安装 …；更换指定版本请执行 onebox update …`。更换已安装内核的版本请执行 `onebox update singbox|xray 版本`（降级加 `--force`）。
-- `latest` 表示不固定版本：sing-box 安装最新稳定版，Xray 仍安装 `26.3.27`；需要更新的 Xray 时，安装后执行 `onebox update xray latest`（会提示兼容风险并要求确认）。
+- `latest` 表示安装最新稳定版且不固定版本，sing-box 与 Xray 相同；最新的 Xray 不是 `26.3.27` 时会提示兼容风险（查询最新版本失败时改装 `26.3.27`）。已安装的 Xray 换到最新版请执行 `onebox update xray latest`（会提示兼容风险并要求确认）。
 - 每个命令只接受自己的选项，写错或不适用的选项会报错（如 `install 不支持选项 --bogus；请执行 onebox install --help`）。
 
 ### 环境变量

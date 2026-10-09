@@ -11,6 +11,9 @@
 //! spec held by another Onebox owner is taken over (the comment moves to
 //! us); when we stop wanting it while that owner still records it, the
 //! comment is handed back instead of deleting the rule (`siblings`).
+//!
+//! ufw translates its status text (`状态： 激活` under a Chinese `LANG`
+//! with the language pack installed), so it always runs in the C locale.
 
 use super::{Backend, Rule};
 use crate::ctx::Ctx;
@@ -20,6 +23,11 @@ use crate::ui::out;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Ufw;
+
+/// `ufw` with untranslated output (its status lines are parsed).
+fn ufw() -> Cmd {
+    Cmd::new("ufw").c_locale()
+}
 
 /// One line of `ufw status numbered`:
 /// `[ n] TO [on IFACE]  ACTION [DIRECTION]  FROM [on IFACE] [(attrs)] [# comment]`
@@ -131,7 +139,7 @@ pub(super) fn foreign_rule<'a>(status: &'a str, spec: &str) -> Option<Listed<'a>
 }
 
 fn status_numbered(ctx: &Ctx) -> Result<String> {
-    ctx.check(&Cmd::new("ufw").args(["status", "numbered"]))
+    ctx.check(&ufw().args(["status", "numbered"]))
 }
 
 /// Give the rule carrying `rule.token` to another owner by replacing its
@@ -140,7 +148,7 @@ pub(super) fn recomment(ctx: &Ctx, rule: &Rule, token: &str) -> Result<()> {
     if numbered_matches(&status_numbered(ctx)?, &rule.token).is_empty() {
         return Ok(());
     }
-    ctx.check(&Cmd::new("ufw").args(["allow", &spec(rule), "comment", token]))?;
+    ctx.check(&ufw().args(["allow", &spec(rule), "comment", token]))?;
     Ok(())
 }
 
@@ -163,7 +171,7 @@ impl Backend for Ufw {
         if !ctx.has("ufw") {
             return Ok(Vec::new());
         }
-        let out = ctx.run(&Cmd::new("ufw").arg("status"))?;
+        let out = ctx.run(&ufw().arg("status"))?;
         let active = out.ok() && out.stdout.lines().any(|l| l.trim() == "Status: active");
         Ok(if active { vec![Ufw] } else { Vec::new() })
     }
@@ -182,7 +190,7 @@ impl Backend for Ufw {
             }
             return Ok(false);
         }
-        ctx.check(&Cmd::new("ufw").args(["allow", &spec, "comment", &rule.token]))?;
+        ctx.check(&ufw().args(["allow", &spec, "comment", &rule.token]))?;
         Ok(true)
     }
 
@@ -202,7 +210,7 @@ impl Backend for Ufw {
             ));
         }
         for number in numbered_matches(&status, &rule.token) {
-            ctx.check(&Cmd::new("ufw").args(["--force", "delete", &number.to_string()]))?;
+            ctx.check(&ufw().args(["--force", "delete", &number.to_string()]))?;
         }
         Ok(())
     }

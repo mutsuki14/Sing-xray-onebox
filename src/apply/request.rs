@@ -34,6 +34,9 @@ pub struct Intents {
     pub site_content: Option<SiteContent>,
     /// Verified core binaries to swap in (`onebox update`).
     pub replace_cores: Vec<(Core, PathBuf)>,
+    /// Cores to download in their newest release when missing
+    /// (`install --xray-version latest`); `latest` is never recorded as a pin.
+    pub latest_cores: Vec<Core>,
     /// Devices migrated from v2 `subscription/settings.json`, written to
     /// `subscription/devices.json` by the transaction.
     pub migrated_devices: Option<Vec<Device>>,

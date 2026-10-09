@@ -89,6 +89,16 @@ fn environment_policy() {
     // Without clear_env the parent environment is inherited.
     let out = run(&sh("echo \"$HOME\""));
     assert_eq!(out.stdout.trim(), std::env::var("HOME").unwrap_or_default());
+    // Parsed output stays untranslated whatever the caller's language.
+    let probe = "echo \"$LC_ALL|${LANGUAGE-unset}|$LANG\"";
+    let out = run(&sh(probe)
+        .clear_env()
+        .env("LANG", "zh_CN.UTF-8")
+        .env("LANGUAGE", "zh_CN")
+        .c_locale());
+    assert_eq!(out.stdout, "C||zh_CN.UTF-8\n");
+    assert!(Cmd::new("ufw").c_locale().is_c_locale());
+    assert!(!Cmd::new("ufw").env("LC_ALL", "C").is_c_locale());
 }
 
 #[test]

@@ -11,6 +11,11 @@
 //! Names Onebox cannot pass to nft safely (`[A-Za-z0-9_-]` only) are
 //! skipped instead of failing the scan: LXD/Incus create `inet lxd
 //! in.lxdbr0`. A skipped chain that can block is reported once per scan.
+//!
+//! `ip|ip6 filter INPUT` is only a candidate here ([`FilterInput`]):
+//! iptables-nft creates it, but so do `iptables-restore-translate` (the
+//! Debian iptables → nftables migration) and hand-written rulesets, and
+//! the names alone cannot tell them apart; `super::detect` asks iptables.
 
 use super::{failure, safe_word, Backend, Rule};
 use crate::ctx::Ctx;
@@ -37,15 +42,25 @@ pub(super) struct Scan {
     /// Chains that can block but whose table or chain name cannot be
     /// managed safely: left alone (the port may stay blocked there).
     pub skipped: Vec<Nft>,
-    /// `ip filter INPUT` / `ip6 filter INPUT` exist: tables owned by
-    /// iptables-nft, managed through iptables / ip6tables instead.
-    pub compat_v4: bool,
-    pub compat_v6: bool,
+    /// `ip filter INPUT` / `ip6 filter INPUT` chains, iptables-nft's or
+    /// native (see [`FilterInput`]); never in `native` or `skipped`.
+    pub filter_input: Vec<FilterInput>,
+}
+
+/// An `ip filter INPUT` / `ip6 filter INPUT` base chain: iptables-nft's own
+/// (managed through iptables / ip6tables) or a native nft chain with the
+/// same names (managed with nft when it can block).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct FilterInput {
+    pub chain: Nft,
+    /// It can block a port: `policy drop`, or an unconditional block rule.
+    pub blocks: bool,
 }
 
 /// An `INPUT` chain of one of iptables-nft's tables. Editing those with raw
 /// nft makes iptables report the table as incompatible; only `filter INPUT`
-/// (where `iptables -I INPUT` goes) decides whether a packet is accepted.
+/// (where `iptables -I INPUT` goes) decides whether a packet is accepted,
+/// and it may also be a native chain ([`FilterInput`]).
 fn iptables_table(family: &str, table: &str, chain: &str) -> bool {
     matches!(family, "ip" | "ip6")
         && matches!(table, "filter" | "nat" | "mangle" | "raw" | "security")
@@ -129,18 +144,23 @@ pub(super) fn parse_ruleset(doc: &Value) -> Result<Scan> {
         let Some((found, policy_drop)) = input_chain(chain)? else {
             continue;
         };
-        if iptables_table(&found.family, &found.table, &found.chain) {
-            let filter = found.table == "filter";
-            scan.compat_v4 |= filter && found.family == "ip";
-            scan.compat_v6 |= filter && found.family == "ip6";
-            continue;
-        }
         let key = (
             found.family.clone(),
             found.table.clone(),
             found.chain.clone(),
         );
-        if !policy_drop && !blocking.contains(&key) {
+        let blocks = policy_drop || blocking.contains(&key);
+        if iptables_table(&found.family, &found.table, &found.chain) {
+            let known = scan.filter_input.iter().any(|f| f.chain == found);
+            if found.table == "filter" && !known {
+                scan.filter_input.push(FilterInput {
+                    chain: found,
+                    blocks,
+                });
+            }
+            continue;
+        }
+        if !blocks {
             continue;
         }
         let list = if safe_word(&found.table) && safe_word(&found.chain) {
@@ -171,7 +191,7 @@ pub(super) fn scan(ctx: &Ctx) -> Result<Scan> {
     if !ctx.has("nft") {
         return Ok(Scan::default());
     }
-    let out = ctx.run(&Cmd::new("nft").args(["-j", "list", "ruleset"]))?;
+    let out = ctx.run(&nft().args(["-j", "list", "ruleset"]))?;
     if !out.ok() {
         return Ok(Scan::default());
     }
@@ -211,6 +231,11 @@ pub(super) fn chain_rules(doc: &Value) -> Result<Vec<ChainRule>> {
         .collect())
 }
 
+/// `nft` with untranslated messages: [`chain_missing`] matches strerror text.
+fn nft() -> Cmd {
+    Cmd::new("nft").c_locale()
+}
+
 /// A chain listing that failed because the chain (or its table) is gone.
 fn chain_missing(out: &Output) -> bool {
     !out.ok() && out.stderr.contains("No such file or directory")
@@ -220,7 +245,7 @@ impl Nft {
     /// The only place nft rule argv is built. The comment element contains
     /// literal double quotes because nft parses its joined argv.
     fn insert_cmd(&self, rule: &Rule) -> Cmd {
-        Cmd::new("nft").args([
+        nft().args([
             "insert",
             "rule",
             self.family.as_str(),
@@ -237,7 +262,7 @@ impl Nft {
 
     fn list_cmd(&self, handles: bool) -> Cmd {
         let flags: &[&str] = if handles { &["-j", "-a"] } else { &["-j"] };
-        Cmd::new("nft").args(flags.iter().copied()).args([
+        nft().args(flags.iter().copied()).args([
             "list",
             "chain",
             &self.family,
@@ -247,7 +272,7 @@ impl Nft {
     }
 
     fn delete_cmd(&self, handle: u64) -> Cmd {
-        Cmd::new("nft").args([
+        nft().args([
             "delete",
             "rule",
             self.family.as_str(),

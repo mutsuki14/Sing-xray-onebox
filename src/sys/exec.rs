@@ -88,6 +88,19 @@ impl Cmd {
         self.env.push((key.into(), value.into()));
         self
     }
+    /// Untranslated messages for a command whose output is parsed
+    /// (`Status: active`, strerror texts): `LC_ALL=C` and an empty
+    /// `LANGUAGE`, which gettext — Python's even ahead of `LC_ALL` — would
+    /// otherwise follow (`LANG=zh_CN.UTF-8` from an SSH client).
+    pub fn c_locale(self) -> Self {
+        self.env("LC_ALL", "C").env("LANGUAGE", "")
+    }
+    /// Whether [`Cmd::c_locale`] was applied (test assertions).
+    #[cfg(test)]
+    pub fn is_c_locale(&self) -> bool {
+        let has = |key: &str, value: &str| self.env.iter().any(|(k, v)| k == key && v == value);
+        has("LC_ALL", "C") && has("LANGUAGE", "")
+    }
     /// Start from an empty environment (only `env` entries are passed).
     pub fn clear_env(mut self) -> Self {
         self.clear_env = true;

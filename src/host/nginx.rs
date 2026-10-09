@@ -15,10 +15,13 @@
 //!    `nginx.conf` and every entry of `sites-enabled/`, `conf.d/`,
 //!    `http.d/`, `default.d/` and `vhosts.d/` (links followed) are
 //!    configuration files of the package with their packaged content (dpkg
-//!    conffile MD5s, or `rpm -V`). An edited default site (hand-made,
-//!    `certbot --nginx`), any other site, or a host without dpkg/rpm
-//!    (Alpine, whose OpenRC never enables nginx by itself) is left alone;
-//!    its port conflicts are reported by the port planner instead.
+//!    conffile MD5s, or `rpm -V`), and every file below their `root`
+//!    directives is the package's welcome page (shipped unchanged, or
+//!    Debian's `index.nginx-debian.html` copy of it). An edited default
+//!    site (hand-made, `certbot --nginx`), any other site, own pages in
+//!    the default `/var/www/html`, or a host without dpkg/rpm (Alpine,
+//!    whose OpenRC never enables nginx by itself) is left alone; its port
+//!    conflicts are reported by the port planner instead.
 //!
 //! Neither happens with `ONEBOX_NGINX_BIN` (a private build) or without an
 //! init system. Neither is part of an apply journal: both only stop a

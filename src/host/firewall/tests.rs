@@ -471,6 +471,49 @@ fn inactive_ufw_cannot_confirm_removal() {
 }
 
 #[test]
+fn parsed_backend_output_is_never_translated() {
+    // `LANG=zh_CN.UTF-8` forwarded by SSH: ufw would print `状态：不活动`,
+    // nft and firewall-cmd translated messages.
+    let (_dir, ctx, exec) = setup();
+    exec.provide("ufw").provide("firewall-cmd").provide("nft");
+    exec.on_fn(
+        |c| c.program == "ufw" && !c.is_c_locale(),
+        |_| Ok(Output::success("状态： 激活\n")),
+    )
+    .on("ufw", &["status"], Output::success("Status: inactive\n"))
+    .on(
+        "firewall-cmd",
+        &["--state"],
+        Output::failure(252, "not running"),
+    )
+    .on(
+        "nft",
+        &["-j", "list", "ruleset"],
+        Output::success(r#"{"nftables":[]}"#),
+    );
+    assert!(detect(&ctx).unwrap().is_empty());
+    let chain = Nft {
+        family: "inet".into(),
+        table: "filter".into(),
+        chain: "input".into(),
+    };
+    exec.on(
+        "nft",
+        &["-j", "-a", "list", "chain"],
+        Output::failure(1, "Error: No such file or directory"),
+    );
+    let removed = Location::Nft(chain)
+        .backend()
+        .remove(&ctx, &rule(Proto::Tcp, 443, 443));
+    assert!(removed.is_ok(), "a vanished chain took the rule with it");
+    let err = Ufw.remove(&ctx, &rule(Proto::Tcp, 443, 443)).unwrap_err();
+    assert!(err.to_string().starts_with("ufw 未启用"), "{err}");
+    let calls = exec.calls();
+    assert_eq!(calls.len(), 5);
+    assert!(calls.iter().all(|c| c.is_c_locale()), "{calls:?}");
+}
+
+#[test]
 fn nft_argv_golden() {
     let (_dir, ctx, exec) = setup();
     let listing = r#"{"nftables":[{"metainfo":{}},

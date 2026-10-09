@@ -8,12 +8,21 @@
 //! packaged content — dpkg conffile MD5s (`dpkg-query`), or `rpm -V` on
 //! RPM systems. Anything else (an edited `sites-enabled/default`, a
 //! certbot-managed site, a host without dpkg/rpm) counts as configured.
+//!
+//! An untouched configuration still serves whatever its document roots
+//! hold (`apt install nginx` plus an own `index.html` in `/var/www/html` is
+//! a working website), so every file below every `root` directive must be
+//! the package's too: shipped unchanged (dpkg `*.md5sums`, `rpm -V`), or a
+//! copy of its welcome page (Debian's postinst copies
+//! `/usr/share/nginx/html/index.html` to
+//! `/var/www/html/index.nginx-debian.html`). A configuration without an
+//! absolute, variable-free `root` counts as configured.
 
 use crate::ctx::Ctx;
 use crate::host::init::InitSystem;
 use crate::sys::exec::Cmd;
 use crate::ui::out;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 const MAIN_CONF: &str = "/etc/nginx/nginx.conf";
@@ -28,8 +37,16 @@ const INCLUDE_DIRS: [&str; 5] = [
 /// dpkg packages owning the distro configuration (Debian/Ubuntu ship it in
 /// `nginx-common`, nginx.org packages in `nginx`).
 const DPKG_PACKAGES: [&str; 2] = ["nginx-common", "nginx"];
+/// dpkg's checksum lists of the files a package shipped (`{package}.md5sums`).
+const DPKG_INFO: &str = "/var/lib/dpkg/info";
+/// Where the packages keep their welcome page (with a trailing slash).
+const WELCOME_DIR: &str = "/usr/share/nginx/html/";
 /// Symlink hops followed when resolving an include entry.
 const MAX_LINKS: usize = 8;
+/// Document-root files inspected at most, and directory levels below a
+/// root: the packages ship a handful; more is somebody's website.
+const MAX_SERVED_FILES: usize = 64;
+const MAX_SERVED_DEPTH: usize = 4;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Whether the distro `nginx` service starts at boot.
@@ -45,7 +62,8 @@ pub(super) fn service_enabled(ctx: &Ctx, init: InitSystem) -> bool {
     }
 }
 
-/// The package manager confirms the distro configuration is untouched.
+/// The package manager confirms the distro configuration is untouched and
+/// that it serves nothing but the package's own files (module docs).
 pub(super) fn pristine(ctx: &Ctx) -> bool {
     let Some(files) = config_files(ctx) else {
         return false;
@@ -53,7 +71,80 @@ pub(super) fn pristine(ctx: &Ctx) -> bool {
     let Some(db) = PackageFiles::load(ctx) else {
         return false;
     };
-    files.iter().all(|file| db.unmodified(ctx, file))
+    files.iter().all(|file| db.unmodified(ctx, file)) && welcome_only(ctx, &files, &db)
+}
+
+/// Every file below every document root of `files` is the package's. A
+/// root that does not exist serves nothing.
+fn welcome_only(ctx: &Ctx, files: &[String], db: &PackageFiles) -> bool {
+    let Some(roots) = document_roots(ctx, files) else {
+        return false;
+    };
+    let mut served = Vec::new();
+    !roots.is_empty()
+        && roots
+            .iter()
+            .all(|root| served_files(ctx, root, 0, &mut served))
+        && served.iter().all(|file| db.welcome(ctx, file))
+}
+
+/// The `root` directives of the configuration files, one per line as the
+/// packages write them. `None` when a file cannot be read or a root is
+/// relative, holds a variable or is not a plain `root PATH;` line.
+fn document_roots(ctx: &Ctx, files: &[String]) -> Option<BTreeSet<String>> {
+    let mut roots = BTreeSet::new();
+    for file in files {
+        let text = std::fs::read_to_string(ctx.paths.system(file)).ok()?;
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or_default().trim();
+            let Some(value) = line.strip_prefix("root") else {
+                continue;
+            };
+            if !value.starts_with(char::is_whitespace) {
+                continue;
+            }
+            let value = value.trim().strip_suffix(';')?.trim();
+            let value = value.trim_matches(|c| c == '"' || c == '\'');
+            if value.contains('$') {
+                return None;
+            }
+            roots.insert(normalize(value)?);
+        }
+    }
+    Some(roots)
+}
+
+/// Collect the host path of every non-directory entry below `dir` (links
+/// are not followed into directories). `false` when a directory cannot be
+/// read, or there are more files or levels than a welcome page needs.
+fn served_files(ctx: &Ctx, dir: &str, depth: usize, out: &mut Vec<String>) -> bool {
+    let entries = match std::fs::read_dir(ctx.paths.system(dir)) {
+        Ok(entries) => entries,
+        Err(e) => return depth == 0 && e.kind() == std::io::ErrorKind::NotFound,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let (Some(name), Ok(kind)) = (
+            entry.file_name().to_str().map(String::from),
+            entry.file_type(),
+        ) else {
+            return false;
+        };
+        let host = format!("{}/{name}", dir.trim_end_matches('/'));
+        if kind.is_dir() {
+            if depth + 1 >= MAX_SERVED_DEPTH || !served_files(ctx, &host, depth + 1, out) {
+                return false;
+            }
+        } else {
+            out.push(host);
+            if out.len() > MAX_SERVED_FILES {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Stop and disable the distro service. Failures only warn: a service
@@ -86,8 +177,9 @@ fn systemctl(args: &[&str]) -> Cmd {
     query(Cmd::new("systemctl").args(args.iter().copied()))
 }
 
+/// A bounded probe with untranslated output (`enabled`, `rpm -V` lines).
 fn query(cmd: Cmd) -> Cmd {
-    cmd.timeout(QUERY_TIMEOUT)
+    cmd.timeout(QUERY_TIMEOUT).c_locale()
 }
 
 fn first_line(text: &str) -> &str {
@@ -163,8 +255,12 @@ fn normalize(path: &str) -> Option<String> {
 /// What the package database says about the distro configuration files.
 #[derive(Debug, PartialEq, Eq)]
 enum PackageFiles {
-    /// dpkg conffiles: host path → packaged MD5.
-    Dpkg(HashMap<String, String>),
+    /// dpkg: host path → packaged MD5 of the conffiles, and of the other
+    /// files the packages shipped.
+    Dpkg {
+        conffiles: HashMap<String, String>,
+        shipped: HashMap<String, String>,
+    },
     /// rpm: files of the package owning `nginx.conf`, and those `rpm -V`
     /// reports as differing.
     Rpm {
@@ -184,12 +280,27 @@ impl PackageFiles {
         None
     }
 
+    /// A configuration file of the package with its packaged content.
     fn unmodified(&self, ctx: &Ctx, path: &str) -> bool {
         match self {
-            PackageFiles::Dpkg(sums) => sums
+            PackageFiles::Dpkg { conffiles, .. } => conffiles
                 .get(path)
                 .is_some_and(|want| md5(ctx, path).as_deref() == Some(want.as_str())),
             PackageFiles::Rpm { owned, changed } => owned.contains(path) && !changed.contains(path),
+        }
+    }
+
+    /// A served file the package shipped unchanged, or (dpkg) a copy of
+    /// one of its welcome pages.
+    fn welcome(&self, ctx: &Ctx, path: &str) -> bool {
+        match self {
+            PackageFiles::Dpkg { shipped, .. } => md5(ctx, path).is_some_and(|sum| {
+                shipped.get(path) == Some(&sum)
+                    || shipped
+                        .iter()
+                        .any(|(file, want)| file.starts_with(WELCOME_DIR) && *want == sum)
+            }),
+            PackageFiles::Rpm { .. } => self.unmodified(ctx, path),
         }
     }
 }
@@ -200,8 +311,33 @@ fn dpkg(ctx: &Ctx) -> Option<PackageFiles> {
         .args(["-W", "--showformat=${Conffiles}\\n"])
         .args(DPKG_PACKAGES);
     let out = ctx.run(&query(cmd)).ok()?;
-    let sums = parse_conffiles(&out.stdout);
-    (!sums.is_empty()).then_some(PackageFiles::Dpkg(sums))
+    let conffiles = parse_conffiles(&out.stdout);
+    if conffiles.is_empty() {
+        return None;
+    }
+    // A package that is not installed has no list.
+    let shipped = DPKG_PACKAGES
+        .iter()
+        .filter_map(|package| {
+            let list = ctx.paths.system(&format!("{DPKG_INFO}/{package}.md5sums"));
+            std::fs::read_to_string(list).ok()
+        })
+        .flat_map(|text| parse_md5sums(&text))
+        .collect();
+    Some(PackageFiles::Dpkg { conffiles, shipped })
+}
+
+/// `7df3…  usr/share/nginx/html/index.html` lines (paths relative to `/`)
+/// → host path → md5.
+fn parse_md5sums(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (sum, path) = line.split_once(char::is_whitespace)?;
+            let path = path.trim_start();
+            (is_md5(sum) && !path.is_empty())
+                .then(|| (format!("/{path}"), sum.to_ascii_lowercase()))
+        })
+        .collect()
 }
 
 /// ` /etc/nginx/nginx.conf 3e4d… [obsolete]` lines → path → md5.

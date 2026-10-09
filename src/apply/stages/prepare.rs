@@ -145,7 +145,8 @@ pub fn replace_cores(run: &mut Run) -> Result<()> {
 pub fn prepare_cores(run: &mut Run) -> Result<()> {
     let ctx = run.ctx;
     for core in run.cfg.cores() {
-        let version = cores::ensure_installed(ctx, core, &run.cfg.versions)?;
+        let latest = run.intents.latest_cores.contains(&core);
+        let version = cores::ensure_installed(ctx, core, &run.cfg.versions, latest)?;
         match core {
             Core::Singbox => run.cfg.versions.singbox = Some(version),
             Core::Xray => run.cfg.versions.xray = Some(version),

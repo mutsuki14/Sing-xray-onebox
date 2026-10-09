@@ -29,6 +29,11 @@ impl Iptables {
         }
     }
 
+    /// `-S INPUT`: succeeds when this binary can read its `INPUT` chain.
+    fn list_cmd(self) -> Cmd {
+        Cmd::new(self.binary()).args(["-w", "5", "-S", "INPUT"])
+    }
+
     /// The only place iptables rule argv is built.
     fn cmd(self, op: Op, rule: &Rule) -> Cmd {
         let head: &[&str] = match op {
@@ -51,6 +56,38 @@ impl Iptables {
     }
 }
 
+/// Who manages an `ip|ip6 filter INPUT` chain listed by nft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FilterOwner {
+    /// iptables-nft: the binary is the nf_tables variant and lists the
+    /// chain, so rules go through iptables.
+    Iptables,
+    /// A native nft chain; the binary is absent or iptables-legacy, whose
+    /// tables are separate from nft's.
+    Nft,
+    /// A native nft chain iptables-nft refuses to list (`incompatible, use
+    /// 'nft' tool`, e.g. after `iptables-restore-translate`): rules go
+    /// through nft and this binary cannot manage anything.
+    NftOnly,
+}
+
+/// Ask `backend` whether the nft `filter INPUT` chain of its family is its
+/// own: only iptables-nft (`-V` says `nf_tables`) that lists it owns it.
+pub(super) fn filter_input_owner(ctx: &Ctx, backend: Iptables) -> Result<FilterOwner> {
+    if !ctx.has(backend.binary()) {
+        return Ok(FilterOwner::Nft);
+    }
+    let version = ctx.run(&Cmd::new(backend.binary()).arg("-V"))?;
+    if !version.ok() || !version.stdout.contains("nf_tables") {
+        return Ok(FilterOwner::Nft);
+    }
+    Ok(if ctx.run(&backend.list_cmd())?.ok() {
+        FilterOwner::Iptables
+    } else {
+        FilterOwner::NftOnly
+    })
+}
+
 /// Usable binaries among `wanted` (ip6tables only with IPv6 enabled); each
 /// must answer `-S INPUT`, otherwise the firewall state is unknown.
 pub(super) fn detect_families(ctx: &Ctx, v4: bool, v6: bool) -> Result<Vec<Iptables>> {
@@ -63,7 +100,7 @@ pub(super) fn detect_families(ctx: &Ctx, v4: bool, v6: bool) -> Result<Vec<Iptab
         {
             continue;
         }
-        ctx.check(&Cmd::new(backend.binary()).args(["-w", "5", "-S", "INPUT"]))?;
+        ctx.check(&backend.list_cmd())?;
         found.push(backend);
     }
     Ok(found)

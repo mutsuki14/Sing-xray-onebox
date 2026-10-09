@@ -528,4 +528,35 @@ fn real_firewall_in_private_netns() {
     assert!(run(&["nft", "list", "tables"]).contains("onebox_hop_"));
     crate::host::hop::clear(&ctx).unwrap();
     assert!(!run(&["nft", "list", "tables"]).contains("onebox_hop_"));
+    // What `iptables-restore-translate` makes of a policy-DROP rules.v4:
+    // `ip filter INPUT` is a native chain iptables-nft refuses to list, so
+    // it gets nft rules instead of failing every apply.
+    run(&["nft", "flush", "ruleset"]);
+    ctx.check(&Cmd::new("nft").args(["-f", "-"]).stdin_bytes(
+        "add table ip filter\n\
+         add chain ip filter INPUT { type filter hook input priority 0; policy drop; }\n\
+         add rule ip filter INPUT iifname \"lo\" counter accept\n\
+         add rule ip filter INPUT ct state related,established counter accept\n\
+         add rule ip filter INPUT tcp dport 22 counter accept\n",
+    ))
+    .unwrap();
+    let report = reconcile_owner(&ctx, "proxy", &desired).unwrap();
+    assert_eq!(
+        report.created,
+        [
+            "nft ip filter INPUT 443/tcp",
+            "nft ip filter INPUT 20000-20010/udp"
+        ]
+    );
+    let chain = run(&["nft", "list", "chain", "ip", "filter", "INPUT"]);
+    assert!(
+        chain.contains("tcp dport 443 accept comment \"onebox-proxy-"),
+        "{chain}"
+    );
+    assert_eq!(
+        reconcile_owner(&ctx, "proxy", &desired).unwrap(),
+        Report::default()
+    );
+    clear_owner(&ctx, "proxy").unwrap();
+    assert!(!run(&["nft", "list", "ruleset"]).contains("onebox-proxy-"));
 }

@@ -89,6 +89,10 @@ fn commits_runtime_and_file_in_one_write() {
         f.exec.history()[..2],
         [format!("sysctl -n {QDISC}"), format!("sysctl -n {CC}")]
     );
+    assert!(
+        f.exec.calls().iter().all(|c| c.is_c_locale()),
+        "errno texts are matched in the C locale"
+    );
 }
 
 #[test]

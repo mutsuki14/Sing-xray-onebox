@@ -14,17 +14,22 @@
 //! 3. native nft input chains (family ip/ip6/inet) that can block a port
 //!    (`policy drop`, or an unconditional drop/reject rule), plus
 //!    iptables/ip6tables for the families whose `filter INPUT` chain belongs
-//!    to iptables-nft;
+//!    to iptables-nft. An `ip|ip6 filter INPUT` chain is iptables-nft's only
+//!    when that binary is the nf_tables variant and lists it (`-S INPUT`);
+//!    otherwise it is native (`iptables-restore-translate`, iptables-legacy
+//!    beside nftables) and gets nft rules when it can block;
 //! 4. iptables / ip6tables, inserting at `INPUT` position 1 so a trailing
-//!    `REJECT` (Oracle Cloud images) cannot win.
+//!    `REJECT` (Oracle Cloud images) cannot win; a family whose iptables-nft
+//!    refuses its native nft `filter INPUT` chain is left out.
 //!
 //! No rule is persisted with `iptables-save`/`netfilter-persistent`: the
 //! `onebox-network` boot oneshot re-applies the ledger owners.
 //!
 //! Changes from v2:
-//! - iptables-nft compatibility chains (`ip|ip6 filter INPUT`) are never
-//!   edited with raw nft rules; they are managed through iptables, while
-//!   native nft chains still get nft rules (v2 E-8.1#14 / F-8.1#14);
+//! - iptables-nft compatibility chains (`ip|ip6 filter INPUT` that the
+//!   nf_tables iptables can list) are never edited with raw nft rules; they
+//!   are managed through iptables, while native nft chains, including a
+//!   native `filter INPUT`, still get nft rules (v2 E-8.1#14 / F-8.1#14);
 //! - a rule whose backend program vanished counts as gone (E-8.1#13);
 //! - rules left on a backend that is no longer selected are removed too,
 //!   and a failed removal of a stale rule no longer aborts the whole apply:
@@ -79,6 +84,8 @@ use crate::domain::protocol::Transport;
 use crate::error::{Error, Result};
 use crate::sys::exec::Output;
 use crate::sys::lock::FileLock;
+use crate::sys::net::ipv6_available;
+use iptables::FilterOwner;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -261,15 +268,34 @@ pub fn detect(ctx: &Ctx) -> Result<Vec<Location>> {
         return Ok(zones.into_iter().map(Location::Firewalld).collect());
     }
     let scan = nft::scan(ctx)?;
-    if scan.native.is_empty() {
-        return Ok(Iptables::detect(ctx)?
+    let mut native = scan.native;
+    let mut compat = Vec::new();
+    // Families iptables may still manage when no nft chain can block.
+    let mut usable = [true, true];
+    for found in scan.filter_input {
+        let backend = Iptables {
+            v6: found.chain.family == "ip6",
+        };
+        if backend.v6 && !ipv6_available(&ctx.paths.system_root) {
+            continue;
+        }
+        match iptables::filter_input_owner(ctx, backend)? {
+            FilterOwner::Iptables => compat.push(backend),
+            owner => {
+                usable[usize::from(backend.v6)] = owner == FilterOwner::Nft;
+                if found.blocks {
+                    native.push(found.chain);
+                }
+            }
+        }
+    }
+    if native.is_empty() {
+        return Ok(iptables::detect_families(ctx, usable[0], usable[1])?
             .into_iter()
             .map(Location::Iptables)
             .collect());
     }
-    let compat = iptables::detect_families(ctx, scan.compat_v4, scan.compat_v6)?;
-    Ok(scan
-        .native
+    Ok(native
         .into_iter()
         .map(Location::Nft)
         .chain(compat.into_iter().map(Location::Iptables))
