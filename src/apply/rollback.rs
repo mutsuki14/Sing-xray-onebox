@@ -20,7 +20,7 @@
 //! 5. `rolled-back`, then the journal is removed.
 //!
 //! Changes from v2:
-//! - `Journal::validate` (cron lines, old state, services, snapshot) runs
+//! - `Journal::validate` (cron anchors, old state, services, snapshot) runs
 //!   before anything stops (v2 validated only the snapshot);
 //! - firewall and hop rules that cannot be removed do not abort the
 //!   rollback: they are reported as warnings and kept recorded in the

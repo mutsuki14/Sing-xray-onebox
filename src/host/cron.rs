@@ -19,7 +19,7 @@
 //! [`Scope`] with their positions and put each line back where it was, so a
 //! rollback reinstalls the original crontab byte for byte; a journal line
 //! is reinstalled only when it has the exact shape some Onebox version
-//! writes (`shape.rs`).
+//! writes (`shape.rs`); any other is only kept while it is still there.
 //!
 //! Every change goes through [`Crontab::edit`], which holds the crontab
 //! lock (`RUN/crontab.lock`) from `crontab -l` to `crontab FILE`: node and
@@ -39,6 +39,13 @@
 //!   (H-8.1#11) and the crontab always ends with a newline;
 //! - journal lines are validated against the exact shapes before they are
 //!   reinstalled (E-8.1#17); retired renewal jobs are never reinstalled;
+//!   neither is a journal line of no known shape (a job edited by hand) or
+//!   one no longer owned, but such a line is kept while the crontab still
+//!   has it instead of failing the whole restore (which made every later
+//!   rollback of that transaction refuse);
+//! - comment lines are never owned, even when they end with a marker (a
+//!   job commented out to disable it); leading blanks, which cron ignores,
+//!   are ignored when a line's shape is checked;
 //! - concurrent edits are serialized by the crontab lock.
 
 mod line;
@@ -166,6 +173,12 @@ impl Ownership {
     /// The owning tag and the form (version) of an owned line.
     fn classify_form(&self, line: &str) -> Option<(Tag, Form)> {
         let trimmed = line.trim_end_matches([' ', '\t', '\r']);
+        // A comment is no job, whatever it ends with: a job an administrator
+        // disabled by commenting it out is theirs, never replaced, removed
+        // or journaled as Onebox's.
+        if trimmed.trim_start_matches([' ', '\t']).starts_with('#') {
+            return None;
+        }
         if let Some((_, tag)) = trimmed.rsplit_once(MARKER) {
             if let Ok(tag) = Tag::new(tag) {
                 return Some((tag, Form::V3));

@@ -5,10 +5,10 @@ use super::{available, Crontab, Form, Line, Ownership, Scope, Tag};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::paths::Paths;
+use crate::ui::out;
 use serde::{Deserialize, Serialize};
 
-pub(super) const NOT_OWNED: &str = "事务记录的 crontab 行不属于 Onebox，拒绝恢复";
-pub(super) const UNKNOWN_SHAPE: &str = "事务记录的 crontab 行不是 Onebox 写入的格式，拒绝恢复";
+pub(super) const NOT_REINSTALLED: &str = "事务记录的 crontab 行已被手工修改或不是 Onebox 写入的格式，未重新安装；重新应用配置即可重建所需的定时任务";
 pub(super) const BAD_ANCHORS: &str = "事务记录的 crontab 位置无效，拒绝恢复";
 
 impl Crontab {
@@ -40,24 +40,33 @@ impl Crontab {
     /// each group returns to the position of its current first line and a
     /// group that already has exactly these lines stays as it is. Groups
     /// absent from the snapshot are removed; lines outside the scope are
-    /// untouched. Every line must be owned within `scope` and have a known
-    /// shape (checked before anything changes); a retired renewal job (no
-    /// exact shape) is kept only while the crontab still has it, never
-    /// reinstalled.
+    /// untouched. Only a line owned within `scope` with a shape some Onebox
+    /// version writes is reinstalled. Any other is kept only while the
+    /// crontab still has it: a retired renewal job (no exact shape), an
+    /// owned line edited by hand, a line this version no longer owns (a
+    /// comment). Such lines never fail the restore — a journal cannot
+    /// smuggle a job in, and refusing would leave the transaction's every
+    /// later rollback refused. Returns how many of them are gone (never
+    /// reinstalled), retired jobs aside, for the caller's warning.
     ///
     /// [`snapshot`]: Crontab::snapshot
-    pub fn restore(&mut self, snapshot: &CronSnapshot, scope: Scope) -> Result<()> {
-        let wanted = self.restorable(snapshot, scope)?;
+    pub fn restore(&mut self, snapshot: &CronSnapshot, scope: Scope) -> Result<usize> {
+        let (wanted, dropped) = self.restorable(snapshot, scope)?;
         if snapshot.anchors.is_some() {
             self.restore_anchored(wanted, scope);
         } else {
             self.restore_groups(wanted.into_iter().map(|(_, l)| l).collect(), scope);
         }
-        Ok(())
+        Ok(dropped)
     }
 
-    /// The snapshot's lines (with anchors, 0 without) after validation.
-    fn restorable(&self, snapshot: &CronSnapshot, scope: Scope) -> Result<Vec<(usize, Line)>> {
+    /// The snapshot's lines to put back (with anchors, 0 without) after
+    /// validation, and how many unrestorable lines are gone.
+    fn restorable(
+        &self,
+        snapshot: &CronSnapshot,
+        scope: Scope,
+    ) -> Result<(Vec<(usize, Line)>, usize)> {
         let checked = check_lines(&self.ownership, snapshot, scope)?;
         let mut present: Vec<&str> = self
             .lines
@@ -66,13 +75,26 @@ impl Crontab {
             .map(|l| l.text.as_str())
             .collect();
         let mut wanted = Vec::with_capacity(snapshot.lines.len());
-        for (index, (text, (tag, form))) in snapshot.lines.iter().zip(checked).enumerate() {
-            if form == Form::Retired {
-                match present.iter().position(|p| p == text) {
-                    Some(at) => _ = present.remove(at),
-                    None => continue,
+        let mut dropped = 0;
+        for (index, (text, kind)) in snapshot.lines.iter().zip(checked).enumerate() {
+            let tag = match kind {
+                Restorable::Exact(tag) => tag,
+                Restorable::WhilePresent(tag, form) => {
+                    match present.iter().position(|p| p == text) {
+                        Some(at) => _ = present.remove(at),
+                        None => {
+                            dropped += usize::from(form != Form::Retired);
+                            continue;
+                        }
+                    }
+                    tag
                 }
-            }
+                Restorable::Foreign => {
+                    // Left to the crontab, which keeps it if it has it.
+                    dropped += usize::from(!self.lines.iter().any(|l| l.text == *text));
+                    continue;
+                }
+            };
             let anchor = snapshot.anchors.as_ref().map_or(0, |a| a[index]);
             let line = Line {
                 text: text.clone(),
@@ -80,7 +102,7 @@ impl Crontab {
             };
             wanted.push((anchor, line));
         }
-        Ok(wanted)
+        Ok((wanted, dropped))
     }
 
     /// Line `i` of the snapshot goes before the `anchor`-th line outside
@@ -129,41 +151,51 @@ impl Crontab {
 }
 
 /// Everything [`Crontab::restore`] requires of `snapshot` that does not
-/// depend on the current crontab: well-formed anchors, and every line
-/// owned within `scope` with a shape some Onebox version writes (retired
-/// renewal jobs are accepted: a restore keeps them only while the crontab
-/// still has them). Pure, so a journal can be checked before a rollback
-/// changes anything.
+/// depend on the current crontab: well-formed anchors. Lines are not
+/// refused — one that cannot be reinstalled is only kept while the crontab
+/// has it. Pure, so a journal can be checked before a rollback changes
+/// anything.
 pub fn check_snapshot(paths: &Paths, snapshot: &CronSnapshot, scope: Scope) -> Result<()> {
     check_lines(&Ownership::of(paths), snapshot, scope).map(drop)
 }
 
-/// [`check_snapshot`], returning each line's classification.
+/// How a journal line is restored.
+#[derive(Debug, PartialEq, Eq)]
+enum Restorable {
+    /// Owned within the scope, with a shape some Onebox version writes:
+    /// reinstalled at its position.
+    Exact(Tag),
+    /// Owned within the scope without such a shape (a retired renewal job,
+    /// a line edited by hand): kept only while the crontab still has it.
+    WhilePresent(Tag, Form),
+    /// Not (or no longer) owned within the scope — a comment, a line of
+    /// another scope, several lines: left to the crontab.
+    Foreign,
+}
+
+/// [`check_snapshot`], returning how each line is restored.
 fn check_lines(
     ownership: &Ownership,
     snapshot: &CronSnapshot,
     scope: Scope,
-) -> Result<Vec<(Tag, Form)>> {
+) -> Result<Vec<Restorable>> {
     if let Some(anchors) = &snapshot.anchors {
         let ordered = anchors.windows(2).all(|w| w[0] <= w[1]);
         if anchors.len() != snapshot.lines.len() || !ordered {
             return Err(Error::msg(BAD_ANCHORS));
         }
     }
-    snapshot
-        .lines
-        .iter()
-        .map(|text| {
-            let (tag, form) = ownership
-                .classify_form(text)
-                .filter(|(t, _)| scope.covers(t) && !text.contains(['\n', '\0']))
-                .ok_or_else(|| Error::msg(NOT_OWNED))?;
-            if form != Form::Retired && !ownership.restorable(text, &tag, form) {
-                return Err(Error::msg(UNKNOWN_SHAPE));
-            }
-            Ok((tag, form))
-        })
-        .collect()
+    let kinds = snapshot.lines.iter().map(|text| {
+        let owned = ownership
+            .classify_form(text)
+            .filter(|(t, _)| scope.covers(t) && !text.contains(['\n', '\0']));
+        match owned {
+            None => Restorable::Foreign,
+            Some((tag, form)) if ownership.restorable(text, &tag, form) => Restorable::Exact(tag),
+            Some((tag, form)) => Restorable::WhilePresent(tag, form),
+        }
+    });
+    Ok(kinds.collect())
 }
 
 /// Whether `line` is owned within `scope`.
@@ -191,6 +223,7 @@ pub fn snapshot(ctx: &Ctx, scope: Scope) -> Result<CronSnapshot> {
 }
 
 /// Restore a [`snapshot`]; foreign lines and other scopes are untouched.
+/// Journal lines that could not be reinstalled are reported as a warning.
 pub fn restore(ctx: &Ctx, snapshot: &CronSnapshot, scope: Scope) -> Result<()> {
     if !available(ctx) {
         if snapshot.available && !snapshot.lines.is_empty() {
@@ -198,7 +231,11 @@ pub fn restore(ctx: &Ctx, snapshot: &CronSnapshot, scope: Scope) -> Result<()> {
         }
         return Ok(());
     }
-    Crontab::edit(ctx, |tab| tab.restore(snapshot, scope))
+    let dropped = Crontab::edit(ctx, |tab| tab.restore(snapshot, scope))?;
+    if dropped > 0 {
+        out::warn(format!("{NOT_REINSTALLED}（{dropped} 行）"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

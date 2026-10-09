@@ -272,8 +272,8 @@ pub fn load(paths: &Paths) -> Result<Option<Journal>> {
 
 impl Journal {
     /// Everything a rollback relies on, before it changes anything: known
-    /// services, FRP-owned crontab lines of a known shape and an intact
-    /// snapshot of FRP paths only.
+    /// services, sane crontab anchors (lines a restore cannot reinstall are
+    /// only kept while present) and an intact snapshot of FRP paths only.
     pub fn validate(&self, paths: &Paths) -> Result<()> {
         self.check_services()?;
         cron::check_snapshot(paths, &self.cron, Scope::Frp)?;

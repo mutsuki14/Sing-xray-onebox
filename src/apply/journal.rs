@@ -27,10 +27,12 @@
 //! - a `.transaction` that is not a real directory is refused;
 //! - a version-1 old state must have v2's shape when the journal is read,
 //!   and [`Journal::validate`] checks everything a rollback needs — cron
-//!   lines and this version's configuration rules included — before the
+//!   anchors and this version's configuration rules included — before the
 //!   first rollback phase (v2 noticed a malformed old state or cron line
 //!   only in `rollback-services`, after stopping services and restoring
-//!   files);
+//!   files). A cron line the rollback cannot reinstall (edited by hand, no
+//!   longer owned) is not a refusal: it is kept while present, with a
+//!   warning;
 //! - [`pending`] reports both journals for the operations that must not run
 //!   while a recovery is due (backup, doctor, uninstall, device changes) and
 //!   treats a corrupt journal as an error, never as "nothing pending".
@@ -483,10 +485,11 @@ impl Journal {
     }
 
     /// What restoring the files, the service states and the crontab needs:
-    /// known service names, a version-1 old state of v2's shape, the
-    /// journaled cron lines (owned by the node, of a shape Onebox writes,
-    /// sane anchors — what `cron::restore` in `rollback-services` will
-    /// require) and the snapshot in `files/` against [`Journal::allowlist`].
+    /// known service names, a version-1 old state of v2's shape, sane
+    /// anchors for the journaled cron lines (what `cron::restore` in
+    /// `rollback-services` will require; a line it cannot reinstall is only
+    /// kept while present, never a refusal) and the snapshot in `files/`
+    /// against [`Journal::allowlist`].
     pub fn validate_files(&self, paths: &Paths) -> Result<()> {
         self.validate_files_with(paths, &self.allowlist(paths))
     }

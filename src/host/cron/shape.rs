@@ -38,9 +38,11 @@ struct Job {
 impl Ownership {
     /// Whether `line`, classified as `tag` in `form`, has a shape Onebox
     /// writes (trailing blanks and CR, which classification ignores too,
-    /// are ignored).
+    /// and leading blanks, which cron ignores, are ignored).
     pub(super) fn restorable(&self, line: &str, tag: &Tag, form: Form) -> bool {
-        let line = line.trim_end_matches([' ', '\t', '\r']);
+        let line = line
+            .trim_end_matches([' ', '\t', '\r'])
+            .trim_start_matches([' ', '\t']);
         match form {
             Form::V3 => self.v3_shape(line, tag),
             Form::V2Boot => self.v2_boot_shape(line, tag),

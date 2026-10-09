@@ -89,6 +89,43 @@ fn failing_commands_in_each_stage_are_rolled_back() {
 }
 
 #[test]
+fn hand_edited_onebox_crontab_lines_never_make_a_failed_apply_unrecoverable() {
+    use crate::host::cron::testing::lines;
+    let host = installed_host();
+    let exe = host.paths().executable.display().to_string();
+    let v2 = |target: &str| lines::v2_cert(target).replace(lines::EXE, &exe);
+    // Renewal disabled by commenting it out, a redirect edited by hand, and
+    // an indented (but otherwise intact) v2 line.
+    let commented = format!("#{}", v2("proxy"));
+    let edited = v2("site").replace(">/dev/null", ">>/var/log/renew.log");
+    let indented = format!("  {}", v2("subscription"));
+    host.set_crontab(&format!(
+        "MAILTO=root\n{commented}\n{edited}\n{indented}\n0 1 * * * /usr/bin/foreign\n"
+    ));
+    let before = host.world();
+    // Fails after finalize rewrote the crontab.
+    host.features.inject(Fault::Fail(Checkpoint::Saved));
+    let text = err_text(&host.apply(big_change(&host)).unwrap_err());
+    assert!(text.starts_with("配置未应用，已恢复原状态"), "{text}");
+    assert_no_journal(&host);
+    // Everything is back except the edited line, which a journal may never
+    // reinstall; the comment was never touched.
+    let mut expected = before.clone();
+    expected.cron = before.cron.replace(&format!("{edited}\n"), "");
+    assert_eq!(expected.diff(&host.world()), Vec::<String>::new());
+    assert!(host.crontab().contains(&commented));
+    host.features.clear();
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::Nothing
+    );
+    // A later apply still works and leaves the comment alone.
+    host.apply(host.change(two_cores(), "修改")).unwrap();
+    assert!(host.crontab().contains(&commented));
+    assert_no_journal(&host);
+}
+
+#[test]
 fn a_firewall_rule_the_rollback_cannot_remove_is_kept_recorded_and_retried() {
     let host = installed_host();
     let before = host.world();

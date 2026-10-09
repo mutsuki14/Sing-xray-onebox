@@ -55,6 +55,14 @@ fn classifies_v3_tags_and_every_older_marker() {
         ("0 3 * * * /usr/local/bin/onebox cert-renew site --cron", Some("renew")),
         ("0 3 * * * /usr/local/bin/onebox cert-renew other --cron", None),
         ("* * * * * admin-command # other", None),
+        // Comments (an Onebox job commented out) are never owned; leading
+        // blanks before a job do not matter.
+        ("#17 4 * * * /usr/local/bin/onebox cert renew proxy --cron >/dev/null 2>&1 # onebox-native-cert-proxy", None),
+        (" \t# 17 4 * * * x renew --cron >>'/l' 2>&1 # onebox:renew", None),
+        ("# onebox-rust:onebox-xray", None),
+        ("#0 0 * * * /etc/onebox/tls/acme/acme.sh --cron", None),
+        (&format!("#{V1_BOOT}"), None),
+        ("  17 4 * * * x # onebox-native-cert-proxy", Some("renew")),
         ("MAILTO=root", None),
         ("", None),
     ];

