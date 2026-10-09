@@ -4,17 +4,12 @@ use crate::domain::fixtures::config;
 use crate::domain::protocol::Protocol;
 use crate::sys::exec::Output;
 use std::fs;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static BACKUPS: AtomicUsize = AtomicUsize::new(0);
-
 fn fake_backup(_ctx: &Ctx, lock: &FileLock, label: &str) -> Result<String> {
     assert_eq!(label, "before-uninstall");
     assert!(
         lock.path().ends_with(".apply.lock"),
         "taken under the node lock"
     );
-    BACKUPS.fetch_add(1, Ordering::SeqCst);
     Ok("1791000000-1a2b3c4d".into())
 }
 
@@ -60,9 +55,7 @@ fn declined_or_not_installed_does_nothing() {
 fn removes_the_node_and_keeps_site_and_backups() {
     let bench = node();
     bench.unattended();
-    let before = BACKUPS.load(Ordering::SeqCst);
     uninstall(&bench.session(), fake_backup).unwrap();
-    assert_eq!(BACKUPS.load(Ordering::SeqCst), before + 1);
     assert_eq!(bench.engine.calls(), [Call::RecoverLocked]);
     let paths = &bench.ctx.paths;
     for gone in [

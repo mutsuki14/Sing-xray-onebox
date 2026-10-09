@@ -4,10 +4,16 @@
 //! Dispatch order: UTF-8 check → leading `-y`/`--help` → no arguments opens
 //! the menu → `--version`/`-V` → parse against the registry → help pages and
 //! context-free built-ins → `Ctx::system` → root policy → handler.
+//!
+//! A process started by a self-update parent with the node lock on fd 198
+//! (`regen` after `update-script`, v2 or v3) never asks anything: its
+//! output is captured by the parent, so a question would hang the update
+//! invisibly (G12). It runs unattended (`-y` defaults, no secrets).
 
 pub mod args;
 pub mod commands;
 pub mod help;
+pub mod menu;
 pub mod options;
 pub mod registry;
 pub mod session;
@@ -26,7 +32,7 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
         return if globals.help {
             registry::print_help(&[])
         } else {
-            registry::menu(globals.assume_yes || auto)
+            menu::run(&context(globals.assume_yes || auto)?)
         };
     };
     if matches!(first.as_str(), "--version" | "-V") {
@@ -44,11 +50,16 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
     let handler = spec
         .handler
         .ok_or_else(|| Error::msg(format!("命令尚未实现: {}", invocation.matches.command())))?;
-    let ctx = Ctx::system(invocation.matches.assume_yes)?;
+    let ctx = context(invocation.matches.assume_yes)?;
     if registry::requires_root(spec, &invocation.matches) {
         registry::require_root()?;
     }
     handler(&ctx, &invocation.matches)
+}
+
+/// The production context; unattended under an inherited lock (G12).
+fn context(assume_yes: bool) -> Result<Ctx> {
+    Ctx::system(assume_yes || crate::sys::lock::inherited_lock_offered())
 }
 
 /// argv must be UTF-8 (v2 panicked on anything else).

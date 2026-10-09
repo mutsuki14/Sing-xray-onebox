@@ -1,18 +1,66 @@
-//! The command registry: the static command tree, root policy and the few
-//! built-in commands that run without a context.
+//! The command registry: the static command tree, root policy, dispatch
+//! of fixed command lines (menus) and the few built-in commands that run
+//! without a context.
 //!
-//! Feature modules contribute their own `static` [`CommandSpec`]s; adding a
+//! Feature modules contribute their own `const` [`CommandSpec`]s; adding a
 //! command means appending it to [`COMMANDS`] (order = help order within
-//! each group).
+//! each group). The commands of the wave-C modules are added at the marked
+//! place; the menus already reach them through [`dispatch`].
 
-use super::args::{find, ArgSpec, CommandSpec, Group, Matches, Root};
+use super::args::{self, find, ArgSpec, CommandSpec, Globals, Group, Matches, Root};
+use super::commands::{
+    cert, client, connection, info, install, node, service, site, tune, uninstall,
+};
 use super::help;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::ui::out;
 
 /// Every top-level command.
-pub static COMMANDS: &[CommandSpec] = &[VERSION, HELP];
+pub static COMMANDS: &[CommandSpec] = &[
+    // 节点
+    install::INSTALL,
+    install::PLAN,
+    node::ADD,
+    node::DEL,
+    node::PORT,
+    connection::ADDR,
+    connection::SNI,
+    node::RESET,
+    tune::TUNE,
+    // 客户端
+    info::INFO,
+    client::CLIENT,
+    client::QR,
+    // 服务
+    service::STATUS,
+    service::START,
+    service::STOP,
+    service::RESTART,
+    service::LOG,
+    service::SERVICE,
+    // 功能
+    site::SITE,
+    cert::CERT,
+    crate::bbr::COMMAND,
+    // 诊断
+    crate::linktools::PROBE,
+    crate::linktools::BENCH,
+    crate::linktools::FAILOVER,
+    crate::linktools::REALITY_CHECK,
+    // 维护
+    node::REGEN,
+    cert::RENEW,
+    uninstall::UNINSTALL,
+    VERSION,
+    HELP,
+    // 隐藏（兼容入口与内部入口）
+    cert::CERT_RENEW,
+    service::NET_APPLY,
+    service::HOP_CLEAR,
+    client::RENDER,
+    // wave C modules: subscription, frps, update, update-script, update-check, update-channel, doctor, support, backup, backups, restore, recover
+];
 
 const VERSION: CommandSpec = CommandSpec::new("version", Group::Maintain, "显示程序版本")
     .root(Root::NotRequired)
@@ -27,7 +75,7 @@ const HELP: CommandSpec = CommandSpec::new("help", Group::Maintain, "显示帮�
 /// The backup `uninstall` takes under the node lock (G11). Wave C wires
 /// `crate::backup::create_locked` here; until then uninstall refuses to
 /// remove anything without a backup.
-pub const UNINSTALL_BACKUP: super::commands::uninstall::BackupHook = backup_not_wired;
+pub const UNINSTALL_BACKUP: uninstall::BackupHook = backup_not_wired;
 
 fn backup_not_wired(
     _ctx: &Ctx,
@@ -66,10 +114,26 @@ pub fn builtin(matches: &Matches) -> Option<Result<()>> {
     }
 }
 
-/// `onebox` without arguments. The interactive menu lands in a later work
-/// package; until then the overview is shown.
-pub fn menu(_assume_yes: bool) -> Result<()> {
-    out::data(&help::global_help(COMMANDS))
+/// Run a fixed command line (`argv[0]` = command word) through `commands`
+/// with its root policy, as the menus do. `-y` follows the context.
+pub fn dispatch(commands: &[CommandSpec], ctx: &Ctx, argv: &[&str], is_root: bool) -> Result<()> {
+    let words: Vec<String> = argv.iter().map(|w| w.to_string()).collect();
+    let globals = Globals {
+        assume_yes: ctx.ui.assume_yes(),
+        help: false,
+    };
+    let invocation = args::parse(commands, &words, globals)?;
+    if invocation.help {
+        return out::data(&help::command_help(&invocation.chain));
+    }
+    let spec = invocation.spec;
+    let handler = spec
+        .handler
+        .ok_or_else(|| Error::msg(format!("命令尚未实现: {}", invocation.matches.command())))?;
+    if requires_root(spec, &invocation.matches) && !is_root {
+        return Err(Error::msg("此操作需要 root 权限"));
+    }
+    handler(ctx, &invocation.matches)
 }
 
 /// `version` prints exactly the version (v2 parents compare it verbatim).
