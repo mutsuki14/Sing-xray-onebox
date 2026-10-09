@@ -3,7 +3,7 @@
 ## 设计原则
 
 - 单个静态 musl 程序 `onebox`（Rust 2021，`rust-version = 1.97`，CI 与发布使用 1.99.0）加一个很薄的 POSIX `sh` 引导脚本 `onebox.sh`。
-- 依赖固定在 `Cargo.toml`（serde、serde_json、sha2、base64、libc、tar、flate2、x25519-dalek、qrcode、httparse），不引入网络或 TLS 库；下载经 `curl`，证书经 openssl / acme.sh（固定 3.1.6）。
+- 依赖列在 `Cargo.toml`（serde、serde_json、sha2、base64、libc、tar、flate2、x25519-dalek、qrcode、httparse），具体版本由 `Cargo.lock` 锁定（构建与 CI 一律 `--locked`），不引入网络或 TLS 库；下载经 `curl`，证书经 openssl / acme.sh（固定 3.1.6）。
 - 面向用户的文字全部为简体中文；代码、注释和标识符为英文。数据结果写标准输出，提示、进度、警告和错误写标准错误。
 - 数据路径上不使用 `unwrap()` / `expect()` / `panic!`（测试除外）；生产代码中的 `unsafe` 只出现在 `sys/` 并注明不变式。
 - 所有外部程序都通过 `sys::exec::Exec` 执行，测试中用 `FakeExec` 替代；所有文件路径来自 `Paths`，测试中用 `Paths::isolated(tmp)`；交互通过 `Prompter`，测试中用 `ScriptedPrompter`。
@@ -26,7 +26,7 @@
 | `frp/`、`bbr/`、`linktools/`、`diag/` | FRP 服务端、BBR、客户端链路工具、体检与诊断包 |
 | `cli/` | 声明式参数解析、命令注册表（含 root 策略）、中文帮助、菜单与向导 |
 
-依赖方向（无环）：`sys` → `domain` → `state` / `render` → `host` → `cert` / `site` / `subscription` → `apply` → `backup` / `update` → `cli`。`frp`、`bbr`、`linktools`、`diag` 只依赖更低层；为此 `apply::snapshot`、`apply::program_journal` 和 `frp::model` 是只依赖 `sys` / `domain` / `paths` / `error` 的叶子模块（FRP 复用快照，诊断只读取事务日志）。`cert`、`site`、`subscription` 的功能代码不调用 `apply`：节点变更由命令层（以及位于其上的 `backup`、`update`）构造 `ApplyRequest` 交给 `apply`。
+依赖方向（无环）：`sys` → `domain` → `state` / `render` → `host` → `cert` / `site` / `subscription` → `apply` → `backup` / `update` → `cli`。`frp`、`bbr`、`linktools`、`diag` 不调用节点事务引擎，也不依赖 `backup` / `update`：FRP 只复用叶子模块 `apply::snapshot`（仅依赖 `sys` / `paths` / `error`）；诊断读取 `frp::model`（仅依赖 `domain` / `sys` / `paths` / `error` 的叶子模块）中的 FRP 状态，并读取节点事务日志 `apply::journal`（它依赖 `domain`、`state`、`host` 的服务与计划任务模块，以及 `apply::snapshot`、`apply::program_journal`，但不依赖事务引擎）。FRP 的体检项由 `frp` 以 `diag::Check` 返回，由命令层传给 `diag`，所以 `diag` 不导入 FRP 的其他部分。各功能模块用 `cli::args`（只依赖 `ctx` / `error` 的参数解析器）声明自己的命令树。`cert`、`site`、`subscription` 的功能代码不调用 `apply`：节点变更由命令层（以及位于其上的 `backup`、`update`）构造 `ApplyRequest` 交给 `apply`。
 
 ## 事务引擎
 
@@ -88,7 +88,7 @@ python3 tests/fetch_tools.py --check       # 校验 tests/tools.json，不联网
 | 黄金对比测试 | `tests/golden/cases/` 的 10 个 v2 状态样例与 v2.0.1 程序的输出（`render server/inbound/outbound/probe`、`client <格式>`）。v3 用真实的 v2 迁移读取样例后渲染：JSON 按值和文本比较，链接与 Base64 逐字节一致，mihomo 按结构比较（v3 输出 YAML，v2 输出 JSON），v2 拒绝的命令 v3 必须以相同消息拒绝。例外逐条记录在 `tests/golden/ALLOWED_DIFFS.md`，某个例外不再出现或出现在别处都会让测试失败。网站首页模板另与 v2 `site preview` 的输出逐字节比较（`src/site/golden/`） | `cargo test` |
 | 真实内核校验（`#[ignore]`） | 每个黄金样例的服务端与客户端配置通过 `sing-box check`、`xray run -test`、`mihomo -t`；`doctor` 的内核检查对真实内核运行 | 见下 |
 | Rust 端到端测试（`#[ignore]`） | FRP（官方 frps / frpc + nginx，全部在本机回环）、订阅（真实 nginx、openssl、curl）、链路工具（真实内核）、nginx / 网站配置、真实下载等 | 见下 |
-| 黑盒测试（Python） | `tests/e2e/*.py`：以 root 在隔离目录中运行真实程序 | 见下 |
+| 黑盒测试（Python） | `tests/e2e/*.py`：以 root 在隔离目录中运行真实程序 <!-- TODO: verify e2e suite names after D3 merge --> | 见下 |
 
 ### 真实工具
 
@@ -147,12 +147,11 @@ Xray 客户端配置的校验需要 `geosite.dat` / `geoip.dat`，放在 `ONEBOX
 | `lifecycle.py` | 安装、修改、导出、备份恢复、注入启动失败后的回滚与 `recover`、v2 状态迁移、卸载（`ONEBOX_INIT=none`、隔离目录、记录并限制可调用的系统命令） |
 | `upgrade.py` | 用 v2.0.1 程序安装后由 v3 原地升级：继承 fd 198 上的锁、保留凭据与订阅设备、失败时回滚到与 v2 逐字节一致、恢复 v2 留下的事务和自更新日志 |
 
-套件以 root 运行，通过环境变量取得被测程序和真实工具：`ONEBOX_TEST_BINARY`（v3 程序）、`ONEBOX_TEST_SINGBOX`、`ONEBOX_TEST_XRAY`、`ONEBOX_TEST_MIHOMO`、`ONEBOX_TEST_V2_BINARY`（v2.0.1 程序，升级测试用）；`ONEBOX_TEST_REQUIRE_FULL=1` 时任何跳过（非 root、缺少工具）都算失败。有假内核模式的套件（假内核用 `RUSTC` 编译）在同一次运行中先跑假内核用例，真实内核只是额外的一轮。失败时以非零状态退出并打印汇总。
+套件以 root 运行，通过环境变量取得被测程序和真实工具：`ONEBOX_TEST_BINARY`（v3 程序）、`ONEBOX_TEST_SINGBOX`、`ONEBOX_TEST_XRAY`、`ONEBOX_TEST_MIHOMO`、`ONEBOX_TEST_V2_BINARY`（v2.0.1 程序，`upgrade.py` 必需；CI 下载 v2.0.1 Release 的 `onebox-linux-amd64-musl` 并按固定的 SHA-256 校验后提供）。各套件只读取自己需要的变量（例如 `lifecycle.py` 只用 `ONEBOX_TEST_SINGBOX` 做真实内核的一轮）；`ONEBOX_TEST_REQUIRE_FULL=1` 时任何跳过（非 root、缺少工具或变量）都算失败。有假内核模式的套件（假内核用 `RUSTC` 编译）在同一次运行中先跑假内核用例，真实内核只是额外的一轮。失败时以非零状态退出并打印汇总。
 
 ```bash
 cargo build --locked
-sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
-  ONEBOX_TEST_SINGBOX=/path/sing-box ONEBOX_TEST_XRAY=/path/xray ONEBOX_TEST_MIHOMO=/path/mihomo \
+sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" ONEBOX_TEST_SINGBOX=/path/sing-box \
   RUSTC="$(rustup which rustc)" python3 tests/e2e/lifecycle.py
 ```
 
@@ -163,7 +162,7 @@ sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" \
 **CI**（`.github/workflows/ci.yml`；任意分支的 push、pull request 和手动触发；工具链 1.99.0）：
 
 1. `lint`（Lint and unit tests）：`scripts/check-version.sh`、`cargo fmt --check`、clippy（`-D warnings`）、`cargo test --all-targets` 与 `cargo test --doc`；随后（即使 Rust 步骤失败也会运行）引导脚本语法检查、shellcheck、`tests/bootstrap.sh`（含 busybox ash）、`tests/fetch_tools.py --check` 和全部 Python 文件的语法检查。
-2. `integration`（Integration with real cores, FRP and nginx）：下载并校验固定版本的真实内核与 frp、解出 nginx，以 root 单线程运行全部 Rust 测试（`--include-ignored --test-threads=1`，设置所有真实工具变量和 `ONEBOX_TEST_REQUIRE_FULL=1`），再以 root 逐个运行 `tests/e2e/*.py` 黑盒套件。
+2. `integration`（Integration with real cores, FRP and nginx）：下载并校验固定版本的真实内核与 frp、解出 nginx，以 root 单线程运行全部 Rust 测试（`--include-ignored --test-threads=1`，设置所有真实工具变量和 `ONEBOX_TEST_REQUIRE_FULL=1`），再以 root 逐个运行 `tests/e2e/` 下的黑盒套件（`_*.py` 辅助模块除外；目录中没有套件时该步骤直接通过）。
 3. `cross`（Static build，矩阵四个目标）：用固定提交的 cross 和解析为摘要的官方构建镜像编译 `x86_64-unknown-linux-musl`、`aarch64-unknown-linux-musl`、`i586-unknown-linux-musl`、`armv7-unknown-linux-musleabihf`，静态链接（`-C target-feature=+crt-static`），确认 `--version` 输出与版本一致且没有 `INTERP` 程序头，并把所用镜像摘要作为构件留给发布流程。
 
 **发布**（`.github/workflows/release.yml`；在 `main` 的 CI 成功后自动触发，也可手动触发或推送 `v*` 标签）：
