@@ -244,9 +244,11 @@ pub struct Credentials {
     pub shadowtls_password: String,
     pub shadowtls_ss_password: String,
     pub clash_secret: String,
-    /// Present iff a REALITY inbound is configured (enforced by `validate`;
-    /// planners generate the keys with the first REALITY inbound and drop
-    /// them with the last one).
+    /// Present while a REALITY inbound is configured (enforced by
+    /// `validate`). Planners generate the keys with the first REALITY
+    /// inbound and keep them when the last one is removed (v2 parity, K12),
+    /// so a re-added REALITY inbound keeps the clients' public key. A
+    /// credential reset discards kept keys instead of rotating them.
     #[serde(default)]
     pub reality: Option<RealityKeys>,
     pub ws_path: String,
