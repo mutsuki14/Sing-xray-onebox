@@ -15,6 +15,21 @@ fn invocation(line: &str) -> (bool, Matches) {
     (inv.spec.root.required(&inv.matches), inv.matches)
 }
 
+/// Manual renewals are forced (F-8.1#3): the help must not read like a
+/// due check, or repeated runs hit the Let's Encrypt rate limits.
+#[test]
+fn renew_help_says_manual_runs_are_forced() {
+    let cert_renew = CERT.subcommands.iter().find(|c| c.name == "renew");
+    for summary in [RENEW.summary, cert_renew.map_or("", |c| c.summary)] {
+        assert!(
+            summary.starts_with("立即强制续期") && summary.contains("--cron"),
+            "{summary}"
+        );
+        assert!(summary.contains("30 天内到期"), "{summary}");
+    }
+    assert!(CRON.help.contains("30 天内到期"), "{}", CRON.help);
+}
+
 #[test]
 fn command_forms_and_root() {
     let (root, m) = invocation("cert");

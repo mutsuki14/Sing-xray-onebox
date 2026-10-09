@@ -33,7 +33,10 @@ use crate::error::{Error, Result};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
 
-const CRON: OptSpec = OptSpec::flag("cron", "计划任务模式：只续期到期证书，无事可做时不输出");
+const CRON: OptSpec = OptSpec::flag(
+    "cron",
+    "计划任务模式：只续期到期的证书（30 天内到期，或自备证书已更新），无事可做时不输出",
+);
 const SET_NEEDS_TLS: &str = "cert set 需要 --tls self|acme|cf|custom";
 /// How long a scheduled renewal waits for a concurrent operation.
 const CRON_LOCK_WAIT: Duration = Duration::from_secs(600);
@@ -61,10 +64,14 @@ pub const CERT: CommandSpec = CommandSpec::new("cert", Group::Feature, "代理�
         CommandSpec::new("set", Group::Feature, "更换代理证书方式")
             .options(&[opt::TLS, opt::DOMAIN, opt::CERT, opt::KEY])
             .handler(set_command),
-        CommandSpec::new("renew", Group::Feature, "续期证书（手动执行时强制续期）")
-            .args(&[TARGET_ARG])
-            .options(&[CRON])
-            .handler(renew_command),
+        CommandSpec::new(
+            "renew",
+            Group::Feature,
+            "立即强制续期证书（--cron 只续期 30 天内到期的）",
+        )
+        .args(&[TARGET_ARG])
+        .options(&[CRON])
+        .handler(renew_command),
     ])
     .root(Root::NotRequired)
     .handler(info_command);
@@ -78,7 +85,7 @@ pub const CERT_RENEW: CommandSpec =
 pub const RENEW: CommandSpec = CommandSpec::new(
     "renew",
     Group::Maintain,
-    "检查并续期全部证书（计划任务每天执行 renew --cron）",
+    "立即强制续期全部证书（计划任务每天执行 renew --cron，只续期 30 天内到期的）",
 )
 .options(&[CRON])
 .handler(renew_all_command);

@@ -309,7 +309,7 @@ fn global_help_snapshot() {
 
 维护:
   regen           按当前状态重新生成并应用全部配置（凭据不变；也用于从 v2 迁移）
-  renew           检查并续期全部证书（计划任务每天执行 renew --cron）
+  renew           立即强制续期全部证书（计划任务每天执行 renew --cron，只续期 30 天内到期的）
   backup          备份当前配置
   backups         列出备份
   restore         恢复备份
