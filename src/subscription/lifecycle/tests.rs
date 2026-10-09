@@ -183,8 +183,19 @@ fn publish_starts_the_worker_and_restarts_it_only_when_needed() {
     );
 }
 
+/// What the engine does for a standalone config before publish: render,
+/// stage in its journal directory, `nginx -t`, install (K7).
+fn engine_installs_web_conf(node: &Node, cfg: &NodeConfig) {
+    let ctx = &node.ctx;
+    let text = frontend::render_web_conf(ctx, cfg).unwrap().unwrap();
+    let staged = ctx.paths.transaction().join("subscription-web.conf.new");
+    std::fs::create_dir_all(ctx.paths.transaction()).unwrap();
+    std::fs::write(&staged, text).unwrap();
+    frontend::install_web_conf(ctx, &staged).unwrap();
+}
+
 #[test]
-fn publish_standalone_installs_the_config_and_starts_nginx() {
+fn publish_standalone_starts_nginx_with_the_tested_config() {
     let (node, systemd) = host("sub-life-standalone");
     let paths = &node.ctx.paths;
     let engine = eng(&node);
@@ -192,8 +203,35 @@ fn publish_standalone_installs_the_config_and_starts_nginx() {
     let _socket = UnixListener::bind(paths.subscription_socket()).unwrap();
     let cfg = standalone(WebCert::Http01, 8448);
     configure_services(&engine, &cfg).unwrap();
+    assert_eq!(
+        publish(&engine, &cfg, &spec(&cfg)).unwrap_err().to_string(),
+        WEB_CONF_MISSING
+    );
+    assert!(
+        !paths.published().exists() && systemd.actions().is_empty(),
+        "refused before anything changed"
+    );
+
+    engine_installs_web_conf(&node, &cfg);
+    let tested = std::fs::read(frontend::conf_file(paths)).unwrap();
+    node.fake.clear_history();
     publish(&engine, &cfg, &spec(&cfg)).unwrap();
-    let conf = std::fs::read_to_string(frontend::conf_file(paths)).unwrap();
+    assert_eq!(
+        std::fs::read(frontend::conf_file(paths)).unwrap(),
+        tested,
+        "exactly the tested file runs"
+    );
+    let nginx_runs: Vec<String> = node
+        .fake
+        .history()
+        .into_iter()
+        .filter(|c| c.contains("nginx -"))
+        .collect();
+    assert!(
+        nginx_runs.is_empty(),
+        "publish neither renders nor tests: {nginx_runs:?}"
+    );
+    let conf = String::from_utf8(tested).unwrap();
     assert!(conf.contains("listen 8448 ssl http2;") && conf.contains("server_name _;"));
     assert_eq!(server::recorded(paths).unwrap(), Some(Listener::Unix));
     assert_eq!(
@@ -394,4 +432,38 @@ fn http01_bootstrap_refuses_a_busy_port_80() {
             .to_string(),
         PORT80_BUSY
     );
+}
+
+#[test]
+fn device_changes_restart_only_a_worker_of_another_program() {
+    let (node, systemd) = host("sub-life-stale");
+    let paths = &node.ctx.paths;
+    let engine = eng(&node);
+    node.save(&ip(8448));
+    node.listening(&[8448]);
+    assert!(!refresh_stale_worker(&engine).unwrap(), "not running");
+    systemd.activate(SERVICE);
+    assert!(!refresh_stale_worker(&engine).unwrap(), "current program");
+    assert!(systemd.actions().is_empty());
+
+    // A worker still running the program EXE replaced (a v2 worker after
+    // an upgrade without regen): /proc/PID/exe is another inode.
+    let old = node.dir.join("onebox-v2");
+    std::fs::write(&old, "v2").unwrap();
+    node.proc_exe(PID, &old);
+    assert!(refresh_stale_worker(&engine).unwrap());
+    assert_eq!(systemd.actions(), [format!("restart {SERVICE}")]);
+
+    // On v2 data the restarted worker keeps v2's socket layout.
+    std::fs::write(paths.state(), crate::apply::testing::V2_STATE).unwrap();
+    std::fs::create_dir_all(&paths.run).unwrap();
+    let _socket = UnixListener::bind(paths.subscription_socket()).unwrap();
+    assert!(refresh_stale_worker(&engine).unwrap());
+
+    // An unusable listener record fails before the old worker is stopped.
+    std::fs::create_dir_all(paths.subscription()).unwrap();
+    std::fs::write(server::listener_file(paths), "{").unwrap();
+    let before = systemd.actions().len();
+    assert!(refresh_stale_worker(&engine).is_err());
+    assert_eq!(systemd.actions().len(), before);
 }

@@ -7,7 +7,9 @@
 //! - [`snapshot`]: `subscription/published.json`, every supported remote
 //!   format, written atomically by the publish stage.
 //! - [`server`] + [`http`]: the worker `onebox subscription serve` — TCP
-//!   in ip mode, a unix socket behind nginx otherwise; the listener of the
+//!   in ip mode, a unix socket behind nginx otherwise; whole-phase
+//!   deadlines per connection keep slow clients from holding its threads;
+//!   the listener of the
 //!   generation being published is recorded in `subscription/listener.json`
 //!   (the worker restarts before `state.json` is written).
 //! - [`frontend`]: the `/sub/` location for the site and the standalone
@@ -104,7 +106,9 @@ pub fn configure_services(ctx: &Ctx, cfg: &NodeConfig) -> Result<()> {
 }
 
 /// publish-subscription: write the snapshot, then start/restart the worker
-/// and web service as needed (executable identity or listener changed).
+/// (executable identity or listener changed) and, in standalone mode, the
+/// web service with the config the engine tested and installed through
+/// [`install_web_conf`] (never rendered or tested again here, K7).
 pub fn publish(ctx: &Ctx, cfg: &NodeConfig, spec: &NodeSpec) -> Result<()> {
     lifecycle::publish(&Engine::system(ctx), cfg, spec)
 }

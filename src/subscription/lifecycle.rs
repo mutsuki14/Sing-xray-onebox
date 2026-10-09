@@ -17,11 +17,16 @@
 //!   `onebox-subscription-web` for the mode (both removed when off; the web
 //!   service and its config only exist in standalone mode).
 //! - [`publish`]: render and atomically write the snapshot, record the
-//!   listener, install the tested standalone config, then start the worker
-//!   — or restart it when its executable (`/proc/PID/exe` versus `EXE`)
-//!   or its listener changed (self-update, mode or port change; G6/G13) —
-//!   and wait until it listens; start the web service in standalone mode.
-//!   Off: remove both services, the snapshot and the listener record.
+//!   listener, then start the worker — or restart it when its executable
+//!   (`/proc/PID/exe` versus `EXE`) or its listener changed (self-update,
+//!   mode or port change; G6/G13) — and wait until it listens; in
+//!   standalone mode start the web service with the config the engine
+//!   tested and installed before this stage (K7: nothing is rendered or
+//!   tested here), in the other modes remove it. Off: remove both
+//!   services, the snapshot and the listener record.
+//! - [`refresh_stale_worker`]: after a device change outside an apply,
+//!   restart a running worker that is not the installed program (a v2
+//!   worker reads only v2's `settings.json`).
 //!
 //! Changes from v2: the worker is restarted after self-updates and
 //! listener changes (G-8.1#8); disabling removes the units, the nginx
@@ -49,6 +54,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub const PORT80_BUSY: &str = "HTTP-01 的 TCP 80 已被占用，请改用 cf/custom";
+/// publish found no installed standalone config (the engine installs the
+/// one check-configurations tested before the publish stage).
+pub const WEB_CONF_MISSING: &str = "独立订阅的 nginx 配置尚未安装（应由校验配置阶段测试并安装）";
 pub const ACME_FOREIGN: &str = "订阅 ACME 目录含未托管内容";
 const OWNED_MARKER: &str = ".onebox-owned";
 /// How long a (re)started worker gets to accept connections.
@@ -190,17 +198,17 @@ pub fn publish(engine: &Engine, cfg: &NodeConfig, spec: &NodeSpec) -> Result<()>
     let Some(listener) = Listener::of(cfg) else {
         return unpublish(&services, paths);
     };
+    let standalone = frontend::standalone(cfg).is_some();
+    ensure!(
+        !standalone || frontend::conf_installed(paths),
+        "{WEB_CONF_MISSING}"
+    );
     check_subscription_family(cfg, ipv6(paths))?;
     let published = snapshot::render(spec)?;
     snapshot::write(paths, &published)?;
     let previous = server::recorded(paths).ok().flatten();
     server::record(paths, listener)?;
-    let standalone = frontend::standalone(cfg).is_some();
-    if standalone {
-        let text = frontend::render_web_conf(ctx, cfg)?
-            .ok_or_else(|| Error::msg("订阅未使用独立 HTTPS 入口"))?;
-        frontend::install_text(ctx, &text)?;
-    } else {
+    if !standalone {
         services.remove(WEB_SERVICE)?;
         frontend::remove_conf(paths)?;
     }
@@ -246,6 +254,28 @@ fn start_web(engine: &Engine, services: &Services) -> Result<()> {
     services.restart(WEB_SERVICE)?;
     services.enable(WEB_SERVICE)?;
     services.wait_running(WEB_SERVICE, WAIT_RUNNING)
+}
+
+/// After a device change made outside an apply (the caller holds the node
+/// lock): a running worker that is not the installed program — a v2 worker
+/// left by an upgrade that did not run `regen` yet — reads only v2's
+/// `settings.json`, so it would keep authorizing a revoked token and
+/// refuse new ones. Restart it so the installed program serves
+/// `devices.json` (on v2 data it keeps v2's socket layout, see
+/// [`server::resolve`]), and wait until it listens. Returns whether it
+/// restarted; a worker that is not running is left alone.
+pub fn refresh_stale_worker(engine: &Engine) -> Result<bool> {
+    let services = engine.services();
+    let paths = &engine.ctx.paths;
+    if !services.running(SERVICE) || worker_is_current(&services, paths) {
+        return Ok(false);
+    }
+    // Resolved first: a failure leaves the old worker running.
+    let listener = server::resolve(paths)?;
+    services.restart(SERVICE)?;
+    services.wait_running(SERVICE, WAIT_RUNNING)?;
+    wait_listening(paths, listener, LISTEN_WAIT)?;
+    Ok(true)
 }
 
 /// Whether the running worker executes the installed `EXE` (same device

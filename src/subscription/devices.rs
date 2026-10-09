@@ -16,7 +16,11 @@
 //! Device changes run under the node lock and refuse a pending journal
 //! (`存在未完成配置事务，请先执行 recover 后修改订阅设备`); the store is read
 //! after the lock is taken, so a concurrent revoke cannot be overwritten by
-//! an add.
+//! an add. Callers load the node configuration before a change (they need
+//! it to print URLs), so a configuration that fails to load changes
+//! nothing; afterwards the CLI restarts a running worker that is not the
+//! installed program ([`super::lifecycle::refresh_stale_worker`]), since a
+//! v2 worker reads only `settings.json`.
 //!
 //! Changes from v2:
 //! - devices live outside the endpoint settings (state.json) because they
@@ -28,6 +32,7 @@
 
 use crate::ctx::Ctx;
 use crate::domain::config::Device;
+use crate::domain::NodeConfig;
 use crate::error::{Context, Error, Result};
 use crate::paths::Paths;
 use crate::sys::fs::{atomic_write, ensure_dir, read_bounded, sha256_hex};
@@ -229,22 +234,23 @@ pub fn list(paths: &Paths) -> Result<Vec<Device>> {
     Ok(DeviceStore::load(paths)?.devices)
 }
 
-/// `subscription add NAME`: requires an enabled subscription.
-pub fn add(ctx: &Ctx, lock: &FileLock, name: &str) -> Result<NewDevice> {
-    add_with(ctx, lock, name, &mut OsRandom, crate::sys::time::now())
+/// `subscription add NAME`: requires an enabled subscription in `cfg`,
+/// the node configuration the caller loaded under `lock`.
+pub fn add(ctx: &Ctx, lock: &FileLock, cfg: &NodeConfig, name: &str) -> Result<NewDevice> {
+    add_with(ctx, lock, cfg, name, &mut OsRandom, crate::sys::time::now())
 }
 
 /// [`add`] with injected randomness and clock.
 pub fn add_with(
     ctx: &Ctx,
     lock: &FileLock,
+    cfg: &NodeConfig,
     name: &str,
     rng: &mut dyn Random,
     now: u64,
 ) -> Result<NewDevice> {
     guard(ctx, lock)?;
-    let loaded = crate::state::StateStore::load_required(ctx)?;
-    ensure!(loaded.config.subscription.is_some(), "{NOT_ENABLED}");
+    ensure!(cfg.subscription.is_some(), "{NOT_ENABLED}");
     mutate(&ctx.paths, |store| store.create(name, rng, now))
 }
 

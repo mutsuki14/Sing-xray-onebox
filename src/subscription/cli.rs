@@ -3,14 +3,24 @@
 //!
 //! Subcommands (bare = `info`): `enable`, `disable`, `info|status|list`,
 //! `add NAME`, `revoke|remove ID`, `reset ID`, `publish|refresh`,
-//! `renew [--cron]`, hidden `serve`. Only `info` runs without root.
+//! `renew [--cron]`, hidden `serve`. Only `info` runs without root; when
+//! the root-only devices or configuration cannot be read it says that
+//! root is needed ([`NEEDS_ROOT`]) instead of showing an I/O error.
 //!
-//! Locking: `enable`/`disable` take the node lock, recover a leftover
-//! journal, plan, resolve Cloudflare credentials (prompting only on a
-//! terminal, before the apply — G8) and apply with that lock; `enable`
-//! then creates the first device under the same lock (G31). Device
-//! changes take the lock and refuse a pending journal. `renew --cron`
-//! waits up to 10 minutes for the lock.
+//! Locking and credentials (G8): `enable` plans and resolves Cloudflare
+//! credentials (prompting only on a terminal) before it takes the node
+//! lock, so an unanswered prompt never blocks other node commands or a
+//! scheduled renewal; it then takes the lock, recovers a leftover journal
+//! and applies with that lock — the request's state hash makes the apply
+//! refuse (`配置已被其他操作修改…`) if `state.json` changed meanwhile — and
+//! creates the first device under the same lock (G31). `publish` resolves
+//! credentials the same way before the engine takes the lock. `disable`
+//! takes the lock first (nothing to ask). Device changes take the lock,
+//! load the configuration before changing anything (a reset never replaces
+//! a token it then cannot print, G-8.1#1), refuse a pending journal, and
+//! restart a running worker that is not the installed program (a v2
+//! worker reads only `settings.json`; G23). `renew --cron` waits up to 10
+//! minutes for the lock.
 //!
 //! Output: URLs, tokens, device lists and results on stdout; the
 //! plaintext warning on stderr.
@@ -23,9 +33,9 @@
 use super::devices::{self, DeviceStore, NewDevice};
 use super::endpoint::{self, SubscriptionInfo, DISABLED, REVOKED};
 use super::request::{EnableRequest, Mode};
-use super::{frontend, renew, server, snapshot};
+use super::{frontend, lifecycle, renew, server, snapshot};
 use crate::apply::{self, ApplyRequest};
-use crate::cert::{self, cloudflare, CertDir, CfCredentials, WebCertTarget};
+use crate::cert::{self, cloudflare, CertDir, CfCredentials, Engine, WebCertTarget};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
 use crate::ctx::Ctx;
 use crate::domain::config::WebCert;
@@ -33,7 +43,7 @@ use crate::domain::plan::{self, PlanEnv};
 use crate::domain::ports::FnProbe;
 use crate::domain::protocol::Transport;
 use crate::domain::NodeConfig;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::state::StateStore;
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use crate::ui::out;
@@ -43,6 +53,11 @@ const ADD_USAGE: &str = "用法: subscription add 设备名称";
 const REVOKE_USAGE: &str = "用法: subscription revoke 设备ID";
 const RESET_USAGE: &str = "用法: subscription reset 设备ID";
 const NO_SNAPSHOT: &str = "订阅快照尚未发布，链接暂时无法访问；请执行 onebox subscription publish";
+/// `subscription info` as a user who cannot read the root-only files.
+pub const NEEDS_ROOT: &str = "查看订阅需要 root 权限：订阅设备与节点配置仅 root 可读";
+/// A device change saved while a worker of another program keeps running.
+pub const STALE_WORKER: &str = "订阅服务仍在运行旧版程序，且未能重启";
+const WORKER_RESTARTED: &str = "订阅服务运行的是旧版程序，已重启以应用设备变更";
 /// `renew --cron` waits this long for the node lock.
 const CRON_LOCK_WAIT: Duration = Duration::from_secs(600);
 const CRON_LOCK_POLL: Duration = Duration::from_secs(5);
@@ -168,8 +183,8 @@ fn serve_command(ctx: &Ctx, _m: &Matches) -> Result<()> {
 
 /// `subscription info` (also for a node without subscription or state).
 pub fn print_info(ctx: &Ctx) -> Result<()> {
-    let devices = devices::list(&ctx.paths)?;
-    let info = match StateStore::load(ctx)? {
+    let devices = readable(devices::list(&ctx.paths))?;
+    let info = match readable(StateStore::load(ctx))? {
         Some(loaded) => SubscriptionInfo::of(&loaded.config, devices),
         None => SubscriptionInfo {
             mode: None,
@@ -188,7 +203,31 @@ pub fn print_info(ctx: &Ctx) -> Result<()> {
 
 /// `subscription info` for a loaded configuration.
 pub fn info(ctx: &Ctx, cfg: &NodeConfig) -> Result<SubscriptionInfo> {
-    Ok(SubscriptionInfo::of(cfg, devices::list(&ctx.paths)?))
+    Ok(SubscriptionInfo::of(
+        cfg,
+        readable(devices::list(&ctx.paths))?,
+    ))
+}
+
+/// A permission error on the root-only subscription files means "run as
+/// root" (`subscription info` itself needs no root; v2 failed with a raw
+/// I/O error, G-8.1#16).
+fn readable<T>(result: Result<T>) -> Result<T> {
+    result.map_err(|e| {
+        if permission_denied(&e) {
+            Error::msg(NEEDS_ROOT)
+        } else {
+            e
+        }
+    })
+}
+
+fn permission_denied(e: &Error) -> bool {
+    match e {
+        Error::Io { source, .. } => source.kind() == std::io::ErrorKind::PermissionDenied,
+        Error::Context { source, .. } => permission_denied(source),
+        _ => false,
+    }
 }
 
 /// The node lock, without waiting.
@@ -196,17 +235,21 @@ pub fn node_lock(ctx: &Ctx) -> Result<FileLock> {
     FileLock::acquire(&ctx.paths.lock(), BUSY_MESSAGE)
 }
 
-/// `subscription enable` (module docs).
+/// `subscription enable` (module docs): plan and resolve credentials
+/// without the lock, then apply and create the first device with it.
 pub fn enable(ctx: &Ctx, request: &EnableRequest) -> Result<()> {
     let name = request.name.as_deref().unwrap_or("default");
     ensure!(devices::valid_name(name.trim()), "{}", devices::BAD_NAME);
-    let lock = node_lock(ctx)?;
-    apply::recover_locked(ctx, &lock)?;
     let loaded = StateStore::load_required(ctx)?;
     let next = plan_request(ctx, &loaded.config, request)?;
+    let cloudflare = cloudflare_for(ctx, &next, false)?;
+    let lock = node_lock(ctx)?;
+    // A journal left behind is finished first; if that (or anything
+    // else) changed state.json since it was loaded, the apply refuses.
+    apply::recover_locked(ctx, &lock)?;
     let old_endpoint = endpoint::endpoint(&loaded.config);
     let mut req = ApplyRequest::from_loaded(&loaded, next.clone(), "启用订阅");
-    req.intents.cloudflare = cloudflare_for(ctx, &next, false)?;
+    req.intents.cloudflare = cloudflare;
     apply::apply_locked(ctx, &lock, req)?;
     after_enable(ctx, &lock, old_endpoint.as_deref(), &next, name)
 }
@@ -237,7 +280,7 @@ pub fn after_enable(
     name: &str,
 ) -> Result<()> {
     if DeviceStore::load(&ctx.paths)?.is_empty() {
-        let device = devices::add(ctx, lock, name)?;
+        let device = devices::add(ctx, lock, cfg, name)?;
         return print_device(ctx, cfg, &device, true);
     }
     print(&[endpoint::enabled_message(old_endpoint, cfg)])?;
@@ -315,31 +358,66 @@ pub fn disable(ctx: &Ctx) -> Result<()> {
 /// `subscription add NAME`.
 pub fn add_device(ctx: &Ctx, name: &str) -> Result<()> {
     let lock = node_lock(ctx)?;
-    let device = devices::add(ctx, &lock, name)?;
     let cfg = StateStore::load_required(ctx)?.config;
-    print_device(ctx, &cfg, &device, true)
+    let device = devices::add(ctx, &lock, &cfg, name)?;
+    let refreshed = refresh_worker(ctx);
+    print_device(ctx, &cfg, &device, true)?;
+    refreshed.map_err(stale_after_new_token)
 }
 
 /// `subscription revoke ID`.
 pub fn revoke_device(ctx: &Ctx, id: &str) -> Result<()> {
     let lock = node_lock(ctx)?;
     devices::revoke(ctx, &lock, id)?;
+    refresh_worker(ctx).map_err(|e| {
+        Error::msg(format!(
+            "设备已从列表移除，但{STALE_WORKER}: {e}；执行 onebox regen 之前旧链接可能仍可访问"
+        ))
+    })?;
     print(&[REVOKED.to_owned()])
 }
 
-/// `subscription reset ID`.
+/// `subscription reset ID`. The configuration (needed for the URLs) is
+/// loaded before the old token is replaced: if it cannot be loaded,
+/// nothing changes (G-8.1#1).
 pub fn reset_device(ctx: &Ctx, id: &str) -> Result<()> {
     let lock = node_lock(ctx)?;
-    let device = devices::reset(ctx, &lock, id)?;
     let cfg = StateStore::load_required(ctx)?.config;
-    print_device(ctx, &cfg, &device, false)
+    let device = devices::reset(ctx, &lock, id)?;
+    let refreshed = refresh_worker(ctx);
+    print_device(ctx, &cfg, &device, false)?;
+    refreshed.map_err(stale_after_new_token)
+}
+
+/// After a device change (node lock held): restart a running worker that
+/// is not the installed program, so the change takes effect now.
+fn refresh_worker(ctx: &Ctx) -> Result<()> {
+    if lifecycle::refresh_stale_worker(&Engine::system(ctx))? {
+        out::info(WORKER_RESTARTED);
+    }
+    Ok(())
+}
+
+/// The token was printed already; say why its URLs may not work yet.
+fn stale_after_new_token(e: Error) -> Error {
+    Error::msg(format!(
+        "{STALE_WORKER}: {e}；执行 onebox regen 之前新链接可能无法访问，旧链接可能仍然有效"
+    ))
 }
 
 /// `subscription publish`: a transaction with the stored configuration.
 pub fn publish_now(ctx: &Ctx) -> Result<()> {
+    apply::apply(ctx, publish_request(ctx)?)
+}
+
+/// The apply `subscription publish` runs, with Cloudflare credentials
+/// resolved (prompted for on a terminal) before the engine takes the node
+/// lock (G8).
+pub fn publish_request(ctx: &Ctx) -> Result<ApplyRequest> {
     let loaded = StateStore::load_required(ctx)?;
-    let req = ApplyRequest::from_loaded(&loaded, loaded.config.clone(), "发布订阅");
-    apply::apply(ctx, req)
+    let mut req = ApplyRequest::from_loaded(&loaded, loaded.config.clone(), "发布订阅");
+    req.intents.cloudflare = cloudflare_for(ctx, &loaded.config, false)?;
+    Ok(req)
 }
 
 /// `subscription renew [--cron]` (see [`super::renew`]).

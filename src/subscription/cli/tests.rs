@@ -2,7 +2,8 @@ use super::*;
 use crate::cli::args::{parse, Globals};
 use crate::domain::config::SubscriptionMode;
 use crate::subscription::request::EnableRequest;
-use crate::subscription::testing::{ip, reality, site, standalone, Node};
+use crate::subscription::testing::{device, ip, reality, site, standalone, Node, TOKEN};
+use crate::subscription::SERVICE;
 
 const COMMANDS: &[CommandSpec] = &[SUBSCRIPTION];
 
@@ -256,4 +257,179 @@ fn cloudflare_credentials_are_resolved_before_the_apply() {
         cloudflare_for(ctx, &cfg, false).unwrap().is_none(),
         "stored credentials are used as they are"
     );
+}
+
+#[test]
+fn a_reset_that_cannot_print_its_token_changes_nothing() {
+    let node = Node::new("sub-cli-reset-load");
+    let ctx = &node.ctx;
+    let id = "00000000000000aa";
+    DeviceStore::write(&ctx.paths, &[device(id, "phone", TOKEN)]).unwrap();
+    let before = std::fs::read(ctx.paths.devices()).unwrap();
+    assert_eq!(
+        reset_device(ctx, id).unwrap_err().to_string(),
+        "尚未安装 Onebox，请先执行 onebox install",
+        "no state.json"
+    );
+    assert!(add_device(ctx, "tablet").is_err());
+    assert_eq!(std::fs::read(ctx.paths.devices()).unwrap(), before);
+
+    std::fs::create_dir_all(&ctx.paths.root).unwrap();
+    std::fs::write(ctx.paths.state(), "{not json").unwrap();
+    assert!(reset_device(ctx, id).is_err(), "invalid state.json");
+    assert!(add_device(ctx, "tablet").is_err());
+    assert_eq!(
+        std::fs::read(ctx.paths.devices()).unwrap(),
+        before,
+        "the old token still works and no new one was lost"
+    );
+    assert!(devices::authorized(
+        &devices::list(&ctx.paths).unwrap(),
+        TOKEN
+    ));
+}
+
+/// A node whose running worker executes another program than `EXE`.
+fn stale_worker(label: &str) -> (Node, crate::subscription::testing::Systemd) {
+    let node = Node::new(label);
+    let systemd = node.systemd(4242);
+    systemd.activate(SERVICE);
+    node.install_exe();
+    let old = node.dir.join("onebox-v2");
+    std::fs::write(&old, "v2").unwrap();
+    node.proc_exe(4242, &old);
+    node.save(&ip(8448));
+    node.listening(&[8448]);
+    (node, systemd)
+}
+
+#[test]
+fn device_changes_reach_a_worker_of_another_program() {
+    let (node, systemd) = stale_worker("sub-cli-stale");
+    let ctx = &node.ctx;
+    let restarts = || {
+        systemd
+            .actions()
+            .iter()
+            .filter(|a| *a == &format!("restart {SERVICE}"))
+            .count()
+    };
+    add_device(ctx, "phone").unwrap();
+    assert_eq!(restarts(), 1, "add");
+    let id = devices::list(&ctx.paths).unwrap()[0].id.clone();
+    reset_device(ctx, &id).unwrap();
+    assert_eq!(restarts(), 2, "reset");
+    revoke_device(ctx, &id).unwrap();
+    assert_eq!(restarts(), 3, "revoke");
+
+    node.proc_exe(4242, &ctx.paths.executable);
+    add_device(ctx, "tablet").unwrap();
+    assert_eq!(restarts(), 3, "the installed program reads devices.json");
+}
+
+#[test]
+fn a_revocation_the_old_worker_keeps_ignoring_is_an_error() {
+    let (node, systemd) = stale_worker("sub-cli-stale-fail");
+    let ctx = &node.ctx;
+    let id = "00000000000000aa";
+    DeviceStore::write(&ctx.paths, &[device(id, "phone", TOKEN)]).unwrap();
+    std::fs::write(server::listener_file(&ctx.paths), "{").unwrap();
+    let err = revoke_device(ctx, id).unwrap_err().to_string();
+    assert!(
+        err.starts_with(&format!("设备已从列表移除，但{STALE_WORKER}: "))
+            && err.ends_with("执行 onebox regen 之前旧链接可能仍可访问"),
+        "{err}"
+    );
+    assert!(devices::list(&ctx.paths).unwrap().is_empty());
+    assert!(
+        systemd.actions().is_empty(),
+        "the old worker was not stopped"
+    );
+}
+
+#[test]
+fn enable_asks_for_credentials_before_taking_the_lock() {
+    let node = Node::new("sub-cli-enable-cf");
+    let ctx = &node.ctx;
+    node.save(&reality());
+    node.listening(&[]);
+    node.ui.set_interactive(true);
+    node.ui.extend(["fake-token-0123", ""]);
+    let held = node.lock();
+    let request = EnableRequest {
+        domain: Some("sub.example.com".into()),
+        ..EnableRequest::default()
+    };
+    assert_eq!(enable(ctx, &request).unwrap_err().to_string(), BUSY_MESSAGE);
+    assert_eq!(
+        node.ui.remaining(),
+        0,
+        "the prompt ran while the lock was free for others"
+    );
+    drop(held);
+}
+
+#[test]
+fn publish_resolves_credentials_before_the_apply() {
+    let node = Node::new("sub-cli-publish-cf");
+    let ctx = &node.ctx;
+    node.save(&ip(8448));
+    assert!(publish_request(ctx).unwrap().intents.cloudflare.is_none());
+    node.save(&standalone(WebCert::Cloudflare, 8448));
+    node.ui.set_interactive(false);
+    assert_eq!(
+        publish_now(ctx).unwrap_err().to_string(),
+        cloudflare::MISSING,
+        "refused before the apply"
+    );
+    node.ui.set_interactive(true);
+    node.ui.extend(["fake-token-0123", ""]);
+    let req = publish_request(ctx).unwrap();
+    assert_eq!(
+        req.intents
+            .cloudflare
+            .as_ref()
+            .and_then(|c| c.get("CF_Token")),
+        Some("fake-token-0123")
+    );
+    assert_eq!(req.config, StateStore::load_required(ctx).unwrap().config);
+    assert_eq!(req.reason, "发布订阅");
+}
+
+#[test]
+fn info_without_read_permission_asks_for_root() {
+    let denied = || {
+        Error::io(
+            "/etc/onebox/subscription/devices.json",
+            std::io::ErrorKind::PermissionDenied.into(),
+        )
+    };
+    assert_eq!(
+        readable::<()>(Err(denied())).unwrap_err().to_string(),
+        NEEDS_ROOT
+    );
+    assert_eq!(
+        readable::<()>(Err(denied().wrap("读取失败")))
+            .unwrap_err()
+            .to_string(),
+        NEEDS_ROOT
+    );
+    let other = Error::io("/x", std::io::ErrorKind::NotFound.into());
+    assert_ne!(
+        readable::<()>(Err(other)).unwrap_err().to_string(),
+        NEEDS_ROOT
+    );
+    assert_eq!(readable(Ok(1)).unwrap(), 1);
+
+    if crate::host::os::is_root() {
+        return; // root reads anything; the mapping above is what matters
+    }
+    let node = Node::new("sub-cli-info-denied");
+    use std::os::unix::fs::PermissionsExt;
+    DeviceStore::write(&node.ctx.paths, &[]).unwrap();
+    let sub = node.ctx.paths.subscription();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = print_info(&node.ctx);
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(result.unwrap_err().to_string(), NEEDS_ROOT);
 }

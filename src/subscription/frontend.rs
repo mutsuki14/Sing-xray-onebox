@@ -6,9 +6,14 @@
 //! The standalone config has a TLS server on the configured port and, for
 //! HTTP-01 certificates, a port-80 server for the ACME webroot. Its
 //! bootstrap variant is that port-80 server alone (before the certificate
-//! exists). The config is rendered and `nginx -t`-tested as the staged
-//! file `nginx.conf.new` during check-configurations; later stages only
-//! install the tested bytes (K7).
+//! exists).
+//!
+//! Staging (K7): the apply engine renders the full config with
+//! [`render_web_conf`] in check-configurations, stages and `nginx -t`-tests
+//! it inside its journal directory, and installs exactly that file with
+//! [`install_web_conf`] before the publish stage, which only checks that it
+//! is there. The one other staged file is the prepare-certificates
+//! bootstrap's `nginx.conf.new` ([`test_conf`]), installed the same way.
 //!
 //! Changes from v2:
 //! - temp paths (and the pid file) live under the persistent
@@ -236,12 +241,18 @@ pub fn conf_file(paths: &Paths) -> PathBuf {
     paths.subscription().join("nginx.conf")
 }
 
-/// The staged, tested config of the current apply.
+/// Whether a standalone config is installed (a regular file, not a link).
+pub fn conf_installed(paths: &Paths) -> bool {
+    std::fs::symlink_metadata(conf_file(paths)).is_ok_and(|m| m.is_file())
+}
+
+/// Where the prepare-certificates bootstrap stages its config (the apply
+/// engine stages the full config in its journal directory instead).
 pub fn staged_conf(paths: &Paths) -> PathBuf {
     paths.subscription().join("nginx.conf.new")
 }
 
-/// Write `text` as the staged file (0600) and `nginx -t` it; the staged
+/// Write `text` as [`staged_conf`] (0600) and `nginx -t` it; the staged
 /// file is removed when the test fails.
 pub fn test_conf(ctx: &Ctx, text: &str) -> Result<PathBuf> {
     let staged = staged_conf(&ctx.paths);
@@ -254,16 +265,9 @@ pub fn test_conf(ctx: &Ctx, text: &str) -> Result<PathBuf> {
     Ok(staged)
 }
 
-/// check-configurations convenience: render, stage and test (`None` when
-/// no standalone config is needed).
-pub fn check(ctx: &Ctx, cfg: &NodeConfig) -> Result<Option<PathBuf>> {
-    match render_web_conf(ctx, cfg)? {
-        Some(text) => test_conf(ctx, &text).map(Some),
-        None => Ok(None),
-    }
-}
-
-/// Install a tested config as `nginx.conf` (the staged file is consumed).
+/// Copy a tested config to `nginx.conf` (atomic, 0600). The bootstrap's
+/// [`staged_conf`] is removed afterwards; the engine's staged copy lives in
+/// its journal directory and goes away with it.
 pub fn install_web_conf(ctx: &Ctx, tested: &Path) -> Result<()> {
     let bytes = read_bounded(tested, CONF_MAX)?;
     atomic_write(&conf_file(&ctx.paths), &bytes, 0o600)?;
@@ -271,23 +275,6 @@ pub fn install_web_conf(ctx: &Ctx, tested: &Path) -> Result<()> {
         remove_file_if_exists(tested)?;
     }
     Ok(())
-}
-
-/// Install `text` as `nginx.conf`: nothing to do when it is installed
-/// already, the staged file when it holds exactly `text`, else test now.
-pub fn install_text(ctx: &Ctx, text: &str) -> Result<()> {
-    let paths = &ctx.paths;
-    let same = |path: &Path| read_bounded(path, CONF_MAX).is_ok_and(|b| b == text.as_bytes());
-    if same(&conf_file(paths)) {
-        let _ = remove_file_if_exists(&staged_conf(paths));
-        return Ok(());
-    }
-    let tested = if same(&staged_conf(paths)) {
-        staged_conf(paths)
-    } else {
-        test_conf(ctx, text)?
-    };
-    install_web_conf(ctx, &tested)
 }
 
 /// Remove the standalone config and its staged copy (ip and site mode).

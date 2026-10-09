@@ -254,11 +254,13 @@ fn changes_need_the_lock_an_enabled_subscription_and_no_pending_journal() {
     node.save(&reality());
     let lock = node.lock();
     let mut rng = SeqRandom(3);
-    let err = add_with(ctx, &lock, "phone", &mut rng, 5).unwrap_err();
+    let err = add_with(ctx, &lock, &reality(), "phone", &mut rng, 5).unwrap_err();
     assert_eq!(err.to_string(), NOT_ENABLED);
+    assert!(!ctx.paths.devices().exists());
 
-    node.save(&ip(8448));
-    let phone = add_with(ctx, &lock, "phone", &mut rng, 5).unwrap();
+    let cfg = ip(8448);
+    node.save(&cfg);
+    let phone = add_with(ctx, &lock, &cfg, "phone", &mut rng, 5).unwrap();
     let stored = list(&ctx.paths).unwrap();
     assert_eq!(stored.len(), 1);
     assert!(
@@ -272,7 +274,7 @@ fn changes_need_the_lock_an_enabled_subscription_and_no_pending_journal() {
 
     node.pending_journal();
     for err in [
-        add_with(ctx, &lock, "tablet", &mut rng, 7).unwrap_err(),
+        add_with(ctx, &lock, &cfg, "tablet", &mut rng, 7).unwrap_err(),
         revoke(ctx, &lock, &phone.id).unwrap_err(),
         reset_with(ctx, &lock, &phone.id, &mut rng, 7).unwrap_err(),
     ] {
@@ -304,7 +306,7 @@ fn first_v3_change_persists_v2_devices() {
     node.save(&ip(8448));
     write_v2_settings(&node, true, json!([v2_device("00000000000000aa", "手机")]));
     let lock = node.lock();
-    let added = add_with(ctx, &lock, "laptop", &mut SeqRandom(1), 9).unwrap();
+    let added = add_with(ctx, &lock, &ip(8448), "laptop", &mut SeqRandom(1), 9).unwrap();
     let store = DeviceStore::load(&ctx.paths).unwrap();
     assert_eq!(store.source(), Source::Devices);
     let names: Vec<&str> = store.devices().iter().map(|d| d.name.as_str()).collect();

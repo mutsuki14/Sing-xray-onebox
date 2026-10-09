@@ -79,7 +79,8 @@ impl Live {
     }
 
     fn add(&self, name: &str) -> NewDevice {
-        devices::add_with(&self.ctx, &self.lock(), name, &mut Xorshift(11), 1).unwrap()
+        let cfg = StateStore::load_required(&self.ctx).unwrap().config;
+        devices::add_with(&self.ctx, &self.lock(), &cfg, name, &mut Xorshift(11), 1).unwrap()
     }
 
     /// Start the worker for `listener` and wait until it accepts.

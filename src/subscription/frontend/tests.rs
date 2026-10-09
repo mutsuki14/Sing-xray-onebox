@@ -157,12 +157,13 @@ fn standalone_config_variants() {
 }
 
 #[test]
-fn staged_configs_are_tested_before_install() {
+fn bootstrap_configs_are_tested_before_install() {
     let node = Node::new("sub-front-stage");
     let ctx = &node.ctx;
     node.fake
         .provide("nginx")
         .on("nginx", &["-t"], Output::success(""));
+    assert!(!conf_installed(&ctx.paths));
     let staged = test_conf(ctx, "events {}\n").unwrap();
     assert_eq!(staged, staged_conf(&ctx.paths));
     let call = node.fake.history().pop().unwrap();
@@ -171,33 +172,34 @@ fn staged_configs_are_tested_before_install() {
         "{call}"
     );
     install_web_conf(ctx, &staged).unwrap();
-    assert!(!staged.exists(), "the staged file is consumed");
+    assert!(!staged.exists(), "the bootstrap's staged file is consumed");
     assert_eq!(
         std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(),
         "events {}\n"
     );
+    assert!(conf_installed(&ctx.paths));
 
+    // The engine's staged copy (in its journal directory) is only copied.
     node.fake.clear_history();
-    install_text(ctx, "events {}\n").unwrap();
-    assert!(
-        node.fake.history().is_empty(),
-        "already installed: nothing to test"
-    );
-    std::fs::write(staged_conf(&ctx.paths), "events { }\n").unwrap();
-    install_text(ctx, "events { }\n").unwrap();
-    assert!(
-        node.fake.history().is_empty(),
-        "the staged file was tested already"
-    );
+    let engine_staged = ctx.paths.transaction().join("subscription-web.conf.new");
+    std::fs::create_dir_all(ctx.paths.transaction()).unwrap();
+    std::fs::write(&engine_staged, "http {}\n").unwrap();
+    install_web_conf(ctx, &engine_staged).unwrap();
+    assert!(engine_staged.exists(), "not ours to remove");
     assert_eq!(
         std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(),
-        "events { }\n"
+        "http {}\n"
     );
-    install_text(ctx, "http {}\n").unwrap();
-    assert_eq!(node.fake.history().len(), 1, "new text is tested");
+    assert!(node.fake.history().is_empty(), "installing tests nothing");
 
     remove_conf(&ctx.paths).unwrap();
-    assert!(!conf_file(&ctx.paths).exists());
+    assert!(!conf_file(&ctx.paths).exists() && !conf_installed(&ctx.paths));
+    std::fs::create_dir_all(ctx.paths.subscription()).unwrap();
+    std::os::unix::fs::symlink(&engine_staged, conf_file(&ctx.paths)).unwrap();
+    assert!(
+        !conf_installed(&ctx.paths),
+        "a link is not an installed config"
+    );
 }
 
 #[test]
@@ -211,7 +213,7 @@ fn a_failing_test_leaves_the_installed_config() {
         &["-t"],
         Output::failure(1, "nginx: [emerg] unknown directive \"bogus\"\n"),
     );
-    let err = install_text(ctx, "bogus;\n").unwrap_err().to_string();
+    let err = test_conf(ctx, "bogus;\n").unwrap_err().to_string();
     assert!(
         err.starts_with("nginx 配置测试失败") && err.contains("bogus"),
         "{err}"
