@@ -219,7 +219,7 @@ fn update_script_success_ends_the_menu() {
         Error::exit(2, "REALITY 检查完成，请核对报告中的警告。")
     });
     // reality-check with warnings continues; the update ends everything.
-    let err = menu_run(&bench, &calls, &["7", "10", "0", "10", "2"]).unwrap_err();
+    let err = menu_run(&bench, &calls, &["7", "11", "0", "10", "2"]).unwrap_err();
     assert!(matches!(err, Error::Exit { code: 0, .. }));
     assert_eq!(calls.lines(), ["reality-check", "update-script"]);
 }
@@ -384,7 +384,27 @@ fn tuning_previews_then_asks() {
     let req = bench.engine.single();
     assert_eq!(req.reason, "调优");
     let prompts = bench.ui.prompts();
-    assert!(prompts[1].starts_with("性能与诊断\n  Hysteria2 调优 未设置 · 资源档位 balanced"));
+    assert!(prompts[1].starts_with(
+        "性能与诊断\n  Hysteria2 调优 未设置 · 混淆 关闭 · 端口跳跃 关闭 · 资源档位 balanced"
+    ));
+}
+
+#[test]
+fn hysteria2_obfuscation_and_hopping_from_the_menu() {
+    let bench = Bench::installed(&node());
+    // Obfuscation on, a bad range re-asked, then applied (Enter = yes).
+    let answers = ["7", "4", "y", "30000", "30000-30100", "", "0", "0"];
+    menu_run(&bench, &Calls::default(), &answers).unwrap();
+    assert_eq!(bench.ui.errors(), ["端口范围格式应为 起始-结束: 30000"]);
+    let hy2 = bench.engine.single().config.hy2;
+    assert!(hy2.obfs);
+    assert_eq!(hy2.hop.unwrap().to_string(), "30000-30100");
+    assert!(bench
+        .output()
+        .ends_with("Hysteria2 混淆=on 端口跳跃=30000-30100"));
+    assert!(bench
+        .notes()
+        .contains(&format!("[提示] {}", crate::cli::commands::tune::REIMPORT)));
 }
 
 #[test]
@@ -400,7 +420,7 @@ fn link_tests_build_their_command_lines() {
         &calls,
         &[
             "7",
-            "8",
+            "9",
             "",
             "http://x",
             "",
@@ -410,7 +430,7 @@ fn link_tests_build_their_command_lines() {
             "",
             "",
             "", // bench
-            "9",
+            "10",
             "",
             "",
             "",
@@ -493,7 +513,7 @@ fn eof_at_a_submenu_prompt_exits() {
     assert_eq!(bench.ui.prompts().len(), 2, "main menu, then the submenu");
     // Nested: performance → probe bundles → EOF.
     let bench = Bench::installed(&node());
-    let err = menu_run(&bench, &Calls::default(), &["7", "7"]).unwrap_err();
+    let err = menu_run(&bench, &Calls::default(), &["7", "8"]).unwrap_err();
     assert!(err.is_cancelled());
     let prompts = bench.ui.prompts();
     assert_eq!(prompts.len(), 3, "{prompts:?}");
@@ -515,7 +535,7 @@ fn probe_bundles_export_list_and_merge() {
         &calls,
         &[
             "7",
-            "7", // performance → probe bundles
+            "8", // performance → probe bundles
             "1",
             &existing,
             &export, // export: an existing target is re-asked

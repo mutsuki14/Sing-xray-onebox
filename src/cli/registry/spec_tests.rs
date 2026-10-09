@@ -342,12 +342,13 @@ fn command_help_snapshots() {
 用法:
   onebox tune [status]
   onebox tune hy2 auto|conservative|measured [--up N --down N] [--apply]
+  onebox tune hy2 [档位] [--obfs on|off] [--hop 起-止|off] [--apply]
   onebox tune resource balanced|low-memory|throughput [--apply]
   onebox tune reset [--apply]
 
 子命令:
   status    当前调优设置
-  hy2       Hysteria2 拥塞与带宽档位
+  hy2       Hysteria2 拥塞与带宽档位、混淆与端口跳跃
   resource  QUIC 接收窗口与并发流档位
   reset     恢复默认调优
 
