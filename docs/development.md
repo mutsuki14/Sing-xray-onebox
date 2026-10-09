@@ -88,7 +88,7 @@ python3 tests/fetch_tools.py --check       # 校验 tests/tools.json，不联网
 | 黄金对比测试 | `tests/golden/cases/` 的 10 个 v2 状态样例与 v2.0.1 程序的输出（`render server/inbound/outbound/probe`、`client <格式>`）。v3 用真实的 v2 迁移读取样例后渲染：JSON 按值和文本比较，链接与 Base64 逐字节一致，mihomo 按结构比较（v3 输出 YAML，v2 输出 JSON），v2 拒绝的命令 v3 必须以相同消息拒绝。例外逐条记录在 `tests/golden/ALLOWED_DIFFS.md`，某个例外不再出现或出现在别处都会让测试失败。网站首页模板另与 v2 `site preview` 的输出逐字节比较（`src/site/golden/`） | `cargo test` |
 | 真实内核校验（`#[ignore]`） | 每个黄金样例的服务端与客户端配置通过 `sing-box check`、`xray run -test`、`mihomo -t`；`doctor` 的内核检查对真实内核运行 | 见下 |
 | Rust 端到端测试（`#[ignore]`） | FRP（官方 frps / frpc + nginx，全部在本机回环）、订阅（真实 nginx、openssl、curl）、链路工具（真实内核）、nginx / 网站配置、真实下载等 | 见下 |
-| 黑盒测试（Python） | `tests/e2e/*.py`：以 root 在隔离目录中运行真实程序 <!-- TODO: verify e2e suite names after D3 merge --> | 见下 |
+| 黑盒测试（Python） | `tests/e2e/*.py`：在隔离目录中运行真实的 v3（和 v2.0.1）程序；生命周期与升级套件需要 root | 见下 |
 
 ### 真实工具
 
@@ -136,26 +136,39 @@ Xray 客户端配置的校验需要 `geosite.dat` / `geoip.dat`，放在 `ONEBOX
 
 ### 黑盒测试（Python）
 
-<!-- TODO: verify e2e suite names after D3 merge -->
-
 `tests/e2e/` 下每个不以 `_` 开头的 `*.py` 是一个独立套件，`_*.py` 是共用的辅助模块，不直接运行：
 
 | 套件 | 内容 |
 |---|---|
-| `protocols.py` | 协议 × 客户端（sing-box、Xray、mihomo）真实流量矩阵 |
-| `policy.py` | 私有地址与 BT 拦截等出站策略 |
-| `lifecycle.py` | 安装、修改、导出、备份恢复、注入启动失败后的回滚与 `recover`、v2 状态迁移、卸载（`ONEBOX_INIT=none`、隔离目录、记录并限制可调用的系统命令） |
-| `upgrade.py` | 用 v2.0.1 程序安装后由 v3 原地升级：继承 fd 198 上的锁、保留凭据与订阅设备、失败时回滚到与 v2 逐字节一致、恢复 v2 留下的事务和自更新日志 |
+| `protocols.py` | 协议 × 服务端内核 × 客户端（sing-box、Xray、mihomo）真实流量矩阵，全部在本机回环 |
+| `policy.py` | 私有地址与本机地址拦截等出站策略、Xray 上 REALITY 与 XHTTP 共用端口 |
+| `lifecycle.py` | 安装、修改、导出、备份恢复、注入启动失败后的回滚与 `recover`、v2 状态迁移、1.x 拒绝、卸载（root，`ONEBOX_INIT=none`） |
+| `upgrade.py` | 用 v2.0.1 程序安装后由 v3 原地升级：继承 fd 198 上的锁、保留凭据与订阅设备、v2 备份的恢复、子进程失败时回滚到与 v2 逐字节一致（包括经过真实的 v2 `update-script` 由 v2 恢复原程序）、恢复 v2 留下的事务和自更新日志（root） |
 
-套件以 root 运行，通过环境变量取得被测程序和真实工具：`ONEBOX_TEST_BINARY`（v3 程序）、`ONEBOX_TEST_SINGBOX`、`ONEBOX_TEST_XRAY`、`ONEBOX_TEST_MIHOMO`、`ONEBOX_TEST_V2_BINARY`（v2.0.1 程序，`upgrade.py` 必需；CI 下载 v2.0.1 Release 的 `onebox-linux-amd64-musl` 并按固定的 SHA-256 校验后提供）。各套件只读取自己需要的变量（例如 `lifecycle.py` 只用 `ONEBOX_TEST_SINGBOX` 做真实内核的一轮）；`ONEBOX_TEST_REQUIRE_FULL=1` 时任何跳过（非 root、缺少工具或变量）都算失败。有假内核模式的套件（假内核用 `RUSTC` 编译）在同一次运行中先跑假内核用例，真实内核只是额外的一轮。失败时以非零状态退出并打印汇总。
+套件通过环境变量取得被测程序和真实工具：`ONEBOX_TEST_BINARY`（v3 程序，默认 `target/debug/onebox`）、`ONEBOX_TEST_SINGBOX`、`ONEBOX_TEST_XRAY`、`ONEBOX_TEST_MIHOMO`、`ONEBOX_TEST_V2_BINARY`（v2.0.1 程序，`upgrade.py` 必需）。各套件只读取自己需要的变量（`lifecycle.py` 只用 `ONEBOX_TEST_SINGBOX` 做真实内核的一轮）；`ONEBOX_TEST_REQUIRE_FULL=1` 时任何跳过（非 root、缺少工具或变量）都算失败。`lifecycle.py` 与 `upgrade.py` 用 `RUSTC`（默认 PATH 中的 `rustc`）编译假内核，在同一次运行中先跑假内核用例（注入启动失败只在假内核下进行），真实内核只是额外的一轮。失败时以非零状态退出。
 
 ```bash
 cargo build --locked
-sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" ONEBOX_TEST_SINGBOX=/path/sing-box \
-  RUSTC="$(rustup which rustc)" python3 tests/e2e/lifecycle.py
+T=/path/to/tools   # tests/fetch_tools.py 下载的 sing-box、xray、mihomo
+
+ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" ONEBOX_TEST_SINGBOX=$T/sing-box \
+  ONEBOX_TEST_XRAY=$T/xray ONEBOX_TEST_MIHOMO=$T/mihomo python3 tests/e2e/protocols.py
+ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" ONEBOX_TEST_SINGBOX=$T/sing-box \
+  ONEBOX_TEST_XRAY=$T/xray python3 tests/e2e/policy.py
+
+for suite in lifecycle upgrade; do
+  sudo env ONEBOX_TEST_BINARY="$PWD/target/debug/onebox" ONEBOX_TEST_SINGBOX=$T/sing-box \
+    ONEBOX_TEST_V2_BINARY=/path/to/onebox-linux-amd64-musl RUSTC="$(rustup which rustc)" \
+    ONEBOX_TEST_REQUIRE_FULL=1 python3 "tests/e2e/$suite.py"
+done
+
+python3 tests/e2e/_lifecycle_sandbox_test.py   # 沙箱辅助模块的单元测试（无需 root）
+python3 tests/e2e/_selftest.py                 # 其余辅助模块的自测（protocols.py 与 policy.py 运行前也会执行）
 ```
 
-这些测试会运行服务、修改测试目录和网络状态，适合在容器或 CI 中运行。生成配置成功不能代替真实连通性测试。
+v2.0.1 程序使用已发布的静态资产，而不是从源码构建：CI 从 `https://github.com/mutsuki14/Sing-xray-onebox/releases/download/v2.0.1/` 下载 `onebox-linux-amd64-musl` 与 `SHA256SUMS`，要求 `SHA256SUMS` 中列出的摘要等于工作流里固定的 SHA-256、文件本身也与之相符，并且 `version` 输出 `2.0.1`。本地运行时用同样的方式取得并校验该文件。
+
+生命周期与升级套件把每个节点装在独立的临时目录中：全部路径变量指向该目录，`PATH` 只含记录调用的辅助程序（模拟 `iptables`、`nft`、`crontab` 等，拒绝包管理器、init 工具、shell 等，拒绝的调用一律算失败）。Onebox 启动的守护进程和一次性服务使用固定的 `SAFE_PATH`，不经过这个 `PATH`，所以套件还会：在每个沙箱创建和清理时比较本机的 `iptables-save`、`ip6tables-save`、`nft list ruleset` 与 root 的 crontab（不同即失败；运行期间自行改动防火墙的主机，例如 Docker 启动容器，也会触发）；以 root 运行时进入私有挂载命名空间，把会改动主机的程序名以记录并拒绝的替身挂载到 `/usr/local/sbin`（`SAFE_PATH` 的第一项），本机看不到这个挂载。无法挂载（没有 CAP_SYS_ADMIN、Python 低于 3.12）时只打印跳过提示，`ONEBOX_TEST_REQUIRE_FULL=1` 下则失败。套件会启动服务并监听本机回环端口，适合在容器或 CI 中运行。生成配置成功不能代替真实连通性测试。
 
 ## CI 与发布
 

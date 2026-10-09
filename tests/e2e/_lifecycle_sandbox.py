@@ -484,7 +484,7 @@ class Sandbox:
                     raise SandboxError(f"firewall-v2.json does not record {token} (port {port})")
 
     def logs(self) -> list[str]:
-        """Names of the files in ``log/`` (one per service that ran)."""
+        """Names of the files in ``log/`` (one per daemon that ran)."""
         log = self.root / "log"
         return sorted(p.name for p in log.iterdir()) if log.is_dir() else []
 

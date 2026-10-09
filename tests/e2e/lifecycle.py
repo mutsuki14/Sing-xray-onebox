@@ -59,8 +59,9 @@ V1_MESSAGE = (
 UNINSTALL_MESSAGE = "代理已卸载，网站内容和备份保留于原目录；FRP 可用 onebox frps 管理"
 NODE_SERVICES = ("onebox-sing-box", "onebox-xray", "onebox-subscription", "onebox-subscription-web",
                  "onebox-site", "onebox-network")
-# The services a full pass runs (log/ holds exactly their logs: never
-# onebox-network, a oneshot that would reach the host's real firewall).
+# The daemons a full pass runs: log/ must hold exactly their logs, so a daemon
+# nobody expects (a second core, a front v3 should have retired) fails.
+# Oneshots such as onebox-network log nowhere; the host guard covers them.
 SERVICE_LOGS = ["onebox-sing-box.log", "onebox-subscription.log"]
 
 

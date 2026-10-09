@@ -79,8 +79,9 @@ ADMIN_CRON = "0 1 * * * /usr/bin/true # admin job"
 # Rewritten by every v2 regen (it records when the snapshot was published),
 # so a v2 parent's or a recovery's regen changes it.
 PUBLISHED = "subscription/published.json"
-# The services of every scenario (log/ holds exactly their logs: never
-# onebox-network, a oneshot that would reach the host's real firewall).
+# The daemons every scenario runs: log/ must hold exactly their logs, so a daemon
+# nobody expects (a second core, a front v3 should have retired) fails.
+# Oneshots such as onebox-network log nowhere; the host guard covers them.
 SERVICE_LOGS = ["onebox-sing-box.log", "onebox-subscription-web.log", "onebox-subscription.log"]
 
 
