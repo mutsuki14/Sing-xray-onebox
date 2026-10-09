@@ -394,16 +394,16 @@ def main() -> int:
     real_core = sb.executable(args.singbox, "ONEBOX_TEST_SINGBOX")
     work = Path(tempfile.mkdtemp(prefix="onebox-lifecycle-"))
     try:
-        build = work / "build"
-        build.mkdir()
-        fixture_core = sb.compile_fake_core(build)
-        read_only = sb.Sandbox(work / "read-only", binary, fixture_core)
-        read_only_phase(read_only)
+        # The read-only phase never starts a core (nor needs rustc).
+        read_only_phase(sb.Sandbox(work / "read-only", binary, binary))
         print("PASS lifecycle read-only CLI")
         blocker = sb.full_run_blocker()
         if blocker:
             sb.skip_or_fail(f"full lifecycle: {blocker}")
             return 0
+        build = work / "build"
+        build.mkdir()
+        fixture_core = sb.compile_fake_core(build)
         run_pass(work, "fixture-core", binary, fixture_core, True)
         if real_core:
             run_pass(work, "real-sing-box", binary, real_core, False)
