@@ -1,5 +1,5 @@
 use super::*;
-use crate::diag::fixture::{two_core_config, Node, NOW};
+use crate::diag::fixture::{check, two_core_config, Node, NOW};
 use crate::diag::redact::contains_ip;
 use crate::diag::CheckStatus;
 use crate::domain::config::ProxyTls;
@@ -314,4 +314,100 @@ fn feature_flags_and_certificate_methods() {
         }
     );
     assert_eq!(Features::of(None, false), Features::default());
+}
+
+/// The report of `node` with its `state.json` edited by `edit`.
+fn report_with_state(edit: impl FnOnce(&mut Value)) -> (SupportReport, String) {
+    let node = Node::healthy();
+    let path = node.ctx.paths.state();
+    let mut doc: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut doc);
+    fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    let report = report_of(&node, &[]);
+    let text = report.to_json().unwrap();
+    (report, text)
+}
+
+fn state_line(report: &SupportReport) -> &Check {
+    report.checks.iter().find(|c| c.name == "节点配置").unwrap()
+}
+
+#[test]
+fn an_invalid_state_never_leaks_the_values_its_error_echoes() {
+    let (report, text) = report_with_state(|doc| {
+        doc["creds"]["ws_path"] = Value::from("/s3cret path");
+    });
+    assert_eq!(report.state, "invalid");
+    let line = state_line(&report);
+    assert_eq!(line.status, CheckStatus::Fail);
+    assert_eq!(line.detail, "state.json 校验失败: WS 路径无效: <secret>");
+    assert!(!text.contains("s3cret"), "{text}");
+
+    let (report, text) = report_with_state(|doc| {
+        doc["creds"]["password"] = Value::from(12_345_678);
+    });
+    let line = state_line(&report);
+    assert!(line.detail.contains("integer `<secret>`"), "{line:?}");
+    assert!(!text.contains("12345678"), "{text}");
+}
+
+#[test]
+fn an_unparseable_state_shows_no_error_text() {
+    let node = Node::healthy();
+    fs::write(node.ctx.paths.state(), "uuid 0b5c6a1e s3cret\n").unwrap();
+    let report = report_of(&node, &[]);
+    assert_eq!(state_line(&report), &Check::fail("节点配置", UNREADABLE));
+    // doctor itself still prints the real error.
+    let printed = check(&node.diagnose().checks, "节点配置").clone();
+    assert!(printed.detail.starts_with("state.json 无效"), "{printed:?}");
+}
+
+#[test]
+fn a_v1_only_install_keeps_its_upgrade_message() {
+    let node = Node::healthy();
+    fs::remove_file(node.ctx.paths.state()).unwrap();
+    fs::write(node.ctx.paths.legacy_v1_state(), "X=1\n").unwrap();
+    let report = report_of(&node, &[]);
+    assert!(
+        state_line(&report)
+            .detail
+            .starts_with("检测到 Onebox 1.x 配置"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn an_invalid_frp_state_never_leaks_its_values() {
+    let node = Node::healthy();
+    let root = &node.ctx.paths.frp_root;
+    fs::create_dir_all(root).unwrap();
+    fs::write(root.join(".managed"), "").unwrap();
+    fs::write(
+        root.join("state.json"),
+        r#"{"schema": 2, "domain": "frp.example.org", "token": 87654321}"#,
+    )
+    .unwrap();
+    let text = report_of(&node, &[]).to_json().unwrap();
+    assert!(
+        !text.contains("87654321") && !text.contains("example"),
+        "{text}"
+    );
+
+    fs::remove_file(root.join("state.json")).unwrap();
+    fs::write(
+        root.join("state.conf"),
+        "FRPS_TOKEN='tok-s3cret-1'\nFRPS_PORT=x\n",
+    )
+    .unwrap();
+    let report = report_of(&node, &[]);
+    let frp = report
+        .checks
+        .iter()
+        .find(|c| c.name == "FRP 服务端")
+        .unwrap();
+    assert_eq!(frp.status, CheckStatus::Fail);
+    assert!(
+        !report.to_json().unwrap().contains("tok-s3cret-1"),
+        "{frp:?}"
+    );
 }

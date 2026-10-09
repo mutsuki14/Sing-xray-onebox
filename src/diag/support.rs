@@ -7,20 +7,26 @@
 //! whether a recovery is pending, and every doctor check. Typed fields are
 //! identifiers, ports and versions only; the free-form check names and
 //! details go through the [`Redactor`] (credentials, IP addresses and
-//! domain names of the node and FRP, then any IP literal or domain-shaped
-//! word) and are capped in length. Nothing is uploaded.
+//! domain names of the node and FRP — or every value of a state file that
+//! failed to load — then any IP literal or domain-shaped word) and are
+//! capped in length. Nothing is uploaded.
 
 use super::redact::Redactor;
+use super::survey::{FrpFound, NodeState, Survey};
 use super::{Check, CheckFn, Diagnosis, Doctor};
 use crate::apply::journal;
 use crate::domain::config::{AcmeMethod, ProxyCertMode, SubscriptionMode, WebCert};
+use crate::domain::defaults::STATE_MAX_BYTES;
 use crate::domain::NodeConfig;
 use crate::error::{Error, Result};
+use crate::frp::model as frp;
 use crate::host::cores;
 use crate::host::os::{self, HostFacts, OsInfo};
-use crate::sys::fs::{ensure_dir, write_new_exclusive};
+use crate::paths::Paths;
+use crate::sys::fs::{ensure_dir, read_bounded, write_new_exclusive};
 use crate::sys::rand::{OsRandom, Random};
 use serde::Serialize;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// Version of the report layout (v2's implicit layout is 1).
@@ -32,6 +38,11 @@ pub const SUPPORT_NOTE: &str =
 const DETAIL_MAX: usize = 600;
 /// Random file-name suffixes tried before giving up.
 const NAME_ATTEMPTS: usize = 8;
+/// Largest input of a failed state read for its values (the state limit).
+const RAW_MAX: u64 = STATE_MAX_BYTES;
+/// What the report shows instead of a load error that could not be
+/// redacted.
+pub const UNREADABLE: &str = "配置无法读取";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SupportReport {
@@ -223,6 +234,51 @@ fn core_rows(doctor: &Doctor, cfg: &NodeConfig) -> Vec<CoreRow> {
         .collect()
 }
 
+/// The redactor of a report: every value of the loaded node and FRP
+/// states, and for a state that failed to load every value of its input
+/// files, since its load error may echo any of them (`ws_path 路径无效:
+/// /x`). A load error from an input that is neither JSON nor `KEY=value`
+/// text is replaced by [`UNREADABLE`] as a whole.
+pub fn report_redactor(paths: &Paths, survey: &Survey) -> Redactor {
+    let mut redactor = Redactor::for_node(survey.config(), survey.frp.state());
+    if let NodeState::Invalid(message) = &survey.node {
+        // v2 states are migrated together with the v2 subscription settings.
+        let inputs = [paths.state(), paths.subscription_v2_settings()];
+        add_inputs(&mut redactor, message, &inputs);
+    }
+    if let FrpFound::Invalid(message) = &survey.frp {
+        let json = frp::state_path(paths);
+        let input = if std::fs::symlink_metadata(&json).is_ok() {
+            json
+        } else {
+            frp::legacy_state_path(paths)
+        };
+        add_inputs(&mut redactor, message, &[input]);
+    }
+    redactor
+}
+
+/// Add the values of every existing input ([`Redactor::add_raw`]); when one
+/// cannot be read or understood, hide `message` instead.
+fn add_inputs(redactor: &mut Redactor, message: &str, inputs: &[PathBuf]) {
+    let mut understood = true;
+    for path in inputs {
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(_) => understood = false,
+            Ok(_) => {
+                let text = read_bounded(path, RAW_MAX)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                understood &= text.is_some_and(|text| redactor.add_raw(&text));
+            }
+        }
+    }
+    if !understood {
+        redactor.add(message, UNREADABLE);
+    }
+}
+
 /// A check with its texts redacted and the detail capped.
 pub fn redact_check(redactor: &Redactor, check: &Check) -> Check {
     let detail = redactor.redact(&check.detail);
@@ -237,7 +293,7 @@ impl SupportReport {
     pub fn build(doctor: &Doctor, diagnosis: &Diagnosis) -> SupportReport {
         let survey = &diagnosis.survey;
         let cfg = survey.config();
-        let redactor = Redactor::for_node(cfg, survey.frp.state());
+        let redactor = report_redactor(&doctor.ctx.paths, survey);
         SupportReport {
             schema: SUPPORT_SCHEMA,
             program_version: crate::VERSION,
