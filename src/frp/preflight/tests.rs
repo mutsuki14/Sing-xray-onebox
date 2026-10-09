@@ -163,12 +163,13 @@ fn node_ports_conflict_with_reservations() {
         w.https_port = 20050;
     }
     check_node_ports(&ctx, &web_state).unwrap();
-    // The web bind port is reserved for UDP too (allowPorts).
+    // So does the web bind port (TCP only, as in v2): the node's UDP
+    // inbound on it keeps working after `configure`.
     web_state.bind_port = 20050;
     if let Mode::Web(w) = &mut web_state.mode {
         w.https_port = 443;
     }
-    assert!(check_node_ports(&ctx, &web_state).is_err());
+    check_node_ports(&ctx, &web_state).unwrap();
 }
 
 /// `/proc/net/{tcp,udp}` with one listener (TCP LISTEN = `0A`).

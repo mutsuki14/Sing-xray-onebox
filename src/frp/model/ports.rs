@@ -88,9 +88,11 @@ impl PortLayout {
 
     /// Ports other Onebox components must leave to FRP — also while FRP is
     /// stopped. The forwarding range only in tcp mode, where it is public
-    /// (H-8.1#8). In web mode the bind port is reserved for UDP as well:
-    /// it is the one `allowPorts` entry ([`PortLayout::allow_ports`]), and
-    /// frps holds only its TCP side.
+    /// (H-8.1#8). The listeners are reserved for TCP alone, as in v2 (H
+    /// §1.2), also the web-mode bind port that is the one `allowPorts`
+    /// entry ([`PortLayout::allow_ports`]): reserving its UDP side would
+    /// reject node configurations v2 accepted (a Hysteria2 hop range or a
+    /// UDP inbound covering it), the v2→v3 upgrade `regen` included.
     pub fn reservations(&self) -> Vec<Reservation> {
         let reserve = |port: u16, label: &str| Reservation {
             start: port,
@@ -98,11 +100,7 @@ impl PortLayout {
             transport: Transport::Tcp,
             label: label.to_owned(),
         };
-        let mut bind = reserve(self.bind_port(), "控制端口");
-        if matches!(self, PortLayout::Web { .. }) {
-            bind.transport = Transport::Both;
-        }
-        let mut out = vec![bind];
+        let mut out = vec![reserve(self.bind_port(), "控制端口")];
         match *self {
             PortLayout::Web {
                 http_port,
@@ -131,9 +129,10 @@ impl PortLayout {
     /// `allowPorts` lets a client with the token bind any port (in web
     /// mode on loopback, next to the node's site, guard and subscription
     /// listeners). Tcp mode: the forwarding range. Web mode has no
-    /// forwarding: the bind port alone, which frps itself holds for TCP and
-    /// [`PortLayout::reservations`] keeps free of other UDP listeners, so
-    /// no proxy can take a port anything else uses.
+    /// forwarding: the bind port alone, whose TCP side frps holds itself.
+    /// Its UDP side is not reserved (see [`PortLayout::reservations`]): a
+    /// UDP proxy there needs the token and binds 127.0.0.1 only, where a
+    /// node UDP listener on that port already holds it.
     pub fn allow_ports(&self) -> Vec<(u16, u16)> {
         match *self {
             PortLayout::Web { bind_port, .. } => vec![(bind_port, bind_port)],
