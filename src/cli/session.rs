@@ -8,16 +8,16 @@
 //! - every `ApplyRequest` is built from the loaded state with
 //!   `ApplyRequest::from_loaded` (v2-migrated devices ride along, G23) and
 //!   the v2 migration warnings are printed once per session;
-//! - Cloudflare credentials are resolved before the engine runs (G8): the
-//!   engine never prompts, so a missing token is asked for here when
-//!   interactive and is an error under `-y`.
+//! - Cloudflare credentials are resolved before the engine runs (G8,
+//!   `cert::cloudflare::resolve_for_apply`): the engine never prompts, so a
+//!   missing token is asked for here when interactive and is an error
+//!   under `-y`.
 //!
 //! Changes from v2: reading the state as a non-root user explains that root
 //! is needed instead of showing a raw permission error.
 
 use crate::apply::{self, ApplyRequest};
-use crate::cert::cloudflare::{self, CfCredentials};
-use crate::cert::{CertScope, CertScopes, RenewOptions};
+use crate::cert::cloudflare;
 use crate::ctx::Ctx;
 use crate::domain::config::NodeConfig;
 use crate::domain::plan::PlanEnv;
@@ -280,15 +280,8 @@ impl<'a> Session<'a> {
     /// Resolve Cloudflare credentials for `req` (G8), then run the engine.
     pub fn apply(&self, mut req: ApplyRequest) -> Result<()> {
         if req.intents.cloudflare.is_none() {
-            let needed = cloudflare_targets(self.ctx, &req.config, req.intents.renew);
-            if !needed.is_empty() && self.ui().interactive() {
-                let labels: Vec<&str> = needed.iter().map(|s| s.label()).collect();
-                self.info(format!(
-                    "{}使用 Cloudflare DNS 验证，需要 API Token",
-                    labels.join("、")
-                ));
-            }
-            req.intents.cloudflare = resolve_cloudflare(self.ui(), &needed)?;
+            req.intents.cloudflare =
+                cloudflare::resolve_for_apply(self.ctx, self.ui(), &req.config, req.intents.renew)?;
         }
         self.engine.apply(self.ctx, req)
     }
@@ -307,45 +300,6 @@ fn explain_permission(e: Error) -> Error {
         }
         _ => e,
     }
-}
-
-/// The Cloudflare DNS-01 certificates of `cfg` an apply would issue or
-/// renew without stored or environment credentials.
-pub fn cloudflare_targets(ctx: &Ctx, cfg: &NodeConfig, forced: CertScopes) -> Vec<CertScope> {
-    let opts = RenewOptions {
-        targets: CertScopes::ALL,
-        scheduled: false,
-        force: false,
-    };
-    let mut needed = crate::cert::credentials_needed(ctx, cfg, &opts);
-    if !forced.is_empty() {
-        let forced_opts = RenewOptions {
-            targets: forced,
-            scheduled: false,
-            force: true,
-        };
-        for scope in crate::cert::credentials_needed(ctx, cfg, &forced_opts) {
-            if !needed.contains(&scope) {
-                needed.push(scope);
-            }
-        }
-    }
-    needed
-}
-
-/// Credentials for `needed` targets: none needed → `None`; interactive →
-/// ask once (no echo); otherwise the v2 "missing credentials" error.
-pub fn resolve_cloudflare(
-    ui: &dyn Prompter,
-    needed: &[CertScope],
-) -> Result<Option<CfCredentials>> {
-    if needed.is_empty() {
-        return Ok(None);
-    }
-    if !ui.interactive() {
-        return Err(Error::msg(cloudflare::MISSING));
-    }
-    cloudflare::prompt(ui).map(Some)
 }
 
 /// Run `f` with the production session.

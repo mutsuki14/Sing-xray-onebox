@@ -181,6 +181,40 @@ fn renewal_outcomes() {
     *REPORT.lock().unwrap() = None;
 }
 
+/// The republishing apply after a proxy identity change carries the
+/// credentials resolved for the renewal (the apply never prompts).
+#[test]
+fn identity_change_apply_carries_the_resolved_credentials() {
+    if std::env::var_os("CF_Token").is_some() {
+        return;
+    }
+    let _guard = serial();
+    let mut cfg = trojan();
+    cfg.tls = Some(crate::domain::config::ProxyTls {
+        mode: ProxyCertMode::Acme {
+            domain: "proxy.example.com".into(),
+            method: AcmeMethod::Cloudflare,
+        },
+        pinned: false,
+    });
+    let bench = Bench::installed(&cfg);
+    bench.answers(&["fake-token-0123", ""]);
+    *REPORT.lock().unwrap() = Some(RenewReport {
+        renewed: vec![CertScope::Proxy],
+        proxy_identity_changed: true,
+        ..RenewReport::default()
+    });
+    let result = renew_with(&bench.session(), CertScopes::ALL, false, scripted);
+    *REPORT.lock().unwrap() = None;
+    result.unwrap();
+    assert_eq!(
+        bench.engine.calls(),
+        [Call::RecoverLocked, Call::ApplyLocked]
+    );
+    let creds = bench.engine.single().intents.cloudflare.unwrap();
+    assert_eq!(creds.get("CF_Token"), Some("fake-token-0123"));
+}
+
 #[test]
 fn renewal_needs_root_and_a_free_lock() {
     let _guard = serial();

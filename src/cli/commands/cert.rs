@@ -20,11 +20,11 @@
 //! `-y` (v2 silently picked self-signed); `cert-renew subscription` renews
 //! like `cert renew subscription`.
 
-use crate::cert::cloudflare::CfCredentials;
+use crate::cert::cloudflare::{self, CfCredentials};
 use crate::cert::{self, CertDir, CertScopes, RenewOptions, RenewReport};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
 use crate::cli::options as opt;
-use crate::cli::session::{request, resolve_cloudflare, with_system, Session};
+use crate::cli::session::{request, with_system, Session};
 use crate::cli::wizard::steps;
 use crate::ctx::Ctx;
 use crate::domain::config::{NodeConfig, SubscriptionMode};
@@ -199,7 +199,7 @@ pub fn renew_with(
     let cf = if cron {
         None
     } else {
-        resolve_cloudflare(session.ui(), &needed)?
+        cloudflare::resolve_needed(session.ui(), &needed)?
     };
     let path = ctx.paths.lock();
     let lock = if cron {
@@ -212,7 +212,10 @@ pub fn renew_with(
     let report = renewer(ctx, &lock, &loaded.config, &opts, cf.as_ref())?;
     if report.proxy_identity_changed {
         session.info("代理证书已更换，正在重新发布客户端配置");
-        let req = request(&loaded, loaded.config.clone(), "证书续期");
+        let mut req = request(&loaded, loaded.config.clone(), "证书续期");
+        // The apply renews what is still due (e.g. a target that just
+        // failed) and never prompts: it gets the credentials resolved above.
+        req.intents.cloudflare = cf.clone();
         session.engine.apply_locked(ctx, &lock, req)?;
     }
     summarize(session, &report, cron)

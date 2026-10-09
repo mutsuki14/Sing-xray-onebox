@@ -213,3 +213,99 @@ fn prompt_asks_for_a_secret_token_and_an_optional_account() {
         BAD_ACCOUNT
     );
 }
+
+#[test]
+fn resolve_needed_asks_once_or_fails_unattended() {
+    let ui = ScriptedPrompter::new(Vec::<String>::new());
+    assert!(resolve_needed(&ui, &[]).unwrap().is_none());
+    assert!(ui.prompts().is_empty(), "nothing needed: nothing asked");
+    let ui = ScriptedPrompter::new(["fake-token-0123", ""]);
+    let creds = resolve_needed(&ui, &[CertScope::Site]).unwrap().unwrap();
+    assert_eq!(creds.get("CF_Token"), Some("fake-token-0123"));
+    assert_eq!(ui.prompts(), [TOKEN_PROMPT, ACCOUNT_PROMPT]);
+    let ui = ScriptedPrompter::unattended();
+    let err = resolve_needed(&ui, &[CertScope::Proxy]).unwrap_err();
+    assert_eq!(err.to_string(), MISSING);
+}
+
+mod apply {
+    use super::*;
+    use crate::cert::renew::credentials_needed_for_apply_with;
+    use crate::cert::Engine;
+    use crate::domain::config::{AcmeMethod, ProxyCertMode, ProxyTls, WebCert};
+    use crate::domain::fixtures::{config, with_site};
+    use crate::domain::protocol::{Core, Protocol};
+
+    fn trojan_cf() -> NodeConfig {
+        let mut cfg = config(&[(Protocol::Trojan, 443, Core::Singbox)]);
+        cfg.tls = Some(ProxyTls {
+            mode: ProxyCertMode::Acme {
+                domain: "proxy.example.com".into(),
+                method: AcmeMethod::Cloudflare,
+            },
+            pinned: false,
+        });
+        cfg
+    }
+
+    #[test]
+    fn targets_are_dns01_certificates_without_credentials() {
+        let dir = TempDir::new("cf-apply").unwrap();
+        let (ctx, _, _) = Ctx::test(dir.path());
+        let engine = Engine {
+            env: &no_env,
+            ..Engine::system(&ctx)
+        };
+        let needed =
+            |cfg: &NodeConfig, forced| credentials_needed_for_apply_with(&engine, cfg, forced);
+        let mut site = with_site(
+            config(&[(Protocol::VlessReality, 443, Core::Singbox)]),
+            "www.example.com",
+            true,
+        );
+        assert!(needed(&site, CertScopes::NONE).is_empty(), "HTTP-01");
+        if let Some(s) = site.site.as_mut() {
+            s.cert = WebCert::Cloudflare;
+        }
+        assert_eq!(needed(&site, CertScopes::NONE), [CertScope::Site]);
+        // A forced renewal of the same target is listed once.
+        assert_eq!(needed(&site, CertScopes::ALL), [CertScope::Site]);
+        assert_eq!(needed(&trojan_cf(), CertScopes::NONE), [CertScope::Proxy]);
+        // Environment credentials satisfy the lookup…
+        let env = env_of(&[("CF_Token", "env-token")]);
+        let with_env = Engine {
+            env: &env,
+            ..Engine::system(&ctx)
+        };
+        assert!(
+            credentials_needed_for_apply_with(&with_env, &trojan_cf(), CertScopes::ALL).is_empty()
+        );
+        // …and so do stored ones.
+        let creds = CfCredentials::token("fake-token-0123", None).unwrap();
+        persist(&ctx.paths.tls(), &creds).unwrap();
+        assert!(needed(&trojan_cf(), CertScopes::NONE).is_empty());
+    }
+
+    #[test]
+    fn resolve_for_apply_prompts_only_when_needed() {
+        if std::env::var_os("CF_Token").is_some() {
+            return;
+        }
+        let dir = TempDir::new("cf-apply-resolve").unwrap();
+        let (ctx, _, ui) = Ctx::test(dir.path());
+        let plain = config(&[(Protocol::VlessReality, 443, Core::Xray)]);
+        assert!(
+            resolve_for_apply(&ctx, ui.as_ref(), &plain, CertScopes::ALL)
+                .unwrap()
+                .is_none()
+        );
+        ui.extend(["fake-token-0123", ""]);
+        let creds = resolve_for_apply(&ctx, ui.as_ref(), &trojan_cf(), CertScopes::NONE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(creds.get("CF_Token"), Some("fake-token-0123"));
+        ui.set_assume_yes(true);
+        let err = resolve_for_apply(&ctx, ui.as_ref(), &trojan_cf(), CertScopes::NONE).unwrap_err();
+        assert_eq!(err.to_string(), MISSING);
+    }
+}

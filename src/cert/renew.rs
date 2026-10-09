@@ -137,6 +137,43 @@ pub fn credentials_needed_with(
         .collect()
 }
 
+/// The DNS-01 targets an apply of `cfg` would issue or renew without
+/// stored or environment credentials: every due one, plus the `forced`
+/// scopes (`Intents.renew`) whether due or not. Read-only; see
+/// [`cloudflare::resolve_for_apply`].
+pub fn credentials_needed_for_apply(
+    ctx: &Ctx,
+    cfg: &NodeConfig,
+    forced: CertScopes,
+) -> Vec<CertScope> {
+    credentials_needed_for_apply_with(&Engine::system(ctx), cfg, forced)
+}
+
+/// [`credentials_needed_for_apply`] with an explicit engine.
+pub fn credentials_needed_for_apply_with(
+    engine: &Engine,
+    cfg: &NodeConfig,
+    forced: CertScopes,
+) -> Vec<CertScope> {
+    let due = RenewOptions {
+        targets: CertScopes::ALL,
+        scheduled: false,
+        force: false,
+    };
+    let mut needed = credentials_needed_with(engine, cfg, &due);
+    if !forced.is_empty() {
+        let forced = RenewOptions {
+            targets: forced,
+            scheduled: false,
+            force: true,
+        };
+        needed.extend(credentials_needed_with(engine, cfg, &forced));
+    }
+    needed.sort_unstable();
+    needed.dedup();
+    needed
+}
+
 /// A DNS-01 target whose directory has no complete credentials (stored or
 /// environment). An unreadable store is not "lacking": its error shows up
 /// in the renewal itself.

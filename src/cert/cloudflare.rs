@@ -16,6 +16,13 @@
 //! accepted only if it is 1–1024 bytes of `[A-Za-z0-9@._+-]` after one
 //! level of matching quotes is removed (`$(…)`, `; cmd` are ignored).
 //!
+//! Before any apply (G8) its caller runs [`resolve_for_apply`] — node
+//! commands, subscription enable/renew, backup restore, core updates: the
+//! engine never prompts, so credentials a DNS-01 certificate of the new
+//! configuration lacks are asked for there (interactive) or reported as
+//! [`MISSING`] (`-y`), and travel in `Intents.cloudflare`. Renewals without
+//! an apply use [`resolve_needed`] with `renew::credentials_needed`.
+//!
 //! Changes from v2: credentials are resolved before an apply (the CLI
 //! prompts, the apply engine never does) and handed to acme.sh only through
 //! that command's environment — v2 exported them with `std::env::set_var`
@@ -23,7 +30,9 @@
 //! inherited the token (F-8.1#11); `Debug` output of [`CfCredentials`]
 //! never shows values.
 
+use super::{CertScope, CertScopes};
 use crate::ctx::Ctx;
+use crate::domain::config::NodeConfig;
 use crate::error::{Error, Result};
 use crate::host::os::{process_env, EnvLookup};
 use crate::sys::fs::{atomic_write, ensure_dir, read_bounded};
@@ -250,6 +259,37 @@ pub fn prompt(ui: &dyn Prompter) -> Result<CfCredentials> {
     };
     let account = ui.input_with(ACCOUNT_PROMPT, "", &check)?;
     CfCredentials::token(&token, Some(&account))
+}
+
+/// Credentials for the `needed` DNS-01 certificates: none → `None`;
+/// interactive → a notice naming them, then [`prompt`] once; otherwise the
+/// v2 [`MISSING`] error.
+pub fn resolve_needed(ui: &dyn Prompter, needed: &[CertScope]) -> Result<Option<CfCredentials>> {
+    if needed.is_empty() {
+        return Ok(None);
+    }
+    if !ui.interactive() {
+        return Err(Error::msg(MISSING));
+    }
+    let labels: Vec<&str> = needed.iter().map(|s| s.label()).collect();
+    out::info(format!(
+        "{}使用 Cloudflare DNS 验证，需要 API Token",
+        labels.join("、")
+    ));
+    prompt(ui).map(Some)
+}
+
+/// What every caller of `apply::apply` / `apply_locked` runs first (G8,
+/// module docs): the credentials an apply of `cfg` with the `forced`
+/// renewals (`Intents.renew`) needs, for `Intents.cloudflare`.
+pub fn resolve_for_apply(
+    ctx: &Ctx,
+    ui: &dyn Prompter,
+    cfg: &NodeConfig,
+    forced: CertScopes,
+) -> Result<Option<CfCredentials>> {
+    let needed = super::renew::credentials_needed_for_apply(ctx, cfg, forced);
+    resolve_needed(ui, &needed)
 }
 
 /// Store `credentials` for `dir` (`<D>/acme` 0700, file 0600, sorted keys).

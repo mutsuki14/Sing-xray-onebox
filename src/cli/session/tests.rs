@@ -1,7 +1,7 @@
 use super::testing::{Bench, Call};
 use super::*;
-use crate::domain::config::{AcmeMethod, ProxyCertMode, ProxyTls, WebCert};
-use crate::domain::fixtures::{config, with_site};
+use crate::domain::config::{AcmeMethod, ProxyCertMode, ProxyTls};
+use crate::domain::fixtures::config;
 use crate::domain::protocol::{Core, Protocol};
 use crate::state::StateHash;
 
@@ -71,56 +71,28 @@ fn cloudflare_credentials_are_resolved_before_apply() {
     }
 }
 
+/// Interactive: the token is asked for before the engine runs, and the
+/// renewals the request forces count too.
 #[test]
-fn credential_decisions() {
-    let bench = Bench::new();
-    assert!(resolve_cloudflare(bench.ui.as_ref(), &[])
-        .unwrap()
-        .is_none());
-    bench.answers(&["fake-token-0123", ""]);
-    let creds = resolve_cloudflare(bench.ui.as_ref(), &[CertScope::Site])
-        .unwrap()
-        .unwrap();
-    assert_eq!(creds.get("CF_Token"), Some("fake-token-0123"));
-    assert_eq!(
-        bench.ui.prompts(),
-        [
-            "Cloudflare API Token",
-            "Cloudflare Account ID（可留空自动查询）"
-        ]
-    );
-    bench.unattended();
-    let err = resolve_cloudflare(bench.ui.as_ref(), &[CertScope::Proxy]).unwrap_err();
-    assert_eq!(err.to_string(), cloudflare::MISSING);
-}
-
-#[test]
-fn cloudflare_targets_list_certificates_without_credentials() {
+fn apply_carries_prompted_cloudflare_credentials() {
     if std::env::var_os("CF_Token").is_some() {
         return;
     }
-    let bench = Bench::new();
-    let mut site = with_site(
-        config(&[(Protocol::VlessReality, 443, Core::Singbox)]),
-        "www.example.com",
-        true,
-    );
-    assert!(cloudflare_targets(&bench.ctx, &site, CertScopes::NONE).is_empty());
-    if let Some(s) = site.site.as_mut() {
-        s.cert = WebCert::Cloudflare;
-    }
-    assert_eq!(
-        cloudflare_targets(&bench.ctx, &site, CertScopes::NONE),
-        [CertScope::Site]
-    );
-    assert_eq!(
-        cloudflare_targets(&bench.ctx, &trojan_cf(), CertScopes::NONE),
-        [CertScope::Proxy]
-    );
-    // Stored credentials satisfy the lookup.
-    let creds = CfCredentials::token("fake-token-0123", None).unwrap();
-    cloudflare::persist(&bench.ctx.paths.tls(), &creds).unwrap();
-    assert!(cloudflare_targets(&bench.ctx, &trojan_cf(), CertScopes::NONE).is_empty());
+    let bench = Bench::installed(&trojan_cf());
+    let session = bench.session();
+    let loaded = session.load().unwrap();
+    bench.answers(&["fake-token-0123", ""]);
+    let mut req = request(&loaded, loaded.config.clone(), "测试");
+    req.intents.renew = crate::cert::CertScopes::ALL;
+    session.apply(req).unwrap();
+    let creds = bench.engine.single().intents.cloudflare.unwrap();
+    assert_eq!(creds.get("CF_Token"), Some("fake-token-0123"));
+    // Credentials already in the request are not asked for again.
+    let mut req = request(&loaded, loaded.config.clone(), "测试");
+    req.intents.cloudflare = Some(creds);
+    session.apply(req).unwrap();
+    assert_eq!(bench.ui.remaining(), 0);
+    assert_eq!(bench.engine.requests().len(), 2);
 }
 
 #[test]
