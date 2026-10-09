@@ -16,21 +16,27 @@
 //! Changes from v2: creation time instead of lexicographic ids for order,
 //! `latest` and rotation (E-8.1#1: v1 ids `2026…` outranked every Unix-time
 //! id, so rotation could delete the `before-restore` copy); unknown
-//! directories are never rotated away; stale `.new-*` stages are removed by
-//! the next apply; `state.json` is stored as it is on disk (no internal keys,
-//! E-8.1#18) and counts against the 64 MiB budget.
+//! directories are never rotated away; rotation renames a backup to a
+//! `.new-*` stage before deleting it (v2 deleted in place, so an interrupted
+//! deletion could leave an unrecognizable directory holding credentials
+//! that nothing removed); stale `.new-*` stages are removed by the next
+//! backup or apply; `state.json` is stored as it is on disk (no internal
+//! keys, E-8.1#18) and counts against the 64 MiB budget.
 
 use super::archive::{self, clean_label, copy_private, inventory, Budget, Kind, Manifest, Part};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 use crate::state::StateStore;
-use crate::sys::fs::{atomic_write, ensure_dir, fsync_dir, read_bounded, remove_tree_if_exists};
+use crate::sys::fs::{
+    atomic_write, ensure_dir, fsync_dir, read_bounded, remove_tree_if_exists, sweep_stale,
+};
 use crate::sys::lock::FileLock;
 use crate::ui::out;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::time::Duration;
 
 /// Backups kept by rotation (v2).
 pub const KEEP: usize = 5;
@@ -38,7 +44,8 @@ pub const KEEP: usize = 5;
 pub const BEFORE_RESTORE: &str = "before-restore";
 /// Label shown for directories without a readable label.
 pub const LEGACY_LABEL: &str = "旧版本备份";
-/// Prefix of a backup being written (renamed to its id when complete).
+/// Prefix of a backup being written (renamed to its id when complete) or
+/// deleted (renamed from its id first).
 pub const STAGE_PREFIX: &str = ".new-";
 
 /// One entry of `onebox backups`.
@@ -224,6 +231,7 @@ fn create(
     let root = paths.backups();
     crate::sys::fs::check_owned(&paths.root, &root)?;
     ensure_dir(&root, 0o700)?;
+    sweep_stages(&root);
     let created = crate::sys::time::now();
     let id = format!("{created}-{}", crate::sys::rand::hex(4)?);
     let stage = root.join(format!("{STAGE_PREFIX}{id}"));
@@ -282,10 +290,41 @@ fn prune(paths: &Paths, new: &str, keep: Option<&str>) -> Result<()> {
         .filter(|b| b.kind != BackupKind::Unknown);
     for old in recognized.skip(KEEP) {
         if old.id != new && Some(old.id.as_str()) != keep {
-            remove_tree_if_exists(&root.join(&old.id))?;
+            remove_backup(&root, &old.id)?;
         }
     }
     Ok(())
+}
+
+/// Delete backup `id` without ever leaving a half-deleted one under its id:
+/// it is renamed to a stage name first, then the stage is deleted. A
+/// deletion stopped part-way (a crash, an I/O error) leaves only a stage,
+/// which the next backup or apply sweeps; in place, a directory that lost
+/// its manifest first became an unknown entry that rotation never removed,
+/// with the state's credentials and the TLS key still inside.
+fn remove_backup(root: &Path, id: &str) -> Result<()> {
+    let dir = root.join(id);
+    let stage = root.join(format!("{STAGE_PREFIX}{id}"));
+    remove_tree_if_exists(&stage)?;
+    match fs::rename(&dir, &stage) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::io(&dir, e)),
+        Ok(()) => {}
+    }
+    fsync_dir(root).map_err(|e| Error::io(root, e))?;
+    remove_tree_if_exists(&stage).map(drop)
+}
+
+/// Remove the stages a killed backup or an interrupted [`remove_backup`]
+/// left (the node lock is held, so none is in use). Failures only warn.
+fn sweep_stages(root: &Path) {
+    if let Err(e) = sweep_stale(root, STAGE_PREFIX, Duration::ZERO) {
+        out::warn(format!(
+            "清理残留的备份临时目录失败 {}: {}",
+            root.display(),
+            e.report_text()
+        ));
+    }
 }
 
 /// After an unrestorable safety copy `new` (labelled `label`): remove the
@@ -296,7 +335,7 @@ fn replace_unreadable(paths: &Paths, new: &str, label: &str) -> Result<()> {
     let root = paths.backups();
     for old in list(paths)? {
         if old.id != new && old.kind == BackupKind::Unrestorable && old.label == label {
-            remove_tree_if_exists(&root.join(&old.id))?;
+            remove_backup(&root, &old.id)?;
         }
     }
     Ok(())

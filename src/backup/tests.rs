@@ -186,6 +186,34 @@ fn order_latest_and_rotation_follow_creation_time_not_names() {
     }
 }
 
+/// Rotation deletes through a stage, so a deletion stopped part-way never
+/// leaves a half-deleted backup under its id (an unknown entry that
+/// rotation would never remove, still holding credentials and the TLS
+/// key); the next backup sweeps what such a deletion left.
+#[test]
+fn rotation_leaves_no_half_deleted_backup_behind() {
+    let host = Host::new();
+    host.install(two_cores());
+    let root = host.paths().backups();
+    let stage = root.join(format!("{}1600000000-aaaaaaaa", store::STAGE_PREFIX));
+    file(&stage.join("state.json"), 0o600, b"credentials");
+    file(&stage.join("tls/key.pem"), 0o600, b"key");
+    assert!(
+        list(host.paths()).unwrap().is_empty(),
+        "a stage is no backup"
+    );
+    let ids: Vec<String> = (0..=KEEP).map(|_| create(&host, "x")).collect();
+    assert!(!stage.exists(), "swept by the next backup");
+    let mut names: Vec<String> = fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let mut kept = ids[1..].to_vec();
+    kept.sort();
+    assert_eq!(names, kept, "the oldest went, and no stage stayed");
+}
+
 #[test]
 fn v1_timestamps_parse_to_unix_seconds() {
     for (id, secs) in [
