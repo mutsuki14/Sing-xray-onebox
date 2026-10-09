@@ -1,5 +1,6 @@
-//! Public API of the apply engine. The bodies of the entry points are
-//! implemented by work package C1; other modules only call them.
+//! Public API of the apply engine: the request types and the entry points,
+//! which take the node lock and hand over to the engine with the production
+//! feature hooks.
 
 use crate::cert::cloudflare::CfCredentials;
 use crate::cert::CertScopes;
@@ -9,7 +10,8 @@ use crate::domain::{Core, NodeConfig};
 use crate::error::Result;
 use crate::site::SiteContent;
 use crate::state::{Loaded, Origin, StateHash, StateStore};
-use crate::sys::lock::FileLock;
+use crate::sys::lock::{FileLock, BUSY_MESSAGE};
+use super::features::SystemFeatures;
 use std::path::PathBuf;
 
 /// One-shot requests carried by an apply; never persisted in state.json.
@@ -76,27 +78,35 @@ impl ApplyRequest {
 
 /// Take the node lock (or the lock inherited from a self-update parent) and
 /// apply `req` transactionally. Never prompts.
-pub fn apply(_ctx: &Ctx, _req: ApplyRequest) -> Result<()> {
-    todo!("WP-C1")
+pub fn apply(ctx: &Ctx, req: ApplyRequest) -> Result<()> {
+    let lock = node_lock(ctx)?;
+    apply_locked(ctx, &lock, req)
 }
 
 /// [`apply`] with a lock the caller already holds.
-pub fn apply_locked(_ctx: &Ctx, _lock: &FileLock, _req: ApplyRequest) -> Result<()> {
-    todo!("WP-C1")
+pub fn apply_locked(ctx: &Ctx, lock: &FileLock, req: ApplyRequest) -> Result<()> {
+    super::engine::apply_with(ctx, lock, req, &SystemFeatures)
 }
 
 /// Finish or roll back a leftover node journal, then a leftover self-update
 /// journal (skipped under an inherited lock).
-pub fn recover(_ctx: &Ctx) -> Result<()> {
-    todo!("WP-C1")
+pub fn recover(ctx: &Ctx) -> Result<()> {
+    let lock = node_lock(ctx)?;
+    recover_locked(ctx, &lock)
 }
 
-pub fn recover_locked(_ctx: &Ctx, _lock: &FileLock) -> Result<()> {
-    todo!("WP-C1")
+pub fn recover_locked(ctx: &Ctx, lock: &FileLock) -> Result<()> {
+    super::recover::recover_all(ctx, lock).map(drop)
 }
 
 /// `onebox net-apply` at boot: recover, refresh own IPs, re-apply firewall
 /// rules and hops (full apply only when own IPs changed). Starts nothing.
-pub fn boot(_ctx: &Ctx) -> Result<()> {
-    todo!("WP-C1")
+pub fn boot(ctx: &Ctx) -> Result<()> {
+    super::boot::boot_with(ctx, &SystemFeatures)
+}
+
+/// The node lock: inherited from a self-update parent when one is offered,
+/// else taken without waiting.
+pub fn node_lock(ctx: &Ctx) -> Result<FileLock> {
+    FileLock::acquire_or_inherit(&ctx.paths.lock(), BUSY_MESSAGE)
 }
