@@ -151,13 +151,18 @@ pub(super) fn exit_code(status: ExitStatus) -> i32 {
 
 /// Write stdin from a thread so a child that fills its stdout pipe before
 /// reading all input cannot deadlock us. Write errors (EPIPE when the child
-/// exits early) are irrelevant: the exit status tells the story.
-fn feed_stdin(child: &mut Child, bytes: Vec<u8>) {
+/// exits early) are irrelevant: the exit status tells the story. Failing
+/// to create the thread (EAGAIN under a thread or memory limit) is an
+/// error, never a panic.
+fn feed_stdin(child: &mut Child, bytes: Vec<u8>) -> io::Result<()> {
     if let Some(mut pipe) = child.stdin.take() {
-        std::thread::spawn(move || {
-            let _ = pipe.write_all(&bytes);
-        });
+        std::thread::Builder::new()
+            .name("onebox-stdin".into())
+            .spawn(move || {
+                let _ = pipe.write_all(&bytes);
+            })?;
     }
+    Ok(())
 }
 
 /// A pipe drained by a background thread into a shared buffer, so a caller
@@ -169,30 +174,36 @@ struct Capture {
 }
 
 impl Capture {
-    /// `limit` keeps only the last `limit` bytes.
-    fn start<R: Read + Send + 'static>(pipe: Option<R>, limit: Option<usize>) -> Capture {
+    /// `limit` keeps only the last `limit` bytes. Fails (instead of
+    /// panicking) when the draining thread cannot be created.
+    fn start<R: Read + Send + 'static>(
+        pipe: Option<R>,
+        limit: Option<usize>,
+    ) -> io::Result<Capture> {
         let Some(mut pipe) = pipe else {
-            return Capture::default();
+            return Ok(Capture::default());
         };
         let data = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&data);
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut chunk = vec![0u8; 64 * 1024];
-            loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => append(&sink, &chunk[..n], limit),
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
+        std::thread::Builder::new()
+            .name("onebox-capture".into())
+            .spawn(move || {
+                let mut chunk = vec![0u8; 64 * 1024];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => append(&sink, &chunk[..n], limit),
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
                 }
-            }
-            let _ = tx.send(());
-        });
-        Capture {
+                let _ = tx.send(());
+            })?;
+        Ok(Capture {
             data,
             done: Some(rx),
-        }
+        })
     }
 
     /// Wait for end of file until `deadline` (forever when `None`); true
@@ -237,6 +248,16 @@ fn append(sink: &Mutex<Vec<u8>>, bytes: &[u8], limit: Option<usize>) {
     }
 }
 
+/// Start the stdin feeder and both output captures of a just-spawned child.
+fn start_io(child: &mut Child, cmd: &Cmd, limit: Option<usize>) -> io::Result<(Capture, Capture)> {
+    if let Stdin::Bytes(bytes) = &cmd.stdin {
+        feed_stdin(child, bytes.clone())?;
+    }
+    let stdout = Capture::start(child.stdout.take(), limit)?;
+    let stderr = Capture::start(child.stderr.take(), limit)?;
+    Ok((stdout, stderr))
+}
+
 /// A started child with its output captures.
 pub(super) struct Proc {
     child: Child,
@@ -268,11 +289,18 @@ impl Proc {
         }
         setup.install(&mut command);
         let mut child = command.spawn().map_err(|e| spawn_error(cmd, &e))?;
-        if let Stdin::Bytes(bytes) = &cmd.stdin {
-            feed_stdin(&mut child, bytes.clone());
-        }
-        let stdout = Capture::start(child.stdout.take(), limit);
-        let stderr = Capture::start(child.stderr.take(), limit);
+        let (stdout, stderr) = match start_io(&mut child, cmd, limit) {
+            Ok(captures) => captures,
+            Err(e) => {
+                // Never leave an unattended child behind.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::msg(format!(
+                    "无法为 {} 创建输出线程: {e}",
+                    cmd.program_name()
+                )));
+            }
+        };
         Ok(Proc {
             pid: child.id() as libc::pid_t,
             child,
