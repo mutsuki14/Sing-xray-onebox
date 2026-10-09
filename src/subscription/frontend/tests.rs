@@ -48,7 +48,8 @@ fn socket_paths_nginx_or_the_kernel_cannot_take_are_refused() {
         assert!(check_socket_path(&paths).is_err());
     }
     let long = format!("/{}", "r".repeat(90));
-    let paths = Paths::from_lookup(|k| (k == "ONEBOX_RUN_DIR").then(|| long.clone().into())).unwrap();
+    let paths =
+        Paths::from_lookup(|k| (k == "ONEBOX_RUN_DIR").then(|| long.clone().into())).unwrap();
     assert_eq!(
         check_socket_path(&paths).unwrap_err().to_string(),
         "订阅 Unix socket 路径过长"
@@ -106,18 +107,26 @@ fn standalone_config_full_and_bootstrap() {
 fn standalone_config_variants() {
     let paths = default_paths();
     let render = |cfg: &NodeConfig, facts: &NginxFacts| {
-        render_for(&paths, cfg, facts, WebPhase::Full).unwrap().unwrap()
+        render_for(&paths, cfg, facts, WebPhase::Full)
+            .unwrap()
+            .unwrap()
     };
     let cf = standalone(WebCert::Cloudflare, 443);
     let v4_only = render(&cf, &facts(false, false));
     assert!(v4_only.contains("server { listen 443 ssl http2;  server_name sub.example.com;\n"));
-    assert!(!v4_only.contains("listen 80;"), "no port-80 server without HTTP-01");
+    assert!(
+        !v4_only.contains("listen 80;"),
+        "no port-80 server without HTTP-01"
+    );
     let modern = render(&cf, &facts(true, true));
     assert!(modern.contains(
         "server { listen 443 ssl; listen [::]:443 ssl; http2 on; server_name sub.example.com;\n"
     ));
     for cfg in [ip(8448), site(), reality()] {
-        assert_eq!(render_for(&paths, &cfg, &facts(false, true), WebPhase::Full).unwrap(), None);
+        assert_eq!(
+            render_for(&paths, &cfg, &facts(false, true), WebPhase::Full).unwrap(),
+            None
+        );
     }
     assert_eq!(v4_only.matches("server {").count(), 1);
     let worker = facts(false, false).worker;
@@ -134,11 +143,15 @@ fn standalone_config_variants() {
         phase: WebPhase::Full,
     };
     assert_eq!(
-        super::render(&conf("not a domain", 443)).unwrap_err().to_string(),
+        super::render(&conf("not a domain", 443))
+            .unwrap_err()
+            .to_string(),
         "订阅域名无效"
     );
     assert_eq!(
-        super::render(&conf("sub.example.com", 0)).unwrap_err().to_string(),
+        super::render(&conf("sub.example.com", 0))
+            .unwrap_err()
+            .to_string(),
         "订阅端口无效"
     );
 }
@@ -147,22 +160,39 @@ fn standalone_config_variants() {
 fn staged_configs_are_tested_before_install() {
     let node = Node::new("sub-front-stage");
     let ctx = &node.ctx;
-    node.fake.provide("nginx").on("nginx", &["-t"], Output::success(""));
+    node.fake
+        .provide("nginx")
+        .on("nginx", &["-t"], Output::success(""));
     let staged = test_conf(ctx, "events {}\n").unwrap();
     assert_eq!(staged, staged_conf(&ctx.paths));
     let call = node.fake.history().pop().unwrap();
-    assert!(call.contains("-t -q -p") && call.contains("nginx.conf.new"), "{call}");
+    assert!(
+        call.contains("-t -q -p") && call.contains("nginx.conf.new"),
+        "{call}"
+    );
     install_web_conf(ctx, &staged).unwrap();
     assert!(!staged.exists(), "the staged file is consumed");
-    assert_eq!(std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(), "events {}\n");
+    assert_eq!(
+        std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(),
+        "events {}\n"
+    );
 
     node.fake.clear_history();
     install_text(ctx, "events {}\n").unwrap();
-    assert!(node.fake.history().is_empty(), "already installed: nothing to test");
+    assert!(
+        node.fake.history().is_empty(),
+        "already installed: nothing to test"
+    );
     std::fs::write(staged_conf(&ctx.paths), "events { }\n").unwrap();
     install_text(ctx, "events { }\n").unwrap();
-    assert!(node.fake.history().is_empty(), "the staged file was tested already");
-    assert_eq!(std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(), "events { }\n");
+    assert!(
+        node.fake.history().is_empty(),
+        "the staged file was tested already"
+    );
+    assert_eq!(
+        std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(),
+        "events { }\n"
+    );
     install_text(ctx, "http {}\n").unwrap();
     assert_eq!(node.fake.history().len(), 1, "new text is tested");
 
@@ -182,9 +212,15 @@ fn a_failing_test_leaves_the_installed_config() {
         Output::failure(1, "nginx: [emerg] unknown directive \"bogus\"\n"),
     );
     let err = install_text(ctx, "bogus;\n").unwrap_err().to_string();
-    assert!(err.starts_with("nginx 配置测试失败") && err.contains("bogus"), "{err}");
+    assert!(
+        err.starts_with("nginx 配置测试失败") && err.contains("bogus"),
+        "{err}"
+    );
     assert!(!staged_conf(&ctx.paths).exists());
-    assert_eq!(std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(), "old\n");
+    assert_eq!(
+        std::fs::read_to_string(conf_file(&ctx.paths)).unwrap(),
+        "old\n"
+    );
 }
 
 #[test]
@@ -199,9 +235,14 @@ fn installed_acme_server_is_detected() {
     std::fs::create_dir_all(paths.subscription()).unwrap();
     std::fs::write(conf_file(paths), &full).unwrap();
     assert!(installed_serves_acme(paths));
-    let cf = render_for(paths, &standalone(WebCert::Cloudflare, 8448), &facts(false, false), WebPhase::Full)
-        .unwrap()
-        .unwrap();
+    let cf = render_for(
+        paths,
+        &standalone(WebCert::Cloudflare, 8448),
+        &facts(false, false),
+        WebPhase::Full,
+    )
+    .unwrap()
+    .unwrap();
     std::fs::write(conf_file(paths), cf).unwrap();
     assert!(!installed_serves_acme(paths));
 }

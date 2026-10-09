@@ -39,7 +39,10 @@ pub fn checks_with(engine: &Engine, cfg: &NodeConfig) -> Vec<Check> {
     let paths = &engine.ctx.paths;
     let services = engine.services();
     let mut out = vec![address(cfg, paths), worker(&services, paths)];
-    if matches!(sub.mode, crate::domain::config::SubscriptionMode::Standalone { .. }) {
+    if matches!(
+        sub.mode,
+        crate::domain::config::SubscriptionMode::Standalone { .. }
+    ) {
         out.push(running(&services, WEB, WEB_SERVICE));
         out.push(certificate(engine));
     }

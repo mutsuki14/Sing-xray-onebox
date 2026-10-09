@@ -68,7 +68,8 @@ const ENABLE: CommandSpec = CommandSpec::new("enable", Group::Feature, "启用�
     .handler(enable_command);
 
 const DISABLE: CommandSpec =
-    CommandSpec::new("disable", Group::Feature, "关闭远程订阅（设备保留）").handler(disable_command);
+    CommandSpec::new("disable", Group::Feature, "关闭远程订阅（设备保留）")
+        .handler(disable_command);
 
 const INFO: CommandSpec = CommandSpec::new("info", Group::Feature, "查看订阅入口与设备")
     .aliases(&["status", "list"])
@@ -99,12 +100,16 @@ const RENEW: CommandSpec = CommandSpec::new(
     Group::Feature,
     "续期 HTTPS 订阅证书（site 模式即网站证书；ip 模式无需）",
 )
-.options(&[OptSpec::flag("cron", "计划任务模式：仅在到期时续期，无事可做时不输出")])
+.options(&[OptSpec::flag(
+    "cron",
+    "计划任务模式：仅在到期时续期，无事可做时不输出",
+)])
 .handler(renew_command);
 
-const SERVE: CommandSpec = CommandSpec::new("serve", Group::Hidden, "订阅服务进程（由服务管理器启动）")
-    .hidden()
-    .handler(serve_command);
+const SERVE: CommandSpec =
+    CommandSpec::new("serve", Group::Hidden, "订阅服务进程（由服务管理器启动）")
+        .hidden()
+        .handler(serve_command);
 
 /// The `subscription` command tree.
 pub const SUBSCRIPTION: CommandSpec = CommandSpec::new(
@@ -119,7 +124,9 @@ pub const SUBSCRIPTION: CommandSpec = CommandSpec::new(
     "subscription enable --mode ip --address IP [--port 8448]（HTTP，无需域名）",
     "subscription publish | renew [--cron]",
 ])
-.subcommands(&[ENABLE, DISABLE, INFO, ADD, REVOKE, RESET, PUBLISH, RENEW, SERVE])
+.subcommands(&[
+    ENABLE, DISABLE, INFO, ADD, REVOKE, RESET, PUBLISH, RENEW, SERVE,
+])
 .root(Root::NotRequired)
 .handler(info_command);
 
@@ -192,11 +199,21 @@ pub fn node_lock(ctx: &Ctx) -> Result<FileLock> {
 /// `subscription enable` (module docs).
 pub fn enable(ctx: &Ctx, request: &EnableRequest) -> Result<()> {
     let name = request.name.as_deref().unwrap_or("default");
-    ensure!(devices::valid_name(name), "{}", devices::BAD_NAME);
+    ensure!(devices::valid_name(name.trim()), "{}", devices::BAD_NAME);
     let lock = node_lock(ctx)?;
     apply::recover_locked(ctx, &lock)?;
     let loaded = StateStore::load_required(ctx)?;
-    let cfg = &loaded.config;
+    let next = plan_request(ctx, &loaded.config, request)?;
+    let old_endpoint = endpoint::endpoint(&loaded.config);
+    let mut req = ApplyRequest::from_loaded(&loaded, next.clone(), "启用订阅");
+    req.intents.cloudflare = cloudflare_for(ctx, &next, false)?;
+    apply::apply_locked(ctx, &lock, req)?;
+    after_enable(ctx, &lock, old_endpoint.as_deref(), &next, name)
+}
+
+/// The configuration an enable request asks for (options checked, ignored
+/// site-mode options named, live facts consulted).
+pub fn plan_request(ctx: &Ctx, cfg: &NodeConfig, request: &EnableRequest) -> Result<NodeConfig> {
     let (choice, port) = request.choice(cfg)?;
     if request.mode(cfg)? == Mode::Site {
         let ignored = request.ignored_in_site_mode();
@@ -207,17 +224,24 @@ pub fn enable(ctx: &Ctx, request: &EnableRequest) -> Result<()> {
             ));
         }
     }
-    let next = plan_enable(ctx, cfg, &choice, port)?;
-    let old_endpoint = endpoint::endpoint(cfg);
-    let mut req = ApplyRequest::from_loaded(&loaded, next.clone(), "启用订阅");
-    req.intents.cloudflare = cloudflare_for(ctx, &next, false)?;
-    apply::apply_locked(ctx, &lock, req)?;
+    plan_enable(ctx, cfg, &choice, port)
+}
+
+/// After the enable committed `cfg` (still under `lock`): the first device
+/// when there is none, else whether existing URLs changed (G31).
+pub fn after_enable(
+    ctx: &Ctx,
+    lock: &FileLock,
+    old_endpoint: Option<&str>,
+    cfg: &NodeConfig,
+    name: &str,
+) -> Result<()> {
     if DeviceStore::load(&ctx.paths)?.is_empty() {
-        let device = devices::add(ctx, &lock, name)?;
-        return print_device(ctx, &next, &device, true);
+        let device = devices::add(ctx, lock, name)?;
+        return print_device(ctx, cfg, &device, true);
     }
-    print(&[endpoint::enabled_message(old_endpoint.as_deref(), &next)])?;
-    print_warnings(&next);
+    print(&[endpoint::enabled_message(old_endpoint, cfg)])?;
+    print_warnings(cfg);
     Ok(())
 }
 
@@ -279,7 +303,11 @@ pub fn disable(ctx: &Ctx) -> Result<()> {
     let loaded = StateStore::load_required(ctx)?;
     if loaded.config.subscription.is_some() {
         let next = plan::disable_subscription(&loaded.config)?;
-        apply::apply_locked(ctx, &lock, ApplyRequest::from_loaded(&loaded, next, "关闭订阅"))?;
+        apply::apply_locked(
+            ctx,
+            &lock,
+            ApplyRequest::from_loaded(&loaded, next, "关闭订阅"),
+        )?;
     }
     print(&[DISABLED.to_owned()])
 }
@@ -321,7 +349,12 @@ pub fn renew_now(ctx: &Ctx, scheduled: bool) -> Result<()> {
     };
     let cf = renew_credentials(ctx, &loaded.config, scheduled)?;
     let lock = if scheduled {
-        FileLock::acquire_waiting(&ctx.paths.lock(), BUSY_MESSAGE, CRON_LOCK_WAIT, CRON_LOCK_POLL)?
+        FileLock::acquire_waiting(
+            &ctx.paths.lock(),
+            BUSY_MESSAGE,
+            CRON_LOCK_WAIT,
+            CRON_LOCK_POLL,
+        )?
     } else {
         node_lock(ctx)?
     };

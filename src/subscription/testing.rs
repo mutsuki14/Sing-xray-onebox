@@ -113,7 +113,11 @@ pub fn nginx(fake: &FakeExec) {
     fake.provide("nginx")
         .on("id", &["-u", "www-data"], Output::success("33\n"))
         .on("id", &["-gn", "www-data"], Output::success("www-data\n"))
-        .on("getent", &["group", "www-data"], Output::success("www-data:x:33:\n"))
+        .on(
+            "getent",
+            &["group", "www-data"],
+            Output::success("www-data:x:33:\n"),
+        )
         .on("nginx", &["-T"], Output::failure(1, ""))
         .on("nginx", &["-t"], Output::success(""))
         .on_fn(

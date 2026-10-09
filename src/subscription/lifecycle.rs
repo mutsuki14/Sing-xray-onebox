@@ -146,7 +146,10 @@ pub fn prepare_acme_root(root: &Path) -> Result<()> {
 fn bootstrap(engine: &Engine, cfg: &NodeConfig) -> Result<()> {
     let ctx = engine.ctx;
     let paths = &ctx.paths;
-    ensure!(!crate::sys::net::listening(&paths.system_root, 80, true), "{PORT80_BUSY}");
+    ensure!(
+        !crate::sys::net::listening(&paths.system_root, 80, true),
+        "{PORT80_BUSY}"
+    );
     let facts = NginxFacts::detect(ctx)?;
     let text = frontend::render_for(paths, cfg, &facts, WebPhase::Bootstrap)?
         .ok_or_else(|| Error::msg("订阅未使用独立 HTTPS 入口"))?;
@@ -249,7 +252,10 @@ fn start_web(engine: &Engine, services: &Services) -> Result<()> {
 /// file, so an old worker then points at the old, unlinked inode.
 pub fn worker_is_current(services: &Services, paths: &Paths) -> bool {
     match services.main_pid(SERVICE) {
-        Ok(Some(pid)) => same_file(&paths.system(&format!("/proc/{pid}/exe")), &paths.executable),
+        Ok(Some(pid)) => same_file(
+            &paths.system(&format!("/proc/{pid}/exe")),
+            &paths.executable,
+        ),
         _ => false,
     }
 }

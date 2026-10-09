@@ -44,7 +44,10 @@ fn the_record_wins_over_the_configuration() {
     forget(paths).unwrap();
     assert_eq!(recorded(paths).unwrap(), None);
     std::fs::write(listener_file(paths), "{\"type\":\"udp\"}").unwrap();
-    assert!(resolve(paths).is_err(), "a corrupt record is not guessed around");
+    assert!(
+        resolve(paths).is_err(),
+        "a corrupt record is not guessed around"
+    );
 }
 
 #[test]
@@ -60,13 +63,20 @@ fn v2_data_means_the_v2_socket_layout() {
         r#"{"enabled":true,"mode":"ip","domain":"203.0.113.10","port":8448,"method":"none","custom_cert":null,"custom_key":null,"devices":[]}"#,
     )
     .unwrap();
-    assert_eq!(resolve(paths).unwrap(), Listener::Unix, "v2 nginx owns the port");
+    assert_eq!(
+        resolve(paths).unwrap(),
+        Listener::Unix,
+        "v2 nginx owns the port"
+    );
     assert!(!paths.devices().exists(), "the worker writes nothing");
 }
 
 #[test]
 fn group_ids_from_getent_or_etc_group() {
-    assert_eq!(parse_group("www-data:x:33:\nnginx:x:101:a,b\n", "nginx"), Some(101));
+    assert_eq!(
+        parse_group("www-data:x:33:\nnginx:x:101:a,b\n", "nginx"),
+        Some(101)
+    );
     assert_eq!(parse_group("www-data:x:33:\n", "nginx"), None);
     assert_eq!(parse_group("nginx:x:bad:\n", "nginx"), None);
     assert_eq!(parse_group("nginxx:x:5:\n", "nginx"), None);
@@ -94,10 +104,7 @@ fn unix_socket_rules() {
     let meta = std::fs::symlink_metadata(&socket).unwrap();
     assert_eq!(meta.mode() & 0o777, 0o660);
     assert_eq!(meta.gid(), gid);
-    assert_eq!(
-        std::fs::metadata(&paths.run).unwrap().mode() & 0o777,
-        0o755
-    );
+    assert_eq!(std::fs::metadata(&paths.run).unwrap().mode() & 0o777, 0o755);
     assert_eq!(
         bind_unix(paths, gid).unwrap_err().to_string(),
         ALREADY_RUNNING
@@ -119,7 +126,10 @@ fn tcp_listeners_follow_the_address_family() {
     let root = &node.ctx.paths.system_root;
     let v4 = bind_tcp(0, root).unwrap();
     assert_eq!(v4.len(), 1);
-    assert!(v4[0].local_addr().unwrap().is_ipv4(), "no IPv6 on this system root");
+    assert!(
+        v4[0].local_addr().unwrap().is_ipv4(),
+        "no IPv6 on this system root"
+    );
     let busy = v4[0].local_addr().unwrap().port();
     assert!(bind_tcp(busy, root)
         .unwrap_err()
@@ -134,7 +144,11 @@ fn tcp_listeners_follow_the_address_family() {
     std::fs::create_dir_all(proc.join("sys/net/ipv6")).unwrap();
     std::fs::write(proc.join("sys/net/ipv6/bindv6only"), "1\n").unwrap();
     let split = bind_tcp(0, root).unwrap();
-    assert_eq!(split.len(), 2, "v6-only sockets need a separate IPv4 listener");
+    assert_eq!(
+        split.len(),
+        2,
+        "v6-only sockets need a separate IPv4 listener"
+    );
     assert_eq!(
         split[0].local_addr().unwrap().port(),
         split[1].local_addr().unwrap().port()
@@ -222,7 +236,10 @@ fn serve_in_ip_mode_listens_on_tcp() {
     std::thread::spawn(move || serve(&ctx));
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(std::time::Instant::now() < deadline, "worker did not listen");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not listen"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     let ok = get(port, &format!("/sub/{TOKEN}/singbox"));

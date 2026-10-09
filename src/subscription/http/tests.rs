@@ -89,9 +89,13 @@ fn responses_are_v2_bytes() {
     );
     let not_allowed = String::from_utf8(Response::method_not_allowed(false).to_bytes()).unwrap();
     assert!(not_allowed.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
-    assert!(not_allowed.ends_with("Connection: close\r\nAllow: GET, HEAD\r\n\r\nMethod Not Allowed\n"));
+    assert!(
+        not_allowed.ends_with("Connection: close\r\nAllow: GET, HEAD\r\n\r\nMethod Not Allowed\n")
+    );
     let bad = String::from_utf8(Response::bad_request(false).to_bytes()).unwrap();
-    assert!(bad.starts_with("HTTP/1.1 400 Bad Request\r\n") && bad.ends_with("\r\n\r\nBad Request\n"));
+    assert!(
+        bad.starts_with("HTTP/1.1 400 Bad Request\r\n") && bad.ends_with("\r\n\r\nBad Request\n")
+    );
 }
 
 #[test]
@@ -107,8 +111,14 @@ fn heads_are_parsed_strictly() {
         (b"GET / HTTP/2.0\r\n\r\n", Some(Head::Bad { head: false })),
         (b"HEAD / HTTP/3\r\n\r\n", Some(Head::Bad { head: true })),
         (b"GET  / HTTP/1.1\r\n\r\n", Some(Head::Bad { head: false })),
-        (b"\x16\x03\x01\x02\x00\r\n\r\n", Some(Head::Bad { head: false })),
-        (b"GET /\xff HTTP/1.1\r\n\r\n", Some(Head::Bad { head: false })),
+        (
+            b"\x16\x03\x01\x02\x00\r\n\r\n",
+            Some(Head::Bad { head: false }),
+        ),
+        (
+            b"GET /\xff HTTP/1.1\r\n\r\n",
+            Some(Head::Bad { head: false }),
+        ),
     ];
     for (input, want) in cases {
         assert_eq!(parse(input), want, "{:?}", String::from_utf8_lossy(input));
@@ -131,7 +141,10 @@ fn heads_up_to_8_kib_are_read_in_any_chunking() {
     near.extend_from_slice(b"\r\n\r\n");
     near.extend_from_slice(&[b'z'; 100]);
     assert_eq!(near[..8190].len(), 8190);
-    assert_eq!(read_head(&mut Memory::new(&near, 1024)), request("GET", "/"));
+    assert_eq!(
+        read_head(&mut Memory::new(&near, 1024)),
+        request("GET", "/")
+    );
     let mut huge = b"GET / HTTP/1.1\r\nX-Pad: ".to_vec();
     huge.resize(9000, b'a');
     assert_eq!(
@@ -208,11 +221,20 @@ fn responses_read_devices_and_snapshot_per_request() {
         404,
         "no snapshot yet"
     );
-    snapshot::write(paths, &published(&[("singbox", "{\"v\":1}\n"), ("mihomo", "a: 1\n")])).unwrap();
+    snapshot::write(
+        paths,
+        &published(&[("singbox", "{\"v\":1}\n"), ("mihomo", "a: 1\n")]),
+    )
+    .unwrap();
     let ok = respond(paths, &request("GET", &url)).unwrap();
     assert_eq!(
         (ok.status, ok.content_type, ok.body.as_slice(), ok.head),
-        (200, "application/json; charset=utf-8", &b"{\"v\":1}\n"[..], false)
+        (
+            200,
+            "application/json; charset=utf-8",
+            &b"{\"v\":1}\n"[..],
+            false
+        )
     );
     let yaml = respond(paths, &request("GET", &format!("/sub/{TOKEN}/mihomo"))).unwrap();
     assert_eq!(yaml.content_type, "text/yaml; charset=utf-8");
@@ -222,7 +244,10 @@ fn responses_read_devices_and_snapshot_per_request() {
     assert_eq!(missing.status, 404, "format not published");
     assert_eq!(respond(paths, &request("POST", &url)).unwrap().status, 405);
     assert_eq!(respond(paths, &request("DELETE", "/")).unwrap().status, 405);
-    assert_eq!(respond(paths, &Head::Bad { head: true }).unwrap().status, 400);
+    assert_eq!(
+        respond(paths, &Head::Bad { head: true }).unwrap().status,
+        400
+    );
     assert_eq!(respond(paths, &Head::Closed), None);
 
     snapshot::write(paths, &published(&[("singbox", "{\"v\":2}\n")])).unwrap();
@@ -252,7 +277,9 @@ fn handle_writes_one_response_and_survives_trailing_input() {
     let post = b"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
     let mut conn = Memory::new(post, 1024);
     handle(&mut conn, paths, Limits::default());
-    assert!(String::from_utf8(conn.output).unwrap().starts_with("HTTP/1.1 405"));
+    assert!(String::from_utf8(conn.output)
+        .unwrap()
+        .starts_with("HTTP/1.1 405"));
 
     let mut silent = Memory::new(b"GET / HT", 1024);
     handle(&mut silent, paths, Limits::default());

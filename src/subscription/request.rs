@@ -97,7 +97,10 @@ impl EnableRequest {
             None if cfg.site_active().is_some() => Mode::Site,
             None => Mode::Ip,
         };
-        ensure!(mode == Mode::Ip || self.address.is_none(), "{ADDRESS_NOT_IP}");
+        ensure!(
+            mode == Mode::Ip || self.address.is_none(),
+            "{ADDRESS_NOT_IP}"
+        );
         Ok(mode)
     }
 
@@ -107,13 +110,19 @@ impl EnableRequest {
         Ok(match self.mode(cfg)? {
             Mode::Ip => {
                 let certificate_options = [&self.domain, &self.tls, &self.cert, &self.key];
-                ensure!(certificate_options.iter().all(|o| o.is_none()), "{IP_NO_CERT}");
+                ensure!(
+                    certificate_options.iter().all(|o| o.is_none()),
+                    "{IP_NO_CERT}"
+                );
                 let address = self.address.as_deref().map(parse_address).transpose()?;
                 (SubscriptionChoice::Ip { address }, port)
             }
             Mode::Site => (SubscriptionChoice::Site, None),
             Mode::Standalone => {
-                let domain = self.domain.clone().ok_or_else(|| Error::msg(NEEDS_DOMAIN))?;
+                let domain = self
+                    .domain
+                    .clone()
+                    .ok_or_else(|| Error::msg(NEEDS_DOMAIN))?;
                 let cert = self.web_cert()?;
                 (SubscriptionChoice::Standalone { domain, cert }, port)
             }

@@ -7,7 +7,8 @@ use ClientFormat::*;
 
 #[test]
 fn supported_formats_follow_the_capability_table() {
-    let cases: [(&[(Protocol, u16, Core)], &[ClientFormat]); 4] = [
+    type Case = (&'static [(Protocol, u16, Core)], &'static [ClientFormat]);
+    let cases: [Case; 4] = [
         (
             &[(Protocol::VlessReality, 443, Core::Singbox)],
             &[Base64, Mihomo, Provider, Singbox, SingboxNoTun, Xray],
@@ -37,7 +38,10 @@ fn render_publishes_exactly_the_client_documents() {
     let published = render_with(&spec, &mut Xorshift(3)).unwrap();
     assert_eq!(published.published_formats(), supported_formats(&cfg));
     assert_eq!(published.generation.len(), 24);
-    assert!(crate::subscription::devices::lower_hex(&published.generation, 24));
+    assert!(crate::subscription::devices::lower_hex(
+        &published.generation,
+        24
+    ));
     let private = &cfg.creds.reality.as_ref().unwrap().private_key;
     for format in published.published_formats() {
         let body = published.body(format).unwrap();
@@ -69,9 +73,12 @@ fn files_keep_the_v2_shape() {
     assert!(!remove(paths).unwrap());
     let snapshot = Published {
         generation: "0123456789abcdef01234567".into(),
-        formats: [("singbox".to_owned(), "{}\n".to_owned()), ("base64".to_owned(), "x\n".to_owned())]
-            .into_iter()
-            .collect(),
+        formats: [
+            ("singbox".to_owned(), "{}\n".to_owned()),
+            ("base64".to_owned(), "x\n".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
     };
     write(paths, &snapshot).unwrap();
     let bytes = std::fs::read_to_string(paths.published()).unwrap();

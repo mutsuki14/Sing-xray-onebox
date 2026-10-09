@@ -101,8 +101,13 @@ pub enum Head {
     /// Closed (or timed out) before the head was complete: no response.
     Closed,
     /// Malformed, not UTF-8, not HTTP/1.x, or over 8 KiB.
-    Bad { head: bool },
-    Request { method: String, path: String },
+    Bad {
+        head: bool,
+    },
+    Request {
+        method: String,
+        path: String,
+    },
 }
 
 /// Read and parse one request head from `stream`.
@@ -252,7 +257,11 @@ pub fn handle(conn: &mut dyn Conn, paths: &Paths, limits: Limits) {
     let Some(response) = respond(paths, &head) else {
         return;
     };
-    if conn.write_all(&response.to_bytes()).and_then(|()| conn.flush()).is_err() {
+    if conn
+        .write_all(&response.to_bytes())
+        .and_then(|()| conn.flush())
+        .is_err()
+    {
         return;
     }
     linger(conn, limits.linger);

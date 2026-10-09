@@ -26,9 +26,18 @@ fn endpoints_use_scheme_default_ports_and_brackets() {
         (ip_at("2001:db8::7", 8448), "http://[2001:db8::7]:8448"),
         (ip_at("::1", 80), "http://[::1]"),
         (ip_at("::ffff:192.0.2.5", 80), "http://192.0.2.5"),
-        (standalone(WebCert::Cloudflare, 443), "https://sub.example.com"),
-        (standalone(WebCert::Http01, 80), "https://sub.example.com:80"),
-        (standalone(WebCert::Cloudflare, 8448), "https://sub.example.com:8448"),
+        (
+            standalone(WebCert::Cloudflare, 443),
+            "https://sub.example.com",
+        ),
+        (
+            standalone(WebCert::Http01, 80),
+            "https://sub.example.com:80",
+        ),
+        (
+            standalone(WebCert::Cloudflare, 8448),
+            "https://sub.example.com:8448",
+        ),
         (site(), "https://www.example.com"),
     ];
     for (cfg, want) in cases {
@@ -44,17 +53,30 @@ fn endpoints_use_scheme_default_ports_and_brackets() {
 fn urls_cover_every_supported_format_without_a_snapshot() {
     let cfg = ip(8448);
     let urls = urls(&cfg, TOKEN);
-    let want: Vec<String> = ["base64", "mihomo", "provider", "singbox", "singbox-notun", "xray"]
-        .iter()
-        .map(|f| format!("http://203.0.113.10:8448/sub/{TOKEN}/{f}"))
-        .collect();
-    assert_eq!(urls.iter().map(|(_, u)| u.clone()).collect::<Vec<_>>(), want);
+    let want: Vec<String> = [
+        "base64",
+        "mihomo",
+        "provider",
+        "singbox",
+        "singbox-notun",
+        "xray",
+    ]
+    .iter()
+    .map(|f| format!("http://203.0.113.10:8448/sub/{TOKEN}/{f}"))
+    .collect();
+    assert_eq!(
+        urls.iter().map(|(_, u)| u.clone()).collect::<Vec<_>>(),
+        want
+    );
     assert!(super::urls(&reality(), TOKEN).is_empty());
     let xhttp = with_subscription(
         config(&[(Protocol::VlessXhttp, 443, Core::Xray)]),
         crate::domain::fixtures::ip_subscription(8448),
     );
-    let ids: Vec<&str> = super::urls(&xhttp, TOKEN).iter().map(|(f, _)| f.id()).collect();
+    let ids: Vec<&str> = super::urls(&xhttp, TOKEN)
+        .iter()
+        .map(|(f, _)| f.id())
+        .collect();
     assert_eq!(ids, ["base64", "mihomo", "provider", "xray"]);
 }
 
@@ -144,7 +166,11 @@ fn info_lines_follow_v2_layout() {
     );
     let off = SubscriptionInfo::of(&reality(), devices);
     assert_eq!(off.lines()[0], "订阅: 关闭");
-    assert_eq!(off.lines().len(), 4, "devices survive a disabled subscription");
+    assert_eq!(
+        off.lines().len(),
+        4,
+        "devices survive a disabled subscription"
+    );
     let site_info = SubscriptionInfo::of(&site(), Vec::new());
     assert_eq!(
         site_info.lines(),

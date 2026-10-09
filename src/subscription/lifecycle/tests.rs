@@ -1,11 +1,12 @@
 use super::*;
-use crate::cert::testing::{acme_calls, engine, fake_acme, have_openssl, serve_release, AcmeScript, Fixture};
+use crate::cert::testing::{
+    acme_calls, engine, fake_acme, have_openssl, serve_release, AcmeScript, Fixture,
+};
 use crate::domain::config::{SubscriptionConfig, WebCert};
 use crate::host::init::InitSystem;
 use crate::render::fixtures::spec;
 use crate::subscription::testing::{
-    device, ip, nginx, reality, site, standalone, systemd, with_subscription, Node, Systemd,
-    TOKEN,
+    device, ip, nginx, reality, site, standalone, systemd, with_subscription, Node, Systemd, TOKEN,
 };
 use std::os::unix::net::UnixListener;
 
@@ -88,7 +89,9 @@ fn prepare_rechecks_the_address_family_and_the_socket_path() {
     ctx.paths.run = std::path::PathBuf::from(format!("/{}", "r".repeat(90)));
     let long = engine_for(&ctx);
     assert_eq!(
-        prepare(&long, &site(), None, false).unwrap_err().to_string(),
+        prepare(&long, &site(), None, false)
+            .unwrap_err()
+            .to_string(),
         "订阅 Unix socket 路径过长"
     );
     prepare(&long, &ip(8448), None, false).expect("ip mode uses no socket");
@@ -107,7 +110,9 @@ fn services_per_mode() {
     let worker = std::fs::read_to_string(unit(paths, SERVICE)).unwrap();
     assert!(worker.contains("\"subscription\" \"serve\""), "{worker}");
     let web = std::fs::read_to_string(unit(paths, WEB_SERVICE)).unwrap();
-    assert!(web.contains("After=network-online.target nss-lookup.target onebox-subscription.service"));
+    assert!(
+        web.contains("After=network-online.target nss-lookup.target onebox-subscription.service")
+    );
     std::fs::create_dir_all(paths.subscription()).unwrap();
     std::fs::write(frontend::conf_file(paths), "x").unwrap();
 
@@ -135,7 +140,10 @@ fn publish_starts_the_worker_and_restarts_it_only_when_needed() {
     publish(&engine, &cfg, &spec(&cfg)).unwrap();
     let snap = snapshot::load(paths).unwrap().unwrap();
     assert_eq!(snap.published_formats().len(), 6);
-    assert_eq!(server::recorded(paths).unwrap(), Some(Listener::Tcp { port: 8448 }));
+    assert_eq!(
+        server::recorded(paths).unwrap(),
+        Some(Listener::Tcp { port: 8448 })
+    );
     assert_eq!(
         systemd.actions(),
         [format!("start {SERVICE}"), format!("enable {SERVICE}")]
@@ -154,14 +162,25 @@ fn publish_starts_the_worker_and_restarts_it_only_when_needed() {
     node.proc_exe(PID, &old);
     let before = systemd.actions().len();
     publish(&engine, &cfg, &spec(&cfg)).unwrap();
-    assert_eq!(systemd.actions()[before], format!("restart {SERVICE}"), "self-update");
+    assert_eq!(
+        systemd.actions()[before],
+        format!("restart {SERVICE}"),
+        "self-update"
+    );
 
     node.proc_exe(PID, &paths.executable);
     let moved = ip(9000);
     let before = systemd.actions().len();
     publish(&engine, &moved, &spec(&moved)).unwrap();
-    assert_eq!(systemd.actions()[before], format!("restart {SERVICE}"), "new port");
-    assert_eq!(server::recorded(paths).unwrap(), Some(Listener::Tcp { port: 9000 }));
+    assert_eq!(
+        systemd.actions()[before],
+        format!("restart {SERVICE}"),
+        "new port"
+    );
+    assert_eq!(
+        server::recorded(paths).unwrap(),
+        Some(Listener::Tcp { port: 9000 })
+    );
 }
 
 #[test]
@@ -210,7 +229,10 @@ fn publish_of_a_disabled_subscription_removes_everything() {
     publish(&engine, &cfg, &spec(&cfg)).unwrap();
     let off = reality();
     publish(&engine, &off, &spec(&off)).unwrap();
-    assert!(!paths.published().exists(), "credentials are not left on disk");
+    assert!(
+        !paths.published().exists(),
+        "credentials are not left on disk"
+    );
     assert!(!server::listener_file(paths).exists());
     assert!(!unit(paths, SERVICE).exists());
     assert!(systemd.actions().contains(&format!("stop {SERVICE}")));
@@ -222,15 +244,24 @@ fn a_worker_that_never_listens_fails_the_publish() {
     let node = Node::new("sub-life-wait");
     let paths = &node.ctx.paths;
     node.listening(&[]);
-    let err = wait_listening(paths, Listener::Tcp { port: 8448 }, Duration::from_millis(120))
-        .unwrap_err()
-        .to_string();
+    let err = wait_listening(
+        paths,
+        Listener::Tcp { port: 8448 },
+        Duration::from_millis(120),
+    )
+    .unwrap_err()
+    .to_string();
     assert_eq!(
         err,
         "onebox-subscription 未能在 TCP 8448 上开始监听，请查看 onebox service onebox-subscription log"
     );
     node.listening(&[8448]);
-    wait_listening(paths, Listener::Tcp { port: 8448 }, Duration::from_millis(120)).unwrap();
+    wait_listening(
+        paths,
+        Listener::Tcp { port: 8448 },
+        Duration::from_millis(120),
+    )
+    .unwrap();
     assert!(wait_listening(paths, Listener::Unix, Duration::ZERO).is_err());
     std::fs::create_dir_all(&paths.run).unwrap();
     let _socket = UnixListener::bind(paths.subscription_socket()).unwrap();
@@ -247,12 +278,18 @@ fn acme_root_must_be_ours() {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
     };
     assert_eq!(mode(&root.join(".well-known/acme-challenge")), 0o755);
-    assert_eq!(std::fs::read_to_string(root.join(OWNED_MARKER)).unwrap(), "onebox\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join(OWNED_MARKER)).unwrap(),
+        "onebox\n"
+    );
     prepare_acme_root(&root).expect("ours: reused");
     let foreign = node.dir.join("foreign");
     std::fs::create_dir_all(&foreign).unwrap();
     std::fs::write(foreign.join("index.html"), "hi").unwrap();
-    assert_eq!(prepare_acme_root(&foreign).unwrap_err().to_string(), ACME_FOREIGN);
+    assert_eq!(
+        prepare_acme_root(&foreign).unwrap_err().to_string(),
+        ACME_FOREIGN
+    );
     let empty = node.dir.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
     prepare_acme_root(&empty).expect("an empty directory is taken over");
@@ -283,7 +320,8 @@ fn custom_certificate_is_deployed_without_nginx_bootstrap() {
     let f = Fixture::new("sub-life-custom");
     let systemd = fixture_host(&f);
     let engine = engine(&f.ctx, InitSystem::Systemd);
-    let (chain, key) = f.ca.leaf(&f.dir.join("src"), &["sub.example.com"], 90, false);
+    let (chain, key) =
+        f.ca.leaf(&f.dir.join("src"), &["sub.example.com"], 90, false);
     let cfg = standalone(WebCert::Custom { cert: chain, key }, 8448);
     assert!(prepare_certificates(&engine, &cfg, false, None).unwrap());
     assert!(CertDir::subscription(&f.ctx.paths).has_pair());
@@ -300,7 +338,8 @@ fn http01_bootstraps_port_80_exactly_when_acme_runs() {
     serve_release(&f.fake);
     let systemd = fixture_host(&f);
     let engine = engine(&f.ctx, InitSystem::Systemd);
-    let issued = f.ca.leaf(&f.dir.join("issued"), &["sub.example.com"], 90, false);
+    let issued =
+        f.ca.leaf(&f.dir.join("issued"), &["sub.example.com"], 90, false);
     fake_acme(
         &f.fake,
         AcmeScript {
@@ -312,11 +351,18 @@ fn http01_bootstraps_port_80_exactly_when_acme_runs() {
     assert!(prepare_certificates(&engine, &cfg, false, None).unwrap());
     let paths = &f.ctx.paths;
     let conf = std::fs::read_to_string(frontend::conf_file(paths)).unwrap();
-    assert!(conf.contains("listen 80;") && !conf.contains("ssl"), "{conf}");
+    assert!(
+        conf.contains("listen 80;") && !conf.contains("ssl"),
+        "{conf}"
+    );
     assert_eq!(systemd.actions(), [format!("restart {WEB_SERVICE}")]);
     let call = acme_calls(&f.fake).pop().unwrap();
     let webroot = paths.subscription_acme().display().to_string();
-    assert!(call.args.ends_with(&["--webroot".into(), webroot]), "{:?}", call.args);
+    assert!(
+        call.args.ends_with(&["--webroot".into(), webroot]),
+        "{:?}",
+        call.args
+    );
     assert!(paths.subscription_acme().join(".onebox-owned").exists());
 
     // Valid pair and nginx serving the webroot: neither bootstrap nor acme.sh.
@@ -343,7 +389,9 @@ fn http01_bootstrap_refuses_a_busy_port_80() {
     let engine = engine(&f.ctx, InitSystem::Systemd);
     let cfg = standalone(WebCert::Http01, 8448);
     assert_eq!(
-        prepare_certificates(&engine, &cfg, false, None).unwrap_err().to_string(),
+        prepare_certificates(&engine, &cfg, false, None)
+            .unwrap_err()
+            .to_string(),
         PORT80_BUSY
     );
 }

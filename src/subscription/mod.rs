@@ -65,7 +65,12 @@ pub const WEB_SERVICE: &str = crate::host::service::SUBSCRIPTION_WEB;
 
 /// prepare-state: write migrated v2 devices, or clear devices and the
 /// published snapshot on reinstall; ensure directories.
-pub fn prepare(ctx: &Ctx, cfg: &NodeConfig, migrated: Option<&[Device]>, clear: bool) -> Result<()> {
+pub fn prepare(
+    ctx: &Ctx,
+    cfg: &NodeConfig,
+    migrated: Option<&[Device]>,
+    clear: bool,
+) -> Result<()> {
     lifecycle::prepare(&Engine::system(ctx), cfg, migrated, clear)
 }
 

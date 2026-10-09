@@ -15,7 +15,10 @@ fn request(options: &[(&'static str, &str)]) -> Result<EnableRequest> {
     EnableRequest::from_matches(&matches(options))
 }
 
-fn choice(options: &[(&'static str, &str)], cfg: &NodeConfig) -> Result<(SubscriptionChoice, Option<u16>)> {
+fn choice(
+    options: &[(&'static str, &str)],
+    cfg: &NodeConfig,
+) -> Result<(SubscriptionChoice, Option<u16>)> {
     request(options)?.choice(cfg)
 }
 
@@ -40,18 +43,30 @@ fn option_values_are_checked_like_v2() {
 fn mode_is_inferred_in_v2_order() {
     let plain = reality();
     let with_site = site();
-    let cases: [(&[(&'static str, &str)], &NodeConfig, Mode); 6] = [
+    type Case<'a> = (&'a [(&'static str, &'a str)], &'a NodeConfig, Mode);
+    let cases: [Case; 6] = [
         (&[], &plain, Mode::Ip),
         (&[], &with_site, Mode::Site),
         (&[("address", "192.0.2.1")], &with_site, Mode::Ip),
-        (&[("domain", "sub.example.com")], &with_site, Mode::Standalone),
+        (
+            &[("domain", "sub.example.com")],
+            &with_site,
+            Mode::Standalone,
+        ),
         (&[("mode", "standalone")], &plain, Mode::Standalone),
         (&[("mode", "site")], &plain, Mode::Site),
     ];
     for (options, cfg, want) in cases {
-        assert_eq!(request(options).unwrap().mode(cfg).unwrap(), want, "{options:?}");
+        assert_eq!(
+            request(options).unwrap().mode(cfg).unwrap(),
+            want,
+            "{options:?}"
+        );
     }
-    assert_eq!(err(request(&[("mode", "cdn")]).unwrap().mode(&plain)), BAD_MODE);
+    assert_eq!(
+        err(request(&[("mode", "cdn")]).unwrap().mode(&plain)),
+        BAD_MODE
+    );
     for mode in ["site", "standalone"] {
         let r = request(&[("mode", mode), ("address", "192.0.2.1")]).unwrap();
         assert_eq!(err(r.mode(&with_site)), ADDRESS_NOT_IP);
@@ -78,7 +93,14 @@ fn ip_mode_takes_only_an_address_and_a_port() {
         let options = [("mode", "ip"), (flag, "x")];
         assert_eq!(err(choice(&options, &cfg)), IP_NO_CERT, "{flag}");
     }
-    for bad in ["[::1]", "fe80::1%eth0", "192.0.2.1:80", "example.com", "192.0.2.1/x", "http://192.0.2.1"] {
+    for bad in [
+        "[::1]",
+        "fe80::1%eth0",
+        "192.0.2.1:80",
+        "example.com",
+        "192.0.2.1/x",
+        "http://192.0.2.1",
+    ] {
         assert_eq!(err(choice(&[("address", bad)], &cfg)), BAD_ADDRESS, "{bad}");
     }
     for bad in ["0", "65536", "port", "-1"] {
@@ -103,13 +125,21 @@ fn standalone_needs_a_domain_and_a_complete_certificate_choice() {
     assert_eq!(cert_of(&[domain]), WebCert::Cloudflare, "cf by default");
     assert_eq!(cert_of(&[domain, ("tls", "http")]), WebCert::Http01);
     assert_eq!(
-        cert_of(&[domain, ("tls", "custom"), ("cert", "/c.pem"), ("key", "/k.pem")]),
+        cert_of(&[
+            domain,
+            ("tls", "custom"),
+            ("cert", "/c.pem"),
+            ("key", "/k.pem")
+        ]),
         WebCert::Custom {
             cert: "/c.pem".into(),
             key: "/k.pem".into()
         }
     );
-    assert_eq!(err(standalone(&[domain, ("tls", "custom"), ("cert", "/c")])), CUSTOM_PATHS);
+    assert_eq!(
+        err(standalone(&[domain, ("tls", "custom"), ("cert", "/c")])),
+        CUSTOM_PATHS
+    );
     assert_eq!(err(standalone(&[domain, ("key", "/k")])), PATHS_NOT_CUSTOM);
     assert_eq!(err(standalone(&[domain, ("tls", "self")])), BAD_METHOD);
     assert_eq!(standalone(&[domain, ("port", "443")]).unwrap().1, Some(443));
@@ -133,7 +163,11 @@ fn planner_finishes_the_v2_address_rules() {
         enable_subscription(&cfg, &choice, port, &env)
     };
     for bad in ["0.0.0.0", "::", "224.0.0.1", "ff02::1", "::ffff:0.0.0.0"] {
-        assert_eq!(err(plan(bad)), "订阅地址不能是未指定地址或组播地址", "{bad}");
+        assert_eq!(
+            err(plan(bad)),
+            "订阅地址不能是未指定地址或组播地址",
+            "{bad}"
+        );
     }
     let mapped = plan("::ffff:192.0.2.5").unwrap();
     let sub = mapped.subscription.unwrap();

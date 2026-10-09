@@ -38,7 +38,11 @@ fn load_prefers_devices_json_then_v2_settings_then_empty() {
     let v2 = DeviceStore::load(paths).unwrap();
     assert_eq!(v2.source(), Source::V2Settings);
     let names: Vec<&str> = v2.devices().iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(names, ["手机", "laptop"], "invalid and duplicate entries skipped");
+    assert_eq!(
+        names,
+        ["手机", "laptop"],
+        "invalid and duplicate entries skipped"
+    );
 
     DeviceStore::write(paths, &[device("00000000000000cc", "tablet", TOKEN)]).unwrap();
     let v3 = DeviceStore::load(paths).unwrap();
@@ -70,10 +74,13 @@ fn write_is_private_validated_and_versioned() {
         device("0123456789abcdef", &"x".repeat(81), TOKEN),
     ];
     for d in bad {
-        let err = DeviceStore::write(paths, &[d.clone()]).unwrap_err();
+        let err = DeviceStore::write(paths, std::slice::from_ref(&d)).unwrap_err();
         assert_eq!(err.to_string(), "订阅设备数据无效", "{d:?}");
     }
-    let twice = [device("0123456789abcdef", "a", TOKEN), device("0123456789abcdef", "b", TOKEN)];
+    let twice = [
+        device("0123456789abcdef", "a", TOKEN),
+        device("0123456789abcdef", "b", TOKEN),
+    ];
     assert!(DeviceStore::write(paths, &twice).is_err(), "ids are unique");
     let many: Vec<Device> = (0..257)
         .map(|i| device(&format!("{i:016x}"), &format!("d{i}"), TOKEN))
@@ -108,7 +115,10 @@ fn create_follows_v2_name_rules_and_hashes_the_token() {
     let stored = &store.devices()[0];
     assert_eq!(stored.hash, token_hash(&new.token));
     assert_eq!(stored.created, 42);
-    assert!(!format!("{new:?}").contains(&new.token), "Debug hides the token");
+    assert!(
+        !format!("{new:?}").contains(&new.token),
+        "Debug hides the token"
+    );
 
     let cases: [(&str, &str); 5] = [
         ("", BAD_NAME),
@@ -121,13 +131,19 @@ fn create_follows_v2_name_rules_and_hashes_the_token() {
         let err = store.create(name, &mut rng, 1).unwrap_err();
         assert_eq!(err.to_string(), message, "{name:?}");
     }
-    assert!(store.create(&"汉".repeat(26), &mut rng, 1).is_ok(), "78 bytes fit");
+    assert!(
+        store.create(&"汉".repeat(26), &mut rng, 1).is_ok(),
+        "78 bytes fit"
+    );
     while store.devices().len() < MAX_DEVICES {
         let name = format!("d{}", store.devices().len());
         store.create(&name, &mut rng, 1).unwrap();
     }
     assert_eq!(
-        store.create("one more", &mut rng, 1).unwrap_err().to_string(),
+        store
+            .create("one more", &mut rng, 1)
+            .unwrap_err()
+            .to_string(),
         TOO_MANY
     );
     let ids: BTreeSet<&str> = store.devices().iter().map(|d| d.id.as_str()).collect();
@@ -164,14 +180,26 @@ fn revoke_and_reset_by_exact_id() {
         source: Source::Devices,
     };
     let mut rng = SeqRandom(1);
-    assert_eq!(store.revoke("00000000000000a").unwrap_err().to_string(), UNKNOWN_ID);
-    assert_eq!(store.reset("nope", &mut rng, 1).unwrap_err().to_string(), UNKNOWN_ID);
+    assert_eq!(
+        store.revoke("00000000000000a").unwrap_err().to_string(),
+        UNKNOWN_ID
+    );
+    assert_eq!(
+        store.reset("nope", &mut rng, 1).unwrap_err().to_string(),
+        UNKNOWN_ID
+    );
     let reset = store.reset("00000000000000bb", &mut rng, 99).unwrap();
-    assert_eq!((reset.id.as_str(), reset.name.as_str()), ("00000000000000bb", "b"));
+    assert_eq!(
+        (reset.id.as_str(), reset.name.as_str()),
+        ("00000000000000bb", "b")
+    );
     let b = &store.devices()[1];
     assert_eq!((b.hash.clone(), b.created), (token_hash(&reset.token), 99));
     assert_eq!(store.revoke("00000000000000aa").unwrap().name, "a");
-    assert!(!authorized(store.devices(), TOKEN), "old token no longer works");
+    assert!(
+        !authorized(store.devices(), TOKEN),
+        "old token no longer works"
+    );
     assert!(authorized(store.devices(), &reset.token));
 }
 
@@ -190,7 +218,11 @@ fn authorization_compares_every_hash() {
         ("abc", "abcd", false),
         ("", "", true),
     ] {
-        assert_eq!(constant_time_eq(a.as_bytes(), b.as_bytes()), equal, "{a} {b}");
+        assert_eq!(
+            constant_time_eq(a.as_bytes(), b.as_bytes()),
+            equal,
+            "{a} {b}"
+        );
     }
 }
 
@@ -200,11 +232,17 @@ fn serving_fails_closed_and_honors_v2_enabled() {
     let paths = &node.ctx.paths;
     assert!(serving(paths).is_empty());
     write_v2_settings(&node, false, json!([v2_device("00000000000000aa", "a")]));
-    assert!(serving(paths).is_empty(), "v2 disabled subscription serves nobody");
+    assert!(
+        serving(paths).is_empty(),
+        "v2 disabled subscription serves nobody"
+    );
     write_v2_settings(&node, true, json!([v2_device("00000000000000aa", "a")]));
     assert_eq!(serving(paths).len(), 1);
     std::fs::write(paths.devices(), "{broken").unwrap();
-    assert!(serving(paths).is_empty(), "a broken devices.json is not bypassed");
+    assert!(
+        serving(paths).is_empty(),
+        "a broken devices.json is not bypassed"
+    );
     DeviceStore::write(paths, &[]).unwrap();
     assert!(serving(paths).is_empty(), "v3 list wins even when empty");
 }
@@ -223,7 +261,10 @@ fn changes_need_the_lock_an_enabled_subscription_and_no_pending_journal() {
     let phone = add_with(ctx, &lock, "phone", &mut rng, 5).unwrap();
     let stored = list(&ctx.paths).unwrap();
     assert_eq!(stored.len(), 1);
-    assert!(authorized(&stored, &phone.token), "on disk before it is shown");
+    assert!(
+        authorized(&stored, &phone.token),
+        "on disk before it is shown"
+    );
 
     let reset = reset_with(ctx, &lock, &phone.id, &mut rng, 6).unwrap();
     assert!(authorized(&list(&ctx.paths).unwrap(), &reset.token));
@@ -240,7 +281,10 @@ fn changes_need_the_lock_an_enabled_subscription_and_no_pending_journal() {
     std::fs::remove_dir_all(ctx.paths.transaction()).unwrap();
     revoke(ctx, &lock, &phone.id).unwrap();
     assert!(list(&ctx.paths).unwrap().is_empty());
-    assert_eq!(revoke(ctx, &lock, &phone.id).unwrap_err().to_string(), UNKNOWN_ID);
+    assert_eq!(
+        revoke(ctx, &lock, &phone.id).unwrap_err().to_string(),
+        UNKNOWN_ID
+    );
 }
 
 #[test]
