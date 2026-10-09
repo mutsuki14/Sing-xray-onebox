@@ -433,7 +433,11 @@ pub fn net_apply(ctx: &Ctx) -> Result<()> {
     } else {
         match FileLock::acquire(&paths.frp_lock(), BUSY) {
             Ok(lock) => {
-                ensure!(!journal::exists(paths), "{}", journal::PENDING);
+                // A committed journal whose cleanup failed is harmless; an
+                // unfinished or unreadable one must be recovered first.
+                let pending = journal::load(paths)
+                    .map_or(true, |j| j.is_some_and(|j| !j.phase.is_finished()));
+                ensure!(!pending, "{}", journal::PENDING);
                 Some(lock)
             }
             Err(Error::Busy(_)) => None,

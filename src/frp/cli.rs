@@ -31,8 +31,9 @@ use crate::cert::cloudflare::{self, CfCredentials};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::host::init::InitSystem;
 use crate::host::os::ROOT_REQUIRED;
-use crate::host::service::{FRPS, FRP_WEB};
+use crate::host::service::{Services, FRPS, FRP_WEB};
 use crate::ui::{out, BACK};
 use std::path::{Path, PathBuf};
 
@@ -458,7 +459,13 @@ impl Session<'_> {
             if name == FRP_WEB && !services.exists(name) {
                 continue;
             }
-            match services.logs(name, LOG_LINES) {
+            // The journal first (systemd), else the log files (v2 fell
+            // back to them when journalctl failed).
+            let files = Services::new(self.ctx(), InitSystem::None);
+            match services
+                .logs(name, LOG_LINES)
+                .or_else(|_| files.logs(name, LOG_LINES))
+            {
                 Ok(text) => {
                     out::data(&format!("==> {name} <=="))?;
                     out::data(text.trim_end())?;

@@ -2,6 +2,8 @@
 //! state, a pending transaction, the binary, the services, the private CA
 //! and control certificate, the website certificate and the renewal job.
 //! Read-only: nothing is written, started or asked.
+//!
+//! Changes from v2: v2's `doctor` did not look at FRP at all.
 
 use super::ca::{expires_within, ControlFiles};
 use super::journal;
