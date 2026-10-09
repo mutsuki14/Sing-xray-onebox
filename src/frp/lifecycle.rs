@@ -1,5 +1,5 @@
 //! The FRP operations that change the host (spec H §5): apply (install,
-//! configure, update, rotate-token), renew, start/stop/restart, uninstall,
+//! configure, update, rotate-token, rotate-ca), renew, start/stop/restart, uninstall,
 //! the boot hook `frps net-apply` and crash recovery.
 //!
 //! Every mutation takes the FRP lock (`/etc/.onebox-frp.lock`, v2 path)
@@ -70,6 +70,9 @@ pub const CRON_LOCK_WAIT: Duration = Duration::from_secs(600);
 pub struct Change {
     /// Generate a new token (all old clients stop working).
     pub rotate: bool,
+    /// Replace the private CA (all exported clients must be exported
+    /// again).
+    pub rotate_ca: bool,
     /// Cloudflare credentials for a DNS-01 website certificate.
     pub cloudflare: Option<CfCredentials>,
     /// For the journal and messages (`安装`, `更新`, …).
@@ -214,6 +217,9 @@ fn write_files(rt: &Runtime, state: &mut FrpState, change: &Change, staged: &Sta
     mkdirs(paths)?;
     if change.rotate || state.token.is_empty() {
         state.token = crate::sys::rand::hex(32)?;
+    }
+    if change.rotate_ca {
+        super::ca::discard(&paths.frp_root)?;
     }
     control_cert(ctx, &paths.frp_root, &state.domain)?;
     signal::check()?;

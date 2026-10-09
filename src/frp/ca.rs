@@ -5,13 +5,15 @@
 //! server certificate (397 days, `DNS:{control domain}`) is reissued when it
 //! expires within 30 days, no longer verifies for the control domain, or
 //! does not match its key. The CA itself survives domain changes and is
-//! never regenerated while one of its two files exists.
+//! never regenerated while one of its two files exists; `frps rotate-ca`
+//! replaces it explicitly ([`discard`]).
 //!
 //! Changes from v2: keys and certificates are generated in a private
 //! staging directory and renamed into place with mode 0600 (v2 created
 //! them with the process umask and chmodded afterwards); the CSR and the
 //! serial file stay in the staging directory, which is always removed (v2
-//! left `server.csr` and `ca.srl` behind).
+//! left `server.csr` and `ca.srl` behind); a CA that is about to expire
+//! can be rotated with `frps rotate-ca` (v2 had no way out, H-8.1#10).
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
@@ -26,6 +28,10 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// Renewal window of the CA check and the server certificate (30 days).
 const WINDOW_SECS: &str = "2592000";
 const STAGE_PREFIX: &str = ".issue-";
+
+/// A CA that cannot stay in use (v2 text plus the command that rotates it).
+pub const CA_INVALID: &str =
+    "FRP CA 无效或即将过期；需人工轮换并更新所有客户端（onebox frps rotate-ca）";
 
 /// The v2 `ca.cnf`.
 pub const CA_CNF: &str = "[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\n\
@@ -135,7 +141,7 @@ pub fn control_cert(ctx: &Ctx, frp_root: &Path, domain: &str) -> Result<bool> {
         ctx,
         &["x509", "-in", &arg(&ca), "-checkend", WINDOW_SECS, "-noout"],
     ) && key_matches(ctx, &ca, &ca_key);
-    ensure!(ca_ok, "FRP CA 无效或即将过期；需人工轮换并更新所有客户端");
+    ensure!(ca_ok, "{CA_INVALID}");
     if verifies(ctx, &ca, &files.cert(), domain) && key_matches(ctx, &files.cert(), &files.key()) {
         return Ok(false);
     }
@@ -250,6 +256,17 @@ fn issue_server(ctx: &Ctx, files: &ControlFiles, stage: &Path, domain: &str) -> 
     ]))?;
     install(&key, &files.key())?;
     install(&cert, &files.cert())
+}
+
+/// Delete the CA and the control certificate so the next
+/// [`control_cert`] creates new ones (`frps rotate-ca`; every exported
+/// client must be exported again). Runs inside an FRP transaction.
+pub fn discard(frp_root: &Path) -> Result<()> {
+    let files = ControlFiles::new(frp_root);
+    for path in [files.cert(), files.key(), files.ca(), files.ca_key()] {
+        crate::sys::fs::remove_file_if_exists(&path)?;
+    }
+    Ok(())
 }
 
 /// Seconds until `cert` expires is below `secs` (or it cannot be read).
@@ -380,10 +397,7 @@ mod tests {
         fs::write(root.join("ca-key.pem"), "y").unwrap();
         // The fake openssl fails every check: the CA counts as invalid.
         let err = control_cert(&ctx, root, "frp.example.com").unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "FRP CA 无效或即将过期；需人工轮换并更新所有客户端"
-        );
+        assert_eq!(err.to_string(), CA_INVALID);
         assert_eq!(fs::read_to_string(root.join("ca.pem")).unwrap(), "x");
     }
 

@@ -17,7 +17,9 @@
 //!   `[错误] …`, a cancelled one `[提示] 操作已取消`, and the menu stays
 //!   (v2 printed the bare error); Ctrl+D at the menu prompt itself exits
 //!   with 130 (ARCH G5); root is checked before an item asks anything;
-//! - `update` to the version already running changes nothing.
+//! - `update` to the version already running changes nothing;
+//! - new `rotate-ca` replaces a private CA that is about to expire (v2 had
+//!   no way out, H-8.1#10).
 
 use super::draft::{self, normalize_version, Draft, Flags};
 use super::export::{self, ExportRequest};
@@ -43,6 +45,7 @@ pub const PREVIEW: &str = "以上仅为预览，未联网、未修改配置。�
 const CONFIRM_DEPLOY: &str = "确认部署上述 FRP 配置？已有连接将短暂中断";
 const CONFIRM_UPDATE: &str = "确认更新 FRP？连接将短暂中断";
 const CONFIRM_ROTATE: &str = "轮换 token 会使所有旧客户端失效，确认继续？";
+const CONFIRM_ROTATE_CA: &str = "轮换私有 CA 会使所有已导出的客户端失效，需重新导出，确认继续？";
 const CONFIRM_UNINSTALL: &str = "卸载 FRP、独立配置与证书？已导出配置将失效";
 const NOT_INSTALLED_INFO: &str = "尚未安装 FRP；运行 onebox frps install";
 const LOG_LINES: usize = 80;
@@ -68,6 +71,7 @@ pub enum Action {
         cron: bool,
     },
     RotateToken,
+    RotateCa,
     Uninstall,
     Help,
     NetApply,
@@ -83,6 +87,7 @@ impl Action {
             | Action::Update(_)
             | Action::Renew { .. }
             | Action::RotateToken
+            | Action::RotateCa
             | Action::Uninstall
             | Action::NetApply => true,
         }
@@ -113,6 +118,7 @@ pub fn from_matches(m: &Matches, cwd: &Path) -> Result<Action> {
             cron: m.flag("cron"),
         },
         Some("rotate-token") => Action::RotateToken,
+        Some("rotate-ca") => Action::RotateCa,
         Some("uninstall") => Action::Uninstall,
         Some("help") => Action::Help,
         Some("net-apply") => Action::NetApply,
@@ -212,6 +218,7 @@ pub static COMMAND: CommandSpec = CommandSpec::new("frps", Group::Feature, "独�
         "frps update [版本]",
         "frps renew [--cron]",
         "frps rotate-token",
+        "frps rotate-ca",
         "frps log",
         "frps uninstall",
     ])
@@ -246,6 +253,11 @@ pub static COMMAND: CommandSpec = CommandSpec::new("frps", Group::Feature, "独�
             OptSpec::flag("cron", "计划任务调用：只续期到期的网站证书"),
         ]),
         sub("rotate-token", "轮换 token（所有旧客户端失效）", Root::Required),
+        sub(
+            "rotate-ca",
+            "轮换私有 CA 与控制证书（所有已导出客户端需重新导出）",
+            Root::Required,
+        ),
         sub("log", "最近的 frps 与网站日志", Root::NotRequired).aliases(&["logs"]),
         sub("uninstall", "卸载 FRP、独立配置与证书", Root::Required),
         sub("help", "v2 用法摘要", Root::NotRequired).hidden(),
@@ -298,7 +310,22 @@ impl Session<'_> {
                 };
                 lifecycle::renew(&self.rt, &lock, cron)
             }
-            Action::RotateToken => self.rotate_token(),
+            Action::RotateToken => self.rotate(
+                CONFIRM_ROTATE,
+                Change {
+                    rotate: true,
+                    reason: "轮换 token",
+                    ..Change::default()
+                },
+            ),
+            Action::RotateCa => self.rotate(
+                CONFIRM_ROTATE_CA,
+                Change {
+                    rotate_ca: true,
+                    reason: "轮换 CA",
+                    ..Change::default()
+                },
+            ),
             Action::Uninstall => self.uninstall(),
             Action::Help => out::data(HELP),
             Action::NetApply => lifecycle::net_apply(self.ctx()),
@@ -419,23 +446,28 @@ impl Session<'_> {
         )
     }
 
-    fn rotate_token(&self) -> Result<()> {
+    /// `rotate-token` / `rotate-ca`: the installed configuration with new
+    /// credentials, after `confirm`.
+    fn rotate(&self, confirm: &str, change: Change) -> Result<()> {
         let state = lifecycle::installed_state(&self.rt)?;
         out::data(&summary(&state))?;
         let cloudflare = self.cloudflare(&state)?;
-        if !self.ctx().ui.confirm(CONFIRM_ROTATE, false)? {
+        if !self.ctx().ui.confirm(confirm, false)? {
             return Ok(());
         }
+        let ca = change.rotate_ca;
         lifecycle::apply(
             &self.rt,
             state,
             Change {
-                rotate: true,
                 cloudflare,
-                reason: "轮换 token",
-                ..Change::default()
+                ..change
             },
-        )
+        )?;
+        if ca {
+            out::info("请重新导出所有客户端：onebox frps client 新目录");
+        }
+        Ok(())
     }
 
     fn uninstall(&self) -> Result<()> {

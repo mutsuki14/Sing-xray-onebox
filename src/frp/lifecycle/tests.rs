@@ -162,6 +162,26 @@ fn a_failing_service_start_rolls_back_and_restarts_the_old_one() {
 }
 
 #[test]
+fn rotate_ca_replaces_the_private_ca_and_keeps_the_token() {
+    let Some(h) = FakeHost::new() else { return };
+    let before = install_tcp(&h);
+    let files = ControlFiles::new(&h.ctx.paths.frp_root);
+    let old_ca = fs::read(files.ca()).unwrap();
+    let rotate = Change {
+        rotate_ca: true,
+        reason: "轮换 CA",
+        ..Change::default()
+    };
+    apply(&h.runtime(), before.clone(), rotate).unwrap();
+    assert_ne!(fs::read(files.ca()).unwrap(), old_ca);
+    assert_eq!(
+        model::load(&h.ctx.paths).unwrap().unwrap().token,
+        before.token
+    );
+    assert_eq!(mode_of(&files.ca_key()), 0o600);
+}
+
+#[test]
 fn configure_with_the_installed_version_needs_no_network() {
     let Some(h) = FakeHost::new() else { return };
     let mut state = install_tcp(&h);

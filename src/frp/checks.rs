@@ -116,7 +116,7 @@ fn control_checks(rt: &Runtime) -> Vec<Check> {
         check(
             "FRP 私有 CA",
             CheckStatus::Fail,
-            "无效或 30 天内到期；需人工轮换并更新所有客户端",
+            "无效或 30 天内到期；需执行 onebox frps rotate-ca 并重新导出所有客户端",
         )
     } else {
         check("FRP 私有 CA", CheckStatus::Pass, "有效")
