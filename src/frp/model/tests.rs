@@ -531,7 +531,7 @@ fn reservations_per_mode() {
     assert_eq!(
         spans(&web.reservations()),
         [
-            (7000, 7000, Transport::Tcp),
+            (7000, 7000, Transport::Both),
             (7080, 7080, Transport::Tcp),
             (443, 443, Transport::Tcp),
             (80, 80, Transport::Tcp)
@@ -569,6 +569,33 @@ fn reservations_per_mode() {
             (80, 80, Transport::Tcp)
         ]
     );
+}
+
+#[test]
+fn allow_ports_are_never_empty() {
+    // tcp mode: exactly the forwarding range.
+    let tcp = v2_tcp().into_state().unwrap();
+    assert_eq!(tcp.allow_ports(), [(20000, 20100)]);
+    // web mode: no forwarding, so only the bind port frps holds itself.
+    let web = web_state();
+    assert_eq!(web.allow_ports(), [(7000, 7000)]);
+    let mut moved = web.clone();
+    moved.bind_port = 7443;
+    assert_eq!(moved.allow_ports(), [(7443, 7443)]);
+    // Its UDP side is reserved, so no node listener can share it.
+    let cfg = config(&[(Protocol::Hysteria2, 7443, Core::Singbox)]);
+    let err = PortPlan::of(&cfg, &moved.reservations())
+        .validate()
+        .unwrap_err();
+    assert_eq!(err.to_string(), "端口 7443/udp 已保留给 FRP");
+    let layout = PortLayout::Tcp {
+        bind_port: 7000,
+        range: PortRange {
+            start: 30000,
+            end: 30000,
+        },
+    };
+    assert_eq!(layout.allow_ports(), [(30000, 30000)]);
 }
 
 #[test]
@@ -665,7 +692,7 @@ fn ip_literal_domains_v2_accepted_stay_readable() {
     assert_eq!(
         spans(&reservations(paths).unwrap()),
         [
-            (7000, 7000, Transport::Tcp),
+            (7000, 7000, Transport::Both),
             (7080, 7080, Transport::Tcp),
             (443, 443, Transport::Tcp),
             (80, 80, Transport::Tcp)

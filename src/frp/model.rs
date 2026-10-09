@@ -17,10 +17,14 @@
 //!   `WebTls::{Http01, Cloudflare, Custom}`, `BindAddr` (H-8.2), persisted
 //!   with `schema: 2`; web-only settings exist only in web mode;
 //! - web mode has no forwarding range at all (H-8.1#8): the range belongs
-//!   to `Mode::Tcp`, so it is neither reserved nor rendered as frps
-//!   `allowPorts` in web mode (v2 let clients bind 127.0.0.1:20000–20100
-//!   there, inside the node's fallback port pool). Reading a v2 web state
-//!   drops its range; [`V2Config::from_state`] writes v2's default;
+//!   to `Mode::Tcp`, so web mode neither reserves nor opens one. Its frps
+//!   `allowPorts` ([`PortLayout::allow_ports`], which the renderer must
+//!   emit in both modes: an empty `allowPorts` allows every port) is the
+//!   bind port alone, which frps holds itself and which is reserved for
+//!   UDP too, so clients cannot open TCP/UDP proxies (v2 let them bind
+//!   127.0.0.1:20000–20100 there, inside the node's fallback port pool).
+//!   Reading a v2 web state drops its range; [`V2Config::from_state`]
+//!   writes v2's default;
 //! - new domains must be DNS names (H-8.1#15: frpc cannot verify a
 //!   certificate for an IP literal). Stored states keep v2's rule, so an IP
 //!   literal v2 accepted is still read and kept while it is unchanged, with
@@ -214,9 +218,9 @@ impl WebSettings {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Mode {
-    /// HTTP applications behind nginx. There is no forwarding range: frps
-    /// must not let clients open TCP/UDP proxies in web mode (mind that an
-    /// empty frps `allowPorts` allows every port).
+    /// HTTP applications behind nginx. There is no forwarding range and
+    /// clients must not open TCP/UDP proxies: frps `allowPorts` is
+    /// [`PortLayout::allow_ports`] (the bind port alone), never empty.
     Web(WebSettings),
     /// Public TCP/UDP forwarding inside `range` (frps `allowPorts`).
     Tcp { range: PortRange },
@@ -335,6 +339,12 @@ impl FrpState {
     /// See [`PortLayout::firewall_ports`].
     pub fn firewall_ports(&self) -> Vec<(u16, u16, Transport)> {
         self.ports().firewall_ports()
+    }
+
+    /// See [`PortLayout::allow_ports`] (what the renderer emits as frps
+    /// `allowPorts`).
+    pub fn allow_ports(&self) -> Vec<(u16, u16)> {
+        self.ports().allow_ports()
     }
 
     /// The invariants of a stored state (load, save, render), token

@@ -88,7 +88,9 @@ impl PortLayout {
 
     /// Ports other Onebox components must leave to FRP — also while FRP is
     /// stopped. The forwarding range only in tcp mode, where it is public
-    /// (H-8.1#8).
+    /// (H-8.1#8). In web mode the bind port is reserved for UDP as well:
+    /// it is the one `allowPorts` entry ([`PortLayout::allow_ports`]), and
+    /// frps holds only its TCP side.
     pub fn reservations(&self) -> Vec<Reservation> {
         let reserve = |port: u16, label: &str| Reservation {
             start: port,
@@ -96,7 +98,11 @@ impl PortLayout {
             transport: Transport::Tcp,
             label: label.to_owned(),
         };
-        let mut out = vec![reserve(self.bind_port(), "控制端口")];
+        let mut bind = reserve(self.bind_port(), "控制端口");
+        if matches!(self, PortLayout::Web { .. }) {
+            bind.transport = Transport::Both;
+        }
+        let mut out = vec![bind];
         match *self {
             PortLayout::Web {
                 http_port,
@@ -118,6 +124,21 @@ impl PortLayout {
             }),
         }
         out
+    }
+
+    /// The frps `allowPorts` entries `(start, end)`, never empty: the
+    /// renderer must emit exactly these in both modes, since an empty
+    /// `allowPorts` lets a client with the token bind any port (in web
+    /// mode on loopback, next to the node's site, guard and subscription
+    /// listeners). Tcp mode: the forwarding range. Web mode has no
+    /// forwarding: the bind port alone, which frps itself holds for TCP and
+    /// [`PortLayout::reservations`] keeps free of other UDP listeners, so
+    /// no proxy can take a port anything else uses.
+    pub fn allow_ports(&self) -> Vec<(u16, u16)> {
+        match *self {
+            PortLayout::Web { bind_port, .. } => vec![(bind_port, bind_port)],
+            PortLayout::Tcp { range, .. } => vec![(range.start, range.end)],
+        }
     }
 
     /// What the FRP firewall owner opens: the bind port; in web mode HTTPS
