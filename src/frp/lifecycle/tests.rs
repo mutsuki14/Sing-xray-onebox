@@ -140,6 +140,28 @@ fn a_failed_change_restores_token_binary_and_private_ca() {
 }
 
 #[test]
+fn a_failing_service_start_rolls_back_and_restarts_the_old_one() {
+    let Some(h) = FakeHost::new() else { return };
+    let before = install_tcp(&h);
+    h.break_unit(FRPS, true);
+    let mut next = before.clone();
+    next.bind_port = 7002;
+    let err = apply(&h.runtime(), next, change("配置")).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("Job for onebox-frps failed"), "{text}");
+    assert!(
+        text.contains("；恢复未完成: "),
+        "the old one cannot start either: {text}"
+    );
+    h.break_unit(FRPS, false);
+    // The journal waits for recovery, which succeeds now.
+    let rt = h.runtime();
+    assert!(recover_locked(&rt, &rt.lock().unwrap()).unwrap());
+    assert_eq!(model::load(&h.ctx.paths).unwrap().unwrap(), before);
+    assert!(h.running(FRPS));
+}
+
+#[test]
 fn configure_with_the_installed_version_needs_no_network() {
     let Some(h) = FakeHost::new() else { return };
     let mut state = install_tcp(&h);
