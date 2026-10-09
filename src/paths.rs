@@ -189,6 +189,12 @@ impl Paths {
     pub fn core_config(&self, core: Core) -> PathBuf {
         self.root.join(format!("{}.json", core.binary()))
     }
+    /// The standalone subscription's ACME webroot, a sibling of the site
+    /// root (v2 layout; a node snapshot target, served on TCP 80 by the
+    /// standalone subscription nginx or the HTTP-01 responder).
+    pub fn subscription_acme(&self) -> PathBuf {
+        self.site_root.with_file_name("onebox-subscription-acme")
+    }
     pub fn frp_lock(&self) -> PathBuf {
         let parent = self.frp_root.parent().unwrap_or_else(|| Path::new("/"));
         parent.join(".onebox-frp.lock")
@@ -212,6 +218,18 @@ mod tests {
             PathBuf::from("/etc/onebox/xray.json")
         );
         assert_eq!(p.frp_lock(), PathBuf::from("/etc/.onebox-frp.lock"));
+        assert_eq!(
+            p.subscription_acme(),
+            PathBuf::from("/var/lib/onebox-subscription-acme")
+        );
+        let custom = Paths::from_lookup(|k| {
+            (k == "ONEBOX_SITE_ROOT").then(|| PathBuf::from("/srv/www/site"))
+        })
+        .unwrap();
+        assert_eq!(
+            custom.subscription_acme(),
+            PathBuf::from("/srv/www/onebox-subscription-acme")
+        );
         assert_eq!(p.service_env().len(), 13);
         assert_eq!(
             p.system("/etc/os-release"),

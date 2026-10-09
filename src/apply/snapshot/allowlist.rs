@@ -287,9 +287,10 @@ fn local_d(paths: &Paths) -> PathBuf {
         .join("local.d")
 }
 
-/// The v2 standalone-subscription ACME webroot, a sibling of the site root.
+/// The standalone-subscription ACME webroot (v2 slot item-17): defined
+/// once, by [`Paths::subscription_acme`].
 pub fn subscription_acme_dir(paths: &Paths) -> PathBuf {
-    paths.site_root.with_file_name("onebox-subscription-acme")
+    paths.subscription_acme()
 }
 
 /// v2's 38 fixed snapshot targets in v2 slot order: 15 `ROOT` items, the
@@ -300,7 +301,7 @@ pub fn v2_fixed_targets(paths: &Paths) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = V2_ROOT_ITEMS.iter().map(|s| paths.root.join(s)).collect();
     out.push(paths.site_root.clone());
     out.push(paths.executable.clone());
-    out.push(subscription_acme_dir(paths));
+    out.push(paths.subscription_acme());
     out.push(paths.bin.join("sing-box"));
     out.push(paths.bin.join("xray"));
     for name in V2_SERVICES {
