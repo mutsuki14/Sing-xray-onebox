@@ -239,6 +239,25 @@ fn preview_writes_a_private_file() {
     assert!(html.contains("预览 &lt;b&gt;"));
     bench.is_root = false;
     assert!(preview(&bench.session(), &edit).is_err());
+    // Without a site and without options: the v2 default page.
+    bench.is_root = true;
+    preview(&bench.session(), &PageEdit::default()).unwrap();
+    let html = fs::read_to_string(&path).unwrap();
+    assert!(html.contains(defaults::SITE_TITLE), "{html}");
+    assert!(html.contains(defaults::SITE_DESCRIPTION), "{html}");
+}
+
+#[test]
+fn page_edits_without_a_site_ask_to_enable_it() {
+    let bench = Bench::installed(&config(&[(VlessReality, 443, XR)]));
+    for action in [
+        SiteAction::Title("新标题".into()),
+        SiteAction::Theme(SiteTheme::Slate),
+        SiteAction::Description("记录".into()),
+    ] {
+        let err = plan_change(&bench.session(), action).unwrap_err();
+        assert_eq!(err.to_string(), "请先启用网站");
+    }
 }
 
 #[test]

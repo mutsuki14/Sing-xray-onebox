@@ -13,7 +13,8 @@
 //! `restore` checks the backup exists before anything runs, and `latest`
 //! is the newest by creation time (v2: by name); `https` without a site is
 //! refused; `site renew` renews without a full apply (G9); `preview` does
-//! not need an enabled site.
+//! not need an enabled site (it renders the default title and description
+//! then, as v2 did); page edits without a site say `请先启用网站`.
 
 use crate::cert::{CertScope, CertScopes};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
@@ -238,6 +239,8 @@ fn change(session: &Session, cfg: &NodeConfig, action: SiteAction) -> Result<Opt
         SiteAction::Theme(_) | SiteAction::Title(_) | SiteAction::Description(_)
     );
     if edits_page {
+        // Without a site there is no page: say so before looking at it.
+        require_site(cfg)?;
         require_generated(&store)?;
     }
     Ok(Some(match action {
@@ -326,11 +329,11 @@ pub fn preview(session: &Session, edit: &PageEdit) -> Result<()> {
         edit.title
             .as_deref()
             .or(site.map(|s| s.title.as_str()))
-            .unwrap_or(""),
+            .unwrap_or(defaults::SITE_TITLE),
         edit.description
             .as_deref()
             .or(site.map(|s| s.description.as_str()))
-            .unwrap_or(""),
+            .unwrap_or(defaults::SITE_DESCRIPTION),
     );
     let path = ContentStore::new(&session.ctx.paths).preview(&html)?;
     session.data(&path.to_string_lossy())
