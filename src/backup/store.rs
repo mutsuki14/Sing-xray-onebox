@@ -23,6 +23,7 @@ use crate::paths::Paths;
 use crate::state::StateStore;
 use crate::sys::fs::{atomic_write, ensure_dir, fsync_dir, read_bounded, remove_tree_if_exists};
 use crate::sys::lock::FileLock;
+use crate::ui::out;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -157,20 +158,43 @@ pub fn latest(paths: &Paths) -> Result<String> {
         .ok_or_else(|| Error::msg("没有备份"))
 }
 
-/// Back up the node under the held node lock (`uninstall`, `restore`): the
+/// Back up the node under the held node lock (`backup`, `uninstall`): the
 /// state as stored, then tls, site, site root, subscription and clients.
-/// Refused while a recovery is due. Returns the new id.
+/// Refused while a recovery is due, and when the state cannot be loaded
+/// (such a backup could not be restored). Returns the new id.
 pub fn create_locked(ctx: &Ctx, lock: &FileLock, label: &str) -> Result<String> {
-    create_kept(ctx, lock, label, None)
+    create(ctx, lock, label, None, false)
 }
 
-/// [`create_locked`]; rotation also spares `keep` (the backup a restore is
-/// about to use).
+/// The safety copy a restore takes first: [`create_locked`], except that a
+/// `state.json` that exists but cannot be loaded (corrupt, or a v2 state
+/// the migration rejects) is kept as it is, with a warning, instead of
+/// refusing the restore — restoring a backup is the natural way out of
+/// such a state, and the engine applies over it (`engine::old_config`).
+/// Rotation also spares `keep` (the backup the restore is about to use).
 pub fn create_kept(ctx: &Ctx, lock: &FileLock, label: &str, keep: Option<&str>) -> Result<String> {
+    create(ctx, lock, label, keep, true)
+}
+
+fn create(
+    ctx: &Ctx,
+    lock: &FileLock,
+    label: &str,
+    keep: Option<&str>,
+    unreadable_ok: bool,
+) -> Result<String> {
     let paths = &ctx.paths;
     lock.verify(&paths.lock())?;
     crate::apply::journal::pending(paths)?.refuse()?;
-    StateStore::load_required(ctx)?;
+    if let Err(e) = StateStore::load_required(ctx) {
+        if !(unreadable_ok && fs::symlink_metadata(paths.state()).is_ok()) {
+            return Err(e);
+        }
+        out::warn(format!(
+            "现有 state.json 无法读取（{}），安全备份按原样保存该文件（该备份不能直接恢复）",
+            e.report_text()
+        ));
+    }
     let state = read_bounded(&paths.state(), crate::domain::defaults::STATE_MAX_BYTES)?;
     let root = paths.backups();
     crate::sys::fs::check_owned(&paths.root, &root)?;

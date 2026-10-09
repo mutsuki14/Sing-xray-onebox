@@ -13,7 +13,9 @@
 //! it and took it three times); `latest` is the newest restorable backup by
 //! creation time; the resolved id (not `latest`) is what the transaction
 //! re-validates, so the safety backup cannot be mistaken for it; a v2
-//! backup's subscription devices are migrated with it.
+//! backup's subscription devices are migrated with it; a `state.json` that
+//! exists but cannot be loaded no longer refuses the restore (the safety
+//! copy keeps it as it is, the engine applies over it).
 
 use super::archive::{self, Validated};
 use super::store::{self, BEFORE_RESTORE};

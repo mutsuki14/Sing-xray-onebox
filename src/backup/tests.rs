@@ -241,6 +241,41 @@ fn a_backup_round_trips_through_a_restore() {
 }
 
 #[test]
+fn a_backup_restores_over_an_unreadable_state_json() {
+    let host = Host::new();
+    host.install(two_cores());
+    let original = host.installed();
+    let id = create(&host, "good");
+    for corrupt in [&b"{ not json"[..], br#"{"schema":2}"#] {
+        file(&host.paths().state(), 0o600, corrupt);
+        // A plain backup of it would not be restorable: still refused.
+        assert!(create_locked(&host.ctx, &host.lock, "x").is_err());
+        restore(&host, &id).unwrap();
+        assert_eq!(host.installed(), original);
+        // The safety copy keeps the unreadable file byte for byte.
+        let safety = list(host.paths()).unwrap();
+        assert_eq!(safety[0].label, store::BEFORE_RESTORE);
+        let kept = host
+            .paths()
+            .backups()
+            .join(&safety[0].id)
+            .join("state.json");
+        assert_eq!(fs::read(kept).unwrap(), corrupt);
+        assert_no_journal_left(&host);
+    }
+    // Without any state.json there is still nothing to restore over.
+    fs::remove_file(host.paths().state()).unwrap();
+    assert!(matches!(
+        store::create_kept(&host.ctx, &host.lock, "x", None).unwrap_err(),
+        Error::NotInstalled
+    ));
+}
+
+fn assert_no_journal_left(host: &Host) {
+    assert!(journal::load(host.paths()).unwrap().is_none());
+}
+
+#[test]
 fn the_running_workers_listener_record_is_never_backed_up_or_restored() {
     use crate::subscription::server::listener_file;
     let host = Host::new();
