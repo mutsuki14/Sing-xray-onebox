@@ -9,12 +9,17 @@
 //! stored families and WARP flags (v2 re-detected even then, so a failed
 //! lookup dropped IPv6 and restarted the node); the interactive ShadowTLS change
 //! also resets an explicit handshake target; `sni` without options under
-//! `-y`, or answers that change nothing, apply nothing.
+//! `-y`, or answers that change nothing, apply nothing; the interactive
+//! REALITY menu offers `保持当前目标` as its default (v2's default was
+//! Microsoft, which silently dropped an own site), and re-picking the own
+//! site defaults to its domain, title, HTTPS entrance and certificate
+//! method; a new site title re-renders the generated homepage.
 
 use crate::apply::ApplyRequest;
 use crate::cli::args::{CommandSpec, Group, Matches};
 use crate::cli::commands::install::Detected;
 use crate::cli::commands::node::run;
+use crate::cli::commands::site::retitled_page;
 use crate::cli::options::{self as opt, RealityArgs};
 use crate::cli::session::{request, with_system, LiveProbe, Session};
 use crate::cli::wizard::steps;
@@ -135,7 +140,10 @@ pub fn plan_sni(session: &Session, args: &RealityArgs) -> Result<Option<ApplyReq
         session.info("配置未变化");
         return Ok(None);
     }
-    Ok(Some(request(&loaded, next, "更换伪装目标")))
+    let page = retitled_page(session, cfg, &next)?;
+    let mut req = request(&loaded, next, "更换伪装目标");
+    req.intents.site_content = page;
+    Ok(Some(req))
 }
 
 /// The command-line handshake options on `cfg`.
@@ -174,8 +182,10 @@ fn ask_targets(session: &Session, cfg: &NodeConfig, env: &plan::PlanEnv) -> Resu
             "当前 REALITY 目标: {}（{}）\n选择新的伪装目标",
             cfg.reality.sni, cfg.reality.dest
         );
-        let choice = steps::reality_menu(ui, &title)?;
-        next = plan::set_reality_target(&next, &choice, env)?;
+        let choice = steps::reality_menu(ui, &title, Some(cfg))?;
+        if choice != RealityChoice::Default {
+            next = plan::set_reality_target(&next, &choice, env)?;
+        }
     }
     if cfg.has(Protocol::Shadowtls) {
         let sni = ui.input_with(

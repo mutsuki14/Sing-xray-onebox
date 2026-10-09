@@ -1,6 +1,6 @@
 use super::*;
 use crate::cli::session::testing::Bench;
-use crate::domain::config::HostPort;
+use crate::domain::config::{HostPort, WebCert};
 use crate::domain::fixtures::config;
 use crate::domain::protocol::Core::{Singbox as SB, Xray as XR};
 use std::net::IpAddr;
@@ -131,7 +131,7 @@ fn sni_options_move_both_handshakes() {
 #[test]
 fn sni_interactive() {
     let bench = Bench::installed(&config(&[(VlessReality, 443, XR), (Shadowtls, 8443, SB)]));
-    bench.answers(&["3", "bad!", "addons.mozilla.org", ""]);
+    bench.answers(&["4", "bad!", "addons.mozilla.org", ""]);
     let req = plan_sni(&bench.session(), &RealityArgs::default())
         .unwrap()
         .unwrap();
@@ -143,11 +143,84 @@ fn sni_interactive() {
     assert_eq!(bench.ui.errors(), ["域名无效"]);
     assert!(bench.ui.prompts()[0]
         .starts_with("当前 REALITY 目标: www.microsoft.com（www.microsoft.com:443）"));
+    assert!(
+        bench.ui.menus()[0].contains("\n  1) 保持当前目标\n  2) Microsoft"),
+        "{}",
+        bench.ui.menus()[0]
+    );
     // Unattended without options changes nothing.
     bench.unattended();
     assert!(plan_sni(&bench.session(), &RealityArgs::default())
         .unwrap()
         .is_none());
+}
+
+/// A node whose REALITY target is its own site with non-default settings.
+fn own_site_node(extra: &[(Protocol, u16, crate::domain::Core)]) -> NodeConfig {
+    let mut inbounds = vec![(VlessReality, 443, XR)];
+    inbounds.extend_from_slice(extra);
+    let mut cfg = crate::domain::fixtures::with_site(config(&inbounds), "www.example.com", false);
+    if let Some(site) = cfg.site.as_mut() {
+        site.title = "我的手记".into();
+        site.cert = WebCert::Cloudflare;
+    }
+    cfg
+}
+
+#[test]
+fn sni_interactive_enter_keeps_the_own_site() {
+    let cfg = own_site_node(&[(Shadowtls, 8443, SB)]);
+    let bench = Bench::installed(&cfg);
+    // Enter at the REALITY menu, then only the ShadowTLS name changes.
+    bench.answers(&["", "www.apple.com"]);
+    let req = plan_sni(&bench.session(), &RealityArgs::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(req.config.site, cfg.site, "the site and its settings stay");
+    assert_eq!(req.config.reality, cfg.reality);
+    assert_eq!(req.config.shadowtls.sni, "www.apple.com");
+    assert_eq!(req.intents.site_content, None);
+}
+
+#[test]
+fn sni_interactive_own_site_defaults_to_the_current_site() {
+    use crate::cli::commands::site::EDITED;
+    use crate::site::{ContentStore, SiteContent};
+    let cfg = own_site_node(&[]);
+    let bench = Bench::installed(&cfg);
+    // Own site again, Enter at every question (domain, title, HTTPS
+    // entrance, certificate): nothing changes.
+    bench.answers(&["5", "", "", "", ""]);
+    assert!(plan_sni(&bench.session(), &RealityArgs::default())
+        .unwrap()
+        .is_none());
+    assert_eq!(bench.notes(), ["[提示] 配置未变化"]);
+    let prompts = bench.ui.prompts();
+    assert!(prompts.contains(&"网站标题".to_owned()), "{prompts:?}");
+    // A new title republishes the generated page; an imported page is
+    // refused as `site title` refuses it.
+    let store = ContentStore::new(&bench.ctx.paths);
+    std::fs::create_dir_all(&bench.ctx.paths.site_root).unwrap();
+    std::fs::write(store.index(), "imported").unwrap();
+    bench.answers(&["5", "", "新标题", "", ""]);
+    let err = plan_sni(&bench.session(), &RealityArgs::default()).unwrap_err();
+    assert_eq!(err.to_string(), EDITED);
+    std::fs::remove_file(store.index()).unwrap();
+    store.ensure_default("<html>generated</html>").unwrap();
+    bench.answers(&["5", "", "新标题", "", ""]);
+    let req = plan_sni(&bench.session(), &RealityArgs::default())
+        .unwrap()
+        .unwrap();
+    let site = req.config.site.unwrap();
+    assert_eq!(site.title, "新标题");
+    assert_eq!(site.domain, "www.example.com");
+    assert_eq!(
+        site.cert,
+        WebCert::Cloudflare,
+        "the current method is the default"
+    );
+    assert!(!site.https_entry, "the current entrance is the default");
+    assert_eq!(req.intents.site_content, Some(SiteContent::Template));
 }
 
 #[test]

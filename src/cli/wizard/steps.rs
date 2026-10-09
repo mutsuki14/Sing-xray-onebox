@@ -5,7 +5,7 @@
 use crate::cli::commands::install::{Detected, InstallArgs};
 use crate::cli::options::{self as opt};
 use crate::cli::session::Session;
-use crate::domain::config::{AcmeMethod, NodeConfig, ProxyCertMode, WebCert};
+use crate::domain::config::{AcmeMethod, NodeConfig, ProxyCertMode, SiteConfig, WebCert};
 use crate::domain::plan::{OwnSite, ProtocolChoice, ProxyCertChoice, RealityChoice};
 use crate::domain::presets::{self, Selection};
 use crate::domain::protocol::{Core, Protocol};
@@ -103,62 +103,119 @@ pub fn reality(ui: &dyn Prompter, args: &mut InstallArgs, list: &[Protocol]) -> 
         "伪装目标",
         "REALITY 借用一个真实 HTTPS 网站完成握手；客户端看到的是该网站的证书",
     );
-    args.reality.choice = reality_menu(ui, &title)?;
+    args.reality.choice = reality_menu(ui, &title, None)?;
     Ok(())
 }
 
 /// The REALITY target menu (install wizard, `add`, `sni`, menus).
-pub fn reality_menu(ui: &dyn Prompter, title: &str) -> Result<RealityChoice> {
-    let items = [
-        "Microsoft（www.microsoft.com，默认）",
-        "Apple（www.apple.com）",
-        "自定义域名（支持 TLS 1.3 的大站）",
-        "自有域名一键建站（域名需已解析到本机）",
-    ]
-    .map(String::from);
-    Ok(match ui.select(title, &items, 0, false)?.unwrap_or(0) {
+///
+/// `current` is a node whose REALITY target is in effect (`sni`): its
+/// target is offered first and is what Enter picks (`保持当前目标`,
+/// [`RealityChoice::Default`]), and the own-site questions default to its
+/// website (domain, title, HTTPS entrance, certificate method), so
+/// re-picking the site changes only what the user changes.
+pub fn reality_menu(
+    ui: &dyn Prompter,
+    title: &str,
+    current: Option<&NodeConfig>,
+) -> Result<RealityChoice> {
+    let mut items: Vec<String> = Vec::with_capacity(5);
+    if current.is_some() {
+        items.push("保持当前目标".into());
+    }
+    items.extend(
+        [
+            if current.is_some() {
+                "Microsoft（www.microsoft.com）"
+            } else {
+                "Microsoft（www.microsoft.com，默认）"
+            },
+            "Apple（www.apple.com）",
+            "自定义域名（支持 TLS 1.3 的大站）",
+            "自有域名一键建站（域名需已解析到本机）",
+        ]
+        .map(String::from),
+    );
+    let index = ui.select(title, &items, 0, false)?.unwrap_or(0);
+    let Some(index) = index.checked_sub(usize::from(current.is_some())) else {
+        return Ok(RealityChoice::Default);
+    };
+    Ok(match index {
         1 => RealityChoice::Apple,
         2 => RealityChoice::Custom(ask_domain(ui, "握手域名", "域名无效")?),
-        3 => RealityChoice::OwnSite(own_site(ui)?),
+        3 => RealityChoice::OwnSite(own_site(ui, current.and_then(|c| c.site_active()))?),
         _ => RealityChoice::Microsoft,
     })
 }
 
-fn own_site(ui: &dyn Prompter) -> Result<OwnSite> {
-    let domain = ask_domain(ui, "已解析到本机的自有域名", "网站域名无效")?;
-    let title = ui.input_with("网站标题", defaults::SITE_TITLE, &|t: &str| {
+/// The own-site questions; `current` (the active site) gives the defaults.
+/// A title equal to the current one is returned as `None` (kept).
+fn own_site(ui: &dyn Prompter, current: Option<&SiteConfig>) -> Result<OwnSite> {
+    let domain = ui.input_with(
+        "已解析到本机的自有域名",
+        current.map_or("", |s| s.domain.as_str()),
+        &|answer: &str| plan::normalize_domain(answer, "网站域名无效"),
+    )?;
+    let current_title = current.map_or(defaults::SITE_TITLE, |s| s.title.as_str());
+    let title = ui.input_with("网站标题", current_title, &|t: &str| {
         if valid_label(t) {
             Ok(t.to_owned())
         } else {
             Err(Error::msg("网站标题不能为空或超过 128 个字符"))
         }
     })?;
-    let https_entry = ui.confirm("开启网站 HTTPS 443 入口?", true)?;
+    let title = Some(title).filter(|t| current.is_none() || t != current_title);
+    let https_entry = ui.confirm(
+        "开启网站 HTTPS 443 入口?",
+        current.is_none_or(|s| s.https_entry),
+    )?;
     Ok(OwnSite {
         domain,
-        title: Some(title),
+        title,
         https_entry,
-        cert: site_cert(ui)?,
+        cert: site_cert_with(ui, current.map(|s| &s.cert))?,
     })
 }
 
 /// The certificate of a public website (never self-signed).
 pub fn site_cert(ui: &dyn Prompter) -> Result<WebCert> {
+    site_cert_with(ui, None)
+}
+
+/// [`site_cert`] defaulting to `current` (a custom pair defaults to its
+/// files); without one the default is HTTP-01.
+pub fn site_cert_with(ui: &dyn Prompter, current: Option<&WebCert>) -> Result<WebCert> {
+    let http01 = if current.is_some() {
+        "Let's Encrypt HTTP-01（需要 TCP 80）"
+    } else {
+        "Let's Encrypt HTTP-01（默认，需要 TCP 80）"
+    };
     let items = [
-        "Let's Encrypt HTTP-01（默认，需要 TCP 80）",
+        http01,
         "Let's Encrypt Cloudflare DNS（域名托管在 Cloudflare）",
         "自备证书（已有证书文件）",
     ]
     .map(String::from);
+    let default = match current {
+        Some(WebCert::Cloudflare) => 1,
+        Some(WebCert::Custom { .. }) => 2,
+        Some(WebCert::Http01) | None => 0,
+    };
+    let (cert, key) = match current {
+        Some(WebCert::Custom { cert, key }) => (Some(cert), Some(key)),
+        _ => (None, None),
+    };
     let title = "网站证书（公网网站必须使用正式证书）";
-    Ok(match ui.select(title, &items, 0, false)?.unwrap_or(0) {
-        1 => WebCert::Cloudflare,
-        2 => WebCert::Custom {
-            cert: ask_file(ui, "完整证书链路径")?,
-            key: ask_file(ui, "私钥路径")?,
+    Ok(
+        match ui.select(title, &items, default, false)?.unwrap_or(default) {
+            1 => WebCert::Cloudflare,
+            2 => WebCert::Custom {
+                cert: ask_file_with(ui, "完整证书链路径", cert)?,
+                key: ask_file_with(ui, "私钥路径", key)?,
+            },
+            _ => WebCert::Http01,
         },
-        _ => WebCert::Http01,
-    })
+    )
 }
 
 /// Step 3: the proxy certificate (only when it can matter).
@@ -385,7 +442,13 @@ pub fn ask_domain(ui: &dyn Prompter, prompt: &str, invalid: &str) -> Result<Stri
 
 /// An existing regular file, as an absolute path.
 pub fn ask_file(ui: &dyn Prompter, prompt: &str) -> Result<PathBuf> {
-    let answer = ui.input_with(prompt, "", &|answer: &str| {
+    ask_file_with(ui, prompt, None)
+}
+
+/// [`ask_file`] with `current` as the Enter default.
+fn ask_file_with(ui: &dyn Prompter, prompt: &str, current: Option<&PathBuf>) -> Result<PathBuf> {
+    let default = current.map(|p| p.to_string_lossy()).unwrap_or_default();
+    let answer = ui.input_with(prompt, &default, &|answer: &str| {
         if answer.is_empty() {
             return Err(Error::msg("请输入文件路径"));
         }

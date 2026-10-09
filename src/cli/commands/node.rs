@@ -23,6 +23,7 @@
 
 use crate::apply::ApplyRequest;
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec};
+use crate::cli::commands::site::retitled_page;
 use crate::cli::options::{self as opt, CertArgs, RealityArgs};
 use crate::cli::session::{request, with_system, LiveProbe, Session};
 use crate::cli::wizard::steps;
@@ -211,7 +212,10 @@ pub fn plan_add(
         }
     }
     next = handshake_extras(&next, &args.reality, &env)?;
-    Ok(Some((request(&loaded, next, "添加协议"), protocol)))
+    let page = retitled_page(session, cfg, &next)?;
+    let mut req = request(&loaded, next, "添加协议");
+    req.intents.site_content = page;
+    Ok(Some((req, protocol)))
 }
 
 /// The ShadowTLS half of `--sni`, `--reality-dest` after `--sni`, and
@@ -257,7 +261,7 @@ fn add_options(
         reality = RealityChoice::Default;
     }
     if protocol.reality() && !cfg.any_reality() && args.reality.is_empty() && ui.interactive() {
-        reality = steps::reality_menu(ui, "选择 REALITY 伪装目标")?;
+        reality = steps::reality_menu(ui, "选择 REALITY 伪装目标", None)?;
     }
     let mut cert = args.cert.choice.clone();
     let needs_new_cert = protocol.certificate() && cfg.tls.is_none();

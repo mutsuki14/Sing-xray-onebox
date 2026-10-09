@@ -30,7 +30,7 @@ use std::path::Path;
 
 pub const PUBLISHED: &str = "网站已发布，原内容保存在网站备份目录";
 const RESTORED: &str = "网站已恢复";
-const EDITED: &str = "网站已被手动修改或导入，请编辑原网页后重新导入";
+pub const EDITED: &str = "网站已被手动修改或导入，请编辑原网页后重新导入";
 const ENABLE_USAGE: &str = "用法: site enable 域名 [--tls http|cf|custom --cert 文件 --key 文件]";
 
 const TITLE: OptSpec = OptSpec::value("title", "标题", "主页标题");
@@ -270,6 +270,26 @@ fn change(session: &Session, cfg: &NodeConfig, action: SiteAction) -> Result<Opt
         }
         SiteAction::Info | SiteAction::Preview(_) | SiteAction::Renew => return Ok(None),
     }))
+}
+
+/// The page publication a handshake change (`sni`, `add` with an own site)
+/// needs: a new title for the site that stays enabled re-renders the
+/// generated homepage, as `site title` does (an imported or hand-edited
+/// page is refused the same way). Only the stored title would change
+/// otherwise.
+pub fn retitled_page(
+    session: &Session,
+    old: &NodeConfig,
+    next: &NodeConfig,
+) -> Result<Option<SiteContent>> {
+    let (Some(before), Some(after)) = (old.site_active(), next.site_active()) else {
+        return Ok(None);
+    };
+    if before.title == after.title {
+        return Ok(None);
+    }
+    require_generated(&ContentStore::new(&session.ctx.paths))?;
+    Ok(Some(SiteContent::Template))
 }
 
 /// `template`: the template (default minimal) plus optional edits.
