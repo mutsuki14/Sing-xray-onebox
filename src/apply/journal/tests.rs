@@ -9,28 +9,7 @@ use crate::domain::protocol::{Core, Protocol};
 use crate::sys::fs::{sha256_hex, TempDir};
 use std::os::unix::fs::{symlink, PermissionsExt};
 
-const ALL: [Phase; 20] = [
-    Phase::Prepared,
-    Phase::PrepareState,
-    Phase::ReplaceCores,
-    Phase::PrepareCores,
-    Phase::PrepareCertificates,
-    Phase::CheckConfigurations,
-    Phase::StopOldServices,
-    Phase::CommitConfigurations,
-    Phase::ConfigureServices,
-    Phase::ApplyWebsite,
-    Phase::ApplyNetwork,
-    Phase::StartCores,
-    Phase::PublishClients,
-    Phase::PublishSubscription,
-    Phase::Finalize,
-    Phase::Committed,
-    Phase::RollbackStop,
-    Phase::RollbackFiles,
-    Phase::RollbackServices,
-    Phase::RolledBack,
-];
+const ALL: [Phase; 20] = Phase::KNOWN;
 
 fn tmp() -> TempDir {
     TempDir::new("journal-test").unwrap()
@@ -81,9 +60,32 @@ fn keys(path: &Path) -> Vec<String> {
 
 #[test]
 fn phase_names_are_the_v2_names() {
-    for phase in ALL {
-        let json = serde_json::to_value(phase).unwrap();
-        assert_eq!(json, phase.id(), "{phase:?}");
+    let names = [
+        "prepared",
+        "prepare-state",
+        "replace-cores",
+        "prepare-cores",
+        "prepare-certificates",
+        "check-configurations",
+        "stop-old-services",
+        "commit-configurations",
+        "configure-services",
+        "apply-website",
+        "apply-network",
+        "start-cores",
+        "publish-clients",
+        "publish-subscription",
+        "finalize",
+        "committed",
+        "rollback-stop",
+        "rollback-files",
+        "rollback-services",
+        "rolled-back",
+    ];
+    for (phase, name) in ALL.into_iter().zip(names) {
+        let json = serde_json::to_value(&phase).unwrap();
+        assert_eq!(json, name, "{phase:?}");
+        assert_eq!(phase.id(), name);
         let back: Phase = serde_json::from_value(json).unwrap();
         assert_eq!(back, phase);
         assert!(!phase.label().is_empty());
@@ -94,7 +96,53 @@ fn phase_names_are_the_v2_names() {
     assert_eq!(rollback, Phase::ROLLBACK);
     assert_eq!(Phase::STAGES[..], ALL[1..15]);
     assert_eq!(Phase::CheckConfigurations.label(), "校验配置");
-    assert!(serde_json::from_str::<Phase>("\"exploded\"").is_err());
+}
+
+#[test]
+fn unknown_phase_names_are_kept_and_rolled_back() {
+    // A stage or rollback phase a newer version added.
+    for name in [
+        "apply-dns",
+        "rollback-network",
+        "x",
+        &"a".repeat(PHASE_NAME_MAX),
+    ] {
+        let phase: Phase = serde_json::from_value(name.into()).unwrap();
+        assert_eq!(phase, Phase::Other(name.to_owned()));
+        assert_eq!(phase.id(), name);
+        assert!(!phase.is_finished() && !phase.is_rollback());
+        assert_eq!(phase.label(), "未知阶段");
+        assert_eq!(serde_json::to_value(&phase).unwrap(), name);
+    }
+    // Names no version writes are corrupt journals.
+    for bad in [
+        "",
+        "Exploded",
+        "rollback stop",
+        "a\u{1b}[2J",
+        &"a".repeat(PHASE_NAME_MAX + 1),
+    ] {
+        let err = serde_json::from_value::<Phase>(bad.into()).unwrap_err();
+        assert!(err.to_string().contains("事务阶段无效"), "{bad:?}: {err}");
+    }
+    assert!(serde_json::from_value::<Phase>(serde_json::json!(3)).is_err());
+    // A whole journal in such a phase loads and keeps the name.
+    let dir_ = tmp();
+    let paths = Paths::isolated(dir_.path());
+    let mut doc: Value = serde_json::from_str(&v2_journal_text(Path::new("/r"))).unwrap();
+    doc["phase"] = "apply-dns".into();
+    fs::create_dir_all(dir(&paths)).unwrap();
+    file(
+        &dir(&paths).join(JOURNAL_FILE),
+        0o600,
+        &serde_json::to_vec(&doc).unwrap(),
+    );
+    let journal = load(&paths).unwrap().unwrap();
+    assert_eq!(*journal.phase(), Phase::Other("apply-dns".into()));
+    assert_eq!(
+        pending(&paths).unwrap().config.unwrap().phase.id(),
+        "apply-dns"
+    );
 }
 
 #[test]
@@ -107,7 +155,7 @@ fn reads_a_journal_written_by_v2() {
         panic!("expected a version-1 journal");
     };
     assert_eq!(journal.version(), V2_VERSION);
-    assert_eq!(journal.phase(), Phase::PrepareCores);
+    assert_eq!(*journal.phase(), Phase::PrepareCores);
     assert_eq!(journal.reason(), None);
     assert!(journal.active_services().is_empty());
     assert_eq!(
@@ -159,7 +207,7 @@ fn a_v2_journal_keeps_its_shape_when_its_phase_changes() {
     );
     let mut journal = load(&paths).unwrap().unwrap();
     journal.set_phase(&paths, Phase::RollbackStop).unwrap();
-    assert_eq!(journal.phase(), Phase::RollbackStop);
+    assert_eq!(*journal.phase(), Phase::RollbackStop);
     let path = dir(&paths).join(JOURNAL_FILE);
     let mut expected: Value = serde_json::from_str(&v2_journal_text(root)).unwrap();
     expected["phase"] = "rollback-stop".into();
@@ -206,7 +254,7 @@ fn v3_journal_round_trips_typed() {
     let dir_ = tmp();
     let paths = Paths::isolated(dir_.path());
     let mut journal = v3_journal();
-    assert_eq!(journal.phase(), Phase::Prepared);
+    assert_eq!(*journal.phase(), Phase::Prepared);
     assert_eq!(journal.reason(), Some("添加协议"));
     assert!(matches!(journal.old(), OldState::Config(c) if c.inbounds.len() == 1));
     assert_eq!(journal.v2_values().unwrap(), None);
@@ -288,7 +336,7 @@ fn malformed_journals_are_errors() {
         assert!(err.starts_with(prefix), "{text}: {err}");
     }
     let mut doc: Value = serde_json::from_str(&v2_journal_text(Path::new("/r"))).unwrap();
-    doc["phase"] = "exploded".into();
+    doc["phase"] = "Exploded!".into();
     let err = parse(&serde_json::to_vec(&doc).unwrap()).unwrap_err();
     assert!(err.to_string().starts_with("事务日志无效"), "{err}");
 }
@@ -373,7 +421,7 @@ fn pending_reports_both_journals_and_refuses_corrupt_ones() {
 }
 
 #[test]
-fn unusable_old_states_are_refused_when_read() {
+fn old_states_are_checked_by_shape_on_load_and_by_rules_on_validate() {
     let base: Value = serde_json::from_str(&v2_journal_text(Path::new("/r"))).unwrap();
     let cases = [
         (
@@ -403,12 +451,15 @@ fn unusable_old_states_are_refused_when_read() {
     let mut doc = base.clone();
     doc["old_state"] = serde_json::json!({});
     parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
-    // A v3 journal whose old configuration fails validation.
+    // A v3 journal whose old configuration fails this version's rules
+    // still loads (a later version may have tightened them); validation
+    // refuses it.
     let Journal::V2(mut v3) = v3_journal() else {
         unreachable!()
     };
     v3.old_config.as_mut().unwrap().node_name = String::new();
-    let err = parse(&serde_json::to_vec(&v3).unwrap()).unwrap_err();
+    let journal = parse(&serde_json::to_vec(&v3).unwrap()).unwrap();
+    let err = journal.check_old_config().unwrap_err();
     assert!(
         err.to_string()
             .starts_with("事务日志记录的旧配置无效: 节点名称"),
@@ -452,13 +503,17 @@ fn validate_checks_everything_a_rollback_needs_before_it_starts() {
     v3.snapshot = taken;
     let journal = Journal::V2(v3.clone());
     journal.validate(&paths).unwrap();
-    // In-memory journals get the same content checks as parsed ones.
+    // An old configuration failing this version's rules fails validate,
+    // while the files can still be restored.
     v3.old_config.as_mut().unwrap().inbounds.clear();
     let err = Journal::V2(v3.clone()).validate(&paths).unwrap_err();
     assert_eq!(
         err.to_string(),
         "事务日志记录的旧配置无效: 配置缺少协议列表"
     );
+    Journal::V2(v3.clone()).validate_files(&paths).unwrap();
+    let loaded = parse(&serde_json::to_vec(&v3).unwrap()).unwrap();
+    assert_eq!(loaded, Journal::V2(v3.clone()));
     v3.old_config = None;
     v3.active_services.push("sshd".into());
     let err = Journal::V2(v3).validate(&paths).unwrap_err();

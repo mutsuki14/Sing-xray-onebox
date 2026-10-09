@@ -21,13 +21,16 @@
 //!   recorded targets.
 //!
 //! Changes from v2:
-//! - the phase is a typed enum (unknown phases are refused instead of being
-//!   rolled back blindly);
+//! - the phase is a typed enum; a well-formed name this version does not
+//!   know (a newer version's stage) is kept as [`Phase::Other`] and rolled
+//!   back like any unfinished phase, other names are corrupt journals;
 //! - a `.transaction` that is not a real directory is refused;
-//! - the recorded old state is checked when the journal is read (v2 noticed
-//!   a malformed one only in `rollback-services`, after stopping services
-//!   and restoring files), and [`Journal::validate`] checks everything a
-//!   rollback needs before the first rollback phase;
+//! - a version-1 old state must have v2's shape when the journal is read,
+//!   and [`Journal::validate`] checks everything a rollback needs — cron
+//!   lines and this version's configuration rules included — before the
+//!   first rollback phase (v2 noticed a malformed old state or cron line
+//!   only in `rollback-services`, after stopping services and restoring
+//!   files);
 //! - [`pending`] reports both journals for the operations that must not run
 //!   while a recovery is due (backup, doctor, uninstall, device changes) and
 //!   treats a corrupt journal as an error, never as "nothing pending".
@@ -72,9 +75,15 @@ pub const LEGACY_NETWORK_SERVICES: [&str; 2] = ["onebox-net", "onebox-hop"];
 pub const PENDING_MESSAGE: &str = program_journal::PENDING_MESSAGE;
 
 /// Journal phases with their v2 names: the stages in order, then the
-/// terminal and rollback phases.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// terminal and rollback phases, and [`Phase::Other`] for a name this
+/// version does not know.
+///
+/// Compatibility contract: only `committed` and `rolled-back` mean "nothing
+/// to roll back". A newer version may add stage or rollback names (an older
+/// one rolls such a journal back from the start, which is idempotent), but
+/// must never add another finished phase.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum Phase {
     Prepared,
     PrepareState,
@@ -96,9 +105,39 @@ pub enum Phase {
     RollbackFiles,
     RollbackServices,
     RolledBack,
+    /// A phase written by a newer version (kebab-case, at most
+    /// [`PHASE_NAME_MAX`] bytes): unfinished, so it is rolled back.
+    Other(String),
 }
 
+/// Longest phase name accepted as [`Phase::Other`].
+pub const PHASE_NAME_MAX: usize = 64;
+
 impl Phase {
+    /// Every phase this version writes, in journal order.
+    pub const KNOWN: [Phase; 20] = [
+        Phase::Prepared,
+        Phase::PrepareState,
+        Phase::ReplaceCores,
+        Phase::PrepareCores,
+        Phase::PrepareCertificates,
+        Phase::CheckConfigurations,
+        Phase::StopOldServices,
+        Phase::CommitConfigurations,
+        Phase::ConfigureServices,
+        Phase::ApplyWebsite,
+        Phase::ApplyNetwork,
+        Phase::StartCores,
+        Phase::PublishClients,
+        Phase::PublishSubscription,
+        Phase::Finalize,
+        Phase::Committed,
+        Phase::RollbackStop,
+        Phase::RollbackFiles,
+        Phase::RollbackServices,
+        Phase::RolledBack,
+    ];
+
     /// The apply stages in execution order (`replace-cores` only runs with
     /// replacement cores).
     pub const STAGES: [Phase; 14] = [
@@ -126,7 +165,7 @@ impl Phase {
     ];
 
     /// The v2 journal name (`prepare-state`, `rolled-back`, …).
-    pub fn id(self) -> &'static str {
+    pub fn id(&self) -> &str {
         use Phase::*;
         match self {
             Prepared => "prepared",
@@ -149,11 +188,12 @@ impl Phase {
             RollbackFiles => "rollback-files",
             RollbackServices => "rollback-services",
             RolledBack => "rolled-back",
+            Other(name) => name,
         }
     }
 
     /// Progress label (`[3/14] 准备证书…`).
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         use Phase::*;
         match self {
             Prepared => "开始事务",
@@ -176,18 +216,42 @@ impl Phase {
             RollbackFiles => "回滚：恢复文件",
             RollbackServices => "回滚：恢复服务",
             RolledBack => "已回滚",
+            Other(_) => "未知阶段",
         }
     }
 
     /// Only cleanup is left (`committed` / `rolled-back`): recovery removes
-    /// the journal without rolling anything back.
-    pub fn is_finished(self) -> bool {
+    /// the journal without rolling anything back. Unknown phases are
+    /// unfinished.
+    pub fn is_finished(&self) -> bool {
         matches!(self, Phase::Committed | Phase::RolledBack)
     }
 
     /// A rollback had started.
-    pub fn is_rollback(self) -> bool {
-        Phase::ROLLBACK.contains(&self)
+    pub fn is_rollback(&self) -> bool {
+        Phase::ROLLBACK.contains(self)
+    }
+}
+
+impl TryFrom<String> for Phase {
+    type Error = Error;
+    fn try_from(name: String) -> Result<Phase> {
+        if let Some(known) = Phase::KNOWN.iter().find(|p| p.id() == name) {
+            return Ok(known.clone());
+        }
+        let kebab = !name.is_empty()
+            && name.len() <= PHASE_NAME_MAX
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        ensure!(kebab, "事务阶段无效");
+        Ok(Phase::Other(name))
+    }
+}
+
+impl From<Phase> for String {
+    fn from(phase: Phase) -> String {
+        phase.id().to_owned()
     }
 }
 
@@ -298,10 +362,10 @@ impl Journal {
         }
     }
 
-    pub fn phase(&self) -> Phase {
+    pub fn phase(&self) -> &Phase {
         match self {
-            Journal::V1(j) => j.phase,
-            Journal::V2(j) => j.phase,
+            Journal::V1(j) => &j.phase,
+            Journal::V2(j) => &j.phase,
         }
     }
 
@@ -366,7 +430,7 @@ impl Journal {
     pub fn info(&self) -> PhaseInfo {
         PhaseInfo {
             version: self.version(),
-            phase: self.phase(),
+            phase: self.phase().clone(),
             reason: self.reason().map(str::to_owned),
         }
     }
@@ -404,35 +468,62 @@ impl Journal {
     }
 
     /// Everything a rollback relies on, checked before the engine changes
-    /// anything: service names, the recorded old state, the journaled cron
-    /// lines (owned by the node, of a shape Onebox writes, sane anchors —
-    /// what `cron::restore` in `rollback-services` will require), and the
-    /// snapshot in `files/` against [`Journal::allowlist`]. The engine calls
-    /// this before entering `rollback-stop` (v2 ran `validate_files` there),
-    /// so a malformed journal never stops services and then aborts half-way.
+    /// anything: [`Journal::validate_files`] and [`Journal::check_old_config`].
+    /// The engine calls this (or the two parts, see `check_old_config`)
+    /// before entering `rollback-stop` (v2 ran `validate_files` there), so a
+    /// malformed journal never stops services and then aborts half-way.
     pub fn validate(&self, paths: &Paths) -> Result<()> {
         self.validate_with(paths, &self.allowlist(paths))
     }
 
-    /// [`Journal::validate`] against an explicit snapshot allowlist (tests,
-    /// or acme.sh homes other than [`acme_homes`](crate::apply::snapshot::acme_homes)).
+    /// [`Journal::validate`] against an explicit snapshot allowlist.
     pub fn validate_with(&self, paths: &Paths, allow: &Allowlist) -> Result<()> {
+        self.validate_files_with(paths, allow)?;
+        self.check_old_config()
+    }
+
+    /// What restoring the files, the service states and the crontab needs:
+    /// known service names, a version-1 old state of v2's shape, the
+    /// journaled cron lines (owned by the node, of a shape Onebox writes,
+    /// sane anchors — what `cron::restore` in `rollback-services` will
+    /// require) and the snapshot in `files/` against [`Journal::allowlist`].
+    pub fn validate_files(&self, paths: &Paths) -> Result<()> {
+        self.validate_files_with(paths, &self.allowlist(paths))
+    }
+
+    fn validate_files_with(&self, paths: &Paths, allow: &Allowlist) -> Result<()> {
         self.check_services()?;
-        self.check_old_state()?;
+        self.check_old_shape()?;
         cron::check_snapshot(paths, &self.cron(), Scope::Node)?;
         snapshot::validate(self.snapshot(), &files_dir(paths), allow)
     }
 
-    /// The recorded old state is usable by a rollback: v2's document of
-    /// string values (version 1, what `state::v2::migrate` needs) or a
-    /// configuration that passes `NodeConfig::validate` (version 2).
-    fn check_old_state(&self) -> Result<()> {
+    /// A version-1 old state is v2's document of string values (what
+    /// `state::v2::migrate` needs); a typed old configuration is shaped by
+    /// deserialization.
+    fn check_old_shape(&self) -> Result<()> {
         match self.old() {
-            OldState::None => Ok(()),
-            OldState::V2(_) => self.v2_values().map(drop),
-            OldState::Config(cfg) => cfg.validate(),
+            OldState::V2(_) => self
+                .v2_values()
+                .map(drop)
+                .context("事务日志记录的旧配置无效"),
+            OldState::None | OldState::Config(_) => Ok(()),
         }
-        .context("事务日志记录的旧配置无效")
+    }
+
+    /// A version-2 old configuration passes this version's
+    /// `NodeConfig::validate` — what re-applying the old network rules and
+    /// services from it needs. Not checked when the journal is loaded: a
+    /// rule tightened by a later version must not make a journal of an
+    /// earlier one unloadable (blocking backup, doctor, uninstall), and the
+    /// snapshot (state.json included) still restores the files, so the
+    /// engine may run [`Journal::validate_files`] alone and decide what to
+    /// re-apply when only this check fails.
+    pub fn check_old_config(&self) -> Result<()> {
+        match self.old() {
+            OldState::Config(cfg) => cfg.validate().context("事务日志记录的旧配置无效"),
+            OldState::None | OldState::V2(_) => Ok(()),
+        }
     }
 
     /// Every journaled service is a node service or a legacy network unit
@@ -484,9 +575,10 @@ pub fn load(paths: &Paths) -> Result<Option<Journal>> {
     parse(&bytes).map(Some)
 }
 
-/// Parse a journal of either version and check its contents (service
-/// names and old state; the snapshot is checked by [`Journal::validate`],
-/// which hashes every slot).
+/// Parse a journal of either version and check its shape (service names,
+/// a version-1 old state of v2's shape). Everything else — cron lines, this
+/// version's configuration rules, the snapshot (every slot is hashed) — is
+/// checked by [`Journal::validate`].
 pub fn parse(bytes: &[u8]) -> Result<Journal> {
     let doc: Value = serde_json::from_slice(bytes).context("事务日志无效")?;
     let journal = match doc.get("version").and_then(Value::as_u64) {
@@ -497,7 +589,7 @@ pub fn parse(bytes: &[u8]) -> Result<Journal> {
         _ => bail!("不支持的事务日志版本"),
     };
     journal.check_services()?;
-    journal.check_old_state()?;
+    journal.check_old_shape()?;
     Ok(journal)
 }
 
