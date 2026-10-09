@@ -85,6 +85,9 @@ pub const STALE_PROCESS: &str =
 const INVALID: &str = "自更新恢复记录无效";
 /// Recovery stopped because owned network rules could not be removed (v2).
 pub const RULES_LEFT: &str = "部分规则未清理，已保留台账";
+/// Refusal while a node journal is pending (v2 wording; shared with
+/// `apply::journal`).
+pub const PENDING_MESSAGE: &str = "存在未完成事务，请先 recover";
 /// The running process image (follows the kernel's magic link, so it is the
 /// mapped binary even after the file was replaced).
 const RUNNING_IMAGE: &str = "/proc/self/exe";
@@ -320,9 +323,10 @@ pub fn create_work_dir(paths: &Paths) -> Result<(String, PathBuf)> {
 }
 
 /// Recover an interrupted self-update (G §5.2). The caller holds the node
-/// lock and has already recovered the configuration journal. May return
-/// `Error::Exit { code: 75 }` after a successful recovery when this process
-/// is not the restored manager.
+/// lock and has already recovered the configuration journal: a pending
+/// `ROOT/.transaction` is refused with [`PENDING_MESSAGE`] before anything
+/// changes. May return `Error::Exit { code: 75 }` after a successful
+/// recovery when this process is not the restored manager.
 pub fn recover_program_locked(ctx: &Ctx, lock: &FileLock) -> Result<()> {
     recover_with(ctx, lock, Path::new(RUNNING_IMAGE))
 }
@@ -337,6 +341,13 @@ fn recover_with(ctx: &Ctx, lock: &FileLock, running_image: &Path) -> Result<()> 
     let Some(mut journal) = load(&ctx.paths)? else {
         return Ok(());
     };
+    // The node journal must be rolled back first: the child's snapshot may
+    // hold the new manager, so a later rollback would put it back over the
+    // restored one and the program journal would be gone.
+    match fs::symlink_metadata(ctx.paths.transaction()) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        _ => bail!("{PENDING_MESSAGE}"),
+    }
     let work = journal.validate(&ctx.paths)?;
     if journal.phase == ProgramPhase::Committed {
         let exe = &ctx.paths.executable;

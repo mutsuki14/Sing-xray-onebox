@@ -687,6 +687,29 @@ fn inherited_lock_skips_the_parents_record() {
 }
 
 #[test]
+fn a_pending_node_journal_is_refused_before_anything_changes() {
+    let fx = Fixture::new(true);
+    let (journal, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
+    fx.replace_and_regenerate();
+    mkdir(&fx.paths().transaction(), 0o700);
+    file(&fx.paths().transaction().join("journal.json"), 0o600, b"{}");
+    let err = fx.recover().unwrap_err().to_string();
+    assert_eq!(err, PENDING_MESSAGE);
+    assert_eq!(load(fx.paths()).unwrap().unwrap(), journal);
+    assert!(work.exists());
+    assert_eq!(fs::read(&fx.paths().executable).unwrap(), NEW);
+    assert_eq!(fs::read(fx.paths().state()).unwrap(), b"new-state");
+    assert!(fx.exec.calls().is_empty());
+    // Whatever the entry is (a file or a symlink, too).
+    fs::remove_dir_all(fx.paths().transaction()).unwrap();
+    symlink("/nonexistent", fx.paths().transaction()).unwrap();
+    assert_eq!(fx.recover().unwrap_err().to_string(), PENDING_MESSAGE);
+    fs::remove_file(fx.paths().transaction()).unwrap();
+    assert_eq!(exit_code(fx.recover()), 75);
+    fx.assert_restored(&work);
+}
+
+#[test]
 fn a_foreign_lock_is_refused() {
     let fx = Fixture::new(true);
     fx.prepare(VERSION, ProgramPhase::Replaced);

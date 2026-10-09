@@ -69,7 +69,7 @@ pub const SERVICES: [&str; 6] = [
 /// they are never started or stopped.
 pub const LEGACY_NETWORK_SERVICES: [&str; 2] = ["onebox-net", "onebox-hop"];
 /// Refusal of operations that must wait for `onebox recover` (v2 wording).
-pub const PENDING_MESSAGE: &str = "存在未完成事务，请先 recover";
+pub const PENDING_MESSAGE: &str = program_journal::PENDING_MESSAGE;
 
 /// Journal phases with their v2 names: the stages in order, then the
 /// terminal and rollback phases.
