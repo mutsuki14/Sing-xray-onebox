@@ -7,7 +7,9 @@
 
 pub mod args;
 pub mod help;
+pub mod options;
 pub mod registry;
+pub mod session;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};

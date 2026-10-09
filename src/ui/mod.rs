@@ -9,6 +9,7 @@
 //! [`confirm_danger`], which requires an explicit `--force` (B-9.1#10).
 
 pub mod auto;
+pub mod menu;
 pub mod out;
 pub mod qr;
 pub mod scripted;
