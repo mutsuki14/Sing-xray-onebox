@@ -72,8 +72,11 @@ def read_only_phase(s: sb.Sandbox) -> None:
     s.run("install", "--help")
     plan = s.run("plan", "--protocols", "anytls-reality", "--port", "anytls-reality=22443", "--json")
     planned = json.loads(plan.stdout)
-    check("anytls-reality" in json.dumps(planned), "plan --json does not mention the protocol")
-    s.run("add", "anytls-reality", "--dry-run", success=False)
+    check(planned["dry_run"] is True, "plan --json is not marked as a dry run")
+    check([(p["protocol"], p["port"]) for p in planned["protocols"]] == [("anytls-reality", 22443)],
+          f"unexpected plan: {planned['protocols']}")
+    rejected = s.run("add", "anytls-reality", "--dry-run", success=False)
+    check("--dry-run" in rejected.stderr, f"add --dry-run failed for another reason:\n{rejected.stderr}")
     check(not s.etc.exists(), "read-only CLI invocations created ONEBOX_DIR")
     check(not s.forbidden_calls(), f"read-only phase ran forbidden programs: {s.forbidden_calls()}")
 
@@ -148,7 +151,8 @@ def conflict_phase(s: sb.Sandbox, ports: Ports) -> None:
     """Two conflicting requests leave the same healthy generation intact."""
     stable = s.state_path.read_bytes()
     for _ in range(2):
-        s.run("port", "vless-reality", str(ports.additional), success=False)
+        refused = s.run("port", "vless-reality", str(ports.additional), success=False)
+        check("端口" in refused.stderr, f"refused for another reason:\n{refused.stderr}")
         check(s.state_path.read_bytes() == stable, "a rejected port change modified state.json")
         check(not s.journal_dir.exists(), "a rejected port change left a journal")
         sb.wait_listening(ports.second)
@@ -158,7 +162,8 @@ def recovery_phase(s: sb.Sandbox, ports: Ports) -> None:
     """Fail the new start and the rollback restart; recover restores the rest."""
     stable = s.state_path.read_bytes()
     s.fail_starts(2)
-    s.run("port", "vless-reality", str(ports.rejected), success=False)
+    failed = s.run("port", "vless-reality", str(ports.rejected), success=False)
+    check("恢复未完成" in failed.stderr, f"the rollback should have failed too:\n{failed.stderr}")
     check(s.journal_dir.is_dir(), "a failed rollback must retain the recovery journal")
     s.run("recover")
     check(not s.journal_dir.exists(), "recover left the journal behind")
@@ -274,7 +279,9 @@ def v2_migration_phase(s: sb.Sandbox, ports: Ports) -> None:
     v2_devices = v2_settings(ports.subscription, sb.sha256_bytes(token.encode()))["devices"]
     check(devices == v2_devices, f"devices not migrated verbatim: {devices}")
     check((s.etc / "subscription/settings.json").is_file(), "v3 must leave v2 settings.json alone")
-    check((s.etc / "services/onebox-sing-box.json").is_file(), "service specs not rewritten")
+    specs = sorted(p.stem for p in (s.etc / "services").glob("*.json"))
+    check(specs == ["onebox-network", "onebox-sing-box", "onebox-subscription"],
+          f"service specs not rewritten: {specs}")
     cron = s.crontab()
     check(cron[0] == "0 1 * * * /usr/bin/true # admin job", f"foreign cron line moved: {cron}")
     check(not any("# onebox-rust:" in line or "# onebox-native-cert-" in line for line in cron),
@@ -299,7 +306,10 @@ def v1_refusal_phase(s: sb.Sandbox) -> None:
     for command in (("regen",), ("info",)):
         proc = s.run(*command, success=False)
         check(V1_MESSAGE in proc.stderr, f"{command[0]}: missing the 1.x message:\n{proc.stderr}")
-    sb.assert_same_tree(before, sb.tree_digest(s.etc, exclude=(".apply.lock",)), "ONEBOX_DIR of a 1.x host")
+    # The node lock file may be created on the way; nothing else may change.
+    after = sb.tree_digest(s.etc, exclude=(".apply.lock",))
+    sb.assert_same_tree(before, after, "ONEBOX_DIR of a 1.x host")
+    check(not s.forbidden_calls(), f"forbidden external calls: {s.forbidden_calls()}")
 
 
 def uninstall_phase(s: sb.Sandbox, ports: Ports) -> None:

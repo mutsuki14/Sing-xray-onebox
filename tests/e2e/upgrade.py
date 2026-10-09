@@ -185,7 +185,7 @@ def parent_pid(pid: int) -> int:
     return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
 
 
-def assert_migrated(node: V2Node, worker_before: int, front_before: int) -> None:
+def assert_migrated(node: V2Node, worker_before: dict, front_before: int) -> None:
     """The node now runs v3 with everything v2 had."""
     s, values = node.sandbox, node.values
     state = s.state()
@@ -211,7 +211,9 @@ def assert_migrated(node: V2Node, worker_before: int, front_before: int) -> None
     assert_no_journals(s)
 
 
-def assert_v3_services(node: V2Node, worker_before: int, front_before: int) -> None:
+def assert_v3_services(node: V2Node, worker_before: dict, front_before: int) -> None:
+    """Units, cron lines and processes are v3's; WORKER_BEFORE is the v2
+    worker's PID record, FRONT_BEFORE the PID of v2's subscription front."""
     s = node.sandbox
     cron = s.crontab()
     check(not any("# onebox-rust:" in line for line in cron), f"v2 cron markers survived: {cron}")
@@ -230,7 +232,8 @@ def assert_v3_services(node: V2Node, worker_before: int, front_before: int) -> N
         check((specs[name]["program"], specs[name]["args"]) == (str(program), args),
               f"unexpected {name} spec: {specs[name]}")
     worker = s.service_pid("onebox-subscription")
-    check(worker and worker != worker_before, "the subscription worker was not restarted")
+    check(worker and s.pid_record("onebox-subscription") != worker_before,
+          "the subscription worker was not restarted (same PID record)")
     check(s.process_exe(worker) == s.exe, "the worker does not run the installed manager")
     check(sb.sha256_file(s.exe) == sb.sha256_file(node.tools.v3), "the installed manager is not v3")
     check(not sb.proc_matches(front_before, node.tools.front), "the v2 front is still running")
@@ -239,11 +242,18 @@ def assert_v3_services(node: V2Node, worker_before: int, front_before: int) -> N
 
 # ----- scenarios ---------------------------------------------------------
 
+def v2_subscription_services(s: sb.Sandbox) -> tuple[dict, int]:
+    """(PID record of v2's worker, PID of v2's front); both must run."""
+    worker, front = s.pid_record("onebox-subscription"), s.service_pid("onebox-subscription-web")
+    check(worker and s.service_pid("onebox-subscription") and front,
+          "the v2 subscription services are not running")
+    return worker, front
+
+
 def scenario_regen(node: V2Node) -> None:
     """(1) v3 regen as the self-update child of a v2 parent."""
     s = node.sandbox
-    worker, front = s.service_pid("onebox-subscription"), s.service_pid("onebox-subscription-web")
-    check(worker and front, "the v2 subscription services are not running")
+    worker, front = v2_subscription_services(s)
     s.install_exe(node.tools.v3)
     with s.hold_node_lock() as lock_env:
         busy = s.run("recover", success=False)
@@ -288,6 +298,8 @@ def scenario_v2_journal(node: V2Node) -> None:
         v2.wait()
     journal = json.loads((s.journal_dir / "journal.json").read_text())
     check(journal.get("version") == 1, f"not a v2 journal: version {journal.get('version')}")
+    # Frozen in apply-network: new configuration committed, old core stopped.
+    check(journal.get("phase") == "apply-network", f"unexpected v2 phase {journal.get('phase')}")
     sb.wait_listening(node.core_port, False)
     s.run("recover")
     assert_no_journals(s)
@@ -318,7 +330,8 @@ def scenario_self_update_journal(node: V2Node) -> None:
     check((work / "old").is_file() and (work / "config").is_dir(), f"incomplete work directory {work}")
     check(record["old_sha256"] == sb.sha256_file(tools.v2), "the record does not name v2 as old")
     check(sb.sha256_file(s.exe) == record["new_sha256"] == sb.sha256_file(tools.v3), "EXE is not v3")
-    check((s.journal_dir / "journal.json").is_file(), "the v3 child left no journal")
+    child_journal = json.loads((s.journal_dir / "journal.json").read_text())
+    check(child_journal.get("phase") == "apply-network", f"unexpected child journal: {child_journal.get('phase')}")
     proc = s.run("recover", success=None)
     check(proc.returncode == EXIT_STALE, f"recover exited {proc.returncode}:\n{proc.stderr}\n{proc.stdout}")
     check(STALE_MESSAGE in proc.stderr + proc.stdout, f"missing the stale-process message:\n{proc.stderr}")
@@ -334,7 +347,7 @@ def scenario_self_update_journal(node: V2Node) -> None:
 def scenario_update_script(node: V2Node) -> None:
     """(5) v2's update-script upgrades to v3 end to end."""
     s, tools = node.sandbox, node.tools
-    worker, front = s.service_pid("onebox-subscription"), s.service_pid("onebox-subscription-web")
+    worker, front = v2_subscription_services(s)
     s.publish_release(tools.v3, tools.v3_version)
     proc = s.run("update-script", binary=tools.v2)
     check(f"程序已更新到 {tools.v3_version}" in proc.stdout, f"unexpected output:\n{proc.stdout}")
