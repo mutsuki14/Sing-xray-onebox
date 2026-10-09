@@ -631,3 +631,36 @@ fn errors_before_the_transaction() {
         .unwrap_err();
     assert!(matches!(err, Error::NotInstalled), "{err}");
 }
+
+/// The apply never prompts (G8): credentials a due DNS-01 renewal of the
+/// update's apply lacks are asked for before anything is staged.
+#[test]
+fn missing_cloudflare_credentials_are_resolved_before_staging() {
+    use crate::domain::config::{AcmeMethod, ProxyCertMode, ProxyTls};
+    let mut fx = Fx::new(&[Core::Singbox], None, None);
+    let mut cfg = fixtures::config(&[(Protocol::Trojan, 443, Core::Singbox)]);
+    cfg.tls = Some(ProxyTls {
+        mode: ProxyCertMode::Acme {
+            domain: "proxy.example.com".into(),
+            method: AcmeMethod::Cloudflare,
+        },
+        pinned: false,
+    });
+    StateStore::save(&fx.ctx, &cfg).unwrap();
+    fx.loaded_hash = StateStore::current_hash(&fx.ctx).unwrap();
+    fx.live(Core::Singbox, "1.14.2");
+    fx.offline(Core::Singbox, "1.14.3");
+
+    fx.ui.set_interactive(false);
+    let err = fx.run(CoreSelection::All, None, false).unwrap_err();
+    assert_eq!(err.to_string(), crate::cert::cloudflare::MISSING);
+    assert!(fx.applied().is_empty());
+    assert!(fx.staging_dirs().is_empty(), "nothing staged");
+
+    fx.ui.set_interactive(true);
+    fx.ui.extend(["fake-token-0123", ""]);
+    fx.run(CoreSelection::All, None, false).unwrap();
+    let applied = fx.request();
+    let given = applied.request.intents.cloudflare.as_ref().unwrap();
+    assert_eq!(given.get("CF_Token"), Some("fake-token-0123"));
+}

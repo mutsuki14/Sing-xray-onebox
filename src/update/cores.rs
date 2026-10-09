@@ -54,6 +54,7 @@
 
 use super::{selfupdate, Updater, UPDATE_BUSY};
 use crate::apply::ApplyRequest;
+use crate::cert::{self, CertScopes, CfCredentials};
 use crate::domain::config::CoreVersions;
 use crate::domain::defaults::XRAY_TESTED_VERSION;
 use crate::domain::protocol::Core;
@@ -343,11 +344,23 @@ impl Updater<'_> {
         let targets = targets(&loaded.config, selection, &wanted)?;
         let plans = self.plan(targets, force)?;
         self.confirm(&plans)?;
-        let unchanged = updated_config(&loaded.config, &plans) == loaded.config;
-        let outcome = if !plans.iter().any(Plan::installs) && unchanged {
+        let next = updated_config(&loaded.config, &plans);
+        let outcome = if !plans.iter().any(Plan::installs) && next == loaded.config {
             Committed::Nothing
         } else {
-            self.stage_and_commit(selection, &wanted, &plans)?
+            // An apply never prompts (G8): credentials a due DNS-01
+            // renewal of that apply lacks are asked for now, unlocked.
+            let cloudflare = if plans.iter().any(Plan::installs) || loaded.origin != Origin::V3 {
+                cert::cloudflare::resolve_for_apply(
+                    self.ctx,
+                    self.ctx.ui.as_ref(),
+                    &next,
+                    CertScopes::NONE,
+                )?
+            } else {
+                None
+            };
+            self.stage_and_commit(selection, &wanted, &plans, cloudflare)?
         };
         out::ok(match outcome {
             Committed::Applied => DONE,
@@ -471,6 +484,7 @@ impl Updater<'_> {
         selection: CoreSelection,
         wanted: &Wanted,
         plans: &[Plan],
+        cloudflare: Option<CfCredentials>,
     ) -> Result<Committed> {
         let installing: Vec<(Core, &Resolved)> = plans
             .iter()
@@ -483,7 +497,7 @@ impl Updater<'_> {
         };
         let result = self
             .download_all(staging.as_deref(), &installing)
-            .and_then(|staged| self.commit(selection, wanted, plans, staged));
+            .and_then(|staged| self.commit(selection, wanted, plans, staged, cloudflare));
         if let Some(dir) = &staging {
             settle_staging(dir, result.is_ok(), self.warn);
         }
@@ -501,6 +515,7 @@ impl Updater<'_> {
         wanted: &Wanted,
         plans: &[Plan],
         staged: Vec<(Core, PathBuf)>,
+        cloudflare: Option<CfCredentials>,
     ) -> Result<Committed> {
         let lock = self.commit_lock()?;
         let loaded = self.recover_and_load(&lock)?;
@@ -517,6 +532,7 @@ impl Updater<'_> {
         }
         let mut req = ApplyRequest::from_loaded(&loaded, config, REASON);
         req.intents.replace_cores = staged;
+        req.intents.cloudflare = cloudflare;
         self.engine.apply(self.ctx, &lock, req)?;
         Ok(Committed::Applied)
     }
