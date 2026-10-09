@@ -243,3 +243,17 @@ fn mode_and_tls_ids() {
         "/srv/x/y.pem"
     );
 }
+
+#[test]
+fn empty_certificate_paths_stay_empty_and_are_refused() {
+    assert_eq!(absolute_path("", Path::new("/srv")).unwrap(), "");
+    assert_eq!(absolute_path("  ", Path::new("/srv")).unwrap(), "");
+    // `--cert=` / `--key ""`: the missing pair is reported by validation,
+    // not discovered by the import inside the transaction.
+    let mut d = web_draft();
+    let custom = flags(&[("tls", "custom"), ("cert", ""), ("key", "/etc/k.pem")]).unwrap();
+    custom.apply(&mut d);
+    assert_eq!(d.cert, "");
+    let err = finish(&d, None).unwrap_err();
+    assert_eq!(err.to_string(), "自备证书需要 --cert 与 --key");
+}

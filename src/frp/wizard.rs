@@ -310,6 +310,48 @@ mod tests {
     }
 
     #[test]
+    fn empty_custom_paths_resume_at_the_control_port() {
+        // Enter on the empty path defaults: the validation step refuses the
+        // missing pair and the wizard resumes at step 2 (the paths are not
+        // turned into the working directory).
+        let answers = [
+            "",
+            "frp.example.com",
+            "",
+            "",
+            "app.example.com",
+            "3",
+            // First pass: web ports and the empty certificate paths.
+            "",
+            "",
+            "",
+            "",
+            "",
+            // Second pass from the control port on.
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "/etc/c.pem",
+            "/etc/k.pem",
+        ];
+        let (state, ui) = wizard(&answers, Draft::fresh(true));
+        let web = state.unwrap().web().cloned().unwrap();
+        assert_eq!(
+            web.tls,
+            WebTls::Custom {
+                cert: "/etc/c.pem".into(),
+                key: "/etc/k.pem".into()
+            }
+        );
+        assert_eq!(ui.prompts()[11], "控制端口");
+        assert_eq!(ui.remaining(), 0);
+    }
+
+    #[test]
     fn cancel_and_eof_abort() {
         let (result, _) = wizard(&["", "q"], Draft::fresh(true));
         assert!(result.unwrap_err().is_cancelled());

@@ -292,8 +292,13 @@ pub fn normalize_version(value: &str) -> String {
     value.trim_start_matches('v').to_owned()
 }
 
-/// `path` made absolute against `cwd` (no `..` allowed).
+/// `path` made absolute against `cwd` (no `..` allowed). An empty path
+/// stays empty, so the state validation reports the missing certificate
+/// (`cwd.join("")` would be the directory itself and pass as a path).
 pub fn absolute_path(path: &str, cwd: &Path) -> Result<String> {
+    if path.trim().is_empty() {
+        return Ok(String::new());
+    }
     let p = Path::new(path);
     ensure!(
         !p.components().any(|c| c == Component::ParentDir),
