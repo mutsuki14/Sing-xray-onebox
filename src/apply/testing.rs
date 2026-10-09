@@ -103,6 +103,12 @@ pub fn build_v2_layout(root: &Path) -> Paths {
         "# onebox-rust-retired-deployment={}\nLe_Domain='example.com'\nLe_RealFullChainPath=''\nLe_RealKeyPath=''\n",
         etc.join("tls").display()
     );
+    dir(&acme_home(root), 0o700);
+    file(
+        &acme_home(root).join("account.conf"),
+        0o600,
+        b"ACCOUNT_EMAIL='admin@example.com'",
+    );
     dir(&acme_home(root).join("example.com_ecc"), 0o700);
     file(&acme_deployment(root), 0o600, deployment.as_bytes());
     dir(&acme_home(root).join("other.org_ecc"), 0o700);

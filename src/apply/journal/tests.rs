@@ -607,3 +607,27 @@ fn validate_refuses_cron_lines_a_rollback_could_not_restore() {
     let err = Journal::V2(v3).validate(&paths).unwrap_err();
     assert_eq!(err.to_string(), "事务记录的 crontab 位置无效，拒绝恢复");
 }
+
+#[test]
+fn a_v2_journal_with_a_custom_acme_home_validates_without_acme_home_set() {
+    // The deployment lives under the fixture's non-default home and no
+    // ACME_HOME is consulted (a boot `net-apply` runs without it): the
+    // recorded path alone, under a recognisable acme.sh home, is accepted.
+    let dir_ = tmp();
+    let root = dir_.path();
+    let (paths, doc, _) = v2_journal_on_disk(root);
+    let journal = parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_ne!(acme_home(root), Path::new(snapshot::DEFAULT_ACME_HOME));
+    assert!(journal
+        .snapshot()
+        .entries
+        .iter()
+        .any(|e| e.target == acme_deployment(root)));
+    journal.validate(&paths).unwrap();
+    // Without anything that makes it an acme.sh home, it is refused.
+    fs::remove_file(acme_home(root).join("account.conf")).unwrap();
+    assert_eq!(
+        journal.validate(&paths).unwrap_err().to_string(),
+        "快照路径范围不合法"
+    );
+}

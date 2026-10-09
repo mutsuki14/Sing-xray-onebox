@@ -416,6 +416,66 @@ fn acme_deployment_pattern() {
 }
 
 #[test]
+fn any_recognisable_acme_home_is_accepted_for_v2_journals() {
+    let dir_ = tmp();
+    let root = dir_.path();
+    let paths = v2_paths(root);
+    let list = v2_node_allowlist(&paths);
+    let deployment = |home: &Path| home.join("example.com_ecc/example.com.conf");
+    // A custom home (the recorded path alone decides; no `$ACME_HOME`).
+    let custom = root.join("srv/acme");
+    file(&deployment(&custom), 0o600, b"Le_Domain='example.com'");
+    assert_eq!(
+        list.owned_root(&deployment(&custom)),
+        None,
+        "no acme.sh marker"
+    );
+    file(&custom.join("account.conf"), 0o600, b"ACCOUNT");
+    assert_eq!(list.owned_root(&deployment(&custom)), Some(custom.clone()));
+    fs::remove_file(custom.join("account.conf")).unwrap();
+    file(&custom.join("acme.sh"), 0o755, b"#!/bin/sh");
+    assert_eq!(list.owned_root(&deployment(&custom)), Some(custom.clone()));
+    // Markers must be regular files, not symlinks or directories.
+    fs::remove_file(custom.join("acme.sh")).unwrap();
+    symlink("/etc/hostname", custom.join("acme.sh")).unwrap();
+    fs::create_dir(custom.join("account.conf")).unwrap();
+    assert_eq!(list.owned_root(&deployment(&custom)), None);
+    // v2's default home needs no marker.
+    let default = Path::new(DEFAULT_ACME_HOME);
+    assert_eq!(
+        list.owned_root(&deployment(default)),
+        Some(default.to_path_buf())
+    );
+    // Never a system directory or one overlapping Onebox's own trees, even
+    // with a marker (ROOT/tls/acme is snapshotted with ROOT/tls).
+    let inside_root = paths.root.join("tls/acme");
+    file(&inside_root.join("account.conf"), 0o600, b"ACCOUNT");
+    file(&deployment(&inside_root), 0o600, b"x");
+    assert_eq!(list.owned_root(&deployment(&inside_root)), None);
+    file(&root.join("account.conf"), 0o600, b"ACCOUNT");
+    file(&deployment(root), 0o600, b"x");
+    assert_eq!(list.owned_root(&deployment(root)), None, "contains ROOT");
+    let broad = PathBuf::from("/root/example.com_ecc/example.com.conf");
+    assert_eq!(list.owned_root(&broad), None);
+    // Only the deployment file itself, with a domain v2 accepted.
+    fs::remove_dir_all(custom.join("account.conf")).unwrap();
+    file(&custom.join("account.conf"), 0o600, b"ACCOUNT");
+    for bad in [
+        custom.join("example.com_ecc/other.com.conf"),
+        custom.join("example.com_ecc/example.com.csr"),
+        custom.join("localhost_ecc/localhost.conf"),
+        custom.join("account.conf"),
+    ] {
+        assert_eq!(list.owned_root(&bad), None, "{}", bad.display());
+    }
+    // The explicit form knows only the homes it is given.
+    let explicit = v2_node_allowlist_with(&paths, &[]);
+    assert_eq!(explicit.owned_root(&deployment(&custom)), None);
+    explicit.check_scope().unwrap();
+    list.check_scope().unwrap();
+}
+
+#[test]
 fn node_allowlist_patterns() {
     let paths = v2_paths(Path::new("/r"));
     let list = node_allowlist(&paths);

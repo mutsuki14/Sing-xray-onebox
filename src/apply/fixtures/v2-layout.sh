@@ -54,6 +54,8 @@ md 755 "$T/initd/init.d"
 md 755 "$T/initd/local.d"
 mk 755 "$T/initd/local.d/onebox-hop.start" "#!/bin/sh"
 mk 755 "$T/initd/local.d/admin.start" "#!/bin/sh admin"
+md 700 "$T/acme-home"
+mk 600 "$T/acme-home/account.conf" "ACCOUNT_EMAIL='admin@example.com'"
 md 700 "$T/acme-home/example.com_ecc"
 printf '# onebox-rust-retired-deployment=%s\nLe_Domain=%s\nLe_RealFullChainPath=%s\nLe_RealKeyPath=%s\n' \
 	"$T/etc/tls" "'example.com'" "''" "''" >"$T/acme-home/example.com_ecc/example.com.conf"

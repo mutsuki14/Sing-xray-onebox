@@ -5,9 +5,11 @@
 //! - written by v2 (config journal version 1, `.self-update.json` version
 //!   1): v2 required the snapshot's target set to *equal* the allowlist it
 //!   recomputed from its context. [`v2_node_allowlist`] is that list (38
-//!   fixed targets in v2 slot order) plus a pattern rule for the retired
+//!   fixed targets in v2 slot order) plus pattern rules for the retired
 //!   acme.sh deployment files v2 snapshotted on hosts that came from v1
-//!   (E-8.1#5: those paths are validated by pattern, never recomputed);
+//!   (E-8.1#5: those paths are validated by pattern against the recorded
+//!   path alone — v2 recomputed them from `$ACME_HOME`, which the boot
+//!   service did not carry);
 //! - written by v3: the journal records its own target list and every target
 //!   must be accepted by [`node_allowlist`] (any plain `ROOT` child, exactly
 //!   the node-owned paths elsewhere), so a v3 adding or dropping a `ROOT`
@@ -85,6 +87,12 @@ pub enum TargetRule {
     /// `{home}/{domain}_ecc/{domain}.conf` (a retired acme.sh deployment);
     /// symlink checks start at `home`.
     AcmeDeployment { home: PathBuf },
+    /// `{home}/{domain}_ecc/{domain}.conf` under any directory that is
+    /// recognisably an acme.sh home ([`is_acme_home`]), is not a system
+    /// directory and neither contains nor lies inside any of `outside`
+    /// (Onebox's own trees, whose acme.sh copies are snapshotted with them);
+    /// symlink checks start at that home.
+    AnyAcmeDeployment { outside: Vec<PathBuf> },
 }
 
 impl TargetRule {
@@ -97,29 +105,47 @@ impl TargetRule {
                 (target.parent() == Some(dir.as_path()) && plain_name(name)).then(|| dir.clone())
             }
             TargetRule::AcmeDeployment { home } => {
-                let rel = target.strip_prefix(home).ok()?;
-                let mut parts = rel.components().map(|c| match c {
-                    Component::Normal(name) => name.to_str(),
-                    _ => None,
-                });
-                let (dir, file) = (parts.next()??, parts.next()??);
-                let domain = dir.strip_suffix("_ecc")?;
-                (parts.next().is_none()
-                    && v2_valid_domain(domain)
-                    && file.strip_suffix(".conf") == Some(domain))
-                .then(|| home.clone())
+                (deployment_home(target)? == home).then(|| home.clone())
+            }
+            TargetRule::AnyAcmeDeployment { outside } => {
+                let home = deployment_home(target)?;
+                let apart = outside
+                    .iter()
+                    .all(|o| !home.starts_with(o) && !o.starts_with(home));
+                (apart && check_not_broad(home).is_ok() && is_acme_home(home))
+                    .then(|| home.to_path_buf())
             }
         }
     }
 
-    /// The directory (or path) this rule exposes to restores.
-    fn scope(&self) -> &Path {
+    /// The directory (or path) this rule exposes to restores; `None` when
+    /// it depends on the target (checked per target instead).
+    fn scope(&self) -> Option<&Path> {
         match self {
-            TargetRule::Exact(path) => path,
-            TargetRule::Child { dir } => dir,
-            TargetRule::AcmeDeployment { home } => home,
+            TargetRule::Exact(path) => Some(path),
+            TargetRule::Child { dir } => Some(dir),
+            TargetRule::AcmeDeployment { home } => Some(home),
+            TargetRule::AnyAcmeDeployment { .. } => None,
         }
     }
+}
+
+/// The acme.sh home of `target` when it is `{home}/{domain}_ecc/{domain}.conf`
+/// with a domain v2 accepted.
+fn deployment_home(target: &Path) -> Option<&Path> {
+    let file = target.file_name()?.to_str()?;
+    let dir = target.parent()?;
+    let domain = dir.file_name()?.to_str()?.strip_suffix("_ecc")?;
+    let home = dir.parent()?;
+    (v2_valid_domain(domain) && file.strip_suffix(".conf") == Some(domain)).then_some(home)
+}
+
+/// Whether `home` holds a regular `acme.sh` or `account.conf` (not
+/// following symlinks): what every acme.sh installation has.
+pub fn is_acme_home(home: &Path) -> bool {
+    ["acme.sh", "account.conf"].iter().any(|name| {
+        std::fs::symlink_metadata(home.join(name)).is_ok_and(|m| m.file_type().is_file())
+    })
 }
 
 /// The targets a snapshot may contain: every `required` path exactly once,
@@ -199,7 +225,7 @@ impl Allowlist {
             .iter()
             .chain(&self.roots)
             .map(PathBuf::as_path)
-            .chain(self.rules.iter().map(TargetRule::scope));
+            .chain(self.rules.iter().filter_map(TargetRule::scope));
         for scope in scopes {
             check_not_broad(scope)?;
         }
@@ -300,48 +326,47 @@ pub fn v2_fixed_targets(paths: &Paths) -> Vec<PathBuf> {
     out
 }
 
-/// acme.sh homes whose retired Onebox deployments v2 may have snapshotted:
-/// `$ACME_HOME` (when it is a clean absolute path) and `/root/.acme.sh`.
-pub fn acme_homes() -> Vec<PathBuf> {
-    let mut homes = Vec::new();
-    if let Some(home) = std::env::var_os("ACME_HOME").map(PathBuf::from) {
-        if is_clean_absolute(&home) && home.to_str().is_some() {
-            homes.push(home);
-        }
-    }
-    let default = PathBuf::from(DEFAULT_ACME_HOME);
-    if !homes.contains(&default) {
-        homes.push(default);
-    }
-    homes
+/// The configured node directories: v2 `safe_roots` guarded them, and no
+/// acme.sh home may overlap them.
+fn node_roots(paths: &Paths) -> [PathBuf; 5] {
+    [
+        paths.root.clone(),
+        paths.bin.clone(),
+        paths.site_root.clone(),
+        paths.systemd.clone(),
+        paths.initd.clone(),
+    ]
 }
 
 /// The configured node roots v2 `safe_roots` guarded: none may be a system
 /// directory, and the site root and `ROOT` must not contain one another.
 fn guard_node_roots(list: Allowlist, paths: &Paths) -> Allowlist {
-    [
-        &paths.root,
-        &paths.bin,
-        &paths.site_root,
-        &paths.systemd,
-        &paths.initd,
-    ]
-    .into_iter()
-    .fold(list, |list, root| list.guard_root(root.clone()))
-    .keep_apart(
-        paths.root.clone(),
-        paths.site_root.clone(),
-        "网站目录和配置目录不能互相包含",
-    )
+    node_roots(paths)
+        .into_iter()
+        .fold(list, Allowlist::guard_root)
+        .keep_apart(
+            paths.root.clone(),
+            paths.site_root.clone(),
+            "网站目录和配置目录不能互相包含",
+        )
 }
 
 /// The allowlist for snapshots written by v2 (G1): the 38 fixed targets,
-/// each required, plus retired acme.sh deployments under [`acme_homes`].
+/// each required, plus retired acme.sh deployments under v2's default home
+/// [`DEFAULT_ACME_HOME`] or under any other recognisable acme.sh home
+/// ([`TargetRule::AnyAcmeDeployment`]). Nothing depends on the process
+/// environment: a journal v2 wrote with a custom `ACME_HOME` validates in
+/// a boot `net-apply`, which runs without it.
 pub fn v2_node_allowlist(paths: &Paths) -> Allowlist {
-    v2_node_allowlist_with(paths, &acme_homes())
+    v2_node_allowlist_with(paths, &[PathBuf::from(DEFAULT_ACME_HOME)]).with_rule(
+        TargetRule::AnyAcmeDeployment {
+            outside: node_roots(paths).to_vec(),
+        },
+    )
 }
 
-/// [`v2_node_allowlist`] with explicit acme.sh homes (tests).
+/// The 38 fixed targets plus deployments under exactly `acme_homes` (no
+/// recognition rule).
 pub fn v2_node_allowlist_with(paths: &Paths, acme_homes: &[PathBuf]) -> Allowlist {
     let list = acme_homes
         .iter()

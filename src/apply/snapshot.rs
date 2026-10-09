@@ -14,9 +14,10 @@
 //! Changes from v2:
 //! - the allowlist is explicit ([`Allowlist`]): v2 journals are checked
 //!   against v2's fixed list plus a *pattern* for retired acme.sh
-//!   deployments (E-8.1#5: v2 recomputed those from `$ACME_HOME`, which the
-//!   boot service did not carry, so `net-apply` refused the journal), v3
-//!   journals against owned-root patterns of their recorded targets;
+//!   deployments under any recognisable acme.sh home (E-8.1#5: v2
+//!   recomputed those from `$ACME_HOME`, which the boot service did not
+//!   carry, so `net-apply` refused the journal), v3 journals against
+//!   owned-root patterns of their recorded targets;
 //! - symlink checks start below the configured roots, so distributions with
 //!   a symlinked `/etc/init.d` work (E-8.1#6);
 //! - copies and digests stream file contents (E-8.1#22) and the 2 GiB cap
@@ -36,7 +37,7 @@ mod allowlist;
 mod digest;
 
 pub use allowlist::{
-    acme_homes, node_allowlist, subscription_acme_dir, v2_fixed_targets, v2_node_allowlist,
+    is_acme_home, node_allowlist, subscription_acme_dir, v2_fixed_targets, v2_node_allowlist,
     v2_node_allowlist_with, Allowlist, TargetRule, DEFAULT_ACME_HOME,
 };
 pub use digest::{digest_tree, MAX_FILE_BYTES};
