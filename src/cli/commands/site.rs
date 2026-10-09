@@ -14,7 +14,9 @@
 //! is the newest by creation time (v2: by name); `https` without a site is
 //! refused; `site renew` renews without a full apply (G9); `preview` does
 //! not need an enabled site (it renders the default title and description
-//! then, as v2 did); page edits without a site say `请先启用网站`.
+//! then, as v2 did); page edits without a site say `请先启用网站`;
+//! `enable --site-https off` keeps the HTTPS 443 entrance closed (v2
+//! always opened it, so closing it took a second apply).
 
 use crate::cert::{CertScope, CertScopes};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
@@ -31,9 +33,13 @@ use std::path::Path;
 pub const PUBLISHED: &str = "网站已发布，原内容保存在网站备份目录";
 const RESTORED: &str = "网站已恢复";
 pub const EDITED: &str = "网站已被手动修改或导入，请编辑原网页后重新导入";
-const ENABLE_USAGE: &str = "用法: site enable 域名 [--tls http|cf|custom --cert 文件 --key 文件]";
+const ENABLE_USAGE: &str =
+    "用法: site enable 域名 [--tls http|cf|custom --cert 文件 --key 文件] [--site-https on|off]";
 
 const TITLE: OptSpec = OptSpec::value("title", "标题", "主页标题");
+/// `site enable --site-https`: the entrance is decided with the enable, so
+/// keeping 443 closed needs no second apply that briefly opens it.
+const ENABLE_HTTPS: OptSpec = OptSpec::value("site-https", "on|off", "HTTPS 443 入口（默认 on）");
 const DESCRIPTION: OptSpec = OptSpec::value("description", "文字", "主页描述");
 const THEME: OptSpec = OptSpec::value("theme", "forest|ocean|slate", "配色主题");
 
@@ -44,7 +50,7 @@ const fn sub(name: &'static str, summary: &'static str) -> CommandSpec {
 pub const SITE: CommandSpec = CommandSpec::new("site", Group::Feature, "自有域名 REALITY 网站")
     .usage(&[
         "site [info]",
-        "site enable 域名 [--tls http|cf|custom --cert 文件 --key 文件]",
+        "site enable 域名 [--tls http|cf|custom --cert 文件 --key 文件] [--site-https on|off]",
         "site disable | https on|off | renew",
         "site template [minimal|profile|docs] [--title 标题] [--description 文字] [--theme 主题]",
         "site theme forest|ocean|slate | title 标题 | description 文字",
@@ -56,7 +62,7 @@ pub const SITE: CommandSpec = CommandSpec::new("site", Group::Feature, "自有�
             .root(Root::NotRequired),
         sub("enable", "启用网站作为 REALITY 目标")
             .args(&[ArgSpec::optional("域名", "已解析到本机的域名")])
-            .options(&[opt::WEB_TLS, opt::CERT, opt::KEY]),
+            .options(&[opt::WEB_TLS, opt::CERT, opt::KEY, ENABLE_HTTPS]),
         sub("disable", "关闭网站（REALITY 改回默认目标）"),
         sub("https", "开启或关闭 HTTPS 443 入口").args(&[ArgSpec::optional("开关", "on / off")]),
         sub("template", "更换主页模板并重新发布")
@@ -81,7 +87,12 @@ pub const SITE: CommandSpec = CommandSpec::new("site", Group::Feature, "自有�
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SiteAction {
     Info,
-    Enable { domain: String, cert: WebCert },
+    Enable {
+        domain: String,
+        cert: WebCert,
+        /// The HTTPS 443 entrance (`--site-https`, default on).
+        https_entry: bool,
+    },
     Disable,
     Https(bool),
     Template(PageEdit),
@@ -115,6 +126,11 @@ pub fn parse(m: &Matches) -> Result<SiteAction> {
         Some("enable") => SiteAction::Enable {
             domain: arg(ENABLE_USAGE)?,
             cert: opt::web_cert(m)?,
+            https_entry: m
+                .value("site-https")
+                .map(|v| opt::on_off(v, "--site-https"))
+                .transpose()?
+                .unwrap_or(true),
         },
         Some("disable") => SiteAction::Disable,
         Some("https") => SiteAction::Https(
@@ -244,11 +260,17 @@ fn change(session: &Session, cfg: &NodeConfig, action: SiteAction) -> Result<Opt
         require_generated(&store)?;
     }
     Ok(Some(match action {
-        SiteAction::Enable { domain, cert } => {
+        SiteAction::Enable {
+            domain,
+            cert,
+            https_entry,
+        } => {
             let facts = session.facts()?;
             let probe = LiveProbe(session.live);
             let env = facts.env(&probe, Some(cfg));
-            Change::config(plan::enable_site(cfg, &domain, cert, &env)?, "启用网站")
+            // One plan: a closed entrance is never opened in between.
+            let next = plan::enable_site(cfg, &domain, cert, &env)?;
+            Change::config(plan::site_https(&next, https_entry)?, "启用网站")
         }
         SiteAction::Disable => Change::config(plan::disable_site(cfg)?, "关闭网站"),
         SiteAction::Https(on) => Change::config(plan::site_https(cfg, on)?, "修改网站入口"),

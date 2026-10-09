@@ -449,6 +449,21 @@ fn site_submenu_defaults_to_current_values() {
 }
 
 #[test]
+fn site_enable_asks_for_the_entrance() {
+    let bench = Bench::installed(&node());
+    // 启用网站: domain, entrance closed, HTTP-01 certificate.
+    let answers = ["5", "2", "www.example.com", "n", "", "0", "0"];
+    menu_run(&bench, &Calls::default(), &answers).unwrap();
+    assert!(bench
+        .ui
+        .prompts()
+        .contains(&"开启网站 HTTPS 443 入口?".to_owned()));
+    let site = bench.engine.single().config.site.unwrap();
+    assert_eq!(site.domain, "www.example.com");
+    assert!(!site.https_entry, "closed from the start");
+}
+
+#[test]
 fn helpers() {
     assert_eq!(backup_id("latest").unwrap(), "latest");
     assert_eq!(

@@ -178,10 +178,16 @@ impl Menu<'_> {
         let site = self.loaded()?.config.site;
         Ok(Some(match i {
             0 => SiteAction::Info,
-            1 => SiteAction::Enable {
-                domain: ask_domain(ui, "网站域名（已解析到本机）", "网站域名无效")?,
-                cert: site_cert(ui)?,
-            },
+            1 => {
+                let domain = ask_domain(ui, "网站域名（已解析到本机）", "网站域名无效")?;
+                let current = site.as_ref().is_none_or(|s| s.https_entry);
+                let https_entry = ui.confirm("开启网站 HTTPS 443 入口?", current)?;
+                SiteAction::Enable {
+                    domain,
+                    cert: site_cert(ui)?,
+                    https_entry,
+                }
+            }
             2 => SiteAction::Disable,
             3 => {
                 let current = site.as_ref().is_none_or(|s| s.https_entry);
