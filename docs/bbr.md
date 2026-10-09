@@ -61,6 +61,8 @@ GitHub API 限流时可设置 `GH_TOKEN`。
 
 GitHub 元数据始终直接从 api.github.com 获取；`GH_PROXY` 只用于下载安装包，内容必须与直连元数据的校验值一致。缺少 SHA-256 的旧 Release 会被拒绝。
 
+与 v2 相比：预览和菜单本身不再需要 root；预览逐项列出全部检查而不是只报第一项失败；apt 预演结果在确认之前显示；下载暂存在 `/var/lib/onebox-bbr` 而不是临时目录；apt / dpkg 输出实时显示。
+
 ### 风险与恢复
 
 - **安装前确认有 VPS 控制台（VNC / 串口）访问和可恢复的磁盘快照。**
