@@ -48,7 +48,7 @@ use crate::domain::NodeConfig;
 use crate::error::{Error, Result};
 use crate::host::cores::{self, Resolved, Wanted};
 use crate::host::fetch;
-use crate::state::{Loaded, StateStore};
+use crate::state::{Loaded, Origin, StateStore};
 use crate::sys::fs::{ensure_dir, fsync_dir, remove_tree_if_exists};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use crate::ui::out;
@@ -299,6 +299,9 @@ impl Updater<'_> {
         let lock = FileLock::acquire(&paths.lock(), BUSY_MESSAGE)?;
         self.engine.recover(self.ctx, &lock)?;
         let loaded = StateStore::load_required(self.ctx)?;
+        if let Origin::V2 { warnings, .. } = &loaded.origin {
+            warnings.iter().for_each(out::warn);
+        }
         let targets = targets(&loaded.config, selection, &wanted)?;
         let plans = self.plan(targets, force)?;
         self.confirm(&plans)?;
