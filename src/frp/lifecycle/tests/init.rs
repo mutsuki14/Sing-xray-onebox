@@ -3,12 +3,14 @@
 //! the `frps net-apply` pre-start hook, G25).
 
 use super::{change, install_tcp};
+use crate::cert::cloudflare::CfCredentials;
+use crate::cert::testing::{fake_acme, AcmeScript};
 use crate::frp::journal;
-use crate::frp::lifecycle::{apply, net_apply, service, uninstall, ServiceAction};
-use crate::frp::model;
-use crate::frp::testing::FakeHost;
+use crate::frp::lifecycle::{apply, net_apply, service, uninstall, Change, ServiceAction};
+use crate::frp::model::{self, WebTls};
+use crate::frp::testing::{tcp_state, web_state, FakeHost};
 use crate::host::init::InitSystem;
-use crate::host::service::{script_file, unit_file, FRPS};
+use crate::host::service::{script_file, unit_file, FRPS, FRP_WEB};
 
 /// The `frps net-apply` hook runs Onebox ran itself: `true` for each run
 /// that inherited the FRP lock.
@@ -77,6 +79,8 @@ fn without_an_init_system_frps_is_supervised_and_starts_from_crontab() {
 fn without_an_init_system_a_rollback_restores_the_boot_lines_from_crontab() {
     let h = FakeHost::with_init(InitSystem::None);
     let before = install_tcp(&h);
+    // A foreign line after Onebox's: positions must survive the rollback.
+    h.set_crontab(&format!("{}0 2 * * * /usr/bin/foreign\n", h.crontab()));
     let tab = h.crontab();
     let spawned = frps_spawns(&h);
     h.set_healthy(false);
@@ -138,4 +142,40 @@ fn openrc_installs_scripts_and_the_default_runlevel() {
     assert!(h.enabled(FRPS));
     assert!(!journal::exists(paths));
     net_apply(&h.ctx).unwrap();
+}
+
+#[test]
+fn without_an_init_system_web_mode_has_a_boot_line_per_service() {
+    let Some(h) = FakeHost::real_openssl(InitSystem::None) else {
+        return;
+    };
+    let pair = h.public_pair("issued", &["app.example.com"]);
+    fake_acme(
+        &h.exec,
+        AcmeScript {
+            issue: Some(pair),
+            ..AcmeScript::default()
+        },
+    );
+    let mut state = web_state(WebTls::Cloudflare);
+    state.token.clear();
+    let install = Change {
+        cloudflare: Some(CfCredentials::token("fake-token-0123", None).unwrap()),
+        ..change("安装")
+    };
+    apply(&h.runtime(), state, install).unwrap();
+    assert!(h.running(FRPS) && h.running(FRP_WEB));
+    assert!(h.enabled(FRPS) && h.enabled(FRP_WEB));
+    // Back to tcp: the web service and its boot line go.
+    let installed = model::load(&h.ctx.paths).unwrap().unwrap();
+    let mut tcp = installed.clone();
+    tcp.mode = tcp_state().mode;
+    apply(&h.runtime(), tcp, change("配置")).unwrap();
+    assert!(h.running(FRPS) && !h.running(FRP_WEB));
+    assert!(h.enabled(FRPS) && !h.enabled(FRP_WEB));
+    assert!(
+        !h.crontab().contains("boot:onebox-frp-web"),
+        "{}",
+        h.crontab()
+    );
 }
