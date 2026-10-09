@@ -68,7 +68,7 @@ pub use support::{
     CertModes, CoreRow, Features, HostInfo, ProtocolRow, SupportReport, SUPPORT_NOTE,
     SUPPORT_SCHEMA,
 };
-pub use survey::{NodeState, Survey};
+pub use survey::{FrpFound, NodeState, Survey};
 
 use crate::ctx::Ctx;
 use crate::domain::NodeConfig;
