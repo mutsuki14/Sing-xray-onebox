@@ -22,6 +22,11 @@ pub struct Firewalld {
     pub permanent: bool,
 }
 
+/// `firewall-cmd` with untranslated output (state and listings are parsed).
+fn firewall_cmd() -> Cmd {
+    Cmd::new("firewall-cmd").c_locale()
+}
+
 impl Firewalld {
     /// The only place firewalld argv is built:
     /// `firewall-cmd --zone=Z --{action}-port=P[-E]/proto [--permanent]`,
@@ -31,7 +36,7 @@ impl Firewalld {
             Some(span) => format!("--{action}-port={}/{}", span.text("-"), span.proto.id()),
             None => format!("--{action}-ports"),
         };
-        let cmd = Cmd::new("firewall-cmd").args([format!("--zone={}", self.zone), operation]);
+        let cmd = firewall_cmd().args([format!("--zone={}", self.zone), operation]);
         if self.permanent {
             cmd.arg("--permanent")
         } else {
@@ -148,14 +153,14 @@ impl Backend for Firewalld {
         if !ctx.has("firewall-cmd") {
             return Ok(Vec::new());
         }
-        let state = ctx.run(&Cmd::new("firewall-cmd").arg("--state"))?;
+        let state = ctx.run(&firewall_cmd().arg("--state"))?;
         if !state.ok() || state.stdout.trim() != "running" {
             return Ok(Vec::new());
         }
-        let active = ctx.check(&Cmd::new("firewall-cmd").arg("--get-active-zones"))?;
+        let active = ctx.check(&firewall_cmd().arg("--get-active-zones"))?;
         let mut zones = parse_active_zones(&active);
         if zones.is_empty() {
-            let default = ctx.check(&Cmd::new("firewall-cmd").arg("--get-default-zone"))?;
+            let default = ctx.check(&firewall_cmd().arg("--get-default-zone"))?;
             zones.push(default.trim().to_string());
         }
         let mut found = Vec::new();

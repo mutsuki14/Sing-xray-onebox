@@ -191,7 +191,7 @@ pub(super) fn scan(ctx: &Ctx) -> Result<Scan> {
     if !ctx.has("nft") {
         return Ok(Scan::default());
     }
-    let out = ctx.run(&Cmd::new("nft").args(["-j", "list", "ruleset"]))?;
+    let out = ctx.run(&nft().args(["-j", "list", "ruleset"]))?;
     if !out.ok() {
         return Ok(Scan::default());
     }
@@ -231,6 +231,11 @@ pub(super) fn chain_rules(doc: &Value) -> Result<Vec<ChainRule>> {
         .collect())
 }
 
+/// `nft` with untranslated messages: [`chain_missing`] matches strerror text.
+fn nft() -> Cmd {
+    Cmd::new("nft").c_locale()
+}
+
 /// A chain listing that failed because the chain (or its table) is gone.
 fn chain_missing(out: &Output) -> bool {
     !out.ok() && out.stderr.contains("No such file or directory")
@@ -240,7 +245,7 @@ impl Nft {
     /// The only place nft rule argv is built. The comment element contains
     /// literal double quotes because nft parses its joined argv.
     fn insert_cmd(&self, rule: &Rule) -> Cmd {
-        Cmd::new("nft").args([
+        nft().args([
             "insert",
             "rule",
             self.family.as_str(),
@@ -257,7 +262,7 @@ impl Nft {
 
     fn list_cmd(&self, handles: bool) -> Cmd {
         let flags: &[&str] = if handles { &["-j", "-a"] } else { &["-j"] };
-        Cmd::new("nft").args(flags.iter().copied()).args([
+        nft().args(flags.iter().copied()).args([
             "list",
             "chain",
             &self.family,
@@ -267,7 +272,7 @@ impl Nft {
     }
 
     fn delete_cmd(&self, handle: u64) -> Cmd {
-        Cmd::new("nft").args([
+        nft().args([
             "delete",
             "rule",
             self.family.as_str(),

@@ -177,8 +177,9 @@ fn systemctl(args: &[&str]) -> Cmd {
     query(Cmd::new("systemctl").args(args.iter().copied()))
 }
 
+/// A bounded probe with untranslated output (`enabled`, `rpm -V` lines).
 fn query(cmd: Cmd) -> Cmd {
-    cmd.timeout(QUERY_TIMEOUT)
+    cmd.timeout(QUERY_TIMEOUT).c_locale()
 }
 
 fn first_line(text: &str) -> &str {

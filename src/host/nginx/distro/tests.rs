@@ -204,6 +204,10 @@ fn pristine_debian_package_is_neutralized() {
     assert!(history[4].starts_with("md5sum ") && history[4].ends_with(DEBIAN_WELCOME));
     assert_eq!(history[5], DISABLE);
     assert_eq!(history.len(), 6);
+    assert!(
+        h.exec.calls().iter().all(|c| c.is_c_locale()),
+        "probe output is parsed untranslated"
+    );
 }
 
 #[test]
