@@ -29,12 +29,14 @@ pub enum Call {
     Boot,
 }
 
-/// Records every call; `fail` makes the next calls fail with that message.
+/// Records every call; `fail` makes the next calls fail with that message,
+/// `fail_applies` only the applies (recovery still succeeds).
 #[derive(Default)]
 pub struct Recorder {
     requests: Mutex<Vec<ApplyRequest>>,
     calls: Mutex<Vec<Call>>,
     fail: Mutex<Option<String>>,
+    fail_applies: Mutex<Option<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -61,13 +63,20 @@ impl Recorder {
         *lock(&self.fail) = Some(message.to_owned());
     }
 
+    /// Make the next applies (not recoveries) fail with `message`.
+    pub fn fail_applies_with(&self, message: &str) {
+        *lock(&self.fail_applies) = Some(message.to_owned());
+    }
+
     fn record(&self, call: Call, req: Option<ApplyRequest>) -> Result<()> {
+        let apply = req.is_some();
         lock(&self.calls).push(call);
         if let Some(req) = req {
             lock(&self.requests).push(req);
         }
-        match lock(&self.fail).as_ref() {
-            Some(message) => Err(Error::msg(message.clone())),
+        let fail_applies = lock(&self.fail_applies).clone().filter(|_| apply);
+        match lock(&self.fail).clone().or(fail_applies) {
+            Some(message) => Err(Error::msg(message)),
             None => Ok(()),
         }
     }
