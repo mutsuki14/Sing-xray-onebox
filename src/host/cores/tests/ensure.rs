@@ -9,8 +9,14 @@ fn ensure_installed_downloads_when_missing() {
     f.serve();
     let bin = f.ctx.paths.bin.clone();
     versions(&f.exec, vec![(bin.clone(), singbox_says("1.15.0"))]);
-    let v =
-        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &CoreVersions::default()).unwrap();
+    let v = ensure_installed_with(
+        &f.ctx,
+        &no_env,
+        Core::Singbox,
+        &CoreVersions::default(),
+        false,
+    )
+    .unwrap();
     assert_eq!(v, "1.15.0");
     let live = f.ctx.paths.core_bin(Core::Singbox);
     assert_eq!(std::fs::read(&live).unwrap(), binary);
@@ -22,8 +28,14 @@ fn ensure_installed_downloads_when_missing() {
 
     // Installed and unpinned: nothing is fetched again.
     f.exec.clear_history();
-    let v =
-        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &CoreVersions::default()).unwrap();
+    let v = ensure_installed_with(
+        &f.ctx,
+        &no_env,
+        Core::Singbox,
+        &CoreVersions::default(),
+        false,
+    )
+    .unwrap();
     assert_eq!(v, "1.15.0");
     assert!(f.curl_urls().is_empty());
 }
@@ -54,7 +66,7 @@ fn ensure_installed_never_replaces_a_working_core() {
         singbox_pin: Some("1.12.0".into()),
         ..CoreVersions::default()
     };
-    let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &old_pin).unwrap();
+    let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &old_pin, false).unwrap();
     assert_eq!(v, "1.14.2");
     assert_eq!(std::fs::read(&live).unwrap(), fake_elf("old"), "untouched");
     assert!(f.curl_urls().is_empty());
@@ -65,13 +77,13 @@ fn ensure_installed_never_replaces_a_working_core() {
         ..CoreVersions::default()
     };
     assert_eq!(
-        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &newer).unwrap(),
+        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &newer, false).unwrap(),
         "1.14.2"
     );
     let env = |k: &str| (k == "ONEBOX_SINGBOX_VERSION").then(|| "1.13.0".to_owned());
     let unpinned = CoreVersions::default();
     assert_eq!(
-        ensure_installed_with(&f.ctx, &env, Core::Singbox, &unpinned).unwrap(),
+        ensure_installed_with(&f.ctx, &env, Core::Singbox, &unpinned, false).unwrap(),
         "1.14.2"
     );
     // `latest` is satisfied by whatever is installed.
@@ -80,7 +92,7 @@ fn ensure_installed_never_replaces_a_working_core() {
         ..CoreVersions::default()
     };
     assert_eq!(
-        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &latest).unwrap(),
+        ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &latest, false).unwrap(),
         "1.14.2"
     );
     assert!(f.curl_urls().is_empty());
@@ -130,7 +142,7 @@ fn a_broken_core_is_downloaded_in_the_pinned_version() {
         singbox_pin: Some("v1.14.2".into()),
         ..CoreVersions::default()
     };
-    let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &pinned).unwrap();
+    let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &pinned, false).unwrap();
     assert_eq!(v, "1.14.2");
     assert_eq!(std::fs::read(&live).unwrap(), binary, "replaced in place");
 }
@@ -145,7 +157,8 @@ fn environment_versions_apply_when_nothing_is_pinned() {
         vec![(f.ctx.paths.bin.clone(), singbox_says("1.14.2"))],
     );
     let env = |k: &str| (k == "ONEBOX_SINGBOX_VERSION").then(|| "v1.14.2".to_owned());
-    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default()).unwrap();
+    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default(), false)
+        .unwrap();
     assert_eq!(v, "1.14.2");
     let live = f.ctx.paths.core_bin(Core::Singbox);
     assert_eq!(std::fs::read(&live).unwrap(), binary);
@@ -163,7 +176,7 @@ fn environment_versions_apply_when_nothing_is_pinned() {
         singbox_pin: Some("1.14.2".into()),
         ..CoreVersions::default()
     };
-    ensure_installed_with(&f.ctx, &env, Core::Singbox, &pinned).unwrap();
+    ensure_installed_with(&f.ctx, &env, Core::Singbox, &pinned, false).unwrap();
     assert_eq!(f.curl_urls()[0], format!("{SB_API}/tags/v1.14.2"));
 
     // `latest` while installing a missing core keeps v2's fallback.
@@ -176,12 +189,13 @@ fn environment_versions_apply_when_nothing_is_pinned() {
         vec![(f.ctx.paths.bin.clone(), singbox_says("1.14.2"))],
     );
     let env = |k: &str| (k == "ONEBOX_SINGBOX_VERSION").then(|| "latest".to_owned());
-    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default()).unwrap();
+    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default(), false)
+        .unwrap();
     assert_eq!(v, "1.14.2");
 
     let bad = |k: &str| (k == "ONEBOX_XRAY_VERSION").then(|| "../x".to_owned());
-    let err =
-        ensure_installed_with(&f.ctx, &bad, Core::Xray, &CoreVersions::default()).unwrap_err();
+    let err = ensure_installed_with(&f.ctx, &bad, Core::Xray, &CoreVersions::default(), false)
+        .unwrap_err();
     assert_eq!(
         err.to_string(),
         "环境变量 ONEBOX_XRAY_VERSION: 版本格式无效: ../x"
@@ -208,7 +222,14 @@ fn ensure_installed_sweeps_v2_and_v3_leftovers() {
     aged(".core-0123456789abcdef01234567");
     aged("onebox-core-stage-0011223344556677");
     std::fs::create_dir(bin.join(".core-fresh")).unwrap();
-    ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &CoreVersions::default()).unwrap();
+    ensure_installed_with(
+        &f.ctx,
+        &no_env,
+        Core::Singbox,
+        &CoreVersions::default(),
+        false,
+    )
+    .unwrap();
     let mut names: Vec<String> = std::fs::read_dir(&bin)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -248,14 +269,15 @@ fn ensure_installed_replaces_a_broken_binary_and_refuses_odd_paths() {
             (bin, xray_says("26.3.27")),
         ],
     );
-    let v = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &CoreVersions::default()).unwrap();
+    let v = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &CoreVersions::default(), false)
+        .unwrap();
     assert_eq!(v, "26.3.27");
     assert_eq!(std::fs::read(&live).unwrap(), binary);
 
     std::fs::remove_file(&live).unwrap();
     std::fs::create_dir(&live).unwrap();
-    let err =
-        ensure_installed_with(&f.ctx, &no_env, Core::Xray, &CoreVersions::default()).unwrap_err();
+    let err = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &CoreVersions::default(), false)
+        .unwrap_err();
     assert_eq!(
         err.to_string(),
         format!("内核路径不是普通文件: {}", live.display())
@@ -267,7 +289,7 @@ fn ensure_installed_replaces_a_broken_binary_and_refuses_odd_paths() {
         xray_pin: Some("bad pin".into()),
         ..CoreVersions::default()
     };
-    let err = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &bad_pin).unwrap_err();
+    let err = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &bad_pin, false).unwrap_err();
     assert_eq!(err.to_string(), "版本格式无效: bad pin");
     assert!(f.curl_urls().is_empty());
 }
@@ -284,11 +306,12 @@ fn a_malformed_wish_only_warns_while_the_core_works() {
             singbox_pin: Some(pin.into()),
             ..CoreVersions::default()
         };
-        let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &versions).unwrap();
+        let v = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &versions, false).unwrap();
         assert_eq!(v, "1.14.2", "{pin}");
     }
     let env = |k: &str| (k == "ONEBOX_SINGBOX_VERSION").then(|| "beta".to_owned());
-    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default()).unwrap();
+    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default(), false)
+        .unwrap();
     assert_eq!(v, "1.14.2");
     assert_eq!(std::fs::read(&live).unwrap(), fake_elf("old"), "untouched");
     assert!(f.curl_urls().is_empty());
@@ -313,13 +336,145 @@ fn keep_notice_wording() {
     assert_eq!(keep_notice(Core::Xray, "26.3.27", &Ok(None)), None);
 }
 
+/// Xray `version` release served with an API digest.
+fn serve_xray(f: &mut Fixture, version: &str, api: &str) -> Vec<u8> {
+    let tag = format!("v{version}");
+    let binary = fake_elf(&format!("xray {version}"));
+    let package = xray_zip(&f.dir, &binary);
+    let name = "Xray-linux-64.zip";
+    let asset = asset_json(repo(Core::Xray), &tag, name, &package, true);
+    f.route(api, release_json(&tag, false, vec![asset])).route(
+        Asset::expected_url(repo(Core::Xray), &tag, name),
+        Reply::body(package),
+    );
+    binary
+}
+
+#[test]
+fn an_explicit_latest_installs_the_newest_release() {
+    // (core, newest release, `latest` from the install option or else
+    // from ONEBOX_*_VERSION)
+    let cases = [
+        (Core::Singbox, "1.15.0", true),
+        (Core::Singbox, "1.15.0", false),
+        (Core::Xray, "26.4.1", true),
+        (Core::Xray, "26.4.1", false),
+    ];
+    for (core, newest, option) in cases {
+        let case = format!("{core:?} option={option}");
+        let mut f = fixture();
+        let api = match core {
+            Core::Singbox => SB_API,
+            Core::Xray => XR_API,
+        };
+        let latest = format!("{api}/latest");
+        let binary = match core {
+            Core::Singbox => serve_singbox(&mut f, newest, &latest),
+            Core::Xray => serve_xray(&mut f, newest, &latest),
+        };
+        f.serve();
+        let says = match core {
+            Core::Singbox => singbox_says(newest),
+            Core::Xray => xray_says(newest),
+        };
+        versions(&f.exec, vec![(f.ctx.paths.bin.clone(), says)]);
+        let env = move |k: &str| (!option && k == version_env(core)).then(|| "latest".to_owned());
+        let unpinned = CoreVersions::default();
+        let v = ensure_installed_with(&f.ctx, &env, core, &unpinned, option).unwrap();
+        assert_eq!(v, newest, "{case}");
+        assert_eq!(
+            std::fs::read(f.ctx.paths.core_bin(core)).unwrap(),
+            binary,
+            "{case}"
+        );
+        assert_eq!(f.curl_urls()[0], latest, "{case}: not the tested version");
+    }
+
+    // A pin still wins over `latest`.
+    let mut f = fixture();
+    serve_xray(&mut f, "26.3.27", &format!("{XR_API}/tags/v26.3.27"));
+    f.serve();
+    versions(
+        &f.exec,
+        vec![(f.ctx.paths.bin.clone(), xray_says("26.3.27"))],
+    );
+    let pinned = CoreVersions {
+        xray_pin: Some("26.3.27".into()),
+        ..CoreVersions::default()
+    };
+    let v = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &pinned, true).unwrap();
+    assert_eq!(v, "26.3.27");
+    assert_eq!(f.curl_urls()[0], format!("{XR_API}/tags/v26.3.27"));
+
+    // Installing, a failed `latest` lookup falls back to the tested Xray.
+    let mut f = fixture();
+    f.route(format!("{XR_API}/latest"), Reply::http(403));
+    serve_xray(&mut f, "26.3.27", &format!("{XR_API}/tags/v26.3.27"));
+    f.serve();
+    versions(
+        &f.exec,
+        vec![(f.ctx.paths.bin.clone(), xray_says("26.3.27"))],
+    );
+    let unpinned = CoreVersions::default();
+    let v = ensure_installed_with(&f.ctx, &no_env, Core::Xray, &unpinned, true).unwrap();
+    assert_eq!(v, "26.3.27");
+    assert_eq!(
+        f.curl_urls()[..2],
+        [
+            format!("{XR_API}/latest"),
+            format!("{XR_API}/tags/v26.3.27")
+        ]
+    );
+}
+
+#[test]
+fn only_an_untested_xray_download_is_warned_about() {
+    let release = |tag: &str| {
+        Source::Release(Release {
+            tag: tag.into(),
+            draft: false,
+            prerelease: false,
+            body: String::new(),
+            assets: Vec::new(),
+        })
+    };
+    let resolved = |core, version: &str, source| Resolved {
+        core,
+        version: version.into(),
+        source,
+    };
+    let warning = Some(untested_xray("26.4.1"));
+    let cases = [
+        (resolved(Core::Xray, "26.4.1", release("v26.4.1")), warning),
+        (resolved(Core::Xray, "26.3.27", release("v26.3.27")), None),
+        (resolved(Core::Singbox, "1.15.0", release("v1.15.0")), None),
+        (
+            resolved(Core::Xray, "26.4.1", Source::Offline("/opt/xray".into())),
+            None,
+        ),
+    ];
+    for (resolved, want) in cases {
+        assert_eq!(untested_download(&resolved), want, "{resolved:?}");
+    }
+    assert_eq!(
+        untested_xray("26.4.1"),
+        "指定的 Xray 26.4.1 可能拒绝 sing-box REALITY 客户端；经过测试版本为 26.3.27"
+    );
+}
+
 #[test]
 fn installing_a_missing_core_needs_curl_and_offline_cores_do_not() {
     let f = fixture();
     // Neither curl nor a package manager: the download is refused before
     // any lookup (as root after looking for a package manager).
-    let err = ensure_installed_with(&f.ctx, &no_env, Core::Singbox, &CoreVersions::default())
-        .unwrap_err();
+    let err = ensure_installed_with(
+        &f.ctx,
+        &no_env,
+        Core::Singbox,
+        &CoreVersions::default(),
+        false,
+    )
+    .unwrap_err();
     assert!(err.to_string().ends_with("请先安装 curl"), "{err}");
     assert!(f.curl_urls().is_empty());
 
@@ -336,7 +491,8 @@ fn installing_a_missing_core_needs_curl_and_offline_cores_do_not() {
     );
     let path = source.to_string_lossy().into_owned();
     let env = move |k: &str| (k == "ONEBOX_SINGBOX_BIN").then(|| path.clone());
-    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default()).unwrap();
+    let v = ensure_installed_with(&f.ctx, &env, Core::Singbox, &CoreVersions::default(), false)
+        .unwrap();
     assert_eq!(v, "1.14.2");
     assert_eq!(
         std::fs::read(f.ctx.paths.core_bin(Core::Singbox)).unwrap(),

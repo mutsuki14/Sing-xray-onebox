@@ -27,6 +27,11 @@
 //!   version ([`resolve`] without a wish, or [`ensure_installed`] for a
 //!   missing core), and says so; `resolve(…, Some("latest"))`, the core
 //!   update path, fails instead of quietly downgrading (G-8.1#3).
+//! - an explicit `latest` (install option or environment) installs a
+//!   missing core in its newest release, Xray included (v2 D §869; a
+//!   failed lookup falls back to the tested 26.3.27 with a warning), and a
+//!   downloaded Xray other than 26.3.27 is warned about like in
+//!   `onebox update`.
 //! - the offline override reports the parsed version instead of the first
 //!   output line, refuses symlinks, and warns when it differs from the pin.
 //! - `ensure_installed` re-downloads a binary that cannot run (v2 only
@@ -408,18 +413,28 @@ pub fn parse_version(core: Core, output: &str) -> Option<String> {
 ///
 /// The binary is downloaded only when it is missing or cannot report a
 /// version, in the wanted version: the pin (`versions.pin(core)`), else
-/// `ONEBOX_SINGBOX_VERSION` / `ONEBOX_XRAY_VERSION` ([`version_env`], v2
-/// parity for scripted installs), else the default. A working binary is
-/// never replaced here, not even when it differs from the pin (v2 parity;
-/// a migrated v2 pin is often older than the installed core and must not
-/// downgrade it or make an upgrade depend on GitHub): only the hint
+/// the newest release when `latest` (`install --xray-version latest`,
+/// which records no pin), else `ONEBOX_SINGBOX_VERSION` /
+/// `ONEBOX_XRAY_VERSION` ([`version_env`], v2 parity for scripted
+/// installs), else the default. A working binary is never replaced here,
+/// not even when it differs from the pin (v2 parity; a migrated v2 pin is
+/// often older than the installed core and must not downgrade it or make
+/// an upgrade depend on GitHub): only the hint
 /// `已安装 … ；更换指定版本请执行 onebox update …` is printed.
+///
+/// Downloading an Xray other than the tested version prints
+/// [`untested_xray`].
 ///
 /// Changing a working core is `onebox update`'s job: it passes the staged
 /// binary in `Intents.replace_cores` and must store the matching pin (or
 /// clear it) in the same apply, or this hint repeats on every apply.
-pub fn ensure_installed(ctx: &Ctx, core: Core, versions: &CoreVersions) -> Result<String> {
-    ensure_installed_with(ctx, &process_env, core, versions)
+pub fn ensure_installed(
+    ctx: &Ctx,
+    core: Core,
+    versions: &CoreVersions,
+    latest: bool,
+) -> Result<String> {
+    ensure_installed_with(ctx, &process_env, core, versions, latest)
 }
 
 /// [`ensure_installed`] with an injected environment lookup.
@@ -428,8 +443,9 @@ pub fn ensure_installed_with(
     env: EnvLookup,
     core: Core,
     versions: &CoreVersions,
+    latest: bool,
 ) -> Result<String> {
-    let wish = wished_version(env, core, versions);
+    let wish = wished_version(env, core, versions, latest);
     sweep_leftovers(&ctx.paths.bin);
     let live = ctx.paths.core_bin(core);
     if let Some(current) = current_version(ctx, core, &live)? {
@@ -441,18 +457,15 @@ pub fn ensure_installed_with(
     }
     // Only a download needs the wish to be valid.
     let wish = wish?;
-    // Installing a missing core, `latest` means "any version": like v2 a
-    // failed lookup may still fall back (only `onebox update` is strict).
-    let wanted = match &wish {
-        Some(Wanted::Exact(v)) => Some(v.as_str()),
-        Some(Wanted::Latest | Wanted::Default) | None => None,
-    };
     if env(offline_env(core)).is_none() {
         // prepare-cores changes the host anyway: a missing curl is
         // installed here, not by read-only lookups (`host::fetch`).
         fetch::ensure_curl(ctx)?;
     }
-    let resolved = resolve_with(ctx, env, core, wanted)?;
+    let resolved = resolve_missing(ctx, env, core, wish.as_ref())?;
+    if let Some(warning) = untested_download(&resolved) {
+        out::warn(warning);
+    }
     sysfs::ensure_dir(&ctx.paths.bin, 0o755)?;
     let stage = TempDir::new_in(&ctx.paths.bin, "core-stage")?;
     let staged = download_with(ctx, env, &resolved, stage.path())?;
@@ -460,6 +473,46 @@ pub fn ensure_installed_with(
     sysfs::fsync_dir(&ctx.paths.bin).map_err(|e| Error::io(&ctx.paths.bin, e))?;
     out::ok(format!("已安装 {} {}", core.title(), resolved.version));
     Ok(resolved.version)
+}
+
+/// The release for a missing core. Installing, `latest` means the newest
+/// release, but like v2 a failed lookup may still fall back (only
+/// `onebox update` is strict): sing-box's default is its newest release
+/// with the 1.14.2 fallback, Xray falls back to the tested version.
+fn resolve_missing(
+    ctx: &Ctx,
+    env: EnvLookup,
+    core: Core,
+    wish: Option<&Wanted>,
+) -> Result<Resolved> {
+    match (wish, core) {
+        (Some(Wanted::Exact(v)), _) => resolve_with(ctx, env, core, Some(v)),
+        (Some(Wanted::Latest), Core::Xray) => {
+            resolve_with(ctx, env, core, Some("latest")).or_else(|e| {
+                out::warn(format!(
+                    "无法获取 Xray 最新版本（{e}），改用 {XRAY_TESTED_VERSION}"
+                ));
+                resolve_with(ctx, env, core, None)
+            })
+        }
+        _ => resolve_with(ctx, env, core, None),
+    }
+}
+
+/// The warning before installing an Xray other than the tested version.
+pub fn untested_xray(version: &str) -> String {
+    format!(
+        "指定的 Xray {version} 可能拒绝 sing-box REALITY 客户端；经过测试版本为 {XRAY_TESTED_VERSION}"
+    )
+}
+
+/// [`untested_xray`] for a release download of an Xray other than the
+/// tested version (a local override already warns about its version).
+fn untested_download(resolved: &Resolved) -> Option<String> {
+    let untested = resolved.core == Core::Xray
+        && !resolved.is_offline()
+        && resolved.version != XRAY_TESTED_VERSION;
+    untested.then(|| untested_xray(&resolved.version))
 }
 
 /// The warning for a working core that is kept: [`pin_hint`] when it
@@ -495,10 +548,19 @@ pub fn version_env(core: Core) -> &'static str {
     }
 }
 
-/// The pin, else the environment's wish; `None` means "no preference".
-fn wished_version(env: EnvLookup, core: Core, versions: &CoreVersions) -> Result<Option<Wanted>> {
+/// The pin, else `latest` when asked for, else the environment's wish;
+/// `None` means "no preference".
+fn wished_version(
+    env: EnvLookup,
+    core: Core,
+    versions: &CoreVersions,
+    latest: bool,
+) -> Result<Option<Wanted>> {
     if let Some(pin) = versions.pin(core) {
         return Wanted::parse(Some(pin)).map(Some);
+    }
+    if latest {
+        return Ok(Some(Wanted::Latest));
     }
     let Some(value) = env(version_env(core)) else {
         return Ok(None);

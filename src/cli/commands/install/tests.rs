@@ -73,6 +73,38 @@ fn version_pins_default_to_the_v2_environment() {
 }
 
 #[test]
+fn latest_options_ask_for_the_newest_release_without_a_pin() {
+    let xray_latest = |key: &str| (key == "ONEBOX_XRAY_VERSION").then(|| "latest".to_owned());
+    // (command line, environment, cores installed in their newest release)
+    let cases: [(&str, EnvLookup, &[Core]); 5] = [
+        ("install --xray-version latest", &no_env, &[Core::Xray]),
+        (
+            "install --singbox-version latest --xray-version 25.1.1",
+            &no_env,
+            &[Core::Singbox],
+        ),
+        ("install", &xray_latest, &[Core::Xray]),
+        ("install --xray-version 25.1.1", &xray_latest, &[]),
+        ("install --xray-version 25.1.1", &no_env, &[]),
+    ];
+    for (line, env, want) in cases {
+        let a = InstallArgs::from_matches(&matches(line), env).unwrap();
+        assert_eq!(a.latest_cores(), want, "{line}");
+    }
+
+    // The install apply carries the wish; the configuration records no pin.
+    let bench = Bench::new();
+    bench.unattended();
+    prerequisites(&bench);
+    let line = "install --preset 1 --xray-version latest --singbox-version latest";
+    install(&bench.session(), &args(line).unwrap()).unwrap();
+    let req = bench.engine.single();
+    assert_eq!(req.intents.latest_cores, [Core::Singbox, Core::Xray]);
+    assert_eq!(req.config.versions.xray_pin, None);
+    assert_eq!(req.config.versions.singbox_pin, None);
+}
+
+#[test]
 fn per_command_options_are_enforced() {
     let argv = |l: &str| l.split_whitespace().map(String::from).collect::<Vec<_>>();
     let err = parse(&SPECS, &argv("install --apply"), Globals::default()).unwrap_err();

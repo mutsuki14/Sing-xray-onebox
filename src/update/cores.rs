@@ -278,9 +278,7 @@ pub fn describe(core: Core, current: Option<&str>, target: &str, decision: Decis
 /// The warning before installing an Xray other than the tested version
 /// (followed by [`CONTINUE`]).
 pub fn xray_warning(version: &str) -> String {
-    format!(
-        "指定的 Xray {version} 可能拒绝 sing-box REALITY 客户端；经过测试版本为 {XRAY_TESTED_VERSION}"
-    )
+    cores::untested_xray(version)
 }
 
 /// How a core update ended.
