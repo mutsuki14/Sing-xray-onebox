@@ -15,7 +15,9 @@
 //! BBR (v2 had per-module guards); cancellation surfaces as
 //! `Error::Cancelled`, so it keeps exit code 130 through rollback wrappers
 //! (B-9.1#16); handler installation is reference-counted, so scopes held by
-//! different threads may end in any order.
+//! different threads may end in any order; a signal the parent left ignored
+//! (`nohup` ignores SIGHUP) stays ignored instead of being turned into a
+//! cancellation, so `nohup onebox … &` survives closing the terminal.
 
 use crate::error::{Error, Result};
 use std::io;
@@ -127,12 +129,23 @@ impl Installed {
         self.owners + self.waiters
     }
 
-    /// Install the handlers unless a holder already did.
+    /// Install the handlers unless a holder already did. A signal whose
+    /// inherited disposition is `SIG_IGN` is left alone: whoever started us
+    /// asked the process to survive it (`nohup` for SIGHUP; `main` resets
+    /// SIGINT on purpose, see [`reset_interrupt_disposition`]).
     fn install(&mut self) -> Result<()> {
         if self.holders() > 0 {
             return Ok(());
         }
         for sig in CANCEL_SIGNALS {
+            match disposition(sig) {
+                Ok(current) if current == libc::SIG_IGN => continue,
+                Ok(_) => {}
+                Err(e) => {
+                    self.restore();
+                    return Err(Error::msg(format!("无法读取信号处理方式: {e}")));
+                }
+            }
             match set_handler(sig, record_address(), 0) {
                 Ok(old) => self.previous.push((sig, old)),
                 Err(e) => {
@@ -165,7 +178,7 @@ impl Installed {
 /// [`check`] at safe points (the scope's *owner*); the previous dispositions
 /// are restored when the last holder drops. Scopes nest. Installing does not
 /// clear an already pending signal, so an outer operation's cancellation is
-/// not lost.
+/// not lost. Signals inherited as ignored stay ignored (see the module docs).
 pub struct SignalScope {
     _private: (),
 }
@@ -215,6 +228,19 @@ impl Drop for WaitScope {
         let mut state = installed();
         state.waiters -= 1;
         state.release();
+    }
+}
+
+/// The current disposition of `sig` (a handler address, SIG_DFL or SIG_IGN).
+fn disposition(sig: libc::c_int) -> io::Result<libc::sighandler_t> {
+    // SAFETY: a null new action only reads the current one into `old`,
+    // a zero-initialised plain-data struct.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(sig, std::ptr::null(), &mut old) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(old.sa_sigaction)
     }
 }
 
@@ -291,6 +317,32 @@ impl Drop for BlockSignals {
 /// (exec timeouts forward pending signals).
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Tests: `sig` ignored (as `nohup` leaves SIGHUP) until dropped, then the
+/// previous action is back. Hold [`TEST_LOCK`] meanwhile.
+#[cfg(test)]
+pub(crate) struct IgnoredForTest {
+    sig: libc::c_int,
+    previous: libc::sigaction,
+}
+
+#[cfg(test)]
+impl IgnoredForTest {
+    pub(crate) fn new(sig: libc::c_int) -> IgnoredForTest {
+        let previous = set_handler(sig, libc::SIG_IGN, 0).expect("sigaction");
+        IgnoredForTest { sig, previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for IgnoredForTest {
+    fn drop(&mut self) {
+        // SAFETY: restoring a sigaction previously returned by the kernel.
+        unsafe {
+            libc::sigaction(self.sig, &self.previous, std::ptr::null_mut());
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -381,6 +433,31 @@ mod tests {
         }
         assert_ne!(received().count, now.count, "repeated signals are new");
         clear();
+    }
+
+    #[test]
+    fn inherited_ignored_signals_stay_ignored() {
+        let _g = guard();
+        clear();
+        let ignored = IgnoredForTest::new(libc::SIGHUP);
+        let term_before = current_handler(libc::SIGTERM);
+        {
+            let _scope = SignalScope::install().unwrap();
+            assert_eq!(current_handler(libc::SIGHUP), libc::SIG_IGN, "nohup kept");
+            assert_eq!(current_handler(libc::SIGTERM), record_address());
+            let start = received();
+            unsafe {
+                libc::raise(libc::SIGHUP);
+            }
+            assert_eq!(pending(), None);
+            assert_eq!(received(), start, "an ignored hang-up is not counted");
+            let _waiter = WaitScope::acquire().unwrap();
+            assert_eq!(current_handler(libc::SIGHUP), libc::SIG_IGN);
+        }
+        assert_eq!(current_handler(libc::SIGHUP), libc::SIG_IGN);
+        assert_eq!(current_handler(libc::SIGTERM), term_before);
+        drop(ignored);
+        assert_ne!(current_handler(libc::SIGHUP), libc::SIG_IGN);
     }
 
     #[test]

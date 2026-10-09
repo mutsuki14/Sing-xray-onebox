@@ -7,9 +7,13 @@
 //! in one process (the menu) or parallel tests cannot see each other's
 //! stop; a signal received before the run started is ignored (v2 reset the
 //! flag on install); SIGHUP cancels too (terminal hang-up), like every
-//! other long operation of Onebox; the handled signal is cleared when the
-//! run ends, so a menu that continues after `failover` (Ctrl+C = normal
-//! stop) does not cancel its next operation.
+//! other long operation of Onebox — unless it was inherited as ignored:
+//! under `nohup onebox failover probe.json &` the hang-up stays ignored
+//! (`sys::signal` never replaces an inherited `SIG_IGN`), so closing the
+//! terminal neither stops the service nor cancels a bench, as in v2 (which
+//! handled only INT and TERM); the handled signal is cleared when the run
+//! ends, so a menu that continues after `failover` (Ctrl+C = normal stop)
+//! does not cancel its next operation.
 
 use crate::error::Result;
 use crate::sys::signal::{self, SignalScope};
@@ -92,7 +96,7 @@ impl CancelToken {
 }
 
 /// Recording INT/TERM/HUP handlers for the duration of a run, wired to a
-/// fresh [`CancelToken`]. Dropping it restores the previous handlers and
+/// fresh [`CancelToken`]; a signal inherited as ignored stays ignored. Dropping it restores the previous handlers and
 /// forgets a signal this run handled.
 pub struct SignalCancel {
     token: CancelToken,
@@ -182,5 +186,25 @@ mod tests {
         assert_eq!(signal::pending(), None, "handled signal is cleared");
         assert!(token.is_cancelled(), "the latch survives the scope");
         assert!(!CancelToken::manual().is_cancelled());
+    }
+
+    /// `nohup onebox failover … &`: closing the terminal must not stop it.
+    #[test]
+    fn an_inherited_ignored_hangup_does_not_cancel() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _nohup = signal::IgnoredForTest::new(libc::SIGHUP);
+        let run = SignalCancel::install().unwrap();
+        let token = run.token().clone();
+        unsafe {
+            libc::raise(libc::SIGHUP);
+        }
+        assert!(!token.is_cancelled(), "hang-up ignored");
+        assert!(token.sleep(Duration::from_millis(1)), "not cut short");
+        unsafe {
+            libc::raise(libc::SIGTERM);
+        }
+        assert!(token.is_cancelled(), "other signals still cancel");
+        drop(run);
+        assert_eq!(signal::pending(), None);
     }
 }
