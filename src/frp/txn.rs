@@ -9,7 +9,8 @@
 //! Rollback order: validate the journal (nothing changes when it is
 //! corrupt) → stop and disable both FRP services, clear the `frp`
 //! firewall owner → restore the snapshot (trees that did not exist are
-//! removed entirely) → reload systemd → restore the FRP crontab lines →
+//! removed entirely) → record the rules the clear could not remove in the
+//! restored ledger again → reload systemd → restore the FRP crontab lines →
 //! for a restored installation re-open its firewall ports, re-enable and
 //! restart what was enabled/running before → `rolled-back` → remove the
 //! journal. Signals are blocked while it runs.
@@ -32,14 +33,18 @@
 //!   `FRP_ROOT/services` (v2 accepted every unit once the directory
 //!   existed, H-8.1#9);
 //! - a rolled-back fresh install leaves no FRP directory behind, so the
-//!   next install is not refused as "not managed";
+//!   next install is not refused as "not managed" (only when firewall
+//!   rules could not be removed, `FRP_ROOT` keeps `.managed` and their
+//!   ledger: `runtime::leftovers_only`);
+//! - firewall rules the rollback could not remove stay recorded and are
+//!   listed as an unfinished step (v2 lost their record with the restore);
 //! - a failed service stop or firewall clear no longer skips restoring the
 //!   files (v2 returned before the restore);
 //! - a cancellation keeps exit code 130 through the rollback message.
 
 use super::journal::{self, Before, Journal, Phase, SERVICES};
 use super::model::{self, MANAGED_FILE};
-use super::runtime::Runtime;
+use super::runtime::{Leftovers, Runtime, FIREWALL_OWNER};
 use crate::error::{Error, Result};
 use crate::host::cron::{self, Scope};
 use crate::host::firewall;
@@ -56,6 +61,10 @@ pub const ROLLED_BACK: &str = "；已恢复旧 FRP 配置与服务状态";
 /// Suffix of a rollback that restored the files while some service,
 /// firewall or crontab steps failed (followed by the failed steps).
 pub const PARTLY_RESTORED: &str = "；已恢复旧 FRP 配置，但以下步骤未完成: ";
+/// A step of a partial rollback: `frp` firewall rules the restored
+/// configuration does not want and the backend refused to remove
+/// (followed by them); they stay recorded for a later retry.
+pub const RULES_LEFT: &str = "删除 FRP 防火墙规则（已保留记录，稍后重试）: ";
 
 /// An open FRP transaction, normally driven by [`Txn::run`].
 pub struct Txn<'r, 'a> {
@@ -207,8 +216,9 @@ pub fn rollback(rt: &Runtime, lock: &FileLock, journal: &mut Journal) -> Result<
     for name in SERVICES.iter().rev() {
         note(&mut missed, services.stop(name), || format!("停止 {name}"));
     }
-    note(&mut missed, firewall::clear_owner(rt.ctx, "frp"), || {
-        "清除 FRP 防火墙规则".to_owned()
+    let left = rt.clear_firewall().unwrap_or_else(|e| {
+        missed.push(format!("清除 FRP 防火墙规则: {e}"));
+        Leftovers::default()
     });
     for name in SERVICES {
         let _ = services.disable(name);
@@ -221,6 +231,17 @@ pub fn rollback(rt: &Runtime, lock: &FileLock, journal: &mut Journal) -> Result<
     )?;
     for entry in journal.snapshot.entries.iter().filter(|e| !e.present) {
         remove_tree_if_exists(&entry.target)?;
+    }
+    // The restore replaced (or removed) the ledger that still records them.
+    if !left.is_empty() {
+        note(&mut missed, rt.keep_leftovers(&left), || {
+            "保留未删除的 FRP 防火墙规则记录".to_owned()
+        });
+        // A restored installation reconciles them below (reporting what
+        // stays); after a first install nothing else will.
+        if !model::installed(paths) {
+            missed.push(format!("{RULES_LEFT}{}", left.messages.join("；")));
+        }
     }
     note(&mut missed, services.daemon_reload(), || {
         "重新加载 systemd".to_owned()
@@ -243,18 +264,23 @@ pub fn rollback(rt: &Runtime, lock: &FileLock, journal: &mut Journal) -> Result<
 }
 
 /// Firewall and services of the restored installation (nothing when the
-/// change was a first install); failures are added to `missed`.
+/// change was a first install); failures, and rules the reconcile could
+/// not remove, are added to `missed`.
 fn restore_services(rt: &Runtime, lock: &FileLock, journal: &Journal, missed: &mut Vec<String>) {
     let paths = rt.paths();
     if !model::installed(paths) {
         return;
     }
     match model::load(paths) {
-        Ok(Some(state)) => note(
-            missed,
-            firewall::reconcile_owner(rt.ctx, "frp", &state.firewall_ports()),
-            || "恢复 FRP 防火墙规则".to_owned(),
-        ),
+        Ok(Some(state)) => {
+            match firewall::reconcile_owner(rt.ctx, FIREWALL_OWNER, &state.firewall_ports()) {
+                Ok(report) if !report.failed.is_empty() => {
+                    missed.push(format!("{RULES_LEFT}{}", report.failed.join("；")));
+                }
+                Ok(_) => {}
+                Err(e) => missed.push(format!("恢复 FRP 防火墙规则: {e}")),
+            }
+        }
         Ok(None) => {}
         Err(e) => missed.push(format!("恢复的 FRP 状态无法读取，未恢复防火墙规则: {e}")),
     }

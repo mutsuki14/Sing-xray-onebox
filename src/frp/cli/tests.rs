@@ -207,7 +207,7 @@ fn unattended_install_update_and_uninstall() {
     s.run(Action::Update(None)).unwrap();
     assert!(
         !h.history().iter().any(|c| c.starts_with("systemctl stop")),
-        "the running version is kept as it is"
+        "the installed version is kept as it is"
     );
     let out = h.dir.join("bundle");
     s.run(Action::Client(ExportRequest {

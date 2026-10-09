@@ -10,14 +10,21 @@
 //!   `@reboot … frps start # onebox-frps-boot` is removed under systemd and
 //!   OpenRC (the units are enabled, H-8.1#12) and replaced by the
 //!   per-service `boot:onebox-frps`/`boot:onebox-frp-web` lines without an
-//!   init system (G25);
+//!   init system (G25). Those lines are rewritten only while they exist (or
+//!   replace v2's `frp-boot`), so a renewal keeps an autostart the
+//!   administrator disabled;
+//! - `frp` firewall rules that could not be removed stay recorded
+//!   ([`Leftovers`]): a rollback writes them back into the restored ledger,
+//!   and an uninstall keeps `FRP_ROOT` holding only `.managed` and the
+//!   ledger, so that `frps uninstall` (or the next install) retries them
+//!   (v2 deleted their record with `FRP_ROOT`);
 //! - `onebox-frps` starts with its `frps net-apply` pre-start hook; a caller
 //!   holding the FRP lock hands it to the hook when Onebox supervises the
 //!   service itself (no init), and the hook never waits for it otherwise;
 //! - the nginx worker account and IPv6 listeners follow the shared host
 //!   answers; the web directories get mode 0755 only where nginx needs them.
 
-use super::model::{FrpState, WebSettings};
+use super::model::{FrpState, WebSettings, MANAGED_FILE};
 use super::render::{nginx_conf, NginxLayout, NginxPhase};
 use crate::cert::acme::AcmeRelease;
 use crate::cert::http01::HTTP_PORT;
@@ -26,6 +33,7 @@ use crate::ctx::Ctx;
 use crate::domain::defaults::FRP_RENEW_CRON;
 use crate::error::Result;
 use crate::host::cron::{self, Crontab, Tag};
+use crate::host::firewall::{self, ledger_path, Entry, Ledger};
 use crate::host::init::{self, InitSystem};
 use crate::host::os::{self, process_env, EnvLookup};
 use crate::host::service::{ServiceDef, Services, FRPS, FRP_WEB};
@@ -40,6 +48,9 @@ use std::time::Duration;
 
 /// Contention message of the FRP lock (v2 wording).
 pub const BUSY: &str = "另一个 FRP 管理操作正在进行";
+/// The firewall owner of the FRP rules (ledger `FRP_ROOT/firewall-v2.json`).
+pub const FIREWALL_OWNER: &str = "frp";
+const MANAGED_TEXT: &[u8] = b"Managed by Onebox FRP\n";
 
 /// How long [`Runtime::lock`] waits for a concurrent holder.
 const LOCK_GRACE: Duration = Duration::from_secs(2);
@@ -235,7 +246,11 @@ impl<'a> Runtime<'a> {
 
     /// The FRP crontab lines (G25): the daily renewal in v3 format, no
     /// `frp-boot` line, and without an init system one autostart line per
-    /// service `state` runs.
+    /// service `state` runs. Those lines are the enablement that
+    /// `Services::enable`/`disable` keep (apply enables both services
+    /// before this runs): only existing groups are rewritten (the v2
+    /// per-service lines included) and v2's `frp-boot` line is converted,
+    /// so a renewal never re-enables a service the administrator disabled.
     pub fn rewrite_cron(&self, state: &FrpState) -> Result<()> {
         ensure!(cron::available(self.ctx), "缺少 crontab，无法安排证书续期");
         let paths = self.paths();
@@ -266,9 +281,12 @@ impl<'a> Runtime<'a> {
         let tcp_mode = !state.is_web();
         Crontab::edit(self.ctx, |tab| {
             tab.replace(&Tag::frp_renew(), &[renew])?;
-            tab.remove(&Tag::frp_boot());
+            // v2 started FRP at boot through this one line.
+            let converted = tab.remove(&Tag::frp_boot());
             for (tag, line) in &boots {
-                tab.replace(tag, std::slice::from_ref(line))?;
+                if converted || tab.has(tag) {
+                    tab.replace(tag, std::slice::from_ref(line))?;
+                }
             }
             if tcp_mode {
                 tab.remove(&web_boot);
@@ -276,6 +294,88 @@ impl<'a> Runtime<'a> {
             Ok(())
         })
     }
+
+    /// Remove every `frp` firewall rule; the ones that could not be
+    /// removed are returned (and were printed as warnings). Errors are
+    /// ledger and lock problems.
+    pub fn clear_firewall(&self) -> Result<Leftovers> {
+        let report = firewall::clear_owner(self.ctx, FIREWALL_OWNER)?;
+        if report.failed.is_empty() {
+            return Ok(Leftovers::default());
+        }
+        let path = ledger_path(self.paths(), FIREWALL_OWNER);
+        Ok(Leftovers {
+            entries: Ledger::load(&path, FIREWALL_OWNER)?.entries,
+            messages: report.failed,
+        })
+    }
+
+    /// Record `left` in the FRP ledger again after `FRP_ROOT`, which holds
+    /// it, was restored or removed, so that a later reconcile or clear
+    /// retries those rules instead of forgetting them. A missing `FRP_ROOT`
+    /// comes back holding only `.managed` and the ledger ([`leftovers_only`]).
+    pub fn keep_leftovers(&self, left: &Leftovers) -> Result<()> {
+        if left.is_empty() {
+            return Ok(());
+        }
+        let root = &self.paths().frp_root;
+        if std::fs::symlink_metadata(root).is_err() {
+            ensure_dir(root, 0o700)?;
+            atomic_write(&root.join(MANAGED_FILE), MANAGED_TEXT, 0o600)?;
+        }
+        let mut ledger = Ledger::load(&ledger_path(self.paths(), FIREWALL_OWNER), FIREWALL_OWNER)?;
+        let fresh: Vec<Entry> = left
+            .entries
+            .iter()
+            .filter(|e| !ledger.entries.iter().any(|k| k.rule.token == e.rule.token))
+            .cloned()
+            .collect();
+        if fresh.is_empty() {
+            return Ok(());
+        }
+        ledger.entries.extend(fresh);
+        ledger.save()
+    }
+}
+
+/// `frp` firewall rules that could not be removed (ufw disabled, firewalld
+/// stopped, …): still live and still recorded in the FRP ledger.
+#[derive(Debug, Default)]
+pub struct Leftovers {
+    /// Their ledger entries.
+    pub entries: Vec<Entry>,
+    /// What failed, one line per rule.
+    pub messages: Vec<String>,
+}
+
+impl Leftovers {
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
+/// What an uninstall that could not remove every firewall rule leaves
+/// behind (and a rolled-back first install with such rules): `FRP_ROOT`
+/// holding nothing but `.managed`, the FRP firewall ledger and its lock.
+pub fn leftovers_only(paths: &Paths) -> bool {
+    let managed = paths.frp_root.join(MANAGED_FILE);
+    let ledger = ledger_path(paths, FIREWALL_OWNER);
+    let allowed = [
+        managed.clone(),
+        ledger.clone(),
+        ledger.with_extension("lock"),
+    ];
+    let Ok(entries) = std::fs::read_dir(&paths.frp_root) else {
+        return false;
+    };
+    for entry in entries {
+        match entry {
+            Ok(entry) if allowed.contains(&entry.path()) => {}
+            _ => return false,
+        }
+    }
+    let is_file = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+    is_file(&managed) && is_file(&ledger)
 }
 
 /// The FRP service names `state` runs.
@@ -291,11 +391,7 @@ pub fn names(state: &FrpState) -> Vec<&'static str> {
 pub fn mkdirs(paths: &Paths) -> Result<()> {
     for dir in [&paths.frp_root, &paths.frp_bin, &paths.frp_web] {
         ensure_dir(dir, 0o700)?;
-        atomic_write(
-            &dir.join(super::model::MANAGED_FILE),
-            b"Managed by Onebox FRP\n",
-            0o600,
-        )?;
+        atomic_write(&dir.join(MANAGED_FILE), MANAGED_TEXT, 0o600)?;
     }
     for dir in [&paths.frp_log, &paths.frp_run] {
         ensure_dir(dir, 0o700)?;

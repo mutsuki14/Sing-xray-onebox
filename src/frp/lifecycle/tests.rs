@@ -8,6 +8,7 @@ use crate::domain::protocol::{Core, Protocol};
 use crate::frp::ca::ControlFiles;
 use crate::frp::model::Mode;
 use crate::frp::render::server_toml;
+use crate::frp::runtime::leftovers_only;
 use crate::frp::testing::{fake_frps, tcp_state, web_state, FakeHost};
 use crate::frp::txn::ROLLED_BACK;
 use crate::host::service::unit_file;
@@ -213,6 +214,99 @@ fn a_failing_firewall_backend_still_restores_the_old_configuration() {
 }
 
 #[test]
+fn uninstall_keeps_the_record_of_rules_it_cannot_remove() {
+    let h = FakeHost::new();
+    install_tcp(&h);
+    let paths = &h.ctx.paths;
+    // Everything else goes; the command fails naming the rules, and
+    // running it again retries them.
+    h.set_firewall_removals_ok(false);
+    let rt = h.runtime();
+    let lock = rt.lock().unwrap();
+    let err = uninstall(&rt, &lock).unwrap_err().to_string();
+    assert!(
+        err.starts_with("FRP 已卸载，但以下防火墙规则未能删除: ") && err.contains("7000/tcp"),
+        "{err}"
+    );
+    assert!(!model::installed(paths));
+    assert!(!h.running(FRPS) && !unit_file(paths, FRPS).exists());
+    assert!(!paths.frp_bin.exists() && !paths.frp_web.exists());
+    assert!(!h.crontab().contains("frp"));
+    assert!(leftovers_only(paths));
+    assert!(h.frp_ledger_ports().contains(&7000));
+    assert!(uninstall(&rt, &lock)
+        .unwrap_err()
+        .to_string()
+        .contains("7000/tcp"));
+    h.set_firewall_removals_ok(true);
+    uninstall(&rt, &lock).unwrap();
+    assert!(!paths.frp_root.exists());
+    assert_eq!(
+        uninstall(&rt, &lock).unwrap_err().to_string(),
+        model::NOT_INSTALLED
+    );
+}
+
+#[test]
+fn rules_a_rollback_cannot_remove_stay_recorded() {
+    let h = FakeHost::new();
+    let before = install_tcp(&h);
+    let paths = &h.ctx.paths;
+    // The change opens TCP 7002 and fails; the backend refuses removals.
+    h.set_firewall_removals_ok(false);
+    h.set_healthy(false);
+    let mut next = before.clone();
+    next.bind_port = 7002;
+    let err = apply(&h.runtime(), next, change("配置"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(crate::frp::txn::RULES_LEFT), "{err}");
+    // Only the rule the restored configuration does not want is listed.
+    assert!(
+        err.contains("7002/tcp") && !err.contains("7000/tcp"),
+        "{err}"
+    );
+    assert_eq!(model::load(paths).unwrap().unwrap(), before);
+    assert!(!journal::exists(paths));
+    // The restored ledger still records the live rule, so the next
+    // reconcile removes it once the backend works again.
+    assert!(h.frp_ledger_ports().contains(&7002));
+    h.set_firewall_removals_ok(true);
+    h.set_healthy(true);
+    let rt = h.runtime();
+    service(&rt, &rt.lock().unwrap(), ServiceAction::Restart).unwrap();
+    assert!(!h.frp_ledger_ports().contains(&7002));
+    assert!(h.frp_ledger_ports().contains(&7000));
+}
+
+#[test]
+fn a_rolled_back_first_install_keeps_only_the_rules_it_could_not_remove() {
+    let h = FakeHost::new();
+    let paths = &h.ctx.paths;
+    h.set_firewall_removals_ok(false);
+    h.set_healthy(false);
+    let mut state = tcp_state();
+    state.token.clear();
+    let err = apply(&h.runtime(), state.clone(), change("安装")).unwrap_err();
+    assert!(
+        err.to_string().contains(crate::frp::txn::RULES_LEFT),
+        "{err}"
+    );
+    assert!(!paths.frp_bin.exists() && !paths.frp_web.exists());
+    assert!(!model::installed(paths));
+    assert!(leftovers_only(paths), "only .managed and the ledger");
+    assert!(h.frp_ledger_ports().contains(&7000));
+    // `frps uninstall` retries them; the next install adopts the directory.
+    let rt = h.runtime();
+    let lock = rt.lock().unwrap();
+    assert!(uninstall(&rt, &lock).is_err());
+    h.set_firewall_removals_ok(true);
+    h.set_healthy(true);
+    apply_locked(&rt, &lock, state, change("安装")).unwrap();
+    assert!(model::installed(paths));
+}
+
+#[test]
 fn rotate_ca_replaces_the_private_ca_and_keeps_the_token() {
     let h = FakeHost::new();
     let before = install_tcp(&h);
@@ -244,7 +338,7 @@ fn configure_with_the_installed_version_needs_no_network() {
 }
 
 #[test]
-fn update_to_the_running_version_changes_nothing() {
+fn update_to_the_installed_version_changes_nothing() {
     let h = FakeHost::new();
     let state = install_tcp(&h);
     h.exec.clear_history();
@@ -410,7 +504,8 @@ fn renew_restarts_frps_only_when_the_control_certificate_changed() {
     let rt = h.runtime();
     let lock = rt.lock().unwrap();
     h.exec.clear_history();
-    renew(&rt, &lock, true).unwrap();
+    // Nothing changed: a scheduled run stays silent (no daily log line).
+    assert!(!renew(&rt, &lock, true).unwrap());
     let restarted = |h: &FakeHost| {
         h.history()
             .iter()
@@ -418,9 +513,25 @@ fn renew_restarts_frps_only_when_the_control_certificate_changed() {
     };
     assert!(!restarted(&h));
     fs::remove_file(ControlFiles::new(&h.ctx.paths.frp_root).cert()).unwrap();
-    renew(&rt, &lock, true).unwrap();
+    assert!(renew(&rt, &lock, true).unwrap(), "reported");
     assert!(restarted(&h));
     assert!(!journal::exists(&h.ctx.paths));
+}
+
+#[test]
+fn scheduled_renewals_are_silent_unless_a_certificate_changed() {
+    for (scheduled, changed, printed) in [
+        (false, false, true),
+        (false, true, true),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        assert_eq!(
+            announced(scheduled, changed),
+            printed,
+            "scheduled={scheduled} changed={changed}"
+        );
+    }
 }
 
 #[test]
