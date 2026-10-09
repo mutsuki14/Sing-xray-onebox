@@ -218,10 +218,17 @@ def assert_v3_services(node: V2Node, worker_before: int, front_before: int) -> N
     for service in ("onebox-sing-box", "onebox-network", "onebox-subscription"):
         check(any(line.endswith(f"# onebox:boot:{service}") for line in cron), f"no boot line for {service}")
     check(not any("onebox-subscription-web" in line for line in cron), "the v2 front still autostarts")
-    check(not (s.etc / "services/onebox-subscription-web.json").exists(), "the v2 front spec survived")
     check(not (s.etc / "subscription/nginx.conf").exists(), "the v2 front config survived")
-    spec = json.loads((s.etc / "services/onebox-sing-box.json").read_text())
-    check(spec["program"] == str(s.root / "bin/sing-box"), f"unexpected core spec: {spec}")
+    expected = {  # service → (program, args) of the specs v3 writes without an init system
+        "onebox-network": (s.exe, ["net-apply"]),
+        "onebox-sing-box": (s.root / "bin/sing-box", ["run", "--disable-color", "-c", str(s.etc / "sing-box.json")]),
+        "onebox-subscription": (s.exe, ["subscription", "serve"]),
+    }
+    specs = {p.stem: json.loads(p.read_text()) for p in (s.etc / "services").glob("*.json")}
+    check(set(specs) == set(expected), f"service specs after the upgrade: {sorted(specs)}")
+    for name, (program, args) in expected.items():
+        check((specs[name]["program"], specs[name]["args"]) == (str(program), args),
+              f"unexpected {name} spec: {specs[name]}")
     worker = s.service_pid("onebox-subscription")
     check(worker and worker != worker_before, "the subscription worker was not restarted")
     check(s.process_exe(worker) == s.exe, "the worker does not run the installed manager")

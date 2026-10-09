@@ -305,8 +305,15 @@ def v1_refusal_phase(s: sb.Sandbox) -> None:
 def uninstall_phase(s: sb.Sandbox, ports: Ports) -> None:
     """Remove the node, keep site content, backups, ledgers and the manager."""
     backups_before = set(os.listdir(s.etc / "backups"))
+    # Website content (site root and ROOT/site backups) survives uninstall.
+    kept = [s.root / "www/keep.html", s.etc / "site/content-backups/keep"]
+    for path in kept:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("user content\n")
     proc = s.run("uninstall")
     check(UNINSTALL_MESSAGE in proc.stdout, f"uninstall message missing:\n{proc.stdout}")
+    for path in kept:
+        check(path.read_text() == "user content\n", f"uninstall removed {path}")
     for port in (ports.second, ports.additional, ports.subscription):
         sb.wait_listening(port, False)
     for rel in ("state.json", "state.v2.json", "onebox.conf", "sing-box.json", "xray.json", "client",
@@ -318,6 +325,10 @@ def uninstall_phase(s: sb.Sandbox, ports: Ports) -> None:
         check(s.service_pid(service) is None, f"{service} still running after uninstall")
     backups = set(os.listdir(s.etc / "backups"))
     check(backups_before < backups, "uninstall must keep old backups and add a safety backup")
+    labels = [json.loads((s.etc / "backups" / b / "manifest.json").read_text())["label"]
+              for b in backups - backups_before]
+    check(labels == ["before-uninstall"], f"unexpected safety backups: {labels}")
+    check(not (s.root / "onebox-subscription-acme").exists(), "uninstall left the subscription webroot")
     check(s.exe.is_file(), "uninstall removed the manager (FRP units still call it)")
     check((s.etc / "firewall-v2.json").is_file(), "uninstall removed the firewall ledger")
     check(not any(s.firewall_rules().values()), f"firewall rules left: {s.firewall_rules()}")
