@@ -95,15 +95,19 @@ fn preflight(
 /// The error of a failed apply after the rollback it triggers.
 fn failed(ctx: &Ctx, lock: &FileLock, journal: &mut Journal, error: Error) -> Error {
     let dir = journal::dir(&ctx.paths);
+    // Without the generic "操作已取消" tail of a wrapped cancellation.
+    let cause = error.report_text();
     let result = if *journal.phase() == Phase::Committed {
-        let message = format!("配置已提交，但事务清理失败: {error}；请执行 recover 清理");
+        let message = format!("配置已提交，但事务清理失败: {cause}；请执行 recover 清理");
         keep_cancellation(error, message)
     } else {
+        out::warn(format!("{cause}；正在恢复原配置…"));
         match rollback::rollback(ctx, lock, journal) {
             Ok(()) => error.wrap("配置未应用，已恢复原状态"),
             Err(recovery) => {
                 let message = format!(
-                    "配置失败: {error}；恢复未完成: {recovery}；事务日志保留于 {}，请执行 recover",
+                    "配置失败: {cause}；恢复未完成: {}；事务日志保留于 {}，请执行 recover",
+                    recovery.report_text(),
                     dir.display()
                 );
                 keep_cancellation(error, message)

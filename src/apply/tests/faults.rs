@@ -87,6 +87,32 @@ fn failing_commands_in_each_stage_are_rolled_back() {
 }
 
 #[test]
+fn a_firewall_rule_the_rollback_cannot_remove_is_kept_recorded_and_retried() {
+    let host = installed_host();
+    let before = host.world();
+    host.features
+        .inject(Fault::Fail(Checkpoint::Stage(Phase::StartCores)));
+    // The new generation's rule cannot be deleted in rollback-stop once.
+    host.fail_command("iptables -w 5 -D INPUT -p tcp --dport 8443 ");
+    let text = err_text(&host.apply(host.change(singbox_only(), "修改")).unwrap_err());
+    assert!(text.starts_with("配置未应用，已恢复原状态"), "{text}");
+    // The leftover went into the restored ledger, so re-applying the old
+    // rules removed it: rules and ledger are the old ones exactly.
+    assert!(host.faults.lock().unwrap().is_empty(), "the fault fired");
+    let deletes = host
+        .history()
+        .iter()
+        .filter(|h| h.starts_with("iptables -w 5 -D INPUT -p tcp --dport 8443 "))
+        .count();
+    assert_eq!(
+        deletes, 2,
+        "failed once, retried by the old rules' reconcile"
+    );
+    assert_eq!(before.diff(&host.world()), Vec::<String>::new());
+    assert_no_journal(&host);
+}
+
+#[test]
 fn a_rollback_that_cannot_stop_keeps_the_journal_for_recover() {
     let host = installed_host();
     let before = host.world();

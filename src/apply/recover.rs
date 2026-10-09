@@ -52,8 +52,9 @@ pub fn recover_journal(ctx: &Ctx, lock: &FileLock) -> Result<Recovery> {
     let what = describe(&journal);
     rollback::rollback(ctx, lock, &mut journal).map_err(|e| {
         let message = format!(
-            "未完成事务恢复失败；日志保留于 {}: {e}",
-            journal::dir(paths).display()
+            "未完成事务恢复失败；日志保留于 {}: {}",
+            journal::dir(paths).display(),
+            e.report_text()
         );
         keep_cancellation(e, message)
     })?;
