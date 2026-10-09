@@ -39,10 +39,7 @@ impl Dispatcher for Calls {
 fn menu_run(bench: &Bench, calls: &Calls, answers: &[&str]) -> Result<()> {
     bench.answers(answers);
     let session = bench.session();
-    let menu = Menu {
-        session: &session,
-        dispatcher: calls,
-    };
+    let menu = Menu::new(&session, calls);
     let result = menu.main();
     assert_eq!(
         bench.ui.remaining(),
@@ -133,7 +130,7 @@ fn not_installed_menu_and_g29() {
     std::fs::write(journal.join("journal.json"), "not json").unwrap();
     let calls = Calls::default();
     menu_run(&bench, &calls, &["6", "", "7", "0"]).unwrap();
-    assert_eq!(calls.lines(), ["backups", "restore latest", "recover"]);
+    assert_eq!(calls.lines(), ["backups", "restore -- latest", "recover"]);
 }
 
 #[test]
@@ -152,10 +149,7 @@ fn outcome_rules() {
     let bench = Bench::new();
     let session = bench.session();
     let calls = Calls::default();
-    let menu = Menu {
-        session: &session,
-        dispatcher: &calls,
-    };
+    let menu = Menu::new(&session, &calls);
     assert!(menu.outcome(Ok(())).is_ok());
     let exit0 = menu.outcome(Err(Error::exit(
         0,
@@ -292,9 +286,9 @@ fn standalone_subscription_and_devices() {
         calls.lines(),
         [
             "subscription enable --mode standalone --domain sub.example.com --port 8448 --tls cf",
-            "subscription add phone",
+            "subscription add -- phone",
             "subscription info",
-            "subscription revoke 0123456789abcdef",
+            "subscription revoke -- 0123456789abcdef",
         ]
     );
     assert_eq!(bench.ui.errors(), ["设备 ID 应为 16 位十六进制"]);
@@ -318,10 +312,10 @@ fn backup_update_and_frp_entries() {
     assert_eq!(
         calls.lines(),
         [
-            "backup manual",
+            "backup -- manual",
             "backups",
             "backups",
-            "restore latest",
+            "restore -- latest",
             "recover",
             "frps",
             "update-check",
@@ -423,8 +417,8 @@ fn link_tests_build_their_command_lines() {
     assert_eq!(
         calls.lines(),
         [
-            format!("bench {probe} --url https://www.gstatic.com/generate_204 --entries n1-a,n2-b --samples 3"),
-            format!("failover {probe} --url https://www.gstatic.com/generate_204 --port 2080 --interval 15 --failures 3 --recoveries 3 --cooldown 60"),
+            format!("bench --url https://www.gstatic.com/generate_204 --entries n1-a,n2-b --samples 3 -- {probe}"),
+            format!("failover --url https://www.gstatic.com/generate_204 --port 2080 --interval 15 --failures 3 --recoveries 3 --cooldown 60 -- {probe}"),
         ]
     );
     assert_eq!(
@@ -461,4 +455,116 @@ fn helpers() {
     std::fs::create_dir_all(dir.join("1-a")).unwrap();
     std::fs::write(dir.join("1-a/manifest.json"), "{}").unwrap();
     assert!(has_backups(dir.path()));
+}
+
+/// EOF (or Ctrl+C) at a submenu's own prompt leaves the whole menu with
+/// 130 — also from a nested submenu — while one inside an action returns
+/// to the submenu (`errors_and_cancellations_inside_actions…`).
+#[test]
+fn eof_at_a_submenu_prompt_exits() {
+    let bench = Bench::installed(&node());
+    let err = menu_run(&bench, &Calls::default(), &["4"]).unwrap_err();
+    assert!(err.is_cancelled());
+    assert_eq!(bench.ui.prompts().len(), 2, "main menu, then the submenu");
+    // Nested: performance → probe bundles → EOF.
+    let bench = Bench::installed(&node());
+    let err = menu_run(&bench, &Calls::default(), &["7", "7"]).unwrap_err();
+    assert!(err.is_cancelled());
+    let prompts = bench.ui.prompts();
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    assert!(prompts[2].starts_with("探测配置\n  本机探测配置 尚未生成\n 1) 导出本机探测配置"));
+}
+
+#[test]
+fn probe_bundles_export_list_and_merge() {
+    let bench = Bench::installed(&node());
+    let dir = bench.dir.path();
+    let existing = dir.join("server-a.json");
+    std::fs::write(&existing, "{}").unwrap();
+    let existing = existing.to_string_lossy().into_owned();
+    let out = dir.join("all.json").to_string_lossy().into_owned();
+    let export = dir.join("export.json").to_string_lossy().into_owned();
+    let calls = Calls::default();
+    menu_run(
+        &bench,
+        &calls,
+        &[
+            "7",
+            "7", // performance → probe bundles
+            "1",
+            &existing,
+            &export, // export: an existing target is re-asked
+            "2",
+            "missing.json",
+            &existing, // list: a missing file is re-asked
+            "3",
+            &out,
+            "9",
+            "2",
+            &existing,
+            &existing, // merge two bundles
+            "0",
+            "0",
+            "0",
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        calls.lines(),
+        [
+            format!("probe export -- {export}"),
+            format!("probe list -- {existing}"),
+            format!("probe merge -- {out} {existing} {existing}"),
+        ]
+    );
+    assert_eq!(
+        bench.ui.errors(),
+        [
+            format!("目标已存在: {existing}"),
+            "文件不存在: missing.json".to_owned(),
+            "请输入 2–8 的整数".to_owned(),
+        ]
+    );
+    let prompts = bench.ui.prompts();
+    for expected in [
+        "导出到新文件（不可已存在）",
+        "合并到新文件（不可已存在）",
+        "要合并的文件数",
+        "第 1 份探测配置文件",
+        "第 2 份探测配置文件",
+    ] {
+        assert!(
+            prompts.iter().any(|p| p == expected),
+            "{expected}: {prompts:?}"
+        );
+    }
+}
+
+/// Typed values that look like options are passed after `--`, and the
+/// real registry treats them as data.
+#[test]
+fn typed_values_are_never_options() {
+    let bench = Bench::installed(&node());
+    let calls = Calls::default();
+    menu_run(
+        &bench,
+        &calls,
+        &["4", "3", "-y", "0", "8", "1", "--help", "0", "0"],
+    )
+    .unwrap();
+    assert_eq!(
+        calls.lines(),
+        ["subscription add -- -y", "backup -- --help"]
+    );
+    // Through the registry: `probe list -- -y` reads a file named `-y`.
+    let session = bench.session();
+    let err = Registry
+        .dispatch(&session, &["probe", "list", "--", "-y"])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("-y"), "{err}");
+    assert!(
+        !err.contains("不支持选项") && !err.contains("多余的参数"),
+        "{err}"
+    );
 }

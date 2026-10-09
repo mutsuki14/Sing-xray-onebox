@@ -252,6 +252,20 @@ fn positional_edge_cases() {
     );
     assert_eq!(matches("render server").positionals, ["server"]);
     assert!(matches("del").positionals.is_empty());
+    // After `--` words are data: not -y, --help, a subcommand or `help`.
+    let m = matches("subscription add -- -y");
+    assert_eq!(
+        (m.path.clone(), m.positionals.clone()),
+        (vec!["subscription", "add"], vec!["-y".to_string()])
+    );
+    assert!(!m.assume_yes);
+    let inv = parse_line("backup -- --help").unwrap();
+    assert!(!inv.help);
+    assert_eq!(inv.matches.positionals, ["--help"]);
+    let m = matches("subscription -- enable");
+    assert_eq!(m.path, ["subscription"], "no subcommand after --");
+    assert_eq!(m.positionals, ["enable"]);
+    assert_eq!(error("bbr -- help"), "多余的参数: help");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Feature submenus: subscription, website, backups, updates and the
 //! reinstall/uninstall entry. Subscription, backups and updates belong to
 //! independent modules and run fixed command lines; answers typed here are
-//! validated and only ever passed as option values.
+//! validated and only ever passed as option values or after `--`.
 
 use super::Menu;
 use crate::cli::commands::install::{self, InstallArgs};
@@ -54,13 +54,13 @@ impl Menu<'_> {
                     .session
                     .ui()
                     .input_with("设备名称", "phone", &device_name)?;
-                self.dispatch(&["subscription", "add", &name])
+                self.dispatch(&["subscription", "add", "--", &name])
             }
             3 | 4 => {
                 self.dispatch(&["subscription", "info"])?;
                 let id = self.session.ui().input_with("设备 ID", "", &device_id)?;
                 let action = if i == 3 { "revoke" } else { "reset" };
-                self.dispatch(&["subscription", action, &id])
+                self.dispatch(&["subscription", action, "--", &id])
             }
             5 => self.dispatch(&["subscription", "disable"]),
             _ => self.dispatch(&["subscription", "publish"]),
@@ -267,7 +267,7 @@ impl Menu<'_> {
                     .session
                     .ui()
                     .input_with("快照标签", "manual", &backup_label)?;
-                self.dispatch(&["backup", &label])
+                self.dispatch(&["backup", "--", &label])
             }
             1 => self.dispatch(&["backups"]),
             2 => self.restore(),

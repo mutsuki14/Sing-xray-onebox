@@ -1,6 +1,7 @@
 //! Performance and diagnostics: tuning with a preview and confirmation,
-//! doctor, probe export, bench, failover, REALITY check and BBR (v2
-//! menu 21 and its prompts, spec D §2.9).
+//! doctor, probe bundles (export, list, merge), bench, failover, REALITY
+//! check and BBR (v2 menu 21 and its prompts, spec D §2.9). File answers
+//! are dispatched after `--`.
 
 use super::Menu;
 use crate::cli::commands::tune::{self, Tune};
@@ -29,7 +30,7 @@ impl Menu<'_> {
             "资源档位",
             "重置调优",
             "体检（doctor）",
-            "导出探测配置",
+            "探测配置（导出 / 查看 / 合并）",
             "测速（bench）",
             "故障切换演练（failover）",
             "REALITY 检查",
@@ -48,7 +49,7 @@ impl Menu<'_> {
             },
             4 => self.tune(Tune::Reset),
             5 => self.dispatch(&["doctor"]),
-            6 => self.probe_export(),
+            6 => self.probe_menu(),
             7 => self.bench(),
             8 => self.failover(),
             9 => self.dispatch(&["reality-check"]),
@@ -93,37 +94,93 @@ impl Menu<'_> {
         Ok(choice.and_then(|i| all.get(i).copied()))
     }
 
+    /// v2's probe submenu: export this node's bundle, list a bundle's
+    /// entries, merge bundles of several servers.
+    fn probe_menu(&self) -> Result<()> {
+        let local = self.local_probe();
+        let heading = || {
+            let state = if local.is_file() {
+                local.to_string_lossy().into_owned()
+            } else {
+                "尚未生成".to_owned()
+            };
+            format!("探测配置\n  本机探测配置 {state}")
+        };
+        let items: Vec<Entry> = ["导出本机探测配置", "查看配置入口", "合并多份配置"]
+            .iter()
+            .map(|l| Entry::new(*l))
+            .collect();
+        self.submenu(&heading, &items, &|i| match i {
+            0 => self.probe_export(),
+            1 => self.probe_list(),
+            _ => self.probe_merge(),
+        })
+    }
+
     fn probe_export(&self) -> Result<()> {
         let path = self.session.ui().input_with(
             "导出到新文件（不可已存在）",
             "probe-export.json",
             &new_file,
         )?;
-        self.dispatch(&["probe", "export", &path])
+        self.run_tool(&["probe", "export"], Vec::new(), &[path])
     }
 
-    /// The probe file, health URL and entries shared by bench/failover.
-    fn link_test_base(&self, tool: &str) -> Result<Vec<String>> {
+    fn probe_list(&self) -> Result<()> {
+        let default = self.default_probe();
+        let file = self
+            .session
+            .ui()
+            .input_with("探测配置文件", &default, &existing_file)?;
+        self.run_tool(&["probe", "list"], Vec::new(), &[file])
+    }
+
+    /// `probe merge NEW F1..Fn` with 2–8 inputs (v2 prompts and defaults).
+    fn probe_merge(&self) -> Result<()> {
         let ui = self.session.ui();
-        let local = self.session.ctx.paths.clients().join("probe.json");
-        let default = if local.is_file() {
+        let target = ui.input_with("合并到新文件（不可已存在）", "combined.json", &new_file)?;
+        let count = ask_number(ui, "要合并的文件数", "2", 2..=8)?;
+        let mut files = vec![target];
+        for i in 1..=count {
+            let prompt = format!("第 {i} 份探测配置文件");
+            let default = format!("server-{i}.json");
+            files.push(ui.input_with(&prompt, &default, &existing_file)?);
+        }
+        self.run_tool(&["probe", "merge"], Vec::new(), &files)
+    }
+
+    /// The node's own bundle, written with the client configurations.
+    fn local_probe(&self) -> std::path::PathBuf {
+        self.session.ctx.paths.clients().join("probe.json")
+    }
+
+    /// The node's own bundle when it exists, else v2's `probe.json`.
+    fn default_probe(&self) -> String {
+        let local = self.local_probe();
+        if local.is_file() {
             local.to_string_lossy().into_owned()
         } else {
             "probe.json".to_owned()
-        };
-        let file = ui.input_with("探测配置文件", &default, &existing_file)?;
+        }
+    }
+
+    /// The probe file, then the health URL and entries options shared by
+    /// bench/failover.
+    fn link_test_base(&self) -> Result<(String, Vec<String>)> {
+        let ui = self.session.ui();
+        let file = ui.input_with("探测配置文件", &self.default_probe(), &existing_file)?;
         let url = ui.input_with("HTTPS 健康检测地址（应返回 2xx）", HEALTH_URL, &https_url)?;
         let entries = ui.input_with("入口 ID（逗号分隔，留空自动选择）", "", &entry_ids)?;
-        let mut argv = vec![tool.to_owned(), file, "--url".into(), url];
+        let mut options = vec!["--url".to_owned(), url];
         if !entries.is_empty() {
-            argv.extend(["--entries".into(), entries]);
+            options.extend(["--entries".into(), entries]);
         }
-        Ok(argv)
+        Ok((file, options))
     }
 
     fn bench(&self) -> Result<()> {
         let ui = self.session.ui();
-        let mut argv = self.link_test_base("bench")?;
+        let (file, mut argv) = self.link_test_base()?;
         let samples = ask_number(ui, "健康检测次数", "5", 1..=20)?;
         argv.extend(["--samples".into(), samples.to_string()]);
         for (flag, prompt, check) in [
@@ -148,12 +205,12 @@ impl Menu<'_> {
                 argv.extend([flag.to_owned(), value]);
             }
         }
-        self.run_argv(&argv)
+        self.run_tool(&["bench"], argv, &[file])
     }
 
     fn failover(&self) -> Result<()> {
         let ui = self.session.ui();
-        let mut argv = self.link_test_base("failover")?;
+        let (file, mut argv) = self.link_test_base()?;
         self.session.info(FAILOVER_NOTE);
         for (flag, prompt, default, range) in [
             ("--port", "本机 SOCKS5 端口", "2080", 1024..=65535),
@@ -165,12 +222,16 @@ impl Menu<'_> {
             let value = ask_number(ui, prompt, default, range)?;
             argv.extend([flag.to_owned(), value.to_string()]);
         }
-        self.run_argv(&argv)
+        self.run_tool(&["failover"], argv, &[file])
     }
 
-    fn run_argv(&self, argv: &[String]) -> Result<()> {
-        let words: Vec<&str> = argv.iter().map(String::as_str).collect();
-        self.dispatch(&words)
+    /// `words OPTIONS -- FILES`: typed file names are data, never options.
+    fn run_tool(&self, words: &[&str], options: Vec<String>, files: &[String]) -> Result<()> {
+        let mut argv: Vec<&str> = words.to_vec();
+        argv.extend(options.iter().map(String::as_str));
+        argv.push("--");
+        argv.extend(files.iter().map(String::as_str));
+        self.dispatch(&argv)
     }
 }
 

@@ -12,8 +12,12 @@
 //! `[警告] …` and continues; a cancellation inside the action (EOF or
 //! Ctrl+C at one of its questions) prints `[提示]` and continues;
 //! `Exit{0}` (a finished self-update) and `Exit{75}` end the process, so
-//! the replaced program never keeps running; EOF at a menu prompt itself
-//! leaves with 130. Under `-y` the menu picks `0) 退出` at once.
+//! the replaced program never keeps running; EOF (or Ctrl+C) at a menu
+//! prompt itself — the main menu's or any submenu's — leaves with 130.
+//! Under `-y` the menu picks `0) 退出` at once.
+//!
+//! Typed values reach dispatched command lines only after `--`, so an
+//! answer such as `-y` or `--help` is data, never an option.
 //!
 //! Changes from v2 (spec B §2.9, B-9.1#11/#25): eleven grouped entries
 //! instead of 28; no menu item dispatches typed text as a command (v2 item
@@ -36,6 +40,7 @@ use crate::error::{Error, Result};
 use crate::state::Loaded;
 use crate::ui::menu::{choose, Entry};
 use crate::VERSION;
+use std::cell::Cell;
 
 /// Runs fixed command lines (the registry in production).
 pub trait Dispatcher {
@@ -57,13 +62,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     if let Some(help) = unanswerable(ctx.ui.as_ref()) {
         return crate::ui::out::data(&help);
     }
-    with_system(ctx, |session| {
-        Menu {
-            session,
-            dispatcher: &Registry,
-        }
-        .main()
-    })
+    with_system(ctx, |session| Menu::new(session, &Registry).main())
 }
 
 /// The command overview to print instead of a menu nobody can answer
@@ -76,6 +75,8 @@ pub fn unanswerable(ui: &dyn crate::ui::Prompter) -> Option<String> {
 pub struct Menu<'a> {
     pub session: &'a Session<'a>,
     pub dispatcher: &'a dyn Dispatcher,
+    /// Set when a menu prompt was cancelled: every loop unwinds (G5).
+    left: Cell<bool>,
 }
 
 /// An entry of the main menu.
@@ -141,19 +142,47 @@ pub const INSTALLED: [Main; 11] = [
     Main::Reinstall,
 ];
 
-impl Menu<'_> {
+impl<'a> Menu<'a> {
+    pub fn new(session: &'a Session<'a>, dispatcher: &'a dyn Dispatcher) -> Menu<'a> {
+        Menu {
+            session,
+            dispatcher,
+            left: Cell::new(false),
+        }
+    }
+
     /// The main loop.
     pub fn main(&self) -> Result<()> {
         loop {
             let (heading, entries) = self.main_view();
             let labels: Vec<Entry> = entries.iter().map(|e| e.entry()).collect();
-            let Some(index) = choose(self.session.ui(), &heading, &labels, "退出")? else {
+            let answer = choose(self.session.ui(), &heading, &labels, "退出");
+            let Some(index) = self.menu_answer(answer)? else {
                 return Ok(());
             };
             if let Some(entry) = entries.get(index) {
-                self.outcome(self.main_action(*entry))?;
+                self.after(self.main_action(*entry))?;
             }
         }
+    }
+
+    /// An answer at a menu prompt; a cancellation there leaves the whole
+    /// menu (exit 130), unlike one inside an action.
+    fn menu_answer(&self, answer: Result<Option<usize>>) -> Result<Option<usize>> {
+        answer.inspect_err(|e| {
+            if e.is_cancelled() {
+                self.left.set(true);
+            }
+        })
+    }
+
+    /// After an action: unwind when a (nested) menu prompt was cancelled,
+    /// else the [`outcome`](Menu::outcome) rules.
+    fn after(&self, result: Result<()>) -> Result<()> {
+        if self.left.get() {
+            return result.and(Err(Error::Cancelled));
+        }
+        self.outcome(result)
     }
 
     /// Header and entries for the current state of the host.
@@ -226,10 +255,11 @@ impl Menu<'_> {
         act: &dyn Fn(usize) -> Result<()>,
     ) -> Result<()> {
         loop {
-            let Some(index) = choose(self.session.ui(), &heading(), entries, "返回")? else {
+            let answer = choose(self.session.ui(), &heading(), entries, "返回");
+            let Some(index) = self.menu_answer(answer)? else {
                 return Ok(());
             };
-            self.outcome(act(index))?;
+            self.after(act(index))?;
         }
     }
 
@@ -278,7 +308,7 @@ impl Menu<'_> {
             .input_with("备份 ID 或 latest", "latest", &|id: &str| {
                 backup_id(id).map(str::to_owned)
             })?;
-        self.dispatch(&["restore", &id])
+        self.dispatch(&["restore", "--", &id])
     }
 }
 

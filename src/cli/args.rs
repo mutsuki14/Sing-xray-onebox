@@ -373,11 +373,9 @@ pub fn parse<'a>(
     let mut tokens = rest.iter();
     while let Some(token) = tokens.next() {
         match token.as_str() {
-            "--" => {
-                for positional in tokens.by_ref() {
-                    parser.positional(positional)?;
-                }
-            }
+            // Everything after `--` is data: never an option, a
+            // subcommand or the `help` word (menus pass typed values so).
+            "--" => parser.matches.positionals.extend(tokens.by_ref().cloned()),
             "-y" | "--yes" => parser.matches.assume_yes = true,
             "-h" | "--help" => parser.help = true,
             t if t.starts_with("--") => {
