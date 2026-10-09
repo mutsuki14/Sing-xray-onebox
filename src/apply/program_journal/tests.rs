@@ -177,7 +177,8 @@ fn every_uncommitted_crash_window_restores_the_old_manager() {
         let regen = &regens[0];
         assert_eq!(regen.program, fx.paths().executable.to_str().unwrap());
         assert_eq!(regen.inherit_lock_fd, Some(fx.lock.raw_fd()));
-        assert!(regen.stream);
+        // Captured: a terminal that hung up cannot fail a regen that applied.
+        assert!(!regen.stream);
         assert!(regen.env.contains(&(
             "ONEBOX_DIR".into(),
             fx.paths().root.to_string_lossy().into()
@@ -220,28 +221,153 @@ fn committed_record_only_cleans_up() {
     assert!(journal_path(fx.paths()).exists());
 }
 
+/// systemd units for the three node services; `running` follows the
+/// `systemctl start`/`stop` calls, `onebox-subscription` starts at boot,
+/// `onebox regen` answers `regen`, everything else of a recovery succeeds.
+fn failing_regen_exec(
+    paths: &Paths,
+    running: &[&str],
+    regen: impl Fn() -> Output + Send + Sync + 'static,
+) -> (Arc<FakeExec>, Arc<std::sync::Mutex<Vec<String>>>) {
+    mkdir(&paths.system("/run/systemd/system"), 0o755);
+    for name in [svc::XRAY, svc::SITE, svc::SUBSCRIPTION] {
+        file(
+            &paths.systemd.join(format!("{name}.service")),
+            0o644,
+            b"[Unit]",
+        );
+    }
+    let state = Arc::new(std::sync::Mutex::new(
+        running.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+    ));
+    let exec = Arc::new(FakeExec::new());
+    let units = state.clone();
+    exec.on_fn(
+        |c| c.program == "systemctl",
+        move |c| {
+            let mut units = units.lock().unwrap();
+            let name = c.args.last().cloned().unwrap_or_default();
+            Ok(match c.args.first().map(String::as_str) {
+                Some("start") => {
+                    units.push(name);
+                    Output::success("")
+                }
+                Some("stop") => {
+                    units.retain(|u| *u != name);
+                    Output::success("")
+                }
+                Some("is-active") if units.contains(&name) => Output::success(""),
+                Some("is-enabled") if name == svc::SUBSCRIPTION => Output::success("enabled"),
+                Some("is-active" | "is-enabled") => Output::failure(3, ""),
+                _ => Output::success(""),
+            })
+        },
+    )
+    .on_fn(|c| c.args == ["regen"], move |_| Ok(regen()))
+    .on(
+        "onebox",
+        &["net-apply"],
+        Output::success("[警告] 规则提示\n"),
+    );
+    (exec, state)
+}
+
 #[test]
-fn failed_regeneration_keeps_the_record_for_a_retry() {
+fn a_failed_regeneration_brings_the_restored_node_back_and_finishes_the_record() {
     let fx = Fixture::new(true);
     let (_, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
     fx.replace_and_regenerate();
-    let failing = Arc::new(FakeExec::new());
-    failing.on("onebox", &["regen"], Output::failure(1, ""));
+    // The child's rollback restarted the cores but left the worker to us.
+    let stderr =
+        "[1/14] 准备…\n[警告] 证书将在 3 天后过期\n[错误] 配置未应用，已恢复原状态: 证书续期失败\n";
+    let (exec, running) = failing_regen_exec(fx.paths(), &[svc::XRAY, svc::SITE], move || {
+        Output::failure(1, stderr)
+    });
     let ctx = Ctx {
-        exec: failing,
+        exec: exec.clone(),
         ..fx.ctx.clone()
     };
     let err = recover_with(&ctx, &fx.lock, &fx.stale_image()).unwrap_err();
+    assert!(restored_only(&err), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "原程序与配置已恢复并已重新启动服务，但恢复后的管理程序重新生成配置失败: \
+         onebox 执行失败 (1): 配置未应用，已恢复原状态: 证书续期失败；\
+         排除问题后执行 onebox regen"
+    );
+    // Program and configuration are the old ones, the record is gone, and
+    // what ran before (plus the worker) runs again, in start order, from
+    // the restored files; the restored manager re-applied the rules.
+    fx.assert_restored(&work);
+    let mut now = running.lock().unwrap().clone();
+    now.sort();
+    assert_eq!(now, [svc::SITE, svc::SUBSCRIPTION, svc::XRAY]);
+    let history = exec.history();
+    let starts: Vec<&String> = history
+        .iter()
+        .filter(|c| c.starts_with("systemctl start"))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            "systemctl start onebox-subscription",
+            "systemctl start onebox-site",
+            "systemctl start onebox-xray"
+        ]
+    );
+    let reload = history
+        .iter()
+        .rposition(|c| c == "systemctl daemon-reload")
+        .unwrap();
+    let first_start = history
+        .iter()
+        .position(|c| c.starts_with("systemctl start"))
+        .unwrap();
+    assert!(reload < first_start, "{history:?}");
+    let calls = exec.calls();
+    let position = |args: &[&str]| calls.iter().position(|c| c.args == args).unwrap();
+    assert!(position(&["regen"]) < position(&["net-apply"]));
+    let net_apply = &calls[position(&["net-apply"])];
+    assert_eq!(net_apply.inherit_lock_fd, Some(fx.lock.raw_fd()));
+    assert!(!net_apply.stream);
+    // Later recoveries do not stop the node again.
+    let before = exec.calls().len();
+    recover_with(&ctx, &fx.lock, &fx.stale_image()).unwrap();
+    assert_eq!(exec.calls().len(), before);
+}
+
+#[test]
+fn a_failed_regeneration_that_left_a_node_journal_keeps_the_record() {
+    let fx = Fixture::new(true);
+    let (_, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
+    fx.replace_and_regenerate();
+    let transaction = fx.paths().transaction();
+    let (exec, running) = failing_regen_exec(fx.paths(), &[svc::XRAY], move || {
+        // Its own rollback could not finish: the node journal stays.
+        fs::create_dir_all(&transaction).unwrap();
+        Output::failure(1, "[错误] 配置失败: x；恢复未完成: y")
+    });
+    let ctx = Ctx {
+        exec: exec.clone(),
+        ..fx.ctx.clone()
+    };
+    let err = recover_with(&ctx, &fx.lock, &fx.stale_image()).unwrap_err();
+    assert!(!restored_only(&err), "{err}");
     assert!(
         err.to_string()
-            .starts_with("恢复后的管理程序重新生成配置失败: onebox 执行失败 (1)"),
+            .starts_with("恢复后的管理程序重新生成配置失败: onebox 执行失败 (1): 配置失败"),
         "{err}"
     );
-    let kept = load(fx.paths()).unwrap().unwrap();
-    assert_eq!(kept.phase, ProgramPhase::Recovering);
+    assert_eq!(
+        load(fx.paths()).unwrap().unwrap().phase,
+        ProgramPhase::Recovering
+    );
     assert!(work.exists());
     assert_eq!(fs::read(&fx.paths().executable).unwrap(), OLD);
-    // The retry completes the recovery.
+    assert!(running.lock().unwrap().is_empty());
+    assert!(!exec.history().iter().any(|c| c.contains(" start ")));
+    // Once the node journal is dealt with, the retry completes.
+    fs::remove_dir(fx.paths().transaction()).unwrap();
     assert_eq!(exit_code(fx.recover()), 75);
     fx.assert_restored(&work);
 }

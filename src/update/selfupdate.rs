@@ -475,6 +475,11 @@ pub fn failure(error: Error, recovery: Option<Result<()>>, work: &Path) -> Error
             EXIT_STALE_PROCESS,
             format!("更新失败，已恢复原程序: {error}；请重新执行命令以使用恢复后的程序"),
         ),
+        // Program and configuration restored, record gone; only the restored
+        // manager's regen failed (nothing to retry).
+        Some(Err(e)) if journal::restored_only(&e) => {
+            Error::msg(format!("更新失败: {error}；{}", e.report_text()))
+        }
         Some(Err(recovery)) => Error::msg(format!(
             "更新失败: {error}；恢复需要重试: {recovery}；备份: {}",
             work.display()

@@ -674,7 +674,7 @@ fn a_successful_regen_repeats_the_childs_output_and_warnings() {
 #[test]
 fn failure_messages() {
     let work = Path::new("/usr/local/bin/.onebox-update-0123");
-    let cases: [(Option<Result<()>>, i32, &str); 4] = [
+    let cases: [(Option<Result<()>>, i32, &str); 5] = [
         (
             None,
             1,
@@ -690,6 +690,15 @@ fn failure_messages() {
             Some(Err(Error::msg("再坏"))),
             1,
             "更新失败: 坏了；恢复需要重试: 再坏；备份: /usr/local/bin/.onebox-update-0123",
+        ),
+        // Restored and finished; only the restored manager's regen failed.
+        (
+            Some(Err(Error::msg(format!(
+                "{}并已重新启动服务，但再坏；排除问题后执行 onebox regen",
+                journal::RESTORED_ONLY
+            )))),
+            1,
+            "更新失败: 坏了；原程序与配置已恢复并已重新启动服务，但再坏；排除问题后执行 onebox regen",
         ),
     ];
     for (recovery, code, text) in cases {

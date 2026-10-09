@@ -22,7 +22,12 @@
 //! put the old manager back, restore the configuration snapshot (and, for
 //! a 2.x manager, drop the node's v3 crontab lines), let the restored
 //! manager `regen` under our lock, remove the journal, and report exit
-//! code 75 when this process is not the restored binary.
+//! code 75 when this process is not the restored binary. When that `regen`
+//! fails (and leaves no node journal behind), the services the recovery
+//! stopped are started again from the restored files, the journal is
+//! removed and the restored manager's `net-apply` restores the rules: the
+//! error ([`RESTORED_ONLY`]…) asks for `onebox regen` once the cause is
+//! fixed.
 //!
 //! Changes from v2:
 //! - v3 writes `version: 2` (same fields): version-1 journals were written
@@ -42,11 +47,17 @@
 //!   node's v3-form crontab lines are removed (2.x would keep a `renew` job
 //!   it has no command for and duplicate autostarts);
 //! - files are hashed while streaming (v2 read up to 128 MiB into memory);
-//! - the restored manager's `regen` output streams to the terminal and the
-//!   completion notice goes to stderr;
+//! - the restored manager's `regen` output is captured (as in v2), its
+//!   warnings shown afterwards, and the completion notice goes to stderr: a
+//!   terminal that hung up cannot fail a regen that applied;
+//! - a failed `regen` no longer leaves the node stopped with the journal
+//!   kept, which made every later recovery (each apply, renewal and boot)
+//!   stop the node again and fail the same way;
 //! - an unreadable running image counts as "not the restored binary" (exit
 //!   75) instead of failing the finished recovery.
 
+use crate::apply::recover::keep_cancellation;
+use crate::apply::rollback::START_ORDER;
 use crate::apply::snapshot::{self, node_allowlist, v2_node_allowlist, Allowlist, Snapshot};
 use crate::ctx::Ctx;
 use crate::error::{Context, Error, Result};
@@ -54,7 +65,7 @@ use crate::host::cron::{self, Crontab, Scope};
 use crate::host::service::{self as svc, Services};
 use crate::host::{firewall, hop};
 use crate::paths::Paths;
-use crate::sys::exec::Cmd;
+use crate::sys::exec::{Cmd, Output};
 use crate::sys::fs::{
     atomic_write, check_owned, copy_file, ensure_dir, fsync_dir, read_bounded,
     remove_file_if_exists, remove_tree_if_exists, sha256_file,
@@ -85,6 +96,12 @@ pub const NEW_FILE: &str = "new";
 /// The configuration snapshot inside the work directory.
 pub const CONFIG_DIR: &str = "config";
 pub const RECOVERED: &str = "已恢复中断前的管理程序与配置";
+/// Shown before the restored manager regenerates (its output is captured).
+pub const REGENERATING: &str = "正在由恢复后的管理程序重新生成配置…";
+pub const REGEN_FAILED: &str = "恢复后的管理程序重新生成配置失败";
+/// Start of the error of a recovery whose regeneration failed after the old
+/// manager and configuration were restored and the record finished.
+pub const RESTORED_ONLY: &str = "原程序与配置已恢复";
 pub const STALE_PROCESS: &str =
     "自更新恢复已完成；当前进程仍是被替换版本，请重新执行命令以使用恢复后的程序";
 const INVALID: &str = "自更新恢复记录无效";
@@ -409,8 +426,11 @@ fn recover_with(ctx: &Ctx, lock: &FileLock, running_image: &Path) -> Result<()> 
         return journal.finish(&ctx.paths);
     }
     journal.set_phase(&ctx.paths, ProgramPhase::Recovering)?;
+    let services = Services::detect(ctx);
+    let mut stopped = Vec::new();
     if journal.snapshot.is_some() {
-        stop_services(ctx)?;
+        stopped = to_restart(&services);
+        stop_services(&services)?;
         clear_network(ctx)?;
     }
     restore_program(&ctx.paths, &journal, &work)?;
@@ -420,7 +440,11 @@ fn recover_with(ctx: &Ctx, lock: &FileLock, running_image: &Path) -> Result<()> 
         if journal.version == V2_VERSION {
             retire_v3_cron(ctx)?;
         }
-        regenerate(ctx, lock)?;
+        if let Err(e) = regenerate(ctx, lock) {
+            return Err(restart_restored(
+                ctx, lock, &journal, &services, &stopped, e,
+            ));
+        }
     }
     journal.finish(&ctx.paths)?;
     out::ok(RECOVERED);
@@ -434,8 +458,22 @@ fn is_regular(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
-fn stop_services(ctx: &Ctx) -> Result<()> {
-    let services = Services::detect(ctx);
+/// The node services to bring back should the restored manager's `regen`
+/// fail: those running now, and the subscription worker when it starts at
+/// boot — a self-update child's rollback leaves the worker stopped for the
+/// parent to start with the restored manager (G6).
+fn to_restart(services: &Services) -> Vec<&'static str> {
+    START_ORDER
+        .into_iter()
+        .filter(|name| {
+            services.exists(name)
+                && (services.running(name)
+                    || (*name == svc::SUBSCRIPTION && services.enabled(name).unwrap_or(false)))
+        })
+        .collect()
+}
+
+fn stop_services(services: &Services) -> Result<()> {
     for name in STOP_ORDER {
         if services.exists(name) {
             services.stop(name)?;
@@ -495,7 +533,30 @@ fn retire_v3_cron(ctx: &Ctx) -> Result<()> {
 
 /// Run the restored manager's `regen` with our lock on fd 198, so its
 /// self-install cannot overwrite it with this (newer) process image.
+///
+/// Its output is captured, not streamed: a terminal that hung up meanwhile
+/// (an SSH session dropped during `update-script`) would turn the final
+/// stdout write of a regen that applied into a failure (EIO), and the
+/// whole recovery into one that repeats. Its warnings are shown afterwards
+/// (best effort); a failure carries its last line.
 fn regenerate(ctx: &Ctx, lock: &FileLock) -> Result<()> {
+    out::info(REGENERATING);
+    let output = run_restored(ctx, lock, "regen").context(REGEN_FAILED)?;
+    forward_warnings(&output);
+    if output.ok() {
+        return Ok(());
+    }
+    Err(Error::Command {
+        program: "onebox".into(),
+        code: output.code,
+        detail: last_line(&output),
+    })
+    .context(REGEN_FAILED)
+}
+
+/// `EXE {command}` of the restored manager, with the service variables and
+/// our lock on fd 198, its output captured.
+fn run_restored(ctx: &Ctx, lock: &FileLock, command: &str) -> Result<Output> {
     let exe = ctx
         .paths
         .executable
@@ -505,12 +566,96 @@ fn regenerate(ctx: &Ctx, lock: &FileLock) -> Result<()> {
         .paths
         .service_env()
         .into_iter()
-        .fold(Cmd::new(exe).arg("regen"), |cmd, (k, v)| cmd.env(k, v))
-        .inherit_lock(lock.raw_fd())
-        .stream();
-    ctx.check(&cmd)
-        .map(drop)
-        .context("恢复后的管理程序重新生成配置失败")
+        .fold(Cmd::new(exe).arg(command), |cmd, (k, v)| cmd.env(k, v))
+        .inherit_lock(lock.raw_fd());
+    ctx.run(&cmd)
+}
+
+/// Re-emit a captured child's `[警告]` lines (its progress is dropped).
+fn forward_warnings(output: &Output) {
+    let tag = out::Level::Warn.tag();
+    for line in output.stderr.lines() {
+        if let Some(text) = line.trim_start().strip_prefix(tag) {
+            out::warn(text.trim());
+        }
+    }
+}
+
+/// The last non-empty line a failed child printed (its `[错误] …` line,
+/// without the tag): what went wrong.
+fn last_line(output: &Output) -> String {
+    let text = if output.stderr.trim().is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    let last = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("");
+    let tag = out::Level::Error.tag();
+    last.strip_prefix(tag).unwrap_or(last).trim().to_owned()
+}
+
+/// The restored manager's `regen` failed — often for a cause every retry
+/// meets again (a certificate renewal that keeps failing, a download that
+/// cannot be reached). The old manager and configuration are back already,
+/// so instead of leaving the node stopped (and keeping the record, which
+/// made every later recovery stop it again and fail the same way), the
+/// services this recovery stopped are started again, the record is
+/// finished, and the restored manager's `net-apply` puts the firewall rules
+/// and hops back. The error says so and asks for `onebox regen` once the
+/// cause is fixed. When that regen left a node journal its own rollback
+/// could not finish, nothing is started and the record stays for a retry.
+fn restart_restored(
+    ctx: &Ctx,
+    lock: &FileLock,
+    journal: &ProgramJournal,
+    services: &Services,
+    stopped: &[&str],
+    error: Error,
+) -> Error {
+    let cause = error.report_text();
+    if fs::symlink_metadata(ctx.paths.transaction()).is_ok() {
+        return error;
+    }
+    let mut missed = Vec::new();
+    // The snapshot put the old units back; the failed regen may not have
+    // reloaded them.
+    if let Err(e) = services.daemon_reload() {
+        missed.push(format!("重新加载服务定义: {e}"));
+    }
+    for name in stopped {
+        if let Err(e) = services
+            .start(name)
+            .and_then(|()| services.wait_running(name, svc::WAIT_RUNNING))
+        {
+            missed.push(format!("启动 {name}: {e}"));
+        }
+    }
+    if let Err(e) = journal.finish(&ctx.paths) {
+        let message = format!("{cause}；恢复记录清理失败: {}", e.report_text());
+        return keep_cancellation(error, message);
+    }
+    match run_restored(ctx, lock, "net-apply") {
+        Ok(output) if output.ok() => forward_warnings(&output),
+        Ok(output) => missed.push(format!("恢复防火墙规则与端口跳跃: {}", last_line(&output))),
+        Err(e) => missed.push(format!("恢复防火墙规则与端口跳跃: {e}")),
+    }
+    let mut message = if missed.is_empty() {
+        format!("{RESTORED_ONLY}并已重新启动服务，但{cause}")
+    } else {
+        format!("{RESTORED_ONLY}，但{cause}；未完成: {}", missed.join("; "))
+    };
+    message.push_str("；排除问题后执行 onebox regen");
+    keep_cancellation(error, message)
+}
+
+/// Whether a recovery error is [`restart_restored`]'s: the old manager and
+/// configuration are back and the record is gone; only regenerating failed.
+pub fn restored_only(error: &Error) -> bool {
+    error.report_text().starts_with(RESTORED_ONLY)
 }
 
 /// Whether the file behind `image` (symlinks followed) has `sha256`.
