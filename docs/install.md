@@ -8,8 +8,8 @@
 |---|---|
 | 系统 | Linux；systemd、OpenRC 或无 init 环境（容器）。可用 `ONEBOX_INIT=systemd\|openrc\|none` 强制指定 |
 | 架构 | 预编译：`amd64`、`arm64`、`386`（i586 及以上）、`armv7`。其他架构需源码构建，并受上游内核支持限制 |
-| 权限 | 安装和修改配置需要 root；`help`、`version` 和客户端链路工具不需要。未安装时 `plan` 无需 root；已安装后需要 root 读取状态 |
-| 依赖 | `openssl`、`curl`、`iproute2` 缺失时通过 apt-get / dnf / yum / apk / pacman / zypper 自动安装；网站、独立订阅和 FRP 网站模式另需 nginx（同样自动安装） |
+| 权限 | 安装和修改配置需要 root；节点配置仅 root 可读，查看节点信息、导出客户端配置也需要 root。`help`、`version`、未安装时的 `plan`，以及使用探测配置文件的 `bench`、`failover` 不需要 root |
+| 依赖 | `openssl`、`curl`、`iproute2` 缺失时通过 apt-get / dnf / yum / apk / pacman / zypper 自动安装；使用 Let's Encrypt 证书时还需要 cron（缺失时自动安装并启动）；网站、独立 HTTPS 订阅和 FRP 网站模式另需 nginx（同样自动安装） |
 | 网络 | 下载程序与代理内核需访问 GitHub；受限网络设置 `GH_PROXY`（见下文[环境变量](#环境变量)中的信任说明） |
 
 | 架构 | Release 资产 | Rust 目标 |
@@ -21,7 +21,7 @@
 
 ## 安装预演
 
-正式安装前可用相同的选项预演，结果只读：不联网、不预留端口、不安装依赖、不申请证书。
+正式安装前可用相同的选项预演，结果只读：不写文件、不联网、不安装依赖、不申请证书。
 
 ```bash
 onebox plan --preset 1
@@ -29,7 +29,7 @@ onebox install --protocols vless-reality,hysteria2 --dry-run
 onebox plan --preset 2 --json          # 机器可读输出
 ```
 
-预演按当前主机的端口占用分配端口；DNS、证书和公网可达性在实际安装时才检查。
+输出每个协议的内核、端口和传输层（如 `vless-reality | singbox | 443/tcp`）。预演按当前主机的端口占用分配端口；公网地址检测、证书申请（以及它依赖的 DNS 解析和 80 端口可达性）在实际安装时才进行。`--json` 只能用于 `plan` 和 `install --dry-run`。
 
 ## 无人值守安装
 
@@ -60,54 +60,61 @@ onebox install --preset 5 --tls cf --domain v.example.com -y
 # 自有域名 REALITY 网站
 onebox install --preset 1 --reality-site www.example.com --site-title '我的手记' -y
 
-# 已安装时无人值守重装：必须加 --force（会生成全新凭据）
+# 已安装时无人值守重装：必须加 --force（会生成全新凭据并清除订阅设备）
 onebox install --preset 1 -y --force
 ```
 
-已安装时，交互重装会先确认；`-y` 重装必须同时给出 `--force`，否则报错并提示改用 `onebox regen`（保留现有凭据重新生成配置）。
+- 没有终端时（例如在脚本中运行）同样按无人值守处理；无法检测公网地址时报错，请用 `--addr` 指定。
+- 已安装时，交互重装会先确认（`重新安装会生成新凭据并清除订阅设备，继续？`）；`-y` 重装必须同时给出 `--force`，否则报错并提示改用 `onebox regen`（保留现有凭据重新生成配置）。v2 的 `-y` 重装会直接覆盖，v3 改为必须加 `--force`。
 
 ### 安装选项
 
+与 `onebox install --help` 一致（`onebox plan` 接受同样的选项）：
+
 | 选项 | 说明 |
 |---|---|
-| `--preset 1-7` | 协议组合（见 [README](../README.md#协议组合)）；7 为自定义，无人值守时需配合 `--protocols` |
-| `--protocols a,b,…` | 自定义协议列表，逗号或空格分隔，按标准顺序保存 <!-- TODO: verify how --preset + --protocols together is handled --> |
-| `--core singbox\|xray` | 两种内核都支持的协议优先使用的内核；预设各有默认值 |
+| `--preset 1-7` | 协议组合编号（见 [README](../README.md#协议组合)）；7 为自定义，无人值守时配合 `--protocols` |
+| `--protocols 列表` | 协议 ID 列表，逗号或空格分隔，按标准顺序保存。与 `--preset` 二选一，只有 `--preset 7` 可以同时给出 |
+| `--core singbox\|xray` | 两种内核都支持的协议优先使用的内核；预设各有默认值，`--protocols` 默认 sing-box（Hysteria2 由 `--hy2-core` 决定） |
 | `--addr IP或域名` | 客户端连接地址，默认自动检测公网 IPv4，其次 IPv6 |
-| `--name 名称` | 节点名称前缀，默认 `onebox`；客户端中显示为 `名称-协议` |
-| `--port 协议=端口` | 指定端口，可重复 |
+| `--name 名称` | 节点名称前缀，默认 `onebox`；客户端中显示为 `名称-协议`（如 `onebox-Hysteria2`） |
+| `--port 协议=端口` | 指定协议端口，可重复 |
 | `--sni 域名` | REALITY 与 ShadowTLS 的伪装域名，握手目标为 `域名:443` |
-| `--reality-dest 主机:端口` | 单独指定 REALITY 握手目标（SNI 不变） |
-| `--reality-site 域名` | 自有域名网站作为 REALITY 目标，见 [website.md](website.md)；不能与 `--sni`、`--reality-dest` 同用 |
-| `--site-title 标题` | 自动生成主页的标题，默认“山间手记” |
-| `--site-https on\|off` | 网站的标准 HTTPS 443 入口，默认 `on` |
-| `--tls self\|acme\|cf\|custom` | 代理证书方式：自签 / HTTP-01（`http` 同 `acme`）/ Cloudflare DNS / 自备 |
+| `--reality-dest 主机:端口` | 单独指定 REALITY 握手目标（SNI 不变）；与 `--sni` 同时给出时在其后生效 |
+| `--reality-site 域名` | 以自有域名网站作为 REALITY 目标（域名需解析到本机），见 [website.md](website.md)；不能与 `--sni`、`--reality-dest` 同用。无人值守时网站证书使用 HTTP-01，交互向导可选其他方式 |
+| `--site-title 标题` | 自动生成主页的标题，默认“山间手记”；只能与 `--reality-site` 同用 |
+| `--site-https on\|off` | 网站的 HTTPS 443 入口，默认 `on`；只能与 `--reality-site` 同用 |
+| `--tls self\|acme\|cf\|custom` | 代理证书：自签 / HTTP-01（`http` 同 `acme`）/ Cloudflare DNS / 自备；后三种需要 `--domain` |
 | `--domain 域名` | 证书域名；不使用域名证书时，作为 VMess-WS 客户端发送的 Host（套 CDN） |
-| `--cert 文件 --key 文件` | 自备证书的完整链与未加密私钥 |
+| `--cert 文件` | 自备证书的完整链（`--tls custom`） |
+| `--key 文件` | 自备证书的私钥，必须未加密（`--tls custom`） |
 | `--hy2-hop 起-止` | Hysteria2 UDP 端口跳跃范围（起始 ≥ 1024） |
 | `--hy2-obfs` | Hysteria2 启用 salamander 混淆 |
 | `--hy2-core singbox\|xray` | Hysteria2 的服务端内核，默认 sing-box（Xray 为实验性，且不支持调优） |
 | `--singbox-version 版本\|latest` | 固定 sing-box 版本，默认最新稳定版 |
 | `--xray-version 版本\|latest` | 固定 Xray 版本，默认 `26.3.27` |
-| `--no-bbr` | 安装结束后不询问启用 BBR |
-| `--force` | 允许 `-y` 覆盖已有安装 |
-| `--json` | 仅 `plan` / `install --dry-run`：输出 JSON |
-| `--dry-run` | 仅 `install`：等同 `plan` |
-| `-y` / `--yes` | 无人值守 |
+| `--no-bbr` | 安装结束后不询问启用 BBR（只有交互安装才会询问） |
+| `--force` | 已安装时允许 `-y` 重装（生成全新凭据并清除订阅设备） |
+| `--json` | 仅预演：输出 JSON |
+| `--dry-run` | 仅预览，不做任何修改（等同 `plan`） |
+| `-y` / `--yes` | 通用选项：无人值守（使用默认值并自动确认） |
 
-每个命令只接受自己的选项，写错或不适用的选项会报错（`{命令} 不支持选项 {选项}`）。完整列表以 `onebox install --help` 为准。
+- `latest` 表示不固定版本：sing-box 安装最新稳定版，Xray 仍安装 `26.3.27`；需要更新的 Xray 时，安装后执行 `onebox update xray latest`（会提示兼容风险并要求确认）。
+- 每个命令只接受自己的选项，写错或不适用的选项会报错（如 `install 不支持选项 --bogus；请执行 onebox install --help`）。
 
 ### 环境变量
 
 | 变量 | 作用 |
 |---|---|
-| `GH_PROXY` | GitHub 下载加速前缀，必须为 `https://`。引导脚本的 `SHA256SUMS` 与程序都经该前缀下载，镜像可同时替换二者，请只使用可信镜像；安装后 Onebox 下载代理内核、FRP、BBRv3 系统内核包和程序更新时，校验值直接从 GitHub 获取（api.github.com 元数据；缺少摘要时为直接从 github.com 下载的校验文件），前缀只传输文件内容 <!-- TODO: verify self-update SHA256SUMS fallback is fetched directly, not via GH_PROXY --> |
-| `ONEBOX_NATIVE_BIN` | 引导脚本直接运行该本地程序，不联网 |
-| `ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN` | 使用本地内核文件代替下载 <!-- TODO: verify still supported in v3 --> |
-| `CF_Token`、`CF_Account_ID` | Cloudflare DNS 验证凭据；交互时也可隐藏输入。避免把 Token 直接写在命令行（会进入 shell 历史），可用 `read -rs CF_Token && export CF_Token` |
-| `ONEBOX_AUTO=1` | 等同 `-y` |
+| `GH_PROXY` | GitHub 下载加速前缀，必须以 `https://` 开头。引导脚本的 `SHA256SUMS` 与程序都经该前缀下载，镜像可同时替换二者，请只使用可信镜像。安装后 Onebox 下载代理内核、FRP、BBRv3 内核包和程序更新时，校验值直接从 GitHub 获取（api.github.com 元数据；缺少摘要时为直接从 github.com 下载的 `SHA256SUMS` / `.dgst`），前缀只传输文件内容 |
+| `GH_TOKEN` | 可选的 GitHub 令牌，只用于提高 API 请求的速率限制 |
+| `ONEBOX_NATIVE_BIN` | 引导脚本直接运行该本地程序，不联网、不校验 |
+| `ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN` | 使用该本地内核文件代替下载（离线安装与更新；不能是符号链接） |
+| `ONEBOX_SINGBOX_VERSION` / `ONEBOX_XRAY_VERSION` | 未给出 `--singbox-version` / `--xray-version` 时使用的固定版本 |
+| `CF_Token`、`CF_Account_ID` | Cloudflare DNS 验证凭据（也支持 `CF_Zone_ID`，或旧式 `CF_Key` + `CF_Email`）；交互时也可隐藏输入。避免把 Token 直接写在命令行（会进入 shell 历史），可用 `read -rs CF_Token && export CF_Token` |
+| `ONEBOX_AUTO=1` | 等同 `-y`（值必须恰好为 `1`） |
 | `ONEBOX_INIT` | 强制 init 类型：`systemd`、`openrc`、`none` |
-| `NO_COLOR` | 关闭彩色输出 |
+| `NO_COLOR` | 设为非空值时关闭彩色输出 |
 
 ## 端口
 
@@ -124,7 +131,7 @@ onebox install --preset 1 -y --force
 规则：
 
 - TCP 与 UDP 分别计算；只有同由 Xray 承载的 VLESS-Reality-Vision 与 VLESS-XHTTP-Reality 可以共用 TCP 端口。
-- 自动分配会避开已在监听的端口，以及 Onebox 自己预留的端口：网站 80 / 443、网站内部端口 10443（仅本机回环）、REALITY 防偷跑端口（18000–19999，仅 Xray 承载 REALITY 时）、订阅端口 8448、HTTP-01 证书验证的 80、Hysteria2 跳跃范围、FRP 预留端口。
+- 自动分配会避开已在监听的端口，以及 Onebox 自己预留的端口：网站的 80 / 443 与内部端口 10443（仅本机回环）、Xray 承载 REALITY 时的本机 guard 端口（在 18000–19999 中选取，仅本机回环）、启用 IP 或独立订阅时的订阅端口（默认 8448）、HTTP-01 证书验证的 80、Hysteria2 跳跃范围、FRP 服务端占用的端口。
 - 本机防火墙（ufw、firewalld、nftables、iptables）由程序自动放行，开机由 `onebox-network` 服务恢复；**云服务商安全组需要手动放行**，TCP 与 UDP 分开（Hysteria2、TUIC 为 UDP；端口跳跃需放行整个 UDP 范围）。
 - 安装后修改端口：`onebox port 协议 端口`；冲突时报错且不修改。
 
@@ -135,21 +142,26 @@ onebox install --preset 1 -y --force
 | 方式 | `--tls` | 条件 | 说明 |
 |---|---|---|---|
 | 自签 | `self` | 无 | 默认。EC P-256，有效期 10 年，SNI `www.bing.com`；完整客户端配置固定证书指纹 |
-| Let's Encrypt HTTP-01 | `acme` / `http` | 域名 A/AAAA 直接解析到本机，TCP 80 可从公网访问 | 由内置验证服务或本机 Onebox 网站应答；续期同样需要 80 |
+| Let's Encrypt HTTP-01 | `acme` / `http` | 域名 A/AAAA 直接解析到本机，TCP 80 可从公网访问 | 由内置验证服务应答；本机已有 Onebox 网站或独立订阅占用 80 时由它们应答。续期同样需要 80 |
 | Let's Encrypt DNS | `cf` | 域名托管在 Cloudflare | `CF_Token` 需要该区域的 DNS 编辑权限；不占用 80 端口 |
-| 自备证书 | `custom` | 证书覆盖所用域名 | `--cert` 完整链、`--key` 私钥；复制到受管目录 |
+| 自备证书 | `custom` | 证书覆盖所用域名 | `--cert` 完整链、`--key` 私钥；复制到受管目录 `/etc/onebox/tls/` |
 
 ```bash
-onebox cert                                      # 查看代理与网站证书状态
+onebox cert                                      # 查看代理、网站（及独立订阅）证书状态
 onebox cert set --tls cf --domain v.example.com  # 更换代理证书方式
 onebox cert set --tls custom --domain v.example.com --cert /root/fullchain.pem --key /root/privkey.pem
-onebox cert renew proxy                          # 立即强制续期（自备证书：重新复制源文件）
+onebox cert renew proxy                          # 立即续期代理证书（目标可选 proxy / site / subscription / all）
 ```
 
-- 证书由 acme.sh 3.1.6 申请（程序固定其 SHA-256）；Cloudflare 凭据只传给 acme.sh，并以 0600 权限保存供续期使用。
-- 每天 04:17 的一个计划任务（`onebox renew --cron`）检查代理、网站和订阅证书，30 天内到期才续期。代理或网站证书续期时执行一次完整配置事务（代理内核与网站会短暂重启）；独立 HTTPS 订阅证书续期只重载订阅入口。<!-- TODO: verify `onebox renew` output/flags and the restart scope of each renewal -->
+- 证书由 acme.sh 3.1.6 向 Let's Encrypt 申请（程序固定其 SHA-256）；Cloudflare 凭据只传给 acme.sh，并以 0600 权限保存在证书目录中供续期使用。
+- 存在 Let's Encrypt 或自备证书（代理、网站或独立 HTTPS 订阅）时，程序在 crontab 写入一条计划任务：每天 4:17（系统时区）执行 `onebox renew --cron`，日志写入 `/var/log/onebox/renew.log`。只有自签证书时不写计划任务。使用 Let's Encrypt 而 cron 无法运行时，在开始配置前报错（`cron 未运行，无法启用证书自动续期；请启动系统 cron 服务`）；自备证书只警告。
+- 计划任务只续期到期的证书，无事可做时不输出：Let's Encrypt 证书 30 天内到期时续期，自签证书 30 天内到期时重新生成，自备证书在源文件内容变化后重新部署。
+- 续期不执行完整配置事务，只重启受影响且正在运行的服务：代理证书 → 代理内核（sing-box / Xray）；网站证书（也是 `site` 模式订阅使用的证书）→ `onebox-site`；独立 HTTPS 订阅证书 → `onebox-subscription-web`。例外：代理证书的身份变化时——客户端固定的证书指纹改变（如自签证书重新生成、私有 CA 签发的自备证书更换），或证书是否公有可信发生变化——程序用当前配置执行一次完整配置事务，重新发布客户端配置和订阅，此时客户端需要重新导入或刷新订阅。
+- 手动执行 `onebox renew`、`onebox cert renew`、`onebox site renew` 或 `onebox subscription renew` 时，所选的 Let's Encrypt 证书不论是否到期都会续期，请勿频繁执行。续期与其他修改共用一把锁，计划任务遇到其他操作时最多等待 10 分钟。
 - 面向浏览器的网站和 HTTPS 订阅必须使用公有可信证书，不能自签。
-- 更新了自备证书的源文件后执行 `onebox cert renew proxy`（网站用 `onebox site renew`）重新部署。
+- 更新了自备证书的源文件后，可等待计划任务，或立即执行 `onebox cert renew proxy`（网站用 `onebox site renew`）重新部署。
+
+v2 的每次证书续期都会执行完整配置事务并重启全部内核，且使用三条计划任务；v3 合并为一条 `renew --cron`，并且只重启受影响的服务。
 
 ## REALITY 目标
 
@@ -167,23 +179,23 @@ REALITY 协议借用一个真实 HTTPS 站点完成握手。安装时可选：
 ```bash
 onebox sni                                   # 交互更换（UUID 与密钥不变）
 onebox sni --sni www.apple.com               # 同时更换 REALITY 与 ShadowTLS 目标
-onebox sni --reality-dest 198.51.100.7:443    # 高级：SNI 不变，只改握手目标（如目标站的固定 IP）
+onebox sni --reality-dest 198.51.100.7:443   # 高级：SNI 不变，只改握手目标（如目标站的固定 IP）
 onebox sni --reality-site www.example.com    # 改用自有域名网站
 ```
 
-更换目标后客户端需要更新 SNI：重新导入配置，或刷新远程订阅。Xray 承载 REALITY 时只转发与配置 SNI 一致的握手（SNI 过滤），防止服务器被他人当作免费中转。
+更换 SNI 后客户端需要更新：重新导入配置，或刷新远程订阅（只改 `--reality-dest` 时客户端无需变化）。Xray 承载 REALITY 时只转发与配置 SNI 一致的握手（SNI 过滤），其他探测一律丢弃，防止服务器被他人当作免费中转。
 
 ## 安装后调整
 
 | 命令 | 作用 |
 |---|---|
-| `onebox add 协议 [--core …]` | 添加协议，自动分配端口；需要时自动准备证书 |
+| `onebox add 协议 [--core …]` | 添加协议，自动分配端口（`--port` 可指定）；需要时自动准备证书 |
 | `onebox del 协议` | 删除协议（至少保留一个；全部删除请用 `uninstall`） |
 | `onebox port 协议 端口` | 修改端口 |
 | `onebox addr [--addr …] [--name …]` | 修改客户端连接地址与节点名称 |
 | `onebox sni` | 更换 REALITY / ShadowTLS 目标 |
 | `onebox cert set …` | 更换代理证书 |
 | `onebox reset` | 重置全部 UUID、密码与密钥（客户端需重新导入） |
-| `onebox regen` | 按当前状态重新生成全部配置，凭据不变 |
+| `onebox regen` | 按当前状态重新生成并应用全部配置，凭据不变 |
 
 每次修改都是一次事务：先渲染并用内核校验新配置，再停止旧服务、写入、启动；任一步失败自动恢复原状态。
