@@ -29,6 +29,50 @@ fn has_prompt(bench: &Bench, needle: &str) -> bool {
 }
 
 #[test]
+fn every_preset_asks_exactly_its_steps() {
+    use Protocol::*;
+    // (preset, protocols, REALITY step, certificate step)
+    let cases: [(&str, &[Protocol], bool, bool); 6] = [
+        ("1", &[VlessReality, Hysteria2, Tuic], true, true),
+        ("2", &[VlessReality, VlessXhttp, Shadowsocks], true, false),
+        ("3", &[VlessReality, VlessXhttp, Hysteria2, Tuic, Anytls], true, true),
+        (
+            "4",
+            &[
+                VlessReality,
+                VlessGrpc,
+                Trojan,
+                Shadowsocks,
+                Hysteria2,
+                Tuic,
+                Anytls,
+                Shadowtls,
+                VmessWs,
+            ],
+            true,
+            true,
+        ),
+        ("5", &[VlessWs, VmessWs], false, true),
+        ("6", &[VlessReality], true, false),
+    ];
+    for (preset, protocols, reality, cert) in cases {
+        let bench = Bench::new();
+        let mut answers = vec![preset];
+        answers.extend(reality.then_some(""));
+        answers.extend(cert.then_some(""));
+        // Self-signed with VMess-WS asks for the optional Host header.
+        answers.extend((cert && protocols.contains(&VmessWs)).then_some(""));
+        answers.extend(["", "", ""]);
+        let cfg = wizard(&bench, "install", &answers).unwrap_or_else(|| panic!("{preset}"));
+        let got: Vec<Protocol> = cfg.protocols().collect();
+        assert_eq!(got, protocols, "preset {preset}");
+        assert_eq!(has_prompt(&bench, "步骤 2/5"), reality, "preset {preset}");
+        assert_eq!(has_prompt(&bench, "步骤 3/5"), cert, "preset {preset}");
+        assert!(has_prompt(&bench, "步骤 5/5 · 确认"), "preset {preset}");
+    }
+}
+
+#[test]
 fn recommended_preset_with_defaults() {
     let bench = Bench::new();
     // preset (Enter = 1), target (Microsoft), certificate (self-signed),
