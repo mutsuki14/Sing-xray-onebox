@@ -373,6 +373,23 @@ impl Crontab {
         self.lines.len() != before
     }
 
+    /// Remove the lines of `scope` written in v3's own form
+    /// (` # onebox:{tag}`) and keep those older versions wrote: run before a
+    /// restored 2.x manager regenerates, which does not recognize v3 lines
+    /// and would neither remove nor replace them. Returns whether a line
+    /// was removed.
+    pub fn remove_v3_lines(&mut self, scope: Scope) -> bool {
+        let ownership = &self.ownership;
+        let before = self.lines.len();
+        self.lines.retain(|l| {
+            !matches!(
+                ownership.classify_form(&l.text),
+                Some((tag, Form::V3)) if scope.covers(&tag)
+            )
+        });
+        self.lines.len() != before
+    }
+
     /// Remove every owned line of `scope` (uninstall).
     pub fn remove_scope(&mut self, scope: Scope) -> bool {
         let before = self.lines.len();

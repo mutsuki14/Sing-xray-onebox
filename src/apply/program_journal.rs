@@ -14,14 +14,15 @@
 //! [`Snapshot`] of the node, present iff a node was installed).
 //!
 //! Recovery (G §5.2): verify the lock; nothing to do under a lock inherited
-//! from the updating parent; validate everything before changing anything;
-//! `committed` only cleans up; otherwise mark `recovering`, stop the node
-//! services, clear the hops and the proxy firewall rules (any rule left
-//! behind stops the recovery there, so the pre-update ledgers are never
-//! restored over a live rule), put the old manager back, restore the
-//! configuration snapshot, let the restored manager `regen` under our lock,
-//! remove the journal, and report exit code 75 when this process is not the
-//! restored binary.
+//! from the updating parent; refuse while a node journal is pending;
+//! validate everything before changing anything; `committed` only cleans
+//! up; otherwise mark `recovering`, stop the node services, clear the hops
+//! and the proxy firewall rules (any rule left behind stops the recovery
+//! there, so the pre-update ledgers are never restored over a live rule),
+//! put the old manager back, restore the configuration snapshot (and, for
+//! a 2.x manager, drop the node's v3 crontab lines), let the restored
+//! manager `regen` under our lock, remove the journal, and report exit
+//! code 75 when this process is not the restored binary.
 //!
 //! Changes from v2:
 //! - v3 writes `version: 2` (same fields): version-1 journals were written
@@ -37,6 +38,9 @@
 //!   (v2 restored the snapshot first, then failed);
 //! - every hop and proxy rule is attempted before a leftover stops the
 //!   recovery (v2 stopped at the first hop it could not remove);
+//! - before a restored 2.x manager regenerates (version-1 journals), the
+//!   node's v3-form crontab lines are removed (2.x would keep a `renew` job
+//!   it has no command for and duplicate autostarts);
 //! - files are hashed while streaming (v2 read up to 128 MiB into memory);
 //! - the restored manager's `regen` output streams to the terminal and the
 //!   completion notice goes to stderr;
@@ -46,6 +50,7 @@
 use crate::apply::snapshot::{self, node_allowlist, v2_node_allowlist, Allowlist, Snapshot};
 use crate::ctx::Ctx;
 use crate::error::{Context, Error, Result};
+use crate::host::cron::{self, Crontab, Scope};
 use crate::host::service::{self as svc, Services};
 use crate::host::{firewall, hop};
 use crate::paths::Paths;
@@ -412,6 +417,9 @@ fn recover_with(ctx: &Ctx, lock: &FileLock, running_image: &Path) -> Result<()> 
     if let Some(snapshot) = &journal.snapshot {
         let allow = journal.allowlist(&ctx.paths);
         snapshot::restore(snapshot, &work.join(CONFIG_DIR), &allow)?;
+        if journal.version == V2_VERSION {
+            retire_v3_cron(ctx)?;
+        }
         regenerate(ctx, lock)?;
     }
     journal.finish(&ctx.paths)?;
@@ -467,6 +475,22 @@ fn restore_program(paths: &Paths, journal: &ProgramJournal, work: &Path) -> Resu
         fsync_dir(dir).map_err(|e| Error::io(dir, e))?;
     }
     Ok(())
+}
+
+/// Before a restored 2.x manager regenerates (version-1 journals): remove
+/// the node's v3-form crontab lines (`renew`, `boot:onebox-*`) a v3 child
+/// regen may have installed. The crontab is in no snapshot, and 2.x
+/// neither recognizes nor replaces `# onebox:` lines, so a daily job
+/// calling a command 2.x lacks and duplicate autostarts next to its own
+/// `# onebox-rust:` lines would stay. Lines in older forms are kept for the
+/// restored regen to manage.
+fn retire_v3_cron(ctx: &Ctx) -> Result<()> {
+    if !cron::available(ctx) {
+        return Ok(());
+    }
+    Crontab::edit(ctx, |tab| Ok(tab.remove_v3_lines(Scope::Node)))
+        .map(drop)
+        .context("恢复前清理 3.x 计划任务失败")
 }
 
 /// Run the restored manager's `regen` with our lock on fd 198, so its

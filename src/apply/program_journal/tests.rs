@@ -66,6 +66,26 @@ impl Fixture {
         (journal, work)
     }
 
+    /// What a v2 updater does up to writing its (version 1) journal: it
+    /// snapshots exactly v2's fixed targets.
+    fn prepare_v2(&self, phase: ProgramPhase) -> (ProgramJournal, PathBuf) {
+        let paths = self.paths();
+        let (name, work) = create_work_dir(paths).unwrap();
+        file(&work.join(OLD_FILE), 0o700, OLD);
+        let snapshot = take(
+            &v2_fixed_targets(paths),
+            &work.join(CONFIG_DIR),
+            &v2_node_allowlist(paths),
+        )
+        .unwrap();
+        let mut journal =
+            ProgramJournal::new(name, Some(sha256_hex(OLD)), sha256_hex(NEW), Some(snapshot));
+        journal.version = V2_VERSION;
+        journal.phase = phase;
+        write(paths, &journal).unwrap();
+        (journal, work)
+    }
+
     /// The new manager is in place and its `regen` changed the configuration.
     fn replace_and_regenerate(&self) {
         let paths = self.paths();
@@ -745,4 +765,82 @@ fn only_3x_managers_take_part_in_a_self_update() {
         "已安装的管理程序为 2.0.1，请先执行 onebox update-script 由它升级到 3.x"
     );
     assert!(supported_installed("3.0").is_err());
+}
+
+/// v3-form node lines for the fixture's layout.
+fn v3_node_lines(paths: &Paths) -> (String, String) {
+    use crate::host::cron::{line, Tag};
+    use crate::host::init::InitSystem;
+    let renew = line(
+        "17 4 * * *",
+        paths,
+        InitSystem::None,
+        &["renew", "--cron"],
+        &paths.log.join("renew.log"),
+        &Tag::renew(),
+    )
+    .unwrap();
+    let boot = line(
+        "@reboot",
+        paths,
+        InitSystem::None,
+        &["service", svc::XRAY, "start"],
+        &paths.log.join("boot.log"),
+        &Tag::boot(svc::XRAY).unwrap(),
+    )
+    .unwrap();
+    (renew, boot)
+}
+
+#[test]
+fn a_restored_2x_manager_regenerates_without_v3_cron_lines() {
+    use crate::host::cron::testing::{fake_crontab, lines, text};
+    let fx = Fixture::new(true);
+    let paths = fx.paths().clone();
+    let (_, work) = fx.prepare_v2(ProgramPhase::Replaced);
+    fx.replace_and_regenerate();
+    // The v3 child regen had rewritten the node's lines in its own form.
+    let (renew, boot) = v3_node_lines(&paths);
+    let v2_boot = format!(
+        "@reboot env ONEBOX_DIR='{}' '{}' service onebox-xray start >/dev/null 2>&1 # onebox-rust:onebox-xray",
+        paths.root.display(),
+        paths.executable.display()
+    );
+    let kept = [
+        "MAILTO=admin@example.com".to_owned(),
+        v2_boot,
+        lines::frp_renew(),
+        "0 * * * * /usr/bin/backup.sh".to_owned(),
+    ];
+    let initial = format!(
+        "{}\n{renew}\n{}\n{boot}\n{}\n{}\n",
+        kept[0], kept[1], kept[2], kept[3]
+    );
+    let cron = fake_crontab(&fx.exec, Some(&initial));
+    assert_eq!(exit_code(fx.recover()), 75);
+    fx.assert_restored(&work);
+    assert_eq!(text(&cron), format!("{}\n", kept.join("\n")));
+    // Removed before the restored manager regenerates.
+    let history = fx.exec.history();
+    let installed = history
+        .iter()
+        .position(|c| c.starts_with("crontab ") && !c.ends_with(" -l"))
+        .unwrap();
+    let regen = history.iter().position(|c| c.ends_with(" regen")).unwrap();
+    assert!(installed < regen, "{history:?}");
+}
+
+#[test]
+fn a_restored_3x_manager_keeps_its_cron_lines() {
+    use crate::host::cron::testing::{fake_crontab, text};
+    let fx = Fixture::new(true);
+    let (_, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
+    fx.replace_and_regenerate();
+    let (renew, boot) = v3_node_lines(fx.paths());
+    let initial = format!("{renew}\n{boot}\n");
+    let cron = fake_crontab(&fx.exec, Some(&initial));
+    assert_eq!(exit_code(fx.recover()), 75);
+    fx.assert_restored(&work);
+    assert_eq!(text(&cron), initial);
+    assert!(!fx.exec.history().iter().any(|c| c.starts_with("crontab")));
 }
