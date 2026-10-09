@@ -20,7 +20,7 @@
 //! protocol titles; the website certificate method is asked for the own
 //! site; the summary and a final confirmation come before anything runs.
 
-mod steps;
+pub mod steps;
 
 use crate::cli::commands::install::{plan_node, InstallArgs};
 use crate::cli::session::Session;

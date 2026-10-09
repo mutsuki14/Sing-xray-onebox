@@ -103,6 +103,12 @@ pub fn reality(ui: &dyn Prompter, args: &mut InstallArgs, list: &[Protocol]) -> 
         "伪装目标",
         "REALITY 借用一个真实 HTTPS 网站完成握手；客户端看到的是该网站的证书",
     );
+    args.reality.choice = reality_menu(ui, &title)?;
+    Ok(())
+}
+
+/// The REALITY target menu (install wizard, `add`, `sni`, menus).
+pub fn reality_menu(ui: &dyn Prompter, title: &str) -> Result<RealityChoice> {
     let items = [
         "Microsoft（www.microsoft.com，默认）",
         "Apple（www.apple.com）",
@@ -110,13 +116,12 @@ pub fn reality(ui: &dyn Prompter, args: &mut InstallArgs, list: &[Protocol]) -> 
         "自有域名一键建站（域名需已解析到本机）",
     ]
     .map(String::from);
-    args.reality.choice = match ui.select(&title, &items, 0, false)?.unwrap_or(0) {
+    Ok(match ui.select(title, &items, 0, false)?.unwrap_or(0) {
         1 => RealityChoice::Apple,
         2 => RealityChoice::Custom(ask_domain(ui, "握手域名", "域名无效")?),
         3 => RealityChoice::OwnSite(own_site(ui)?),
         _ => RealityChoice::Microsoft,
-    };
-    Ok(())
+    })
 }
 
 fn own_site(ui: &dyn Prompter) -> Result<OwnSite> {
@@ -173,6 +178,16 @@ pub fn certificate(ui: &dyn Prompter, args: &mut InstallArgs, list: &[Protocol])
     } else {
         format!("{} 需要 TLS 证书；没有域名时选自签即可", needing.join("、"))
     };
+    let choice = cert_menu(ui, &header(3, "证书", &explanation))?;
+    if choice == ProxyCertChoice::SelfSigned && vmess && args.cert.vmess_host.is_none() {
+        args.cert.vmess_host = vmess_host(ui)?;
+    }
+    args.cert.choice = Some(choice);
+    Ok(())
+}
+
+/// The proxy certificate menu (install wizard, `add`, `cert set`, menus).
+pub fn cert_menu(ui: &dyn Prompter, title: &str) -> Result<ProxyCertChoice> {
     let items = [
         "自签证书（推荐，无需域名；客户端固定证书指纹）",
         "Let's Encrypt HTTP-01（域名需解析到本机，占用 TCP 80）",
@@ -180,16 +195,10 @@ pub fn certificate(ui: &dyn Prompter, args: &mut InstallArgs, list: &[Protocol])
         "自备证书（已有证书文件）",
     ]
     .map(String::from);
-    let title = header(3, "证书", &explanation);
-    let choice = match ui.select(&title, &items, 0, false)?.unwrap_or(0) {
-        0 => ProxyCertChoice::SelfSigned,
-        index => domain_cert(ui, index)?,
-    };
-    if choice == ProxyCertChoice::SelfSigned && vmess && args.cert.vmess_host.is_none() {
-        args.cert.vmess_host = vmess_host(ui)?;
+    match ui.select(title, &items, 0, false)?.unwrap_or(0) {
+        0 => Ok(ProxyCertChoice::SelfSigned),
+        index => domain_cert(ui, index),
     }
-    args.cert.choice = Some(choice);
-    Ok(())
 }
 
 fn domain_cert(ui: &dyn Prompter, index: usize) -> Result<ProxyCertChoice> {

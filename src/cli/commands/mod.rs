@@ -3,5 +3,7 @@
 //! exposes `const` [`CommandSpec`](super::args::CommandSpec)s for the
 //! registry and `pub fn`s the menus call directly.
 
+pub mod connection;
 pub mod info;
 pub mod install;
+pub mod node;
