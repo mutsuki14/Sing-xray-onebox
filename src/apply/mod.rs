@@ -37,7 +37,7 @@ pub use request::{
 };
 
 #[cfg(test)]
-mod harness;
+pub(crate) mod harness;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
