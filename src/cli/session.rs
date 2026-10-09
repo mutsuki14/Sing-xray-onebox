@@ -26,12 +26,14 @@ use crate::domain::protocol::Transport;
 use crate::error::{Error, Result};
 use crate::host::init::{self, InitSystem};
 use crate::host::service::Services;
+use crate::paths::Paths;
 use crate::state::{Loaded, Origin, StateStore};
 use crate::sys::lock::FileLock;
 use crate::sys::rand::{OsRandom, Random};
 use crate::ui::out::{self, Level};
 use crate::ui::Prompter;
 use std::net::IpAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Message for commands that need root.
@@ -238,8 +240,14 @@ impl<'a> Session<'a> {
         Services::new(self.ctx, self.live.init())
     }
 
+    /// A node is installed when its state file (or a v1 `onebox.conf`) is
+    /// present — or cannot even be looked at: a non-root user gets EACCES
+    /// inside the 0700 ROOT, which means "installed, needs root", not a
+    /// fresh host (a preview would otherwise plan against no node).
     pub fn installed(&self) -> bool {
-        StateStore::installed(self.ctx)
+        installed_with(&self.ctx.paths, &|path| {
+            std::fs::symlink_metadata(path).map(|_| ())
+        })
     }
 
     /// The installed configuration (`NotInstalled` otherwise). Migration
@@ -285,6 +293,16 @@ impl<'a> Session<'a> {
         }
         self.engine.apply(self.ctx, req)
     }
+}
+
+/// [`Session::installed`] over a `stat` of each state file.
+fn installed_with(paths: &Paths, stat: &dyn Fn(&Path) -> std::io::Result<()>) -> bool {
+    [paths.state(), paths.legacy_v1_state()]
+        .iter()
+        .any(|path| match stat(path) {
+            Ok(()) => true,
+            Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied,
+        })
 }
 
 /// `ApplyRequest::from_loaded` for a modification of `loaded`.

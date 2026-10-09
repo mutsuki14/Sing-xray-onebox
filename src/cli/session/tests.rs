@@ -26,6 +26,32 @@ fn load_requires_an_installed_node() {
     assert!(!bench.session().installed());
 }
 
+/// A state file that cannot be looked at (EACCES for a non-root user in
+/// the 0700 ROOT) counts as installed, so previews ask for root instead
+/// of planning against no node.
+#[test]
+fn unreadable_state_counts_as_installed() {
+    use std::io::{Error as IoError, ErrorKind};
+    let bench = Bench::new();
+    let paths = &bench.ctx.paths;
+    assert!(!installed_with(paths, &|_| Err(IoError::from(
+        ErrorKind::NotFound
+    ))));
+    assert!(installed_with(paths, &|_| Err(IoError::from(
+        ErrorKind::PermissionDenied
+    ))));
+    let state = paths.state();
+    assert!(installed_with(paths, &|p| if p == state {
+        Ok(())
+    } else {
+        Err(IoError::from(ErrorKind::NotFound))
+    }));
+    let v1 = paths.legacy_v1_state();
+    std::fs::create_dir_all(v1.parent().unwrap()).unwrap();
+    std::fs::write(&v1, "").unwrap();
+    assert!(bench.session().installed(), "a v1 config is a node too");
+}
+
 #[test]
 fn permission_errors_explain_root() {
     let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
