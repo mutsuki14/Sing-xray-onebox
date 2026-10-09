@@ -4,7 +4,7 @@
 
 use super::survey::{FrpFound, NodeState, Survey};
 use super::{node, tls, Check, CheckFn, CheckStatus, Diagnosis, Doctor};
-use crate::apply::journal::{self, PhaseInfo};
+use crate::apply::journal::{self, Pending, PhaseInfo};
 use crate::ctx::Ctx;
 use crate::domain::config::PortRange;
 use crate::domain::version::Semver;
@@ -16,6 +16,7 @@ use crate::paths::Paths;
 use crate::state::Origin;
 use crate::sys::exec::Cmd;
 use crate::sys::fs::TempDir;
+use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
 
 pub const STATE: &str = "节点配置";
@@ -131,19 +132,48 @@ pub fn protocol_summary(cfg: &NodeConfig) -> String {
 
 /// `未完成事务`: none, a pending config or self-update journal (a failure:
 /// changes are blocked until `recover`), or an unreadable one (D-8.1#28).
+/// A journal whose operation still holds the node lock is that operation
+/// in progress (doctor runs without the lock), not something to recover.
 pub fn journal_check(paths: &Paths) -> Check {
-    match journal::pending(paths) {
+    let pending = journal::pending(paths);
+    let busy = matches!(&pending, Ok(p) if p.any()) && node_lock_held(paths);
+    journal_verdict(pending, busy)
+}
+
+/// Whether another process holds the node lock. Probed only while a
+/// journal exists, on an existing lock file (nothing is created), and
+/// released at once.
+fn node_lock_held(paths: &Paths) -> bool {
+    let lock = paths.lock();
+    let exists = std::fs::symlink_metadata(&lock).is_ok_and(|m| m.is_file());
+    exists && matches!(FileLock::acquire(&lock, BUSY_MESSAGE), Err(Error::Busy(_)))
+}
+
+/// The verdict on what [`journal::pending`] found; `busy` = the node lock is
+/// held by a running operation.
+pub fn journal_verdict(pending: Result<Pending>, busy: bool) -> Check {
+    match pending {
         Err(e) => Check::fail(JOURNAL, format!("事务记录无法读取: {e}")),
         Ok(pending) if !pending.any() => Check::pass(JOURNAL, "无"),
-        Ok(pending) => Check::fail(
-            JOURNAL,
-            pending_text(pending.config.as_ref(), pending.program),
-        ),
+        Ok(pending) => {
+            let what = pending_parts(pending.config.as_ref(), pending.program);
+            if busy {
+                Check::warn(
+                    JOURNAL,
+                    format!("另一个配置操作正在进行（{what}）；完成后重新执行 onebox doctor"),
+                )
+            } else {
+                Check::fail(
+                    JOURNAL,
+                    format!("有未完成事务（{what}）；执行 onebox recover"),
+                )
+            }
+        }
     }
 }
 
-/// `有未完成事务（配置变更「添加协议」停在启动内核阶段，程序自更新）；执行 onebox recover`.
-pub fn pending_text(config: Option<&PhaseInfo>, program: bool) -> String {
+/// `配置变更「添加协议」停在启动内核阶段，程序自更新`.
+pub fn pending_parts(config: Option<&PhaseInfo>, program: bool) -> String {
     let mut parts = Vec::new();
     if let Some(info) = config {
         let reason = info
@@ -156,7 +186,7 @@ pub fn pending_text(config: Option<&PhaseInfo>, program: bool) -> String {
     if program {
         parts.push("程序自更新".to_owned());
     }
-    format!("有未完成事务（{}）；执行 onebox recover", parts.join("，"))
+    parts.join("，")
 }
 
 /// `管理程序`: `EXE` (which every unit and cron line runs) exists, runs,

@@ -14,7 +14,7 @@ use super::redact::Redactor;
 use super::{Check, CheckFn, Diagnosis, Doctor};
 use crate::apply::journal;
 use crate::domain::config::{AcmeMethod, ProxyCertMode, SubscriptionMode, WebCert};
-use crate::domain::{Core, NodeConfig, Protocol};
+use crate::domain::NodeConfig;
 use crate::error::{Error, Result};
 use crate::host::cores;
 use crate::host::os::{self, HostFacts, OsInfo};
@@ -195,7 +195,7 @@ pub fn protocol_rows(cfg: &NodeConfig) -> Vec<ProtocolRow> {
             core: inbound.core.id(),
             network: inbound.protocol.transport().id(),
             port: inbound.port,
-            protocol: Protocol::id(inbound.protocol),
+            protocol: inbound.protocol.id(),
         })
         .collect()
 }
@@ -204,7 +204,7 @@ fn core_rows(doctor: &Doctor, cfg: &NodeConfig) -> Vec<CoreRow> {
     let services = doctor.services();
     cfg.cores()
         .into_iter()
-        .map(|core: Core| {
+        .map(|core| {
             let bin = doctor.ctx.paths.core_bin(core);
             let version = bin
                 .is_file()

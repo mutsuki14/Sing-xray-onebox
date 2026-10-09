@@ -59,37 +59,86 @@ fn protocol_summary_lists_ids_in_order() {
 }
 
 #[test]
-fn pending_texts() {
+fn pending_journal_verdicts() {
     let info = |reason: Option<&str>, phase: Phase| PhaseInfo {
         version: 2,
         phase,
         reason: reason.map(str::to_owned),
     };
+    let pending = |config: Option<PhaseInfo>, program: bool| Ok(Pending { config, program });
     let cases = [
         (
-            Some(info(Some("安装"), Phase::PrepareCertificates)),
+            pending(Some(info(Some("安装"), Phase::PrepareCertificates)), false),
             false,
-            "有未完成事务（配置变更「安装」停在准备证书阶段）；执行 onebox recover",
+            Check::fail(
+                JOURNAL,
+                "有未完成事务（配置变更「安装」停在准备证书阶段）；执行 onebox recover",
+            ),
         ),
         (
-            Some(info(None, Phase::RollbackFiles)),
+            pending(Some(info(None, Phase::RollbackFiles)), false),
             false,
-            "有未完成事务（配置变更停在回滚：恢复文件阶段）；执行 onebox recover",
+            Check::fail(
+                JOURNAL,
+                "有未完成事务（配置变更停在回滚：恢复文件阶段）；执行 onebox recover",
+            ),
         ),
         (
-            None,
-            true,
-            "有未完成事务（程序自更新）；执行 onebox recover",
+            pending(None, true),
+            false,
+            Check::fail(JOURNAL, "有未完成事务（程序自更新）；执行 onebox recover"),
         ),
         (
-            Some(info(Some("添加协议"), Phase::Committed)),
+            pending(Some(info(Some("添加协议"), Phase::Committed)), true),
+            false,
+            Check::fail(
+                JOURNAL,
+                "有未完成事务（配置变更「添加协议」停在已提交阶段，程序自更新）；执行 onebox recover",
+            ),
+        ),
+        (
+            pending(Some(info(Some("添加协议"), Phase::StartCores)), false),
             true,
-            "有未完成事务（配置变更「添加协议」停在已提交阶段，程序自更新）；执行 onebox recover",
+            Check::warn(
+                JOURNAL,
+                "另一个配置操作正在进行（配置变更「添加协议」停在启动内核阶段）；完成后重新执行 onebox doctor",
+            ),
+        ),
+        (pending(None, false), true, Check::pass(JOURNAL, "无")),
+        (
+            Err(Error::msg("事务日志过大")),
+            false,
+            Check::fail(JOURNAL, "事务记录无法读取: 事务日志过大"),
         ),
     ];
-    for (config, program, want) in cases {
-        assert_eq!(pending_text(config.as_ref(), program), want);
+    for (pending, busy, want) in cases {
+        assert_eq!(journal_verdict(pending, busy), want);
     }
+}
+
+#[test]
+fn a_journal_of_a_running_operation_is_a_warning() {
+    let dir = TempDir::new("diag-journal-busy").unwrap();
+    let paths = Paths::isolated(dir.path());
+    let cfg = fixtures::config(&[(Protocol::Tuic, 443, Core::Singbox)]);
+    let journal = crate::apply::journal::Journal::new(
+        "安装",
+        Some(cfg),
+        vec![],
+        vec![],
+        Default::default(),
+        Default::default(),
+    );
+    journal::write(&paths, &journal).unwrap();
+    assert_eq!(journal_check(&paths).status, CheckStatus::Fail);
+    assert!(
+        !paths.lock().exists(),
+        "probing never creates the lock file"
+    );
+    let held = FileLock::acquire(&paths.lock(), BUSY_MESSAGE).unwrap();
+    assert_eq!(journal_check(&paths).status, CheckStatus::Warn);
+    drop(held);
+    assert_eq!(journal_check(&paths).status, CheckStatus::Fail);
 }
 
 #[test]

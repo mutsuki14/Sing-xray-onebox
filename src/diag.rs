@@ -2,17 +2,20 @@
 //! `onebox support` (a redacted JSON report for bug reports).
 //!
 //! A diagnosis is a list of [`Check`]s. Which checks run follows from what
-//! is installed and configured ([`survey`]): the node state, pending
-//! journals and the installed program always; per used core its binary,
-//! version and configuration; the services the configuration needs; the
-//! certificates in effect (proxy, site, standalone subscription); the site's
-//! nginx configuration; the renewal cron line when a certificate needs it;
-//! the firewall and hop ledgers; the FRP state when FRP is installed; then
-//! the checks of feature modules registered in [`registry::EXTRA_CHECKS`]
-//! (or passed to [`doctor_with`] / [`support_with`]).
+//! is installed and configured (a [`Survey`] of the node state and FRP):
+//! the node state, pending journals and the installed program always; per
+//! used core its binary, version and configuration; the services the
+//! configuration needs; the certificates in effect (proxy, site, standalone
+//! subscription); the site's nginx configuration; the renewal cron line
+//! when a certificate needs it; the firewall and hop ledgers; the FRP state
+//! when FRP is installed; then the checks of feature modules registered in
+//! [`registry::EXTRA_CHECKS`] (or passed to [`doctor_with`] /
+//! [`support_with`]).
 //!
-//! Every check is read-only: nothing is started, repaired, created under
-//! the run root or written (support writes only its report file). Checks
+//! Checks are read-only and take no lock: nothing is started, repaired or
+//! created under the run root (support writes only its report file). Only
+//! while a journal exists is the node lock probed (briefly, on the existing
+//! lock file) to tell an operation in progress from one to recover. Checks
 //! never abort the diagnosis: a failing probe becomes a `[失败]` or
 //! `[警告]` line.
 //!
@@ -20,21 +23,27 @@
 //! - checks cover the site, subscription and FRP, service autostart, the
 //!   renewal cron line, the firewall/hop ledgers and the installed program,
 //!   not only the cores, two certificates and the journal (D-8.1#32);
-//! - an expired certificate is a failure, one expiring within 7 days a
-//!   warning (v2 warned for both); a missing `openssl` is a warning line,
-//!   not an abort (D-8.1#27);
+//! - an expired or missing certificate is a failure, one expiring within 7
+//!   days a warning (v2 warned for both); a missing `openssl` is a warning
+//!   line, not an abort (D-8.1#27);
 //! - a pending or corrupt journal is a `[失败]` line and counts as a
 //!   problem (v2 printed `[警告]` but counted it, or aborted on a corrupt
-//!   journal, D-8.1#28/#29); one helper (`apply::journal::pending`) decides;
+//!   journal, D-8.1#28/#29); one helper (`apply::journal::pending`)
+//!   decides; the journal of an operation still running is a warning;
 //! - core configurations are checked in a private temp directory, never in
 //!   `RUN/check` (D-8.1#30, G42);
-//! - lines are `[通过]/[警告]/[失败] {name}: {detail}` followed by a summary;
-//!   the exit status counts failures only;
+//! - lines are `[通过]/[警告]/[失败] {name}: {detail}` followed by a
+//!   summary; the exit status counts failures only;
+//! - an unreadable state is a failure line and the checks that do not need
+//!   it still run (v2 aborted); a host with only FRP, or with only a
+//!   journal, is diagnosed instead of reported as not installed;
 //! - `support` names its file `support-{unix}-{random}.json` (v2 failed
 //!   when run twice in a second, D-8.1#31), ends it with a newline, adds the
 //!   check results, and redacts IP addresses, domain names and credentials
 //!   from every free-form text; failing host probes (`uname`) no longer
-//!   abort it.
+//!   abort it. The report keeps v2's `program_version`, `host`,
+//!   `protocols`, `cores`, `pending_recovery` and `note`; `certificate_mode`,
+//!   `owned_site` and `subscription` became `certificates` and `features`.
 
 mod checks;
 mod cli;

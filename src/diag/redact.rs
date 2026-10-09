@@ -285,7 +285,7 @@ fn scrub_domains(text: &str) -> String {
         text,
         |c| c.is_ascii_alphanumeric() || c == '-' || c == '.',
         |run, before, after| {
-            if joins(before) || joins(after) || before == Some('_') {
+            if joins(before) || joins(after) {
                 return None;
             }
             let kept = trim_trailing(run, &['.', '-']);
