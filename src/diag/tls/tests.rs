@@ -5,46 +5,58 @@ use crate::domain::{fixtures, Core, Protocol};
 
 const NOW: u64 = 1_800_000_000;
 
+fn proxy() -> CertProbe {
+    CertProbe::node(CertScope::Proxy, &CertDir::new("/t/etc/tls"))
+}
+
+#[test]
+fn node_probes_name_their_renew_command() {
+    assert_eq!(
+        proxy(),
+        CertProbe {
+            name: "代理证书".into(),
+            dir: "/t/etc/tls".into(),
+            renew: "onebox cert renew proxy".into(),
+            deploy: "onebox regen".into(),
+        }
+    );
+}
+
 #[test]
 fn expiry_verdicts() {
+    const WEEK: u64 = 7 * DAY;
+    let renew = "执行 onebox cert renew proxy";
     let cases = [
         (None, CheckStatus::Warn, "无法读取证书有效期".to_owned()),
         (
-            Some(NOW),
+            Some(NOW - 1),
             CheckStatus::Fail,
-            format!(
-                "已于 {} 过期；执行 onebox cert renew proxy",
-                format_utc(NOW)
-            ),
+            format!("已于 {} 过期；{renew}", format_utc(NOW - 1)),
         ),
         (
             Some(NOW - 10 * DAY),
             CheckStatus::Fail,
-            format!(
-                "已于 {} 过期；执行 onebox cert renew proxy",
-                format_utc(NOW - 10 * DAY)
-            ),
+            format!("已于 {} 过期；{renew}", format_utc(NOW - 10 * DAY)),
+        ),
+        (
+            Some(NOW),
+            CheckStatus::Warn,
+            format!("将在 1 天内到期（{}）；{renew}", format_utc(NOW)),
         ),
         (
             Some(NOW + 3600),
             CheckStatus::Warn,
-            format!(
-                "将在 1 天内到期（{}）；执行 onebox cert renew proxy",
-                format_utc(NOW + 3600)
-            ),
+            format!("将在 1 天内到期（{}）；{renew}", format_utc(NOW + 3600)),
         ),
         (
-            Some(NOW + WARN_SECS - 1),
+            Some(NOW + WEEK - 1),
             CheckStatus::Warn,
-            format!(
-                "将在 7 天内到期（{}）；执行 onebox cert renew proxy",
-                format_utc(NOW + WARN_SECS - 1)
-            ),
+            format!("将在 7 天内到期（{}）；{renew}", format_utc(NOW + WEEK - 1)),
         ),
         (
-            Some(NOW + WARN_SECS),
+            Some(NOW + WEEK),
             CheckStatus::Pass,
-            format!("有效期至 {}（剩余 7 天）", format_utc(NOW + WARN_SECS)),
+            format!("有效期至 {}（剩余 7 天）", format_utc(NOW + WEEK)),
         ),
         (
             Some(NOW + 3650 * DAY),
@@ -54,14 +66,56 @@ fn expiry_verdicts() {
     ];
     for (expires, status, detail) in cases {
         assert_eq!(
-            expiry_check(CertScope::Proxy, expires, NOW),
+            expiry_check(&proxy(), expires, NOW),
             Check::new("代理证书", status, detail),
             "{expires:?}"
         );
     }
-    let site = expiry_check(CertScope::Site, Some(NOW), NOW);
+    let site = expiry_check(
+        &CertProbe::node(CertScope::Site, &CertDir::new("/s")),
+        Some(NOW - 1),
+        NOW,
+    );
     assert_eq!(site.name, "网站证书");
     assert!(site.detail.ends_with("执行 onebox cert renew site"));
+}
+
+/// `cert info` (`CertStatus::warning`) and doctor agree at every boundary
+/// of the 7-day window.
+#[test]
+fn expiry_agrees_with_cert_status_warning() {
+    use crate::cert::store::days_until;
+    use crate::cert::CertStatus;
+    for offset in [
+        -(DAY as i64),
+        -1,
+        0,
+        1,
+        6 * DAY as i64,
+        7 * DAY as i64 - 1,
+        7 * DAY as i64,
+        8 * DAY as i64 - 1,
+        8 * DAY as i64,
+        30 * DAY as i64,
+    ] {
+        let at = (NOW as i64 + offset) as u64;
+        let status = CertStatus {
+            dir: "/d".into(),
+            x509: Default::default(),
+            days_left: Some(days_until(at, NOW)),
+            metadata: None,
+        };
+        let cert_says = match status.warning(CERT_WARNING_DAYS) {
+            None => CheckStatus::Pass,
+            Some(w) if w == "证书已过期" => CheckStatus::Fail,
+            Some(_) => CheckStatus::Warn,
+        };
+        assert_eq!(
+            expiry_check(&proxy(), Some(at), NOW).status,
+            cert_says,
+            "{offset}"
+        );
+    }
 }
 
 #[test]
@@ -113,11 +167,55 @@ fn renewal_verdicts() {
     ];
     for (need, line, scheduler, status, detail) in cases {
         assert_eq!(
-            renewal_verdict(need, line.clone(), scheduler),
+            renewal_job_verdict(&node_renewal_job(need), line.clone(), scheduler),
             Check::new(RENEWAL, status, detail),
             "{need:?} {line:?} {scheduler}"
         );
     }
+    let frp = RenewalJob {
+        name: "FRP 续期任务",
+        tag: Tag::frp_renew(),
+        required: false,
+        effect: "网站证书不会自动续期",
+        fix: "onebox frps renew",
+    };
+    assert_eq!(
+        renewal_job_verdict(&frp, Ok(false), false),
+        Check::warn(
+            "FRP 续期任务",
+            "缺少每日续期任务，网站证书不会自动续期；执行 onebox frps renew"
+        )
+    );
+}
+
+#[test]
+fn nginx_configurations_in_use() {
+    let paths = Paths::isolated(std::path::Path::new("/t"));
+    let reality = fixtures::config(&[(Protocol::VlessReality, 443, Core::Singbox)]);
+    assert!(nginx_configs(&reality, &paths).is_empty());
+    let mut both = fixtures::with_site(reality.clone(), "blog.example.org", false);
+    both.subscription = Some(fixtures::standalone_subscription(
+        "sub.example.org",
+        8448,
+        WebCert::Cloudflare,
+    ));
+    assert_eq!(
+        nginx_configs(&both, &paths),
+        [
+            (SITE_NGINX, paths.site(), paths.site().join("nginx.conf")),
+            (
+                SUBSCRIPTION_NGINX,
+                paths.subscription(),
+                paths.subscription().join("nginx.conf")
+            ),
+        ]
+    );
+    let mut ip = reality;
+    ip.subscription = Some(fixtures::ip_subscription(8448));
+    assert!(
+        nginx_configs(&ip, &paths).is_empty(),
+        "ip mode runs no nginx"
+    );
 }
 
 #[test]
@@ -187,7 +285,7 @@ fn real_openssl_certificates_by_remaining_validity() {
             init: crate::host::init::InitSystem::None,
             now: crate::sys::time::now(),
         };
-        let check = certificate_check(&doctor, CertScope::Proxy, &dir);
+        let check = certificate_check(&doctor, &CertProbe::node(CertScope::Proxy, &dir));
         assert_eq!(check.status, status, "{check:?}");
         assert!(check.detail.contains(text), "{check:?}");
     }

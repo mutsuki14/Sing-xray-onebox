@@ -1,5 +1,4 @@
 use super::*;
-use crate::ctx::Ctx;
 use crate::diag::fixture::{two_core_config, Node, NOW};
 use crate::diag::redact::contains_ip;
 use crate::diag::CheckStatus;
@@ -28,6 +27,7 @@ fn healthy_report_contents() {
     assert_eq!(report.state, "v3");
     assert_eq!(report.note, SUPPORT_NOTE);
     assert!(!report.pending_recovery);
+    assert!(!report.operation_running);
     assert_eq!(
         report.protocols,
         [
@@ -101,6 +101,7 @@ fn json_has_sorted_keys_and_a_trailing_newline() {
             "generated_at",
             "host",
             "note",
+            "operation_running",
             "pending_recovery",
             "program_version",
             "protocols",
@@ -154,7 +155,7 @@ fn write_support_creates_the_report_under_root() {
     assert_eq!(doc["state"], "v3");
 }
 
-fn leaky_provider(_: &Ctx, cfg: Option<&NodeConfig>) -> Vec<Check> {
+fn leaky_provider(_: &Doctor, cfg: Option<&NodeConfig>) -> Vec<Check> {
     let Some(cfg) = cfg else {
         return vec![];
     };

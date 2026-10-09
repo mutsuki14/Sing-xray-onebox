@@ -110,10 +110,23 @@ fn pending_journal_verdicts() {
             false,
             Check::fail(JOURNAL, "事务记录无法读取: 事务日志过大"),
         ),
+        (
+            Err(Error::msg("事务日志无效")),
+            true,
+            Check::warn(
+                JOURNAL,
+                "另一个配置操作正在进行（事务记录正在更新）；完成后重新执行 onebox doctor",
+            ),
+        ),
     ];
     for (pending, busy, want) in cases {
         assert_eq!(journal_verdict(pending, busy), want);
     }
+}
+
+/// The journal line as `diagnose` computes it.
+fn journal_now(paths: &Paths) -> Check {
+    journal_check(paths, operation_running(paths))
 }
 
 #[test]
@@ -130,26 +143,62 @@ fn a_journal_of_a_running_operation_is_a_warning() {
         Default::default(),
     );
     journal::write(&paths, &journal).unwrap();
-    assert_eq!(journal_check(&paths).status, CheckStatus::Fail);
+    assert_eq!(journal_now(&paths).status, CheckStatus::Fail);
     assert!(
         !paths.lock().exists(),
         "probing never creates the lock file"
     );
     let held = FileLock::acquire(&paths.lock(), BUSY_MESSAGE).unwrap();
-    assert_eq!(journal_check(&paths).status, CheckStatus::Warn);
+    assert!(operation_running(&paths));
+    assert_eq!(journal_now(&paths).status, CheckStatus::Warn);
+
+    // Caught mid-cleanup: the directory is there, journal.json is gone.
+    fs::remove_file(paths.transaction().join("journal.json")).unwrap();
+    assert_eq!(
+        journal_now(&paths),
+        Check::warn(
+            JOURNAL,
+            "另一个配置操作正在进行（事务记录正在更新）；完成后重新执行 onebox doctor"
+        )
+    );
     drop(held);
-    assert_eq!(journal_check(&paths).status, CheckStatus::Fail);
+    let check = journal_now(&paths);
+    assert_eq!(check.status, CheckStatus::Fail, "{check:?}");
+    assert!(check.detail.starts_with("事务记录无法读取: "), "{check:?}");
+}
+
+#[test]
+fn the_lock_is_probed_only_while_a_journal_exists() {
+    let dir = TempDir::new("diag-journal-lock").unwrap();
+    let paths = Paths::isolated(dir.path());
+    fs::create_dir_all(&paths.root).unwrap();
+    let _held = FileLock::acquire(&paths.lock(), BUSY_MESSAGE).unwrap();
+    assert!(!operation_running(&paths), "no journal: not probed");
+    fs::write(paths.self_update_journal(), "{").unwrap();
+    assert!(operation_running(&paths), "a self-update journal counts");
+}
+
+#[test]
+fn failures_are_downgraded_while_an_operation_runs() {
+    assert_eq!(
+        downgrade(Check::fail("服务 onebox-xray", "未运行")),
+        Check::warn("服务 onebox-xray", format!("{TRANSIENT}未运行"))
+    );
+    let warn = Check::warn("x", "y");
+    assert_eq!(downgrade(warn.clone()), warn);
+    let pass = Check::pass("x", "y");
+    assert_eq!(downgrade(pass.clone()), pass);
 }
 
 #[test]
 fn journal_check_without_journals_passes() {
     let dir = TempDir::new("diag-journal").unwrap();
     let paths = Paths::isolated(dir.path());
-    assert_eq!(journal_check(&paths), Check::pass(JOURNAL, "无"));
+    assert_eq!(journal_now(&paths), Check::pass(JOURNAL, "无"));
     // A `.transaction` that is a file is corrupt, not "nothing pending".
     fs::create_dir_all(&paths.root).unwrap();
     fs::write(paths.transaction(), "").unwrap();
-    let check = journal_check(&paths);
+    let check = journal_now(&paths);
     assert_eq!(check.status, CheckStatus::Fail);
     assert!(
         check.detail.starts_with("事务记录无法读取: 事务目录无效"),

@@ -8,24 +8,26 @@
 //! configuration needs; the certificates in effect (proxy, site, standalone
 //! subscription); the site's nginx configuration; the renewal cron line
 //! when a certificate needs it; the firewall and hop ledgers; the FRP state
-//! when FRP is installed; then the checks of feature modules registered in
-//! [`registry::EXTRA_CHECKS`] (or passed to [`doctor_with`] /
-//! [`support_with`]).
+//! when FRP is installed; then the checks of feature modules passed to
+//! [`doctor_with`] / [`support_with`] (see [`registry`]).
 //!
 //! Checks are read-only and take no lock: nothing is started, repaired or
 //! created under the run root (support writes only its report file). Only
 //! while a journal exists is the node lock probed (briefly, on the existing
-//! lock file) to tell an operation in progress from one to recover. Checks
-//! never abort the diagnosis: a failing probe becomes a `[失败]` or
-//! `[警告]` line.
+//! lock file) to tell an operation in progress from one to recover; while
+//! one runs, services are stopped and files swapped on purpose, so every
+//! later failure is reported as a warning. Checks never abort the
+//! diagnosis: a failing probe becomes a `[失败]` or `[警告]` line.
 //!
 //! Changes from v2:
 //! - checks cover the site, subscription and FRP, service autostart, the
-//!   renewal cron line, the firewall/hop ledgers and the installed program,
-//!   not only the cores, two certificates and the journal (D-8.1#32);
+//!   renewal cron line, both private nginx configurations, the firewall/hop
+//!   ledgers and the installed program, not only the cores, two
+//!   certificates and the journal (D-8.1#32);
 //! - an expired or missing certificate is a failure, one expiring within 7
 //!   days a warning (v2 warned for both); a missing `openssl` is a warning
-//!   line, not an abort (D-8.1#27);
+//!   line, not an abort (D-8.1#27), a certificate `openssl` rejects a
+//!   failure;
 //! - a pending or corrupt journal is a `[失败]` line and counts as a
 //!   problem (v2 printed `[警告]` but counted it, or aborted on a corrupt
 //!   journal, D-8.1#28/#29); one helper (`apply::journal::pending`)
@@ -40,8 +42,9 @@
 //! - `support` names its file `support-{unix}-{random}.json` (v2 failed
 //!   when run twice in a second, D-8.1#31), ends it with a newline, adds the
 //!   check results, and redacts IP addresses, domain names and credentials
-//!   from every free-form text; failing host probes (`uname`) no longer
-//!   abort it. The report keeps v2's `program_version`, `host`,
+//!   from every free-form text (all values of a state that cannot be
+//!   loaded, whose error may echo them); failing host probes (`uname`) no
+//!   longer abort it. The report keeps v2's `program_version`, `host`,
 //!   `protocols`, `cores`, `pending_recovery` and `note`; `certificate_mode`,
 //!   `owned_site` and `subscription` became `certificates` and `features`.
 
@@ -60,7 +63,7 @@ pub(crate) mod fixture;
 #[cfg(test)]
 mod realcore;
 
-pub use cli::{COMMANDS, DOCTOR, SUPPORT};
+pub use cli::{support_command_with, support_message, COMMANDS, DOCTOR, SUPPORT};
 pub use redact::Redactor;
 pub use registry::EXTRA_CHECKS;
 pub use report::{format_check, summary_line, Tally, DOCTOR_HINT};
@@ -138,9 +141,23 @@ impl Check {
 }
 
 /// A provider of extra checks (feature modules such as the subscription
-/// or FRP). It gets the node configuration when one could be loaded and
-/// must not fail: problems are reported as checks.
-pub type CheckFn = fn(&Ctx, Option<&NodeConfig>) -> Vec<Check>;
+/// or FRP). It gets the diagnosis' facts (context, init system, the time
+/// certificates are measured against) and the node configuration when one
+/// could be loaded, and must not fail: problems are reported as checks.
+/// The [`probe`] helpers give its lines doctor's wording and thresholds.
+pub type CheckFn = fn(&Doctor, Option<&NodeConfig>) -> Vec<Check>;
+
+/// Building blocks for the checks of feature modules, so that their lines
+/// match the built-in ones (names, wording, the 7-day certificate rule,
+/// running + autostart, the renewal line, `nginx -t`). Each takes the
+/// [`Doctor`] or its parts, never the real clock or a re-detected init.
+pub mod probe {
+    pub use super::node::{service_check, service_name, service_verdict, Role, REGEN};
+    pub use super::tls::{
+        certificate_check, expiry_check, nginx_check, renewal_job_check, renewal_job_verdict,
+        CertProbe, RenewalJob,
+    };
+}
 
 /// The external facts of a diagnosis; tests build one with fixed values.
 pub struct Doctor<'a> {
@@ -179,6 +196,9 @@ impl<'a> Doctor<'a> {
 pub struct Diagnosis {
     pub survey: Survey,
     pub checks: Vec<Check>,
+    /// A configuration operation held the node lock: failures after the
+    /// journal line were reported as warnings.
+    pub operation_running: bool,
 }
 
 impl Diagnosis {

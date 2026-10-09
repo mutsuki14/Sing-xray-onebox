@@ -2,10 +2,12 @@
 //! lists [`COMMANDS`]. Both read root-owned state, so both require root
 //! (v2 checked nothing and failed on permissions).
 //!
-//! A caller that needs other extra checks than [`super::EXTRA_CHECKS`]
-//! can keep the spec and swap the handler: `DOCTOR.handler(my_handler)`
-//! with `my_handler` calling [`super::doctor_with`].
+//! The CLI passes the feature modules' check providers by keeping the
+//! specs and swapping the handlers: `DOCTOR.handler(h)` with `h` calling
+//! [`super::doctor_with`], `SUPPORT.handler(h)` with `h` calling
+//! [`support_command_with`] (see [`super::registry`]).
 
+use super::CheckFn;
 use crate::cli::args::{CommandSpec, Group, Matches, Root};
 use crate::ctx::Ctx;
 use crate::error::Result;
@@ -33,9 +35,14 @@ fn doctor_command(ctx: &Ctx, _matches: &Matches) -> Result<()> {
     super::doctor(ctx)
 }
 
-/// Prints `已生成脱敏诊断文件: {path}` on stdout (v2 wording).
 fn support_command(ctx: &Ctx, _matches: &Matches) -> Result<()> {
-    let path = super::support(ctx)?;
+    support_command_with(ctx, super::EXTRA_CHECKS)
+}
+
+/// `onebox support` with explicit providers: writes the report and prints
+/// `已生成脱敏诊断文件: {path}` on stdout (v2 wording).
+pub fn support_command_with(ctx: &Ctx, extra: &[CheckFn]) -> Result<()> {
+    let path = super::support_with(ctx, extra)?;
     out::data(&support_message(&path))
 }
 

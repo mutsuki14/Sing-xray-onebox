@@ -48,6 +48,9 @@ pub struct SupportReport {
     pub features: Features,
     /// A node or self-update journal is pending (or unreadable).
     pub pending_recovery: bool,
+    /// A configuration operation held the node lock during the diagnosis
+    /// (its failures were reported as warnings).
+    pub operation_running: bool,
     /// Every doctor check, redacted.
     pub checks: Vec<Check>,
     pub note: &'static str,
@@ -246,6 +249,7 @@ impl SupportReport {
             certificates: cfg.map(CertModes::of).unwrap_or_default(),
             features: Features::of(cfg, survey.frp.installed()),
             pending_recovery: journal::pending(&doctor.ctx.paths).map_or(true, |p| p.any()),
+            operation_running: diagnosis.operation_running,
             checks: diagnosis
                 .checks
                 .iter()

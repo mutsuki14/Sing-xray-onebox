@@ -13,6 +13,9 @@ use crate::host::service::{
 };
 use std::path::Path;
 
+/// Command that installs what a node check finds missing.
+pub const REGEN: &str = "onebox regen";
+
 /// `sing-box 内核` / `Xray 内核`.
 pub fn core_name(core: Core) -> String {
     format!("{} 内核", core.title())
@@ -101,7 +104,8 @@ fn config_check(ctx: &Ctx, core: Core, workdir: Result<&Path, &str>) -> Check {
 pub enum Role {
     /// Long-running: must run and start at boot.
     Daemon,
-    /// The boot oneshot `onebox-network`: must start at boot only.
+    /// A boot oneshot restoring firewall and hop rules (`onebox-network`):
+    /// must start at boot only; whether it "runs" is never asked.
     Boot,
 }
 
@@ -137,20 +141,29 @@ pub fn required_services(cfg: &NodeConfig) -> Vec<(&'static str, Role)> {
 pub fn service_checks(services: &Services, cfg: &NodeConfig) -> Vec<Check> {
     required_services(cfg)
         .into_iter()
-        .map(|(name, role)| service_check(services, name, role))
+        .map(|(name, role)| service_check(services, name, role, REGEN))
         .collect()
 }
 
-fn service_check(services: &Services, name: &str, role: Role) -> Check {
+/// `服务 {name}`: configured, running (daemons) and starting at boot under
+/// the services' init system; `fix` is the command that configures it
+/// (`onebox regen` for node services).
+pub fn service_check(services: &Services, name: &str, role: Role, fix: &str) -> Check {
     if !services.exists(name) {
-        return Check::fail(service_name(name), "未配置；执行 onebox regen");
+        return Check::fail(service_name(name), format!("未配置；执行 {fix}"));
     }
     let running = role == Role::Daemon && services.running(name);
-    service_verdict(name, role, running, services.enabled(name))
+    service_verdict(name, role, running, services.enabled(name), fix)
 }
 
 /// The verdict for a configured service from its facts.
-pub fn service_verdict(name: &str, role: Role, running: bool, enabled: Result<bool>) -> Check {
+pub fn service_verdict(
+    name: &str,
+    role: Role,
+    running: bool,
+    enabled: Result<bool>,
+    fix: &str,
+) -> Check {
     let label = service_name(name);
     match role {
         Role::Daemon if !running => Check::fail(
@@ -159,14 +172,14 @@ pub fn service_verdict(name: &str, role: Role, running: bool, enabled: Result<bo
         ),
         Role::Daemon => match enabled {
             Ok(true) => Check::pass(label, "运行中"),
-            Ok(false) => Check::warn(label, "运行中，但未设置开机自启；执行 onebox regen"),
+            Ok(false) => Check::warn(label, format!("运行中，但未设置开机自启；执行 {fix}")),
             Err(e) => Check::warn(label, format!("运行中；无法读取自启状态: {e}")),
         },
         Role::Boot => match enabled {
             Ok(true) => Check::pass(label, "已设置开机恢复防火墙与端口跳跃规则"),
             Ok(false) => Check::warn(
                 label,
-                "未设置开机自启，重启后防火墙与端口跳跃规则不会恢复；执行 onebox regen",
+                format!("未设置开机自启，重启后防火墙与端口跳跃规则不会恢复；执行 {fix}"),
             ),
             Err(e) => Check::warn(label, format!("无法读取自启状态: {e}")),
         },

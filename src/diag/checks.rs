@@ -28,14 +28,24 @@ pub const HOPS: &str = "端口跳跃";
 pub const FRP: &str = "FRP 服务端";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Prefix of a failure downgraded while a configuration operation runs.
+pub const TRANSIENT: &str = "配置操作进行中，可能是暂时的: ";
+
 /// Checks recorded in order, each handed to the sink as it is added.
 struct Run<'s> {
     checks: Vec<Check>,
     sink: &'s mut dyn FnMut(&Check),
+    /// A configuration operation runs: failures become warnings.
+    transient: bool,
 }
 
 impl Run<'_> {
     fn push(&mut self, check: Check) {
+        let check = if self.transient {
+            downgrade(check)
+        } else {
+            check
+        };
         (self.sink)(&check);
         self.checks.push(check);
     }
@@ -47,6 +57,16 @@ impl Run<'_> {
     }
 }
 
+/// A failure seen while an operation stops services and swaps files on
+/// purpose is reported as a warning (doctor must not exit 1 for it).
+pub fn downgrade(check: Check) -> Check {
+    if check.is_fail() {
+        Check::warn(check.name, format!("{TRANSIENT}{}", check.detail))
+    } else {
+        check
+    }
+}
+
 /// See [`Doctor::diagnose`].
 pub(super) fn diagnose(
     doctor: &Doctor,
@@ -55,9 +75,10 @@ pub(super) fn diagnose(
 ) -> Result<Diagnosis> {
     let ctx = doctor.ctx;
     let survey = Survey::gather(ctx);
+    let running = operation_running(&ctx.paths);
     // Decided before anything is printed: an interrupted first install
     // leaves a journal but no state, and must still be diagnosed.
-    let journal = journal_check(&ctx.paths);
+    let journal = journal_check(&ctx.paths, running);
     let nothing = !survey.node.present() && !survey.frp.installed();
     if nothing && journal.status == CheckStatus::Pass {
         return Err(Error::NotInstalled);
@@ -65,9 +86,11 @@ pub(super) fn diagnose(
     let mut run = Run {
         checks: Vec::new(),
         sink,
+        transient: false,
     };
     run.extend(state_checks(&survey.node));
     run.push(journal);
+    run.transient = running;
     run.push(program_check(ctx));
     if let Some(cfg) = survey.config() {
         node_checks(doctor, cfg, &mut run);
@@ -77,11 +100,12 @@ pub(super) fn diagnose(
     }
     run.extend(frp_check(&survey.frp));
     for provider in extra {
-        run.extend(provider(ctx, survey.config()));
+        run.extend(provider(doctor, survey.config()));
     }
     Ok(Diagnosis {
         survey,
         checks: run.checks,
+        operation_running: running,
     })
 }
 
@@ -94,7 +118,7 @@ fn node_checks(doctor: &Doctor, cfg: &NodeConfig, run: &mut Run) {
     run.extend(node::core_checks(doctor.ctx, cfg, workdir));
     run.extend(node::service_checks(&doctor.services(), cfg));
     run.extend(tls::certificate_checks(doctor, cfg));
-    run.extend(tls::site_nginx_check(doctor.ctx, cfg));
+    run.extend(tls::nginx_checks(doctor.ctx, cfg));
     run.extend(tls::renewal_check(doctor, cfg));
 }
 
@@ -132,36 +156,47 @@ pub fn protocol_summary(cfg: &NodeConfig) -> String {
 
 /// `未完成事务`: none, a pending config or self-update journal (a failure:
 /// changes are blocked until `recover`), or an unreadable one (D-8.1#28).
-/// A journal whose operation still holds the node lock is that operation
-/// in progress (doctor runs without the lock), not something to recover.
-pub fn journal_check(paths: &Paths) -> Check {
-    let pending = journal::pending(paths);
-    let busy = matches!(&pending, Ok(p) if p.any()) && node_lock_held(paths);
-    journal_verdict(pending, busy)
+/// While `running` (see [`operation_running`]) a journal — even one caught
+/// half-written — is that operation's, not something to recover.
+pub fn journal_check(paths: &Paths, running: bool) -> Check {
+    journal_verdict(journal::pending(paths), running)
 }
 
-/// Whether another process holds the node lock. Probed only while a
-/// journal exists, on an existing lock file (nothing is created), and
-/// released at once.
+/// Whether a configuration operation (an apply, a recovery, a self-update)
+/// runs right now: a node or self-update journal exists and another
+/// process holds the node lock. Doctor runs without the lock, so the lock
+/// is probed only while a journal exists, on an existing lock file
+/// (nothing is created), and released at once.
+pub fn operation_running(paths: &Paths) -> bool {
+    let journal = [paths.transaction(), paths.self_update_journal()]
+        .iter()
+        .any(|p| std::fs::symlink_metadata(p).is_ok());
+    journal && node_lock_held(paths)
+}
+
 fn node_lock_held(paths: &Paths) -> bool {
     let lock = paths.lock();
     let exists = std::fs::symlink_metadata(&lock).is_ok_and(|m| m.is_file());
     exists && matches!(FileLock::acquire(&lock, BUSY_MESSAGE), Err(Error::Busy(_)))
 }
 
-/// The verdict on what [`journal::pending`] found; `busy` = the node lock is
-/// held by a running operation.
-pub fn journal_verdict(pending: Result<Pending>, busy: bool) -> Check {
+/// The verdict on what [`journal::pending`] found; `running` = an operation
+/// holds the node lock.
+pub fn journal_verdict(pending: Result<Pending>, running: bool) -> Check {
+    let busy = |what: &str| {
+        Check::warn(
+            JOURNAL,
+            format!("另一个配置操作正在进行（{what}）；完成后重新执行 onebox doctor"),
+        )
+    };
     match pending {
+        Err(_) if running => busy("事务记录正在更新"),
         Err(e) => Check::fail(JOURNAL, format!("事务记录无法读取: {e}")),
         Ok(pending) if !pending.any() => Check::pass(JOURNAL, "无"),
         Ok(pending) => {
             let what = pending_parts(pending.config.as_ref(), pending.program);
-            if busy {
-                Check::warn(
-                    JOURNAL,
-                    format!("另一个配置操作正在进行（{what}）；完成后重新执行 onebox doctor"),
-                )
+            if running {
+                busy(&what)
             } else {
                 Check::fail(
                     JOURNAL,

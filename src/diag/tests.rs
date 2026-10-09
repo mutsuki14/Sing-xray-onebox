@@ -151,6 +151,29 @@ fn missing_openssl_is_a_warning_not_an_abort() {
 }
 
 #[test]
+fn a_certificate_openssl_rejects_fails() {
+    let node = Node::new(two_core_config());
+    node.fake.on(
+        "openssl",
+        &["x509", "-in", &node.proxy_cert()],
+        Output::failure(
+            1,
+            "Could not read certificate from /etc/onebox/tls/cert.pem\nUnable to load certificate\n",
+        ),
+    );
+    let node = node.finish();
+    let diagnosis = node.diagnose();
+    assert_eq!(
+        check(&diagnosis.checks, "代理证书"),
+        &Check::fail(
+            "代理证书",
+            "证书无法解析: Could not read certificate from /etc/onebox/tls/cert.pem；执行 onebox cert renew proxy"
+        )
+    );
+    assert!(diagnosis.tally().verdict().is_err());
+}
+
+#[test]
 fn a_missing_certificate_fails() {
     let node = Node::healthy();
     fs::remove_file(crate::cert::CertDir::proxy(&node.ctx.paths).cert()).unwrap();
@@ -191,6 +214,51 @@ fn pending_config_and_program_journals_fail() {
     assert_eq!(
         both,
         "有未完成事务（配置变更「添加协议」停在启动内核阶段，程序自更新）；执行 onebox recover"
+    );
+}
+
+#[test]
+fn a_running_operation_turns_failures_into_warnings() {
+    let node = Node::new(two_core_config());
+    node.fake.on(
+        "systemctl",
+        &["is-active", "--quiet", "onebox-xray"],
+        Output::failure(3, ""),
+    );
+    let node = node.finish();
+    let paths = &node.ctx.paths;
+    let j = Journal::new(
+        "添加协议",
+        Some(node.cfg.clone()),
+        vec![],
+        vec![],
+        CronSnapshot::default(),
+        Snapshot::default(),
+    );
+    journal::write(paths, &j).unwrap();
+    let held = crate::sys::lock::FileLock::acquire(&paths.lock(), "busy").unwrap();
+    let diagnosis = node.diagnose();
+    assert!(diagnosis.operation_running);
+    assert!(with_status(&diagnosis.checks, CheckStatus::Fail).is_empty());
+    assert_eq!(
+        check(&diagnosis.checks, "未完成事务").status,
+        CheckStatus::Warn
+    );
+    assert_eq!(
+        check(&diagnosis.checks, "服务 onebox-xray"),
+        &Check::warn(
+            "服务 onebox-xray",
+            "配置操作进行中，可能是暂时的: 未运行；查看日志: onebox service onebox-xray log"
+        )
+    );
+    assert!(report::run_doctor(&node.doctor(), &[failing_provider]).is_ok());
+
+    drop(held);
+    let after = node.diagnose();
+    assert!(!after.operation_running);
+    assert_eq!(
+        with_status(&after.checks, CheckStatus::Fail),
+        ["未完成事务", "服务 onebox-xray"]
     );
 }
 
@@ -378,12 +446,13 @@ fn a_standalone_subscription_adds_its_services_and_certificate() {
         8448,
         WebCert::Cloudflare,
     ));
-    let node = Node::new(cfg).finish();
+    let node = Node::new(cfg.clone()).finish();
     let checks = node.diagnose().checks;
     for name in [
         "服务 onebox-subscription",
         "服务 onebox-subscription-web",
         "订阅证书",
+        "订阅 nginx 配置",
         "证书自动续期",
     ] {
         assert_eq!(
@@ -392,6 +461,41 @@ fn a_standalone_subscription_adds_its_services_and_certificate() {
             "{name}: {checks:#?}"
         );
     }
+    let test = node
+        .fake
+        .calls()
+        .into_iter()
+        .find(|c| c.args.first().map(String::as_str) == Some("-t"))
+        .unwrap();
+    let prefix = node.ctx.paths.subscription();
+    let conf = prefix.join("nginx.conf");
+    assert_eq!(
+        test.args,
+        [
+            "-t",
+            "-q",
+            "-p",
+            &prefix.to_string_lossy(),
+            "-c",
+            &conf.to_string_lossy()
+        ]
+    );
+
+    let broken = Node::new(cfg);
+    broken.fake.on(
+        "nginx",
+        &["-t"],
+        Output::failure(1, "nginx: [emerg] cannot load certificate\n"),
+    );
+    let broken = broken.finish();
+    let nginx = check(&broken.diagnose().checks, "订阅 nginx 配置").clone();
+    assert_eq!(
+        nginx,
+        Check::fail(
+            "订阅 nginx 配置",
+            "nginx 配置测试失败: nginx: [emerg] cannot load certificate"
+        )
+    );
 }
 
 #[test]
@@ -544,30 +648,38 @@ fn frp_only_hosts_are_diagnosed_without_node_checks() {
     );
 }
 
-fn extra_provider(_: &Ctx, cfg: Option<&crate::domain::NodeConfig>) -> Vec<Check> {
+/// Reports what it was given: the diagnosis' facts and the configuration.
+fn extra_provider(doctor: &Doctor, cfg: Option<&crate::domain::NodeConfig>) -> Vec<Check> {
     vec![Check::warn(
         "订阅设备",
-        format!("收到配置: {}", cfg.is_some()),
+        format!(
+            "收到配置: {}，init {}，now {}",
+            cfg.is_some(),
+            doctor.init.id(),
+            doctor.now
+        ),
     )]
 }
 
-fn failing_provider(_: &Ctx, _: Option<&crate::domain::NodeConfig>) -> Vec<Check> {
+fn failing_provider(_: &Doctor, _: Option<&crate::domain::NodeConfig>) -> Vec<Check> {
     vec![Check::fail("额外检查", "坏了")]
 }
 
 #[test]
-fn extra_providers_run_last_in_order_with_the_configuration() {
+fn extra_providers_run_last_in_order_with_the_diagnosis_facts() {
     let node = Node::healthy();
     let providers: [CheckFn; 2] = [extra_provider, failing_provider];
     let diagnosis = node.doctor().diagnose(&providers, &mut |_| {}).unwrap();
     let tail: Vec<&Check> = diagnosis.checks.iter().rev().take(2).collect();
-    assert_eq!(tail[1], &Check::warn("订阅设备", "收到配置: true"));
+    assert_eq!(
+        tail[1],
+        &Check::warn(
+            "订阅设备",
+            format!("收到配置: true，init systemd，now {NOW}")
+        )
+    );
     assert_eq!(tail[0], &Check::fail("额外检查", "坏了"));
     assert_eq!(diagnosis.tally().fail, 1);
-    assert!(
-        EXTRA_CHECKS.is_empty(),
-        "registered by the CLI work package"
-    );
 }
 
 #[test]

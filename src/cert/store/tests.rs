@@ -161,9 +161,30 @@ fn days_and_warnings() {
         metadata: None,
     };
     assert_eq!(status(Some(-1)).warning(7).unwrap(), "证书已过期");
-    assert_eq!(status(Some(7)).warning(7).unwrap(), "证书将在 7 天内到期");
+    assert_eq!(status(Some(0)).warning(7).unwrap(), "证书将在 0 天内到期");
+    assert_eq!(status(Some(6)).warning(7).unwrap(), "证书将在 6 天内到期");
+    // Seven whole days left is 7 × 86400 s or more: outside the window,
+    // as for `openssl x509 -checkend 604800` and doctor.
+    assert_eq!(status(Some(7)).warning(7), None);
     assert_eq!(status(Some(8)).warning(7), None);
     assert!(status(None).warning(7).is_some());
+}
+
+#[test]
+fn expiry_predicate_boundaries() {
+    const DAY: u64 = 86_400;
+    let now = 1_800_000_000;
+    let cases = [
+        (now - 1, Expiry::Expired),
+        (now, Expiry::Expiring),
+        (now + 7 * DAY - 1, Expiry::Expiring),
+        (now + 7 * DAY, Expiry::Valid),
+        (now + 8 * DAY - 1, Expiry::Valid),
+    ];
+    for (at, want) in cases {
+        assert_eq!(Expiry::at(at, now, 7), want, "{at}");
+        assert_eq!(Expiry::of_days(days_until(at, now), 7), want, "{at}");
+    }
 }
 
 #[test]

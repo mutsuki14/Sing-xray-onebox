@@ -50,7 +50,7 @@ pub use hooks::{
 pub use method::{CertSpec, Challenge, MethodId, Source};
 pub use openssl::{publicly_trusted, validate_pair, Trust};
 pub use renew::{credentials_needed, renew_all, RenewOptions, RenewReport};
-pub use store::{CertDir, CertStatus, Metadata};
+pub use store::{CertDir, CertStatus, Expiry, Metadata};
 
 use crate::error::{Error, Result};
 use std::fmt;

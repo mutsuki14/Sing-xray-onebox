@@ -109,10 +109,25 @@ fn service_verdicts() {
     ];
     for (role, running, enabled, status, detail) in cases {
         assert_eq!(
-            service_verdict("onebox-x", role, running, enabled),
+            service_verdict("onebox-x", role, running, enabled, REGEN),
             Check::new("服务 onebox-x", status, detail)
         );
     }
+}
+
+#[test]
+fn service_fix_commands_are_the_callers() {
+    let check = service_verdict(
+        "onebox-frps",
+        Role::Daemon,
+        true,
+        Ok(false),
+        "onebox frps start",
+    );
+    assert_eq!(
+        check.detail,
+        "运行中，但未设置开机自启；执行 onebox frps start"
+    );
 }
 
 #[test]

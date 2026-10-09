@@ -14,7 +14,6 @@ use crate::domain::{Core, NodeConfig, Protocol};
 use crate::host::cron::testing::{fake_crontab, lines, CronState};
 use crate::host::init::InitSystem;
 use crate::host::service::unit_file;
-use crate::site;
 use crate::state::StateStore;
 use crate::sys::exec::{FakeExec, Output};
 use crate::sys::fs::TempDir;
@@ -117,8 +116,8 @@ impl Node {
             write(&cert_dir.cert(), "-----BEGIN CERTIFICATE-----\n", 0o600);
             write(&cert_dir.key(), "-----BEGIN PRIVATE KEY-----\n", 0o600);
         }
-        if cfg.site_active().is_some() {
-            write(&site::conf_file(paths), "events {}\n", 0o600);
+        for (_, _, conf) in super::tls::nginx_configs(&cfg, paths) {
+            write(&conf, "events {}\n", 0o600);
         }
         Node {
             _dir: dir,
