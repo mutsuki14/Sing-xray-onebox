@@ -60,6 +60,16 @@ fn assert_invariants(host: &Host) {
     }
 }
 
+/// A change that touches everything: one core removed, one port moved, a
+/// core binary replaced and (with [`installed_host`]) the manager rewritten.
+fn big_change(host: &Host) -> super::ApplyRequest {
+    let candidate = host.paths().run.join("candidate-sing-box");
+    crate::apply::testing::file(&candidate, 0o755, b"\x7fELF replacement sing-box");
+    let mut req = host.change(super::harness::singbox_only(), "修改");
+    req.intents.replace_cores = vec![(crate::domain::protocol::Core::Singbox, candidate)];
+    req
+}
+
 fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }

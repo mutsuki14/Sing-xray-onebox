@@ -3,19 +3,8 @@
 use super::*;
 use crate::apply::harness::{singbox_only, two_cores, Fault};
 use crate::apply::ApplyRequest;
-use crate::domain::protocol::Core;
 use crate::state::StateHash;
 use crate::sys::signal;
-
-/// A change that touches everything: one core removed, one port moved, a
-/// core binary replaced and the manager rewritten.
-fn big_change(host: &Host) -> ApplyRequest {
-    let candidate = host.paths().run.join("candidate-sing-box");
-    crate::apply::testing::file(&candidate, 0o755, b"\x7fELF replacement sing-box");
-    let mut req = host.change(singbox_only(), "修改");
-    req.intents.replace_cores = vec![(Core::Singbox, candidate)];
-    req
-}
 
 #[test]
 fn a_failure_at_every_stage_and_at_the_final_save_restores_the_old_generation() {

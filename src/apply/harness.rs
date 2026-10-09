@@ -261,37 +261,45 @@ impl Host {
     /// A systemd host with both core binaries and the old manager in place.
     pub fn new() -> Host {
         let dir = TempDir::new("apply-host").unwrap();
-        let (ctx, exec, ui) = Ctx::test(dir.path());
-        Host::build(dir, ctx, exec, ui)
+        let paths = Paths::isolated(dir.path());
+        Host::build(dir, paths, true)
     }
 
-    /// A host over explicit `paths` (v2 fixture layouts).
+    /// A host over an existing layout at `paths` (v2 fixtures, a child
+    /// process working on its parent's host): nothing is added to it, and
+    /// a lock offered by a parent is adopted instead of taken.
     pub fn with_paths(dir: TempDir, paths: Paths) -> Host {
+        Host::build(dir, paths, false)
+    }
+
+    fn build(dir: TempDir, paths: Paths, seed: bool) -> Host {
         let (mut ctx, exec, ui) = Ctx::test(dir.path());
         ctx.paths = paths;
-        Host::build(dir, ctx, exec, ui)
-    }
-
-    fn build(dir: TempDir, ctx: Ctx, exec: Arc<FakeExec>, ui: Arc<ScriptedPrompter>) -> Host {
         let guard = signal::TEST_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         signal::clear();
         let paths = &ctx.paths;
         fs::create_dir_all(paths.system("/run/systemd/system")).unwrap();
-        for d in [&paths.systemd, &paths.initd, &paths.bin, &paths.log] {
-            fs::create_dir_all(d).unwrap();
+        if seed {
+            for d in [&paths.systemd, &paths.initd, &paths.bin, &paths.log] {
+                fs::create_dir_all(d).unwrap();
+            }
         }
         let faults = fault_rule(&exec);
         let units = fake_systemd(&exec);
         let cron = fake_crontab(&exec, None);
         let iptables = fake_iptables(&exec);
         let ips = fake_ip(&exec);
-        fake_cores(&exec, paths);
-        if fs::symlink_metadata(&paths.executable).is_err() {
+        fake_cores(&exec, paths, seed);
+        if seed {
             crate::apply::testing::file(&paths.executable, 0o755, OLD_MANAGER);
         }
-        let lock = FileLock::acquire(&paths.lock(), BUSY_MESSAGE).unwrap();
+        let lock = if crate::sys::lock::inherited_lock_offered() {
+            FileLock::from_inherited(&paths.lock()).unwrap()
+        } else {
+            FileLock::acquire(&paths.lock(), BUSY_MESSAGE).unwrap()
+        };
         Host {
             ctx,
             exec,
@@ -403,15 +411,18 @@ pub struct World {
 }
 
 impl World {
-    /// Paths that differ from `other` (for readable assertion messages).
-    pub fn diff(&self, other: &World) -> Vec<String> {
-        let mut out = Vec::new();
+    /// Files that differ from `other`.
+    pub fn file_diff(&self, other: &World) -> Vec<String> {
         let keys: BTreeSet<&String> = self.files.keys().chain(other.files.keys()).collect();
-        for key in keys {
-            if self.files.get(key) != other.files.get(key) {
-                out.push(key.clone());
-            }
-        }
+        keys.into_iter()
+            .filter(|key| self.files.get(*key) != other.files.get(*key))
+            .cloned()
+            .collect()
+    }
+
+    /// Everything that differs from `other` (readable assertion messages).
+    pub fn diff(&self, other: &World) -> Vec<String> {
+        let mut out = self.file_diff(other);
         if self.units != other.units {
             out.push(format!("units {:?} != {:?}", self.units, other.units));
         }
@@ -596,12 +607,12 @@ fn fake_ip(exec: &FakeExec) -> Arc<Mutex<String>> {
     ips
 }
 
-/// Installed core binaries answering `version` and config checks.
-fn fake_cores(exec: &FakeExec, paths: &Paths) {
+/// Core binaries (installed when `seed`) answering `version` and config
+/// checks.
+fn fake_cores(exec: &FakeExec, paths: &Paths, seed: bool) {
     for (core, bytes) in [(Core::Singbox, SING_BOX), (Core::Xray, XRAY)] {
-        let bin = paths.core_bin(core);
-        if fs::symlink_metadata(&bin).is_err() {
-            crate::apply::testing::file(&bin, 0o755, bytes);
+        if seed {
+            crate::apply::testing::file(&paths.core_bin(core), 0o755, bytes);
         }
     }
     exec.on(
