@@ -6,7 +6,9 @@ use crate::host::fetch::testing::{serve, url_arg, Reply};
 use crate::host::fetch::Asset;
 use crate::sys::exec::{FakeExec, Stdin};
 use crate::sys::fs::{sha256_hex, TempDir};
-use crate::update::testing::{answer_versions, mode, program, write, FakeEngine, FakeEnv, Recover};
+use crate::update::testing::{
+    answer_versions, mode, program, version_reply, write, FakeEngine, FakeEnv, Recover, Warnings,
+};
 use serde_json::json;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -163,6 +165,11 @@ struct Fx {
     seen: Mutex<Vec<Seen>>,
     regen_reply: Arc<Mutex<Output>>,
     regens: Arc<Mutex<Vec<Regen>>>,
+    /// Raised by the child `regen` / by `new version` (a signal from the
+    /// terminal or `kill` at that moment).
+    regen_signal: Arc<Mutex<Option<i32>>>,
+    probe_signal: Arc<Mutex<Option<i32>>>,
+    warnings: Warnings,
     old_state: Option<Vec<u8>>,
 }
 
@@ -176,6 +183,15 @@ impl Fx {
         let dir = TempDir::new("selfupdate").unwrap();
         let (ctx, exec, _) = Ctx::test(dir.path());
         exec.on("uname", &["-m"], Output::success(format!("{machine}\n")));
+        let probe_signal = Arc::new(Mutex::new(None));
+        let raise = probe_signal.clone();
+        exec.on_fn(
+            |cmd| cmd.args == ["version"] && cmd.program.ends_with(&format!("/{NEW_FILE}")),
+            move |cmd| {
+                raise_signal(&raise);
+                version_reply(cmd)
+            },
+        );
         answer_versions(&exec);
         let old_state = installed.then(|| {
             let cfg = fixtures::config(&[(Protocol::VlessReality, 443, Core::Singbox)]);
@@ -191,7 +207,14 @@ impl Fx {
         }
         let regen_reply = Arc::new(Mutex::new(Output::success("配置已更新\n")));
         let regens = Arc::new(Mutex::new(Vec::new()));
-        answer_regen(&exec, &ctx.paths, regen_reply.clone(), regens.clone());
+        let regen_signal = Arc::new(Mutex::new(None));
+        let child = Child {
+            paths: ctx.paths.clone(),
+            reply: regen_reply.clone(),
+            seen: regens.clone(),
+            signal: regen_signal.clone(),
+        };
+        answer_regen(&exec, child);
         Fx {
             _dir: dir,
             ctx,
@@ -202,6 +225,9 @@ impl Fx {
             seen: Mutex::new(Vec::new()),
             regen_reply,
             regens,
+            regen_signal,
+            probe_signal,
+            warnings: Warnings::default(),
             old_state,
         }
     }
@@ -231,6 +257,8 @@ impl Fx {
     }
 
     fn run(&self, channel: Option<Channel>, check_only: bool) -> Result<()> {
+        // The replacement installs signal handlers (process-wide).
+        let _signals = signal::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let env = |key: &str| self.env.get(key);
         let on_phase = |phase: ProgramPhase| {
             let on_disk = load(self.paths()).ok().flatten();
@@ -255,8 +283,11 @@ impl Fx {
             env: &env,
             engine: &self.engine,
             on_phase: &on_phase,
+            warn: &|m| self.warnings.push(m),
         };
-        updater.self_update(channel, check_only)
+        let result = updater.self_update(channel, check_only);
+        assert_eq!(signal::pending(), None, "a signal is consumed");
+        result
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -317,15 +348,37 @@ fn busy(path: &Path) -> bool {
     matches!(FileLock::acquire(path, "busy"), Err(Error::Busy(_)))
 }
 
-/// `EXE regen`: records what the child would see; as the update's child
-/// (journal not `recovering`) it rewrites state.json and answers `reply`.
-fn answer_regen(
-    exec: &FakeExec,
-    paths: &Paths,
+/// Send the configured signal (if any) to this thread, as a terminal
+/// Ctrl+C or a `kill` would at that moment. While the updater blocks
+/// signals it stays pending until the block ends.
+fn raise_signal(signal: &Mutex<Option<i32>>) {
+    if let Some(sig) = *signal.lock().unwrap() {
+        // SAFETY: raising a standard signal; the updater's recording
+        // handlers are installed (and the test holds TEST_LOCK).
+        unsafe {
+            libc::raise(sig);
+        }
+    }
+}
+
+/// The fake child `regen` and what it reports back.
+struct Child {
+    paths: Paths,
     reply: Arc<Mutex<Output>>,
     seen: Arc<Mutex<Vec<Regen>>>,
-) {
-    let paths = paths.clone();
+    signal: Arc<Mutex<Option<i32>>>,
+}
+
+/// `EXE regen`: records what the child would see; as the update's child
+/// (journal not `recovering`) it rewrites state.json, raises the configured
+/// signal and answers `reply`.
+fn answer_regen(exec: &FakeExec, child: Child) {
+    let Child {
+        paths,
+        reply,
+        seen,
+        signal,
+    } = child;
     exec.on_fn(
         |cmd| cmd.args == ["regen"],
         move |cmd| {
@@ -346,6 +399,7 @@ fn answer_regen(
             if paths.state().exists() {
                 fs::write(paths.state(), b"{\"rewritten\":true}").unwrap();
             }
+            raise_signal(&signal);
             Ok(reply.lock().unwrap().clone())
         },
     );

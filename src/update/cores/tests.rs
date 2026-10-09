@@ -4,14 +4,15 @@ use crate::domain::fixtures;
 use crate::domain::protocol::Protocol;
 use crate::host::fetch::testing::{serve, url_arg, Reply};
 use crate::host::fetch::Asset;
+use crate::state::v2::fixtures as v2;
 use crate::sys::exec::{FakeExec, Output};
 use crate::sys::fs::{sha256_hex, TempDir};
-use crate::ui::ScriptedPrompter;
+use crate::ui::{Prompter, ScriptedPrompter, NO_TERMINAL};
 use crate::update::testing::{
-    answer_versions, program, write, Applied, FakeEngine, FakeEnv, Recover,
+    answer_versions, program, write, Applied, FakeEngine, FakeEnv, Recover, Warnings,
 };
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const SB_API: &str = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
 
@@ -37,6 +38,7 @@ struct Fx {
     ui: Arc<ScriptedPrompter>,
     env: FakeEnv,
     engine: FakeEngine,
+    warnings: Warnings,
     loaded_hash: crate::state::StateHash,
 }
 
@@ -67,7 +69,26 @@ impl Fx {
             ui,
             env: FakeEnv::default(),
             engine: FakeEngine::new(Recover::Nothing),
+            warnings: Warnings::default(),
             loaded_hash,
+        }
+    }
+
+    /// A node still in v2 form (sing-box only: v2 preset 1 with `pairs`),
+    /// with a v2 subscription holding two devices.
+    fn v2(pairs: &[(&str, &str)]) -> Fx {
+        let fx = Fx::new(&[Core::Singbox], None, None);
+        let values = v2::with(v2::preset1(), pairs);
+        write(&fx.ctx.paths.state(), 0o600, &v2::file(&values));
+        let settings = v2::settings("ip", "203.0.113.10", 8448, "none");
+        write(
+            &fx.ctx.paths.subscription().join("settings.json"),
+            0o600,
+            settings.to_string().as_bytes(),
+        );
+        Fx {
+            loaded_hash: StateStore::current_hash(&fx.ctx).unwrap(),
+            ..fx
         }
     }
 
@@ -104,8 +125,18 @@ impl Fx {
             env: &env,
             engine: &self.engine,
             on_phase: &|_| {},
+            warn: &|m| self.warnings.push(m),
         };
         updater.update_cores(which, version, force)
+    }
+
+    /// Answer every confirmation with yes after running `hook`.
+    fn on_confirm(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        self.ctx.ui = Arc::new(Hooked(Box::new(hook)));
+    }
+
+    fn saved(&self) -> NodeConfig {
+        StateStore::load_required(&self.ctx).unwrap().config
     }
 
     fn applied(&self) -> Vec<Applied> {
@@ -141,6 +172,42 @@ impl Fx {
             .map(|c| url_arg(c).to_owned())
             .collect()
     }
+}
+
+/// An interactive prompter that runs a hook, then says yes, on every
+/// confirmation (to look at the locks or change the node meanwhile).
+struct Hooked(Box<dyn Fn() + Send + Sync>);
+
+impl Prompter for Hooked {
+    fn interactive(&self) -> bool {
+        true
+    }
+    fn assume_yes(&self) -> bool {
+        false
+    }
+    fn input(&self, _: &str, _: &str) -> Result<String> {
+        Err(Error::msg("unexpected input"))
+    }
+    fn input_with(&self, _: &str, _: &str, _: &dyn Fn(&str) -> Result<String>) -> Result<String> {
+        Err(Error::msg("unexpected input"))
+    }
+    fn confirm(&self, _: &str, _: bool) -> Result<bool> {
+        (self.0)();
+        Ok(true)
+    }
+    fn select(&self, _: &str, _: &[String], _: usize, _: bool) -> Result<Option<usize>> {
+        Err(Error::msg("unexpected select"))
+    }
+    fn select_many(&self, _: &str, _: &[String], _: &[usize]) -> Result<Vec<usize>> {
+        Err(Error::msg("unexpected select"))
+    }
+    fn secret(&self, _: &str) -> Result<String> {
+        Err(Error::msg("unexpected secret"))
+    }
+}
+
+fn busy(path: &Path) -> bool {
+    matches!(FileLock::acquire(path, "busy"), Err(Error::Busy(_)))
 }
 
 fn versions(applied: &Applied) -> &CoreVersions {
@@ -279,8 +346,8 @@ fn descriptions_and_prompt() {
         assert_eq!(describe(Core::Singbox, current, target, decision), text);
     }
     assert_eq!(
-        xray_prompt("26.5.0"),
-        "指定的 Xray 26.5.0 可能拒绝 sing-box REALITY 客户端；经过测试版本为 26.3.27，继续？"
+        xray_warning("26.5.0"),
+        "指定的 Xray 26.5.0 可能拒绝 sing-box REALITY 客户端；经过测试版本为 26.3.27"
     );
 }
 
@@ -315,7 +382,9 @@ fn bare_update_installs_what_is_newer_and_keeps_what_is_current() {
         "the tested Xray needs no question"
     );
     assert!(fx.curl_calls().is_empty());
-    assert_eq!(fx.engine.recover_calls(), 1);
+    // Once before planning, once more under the lock it commits under.
+    assert_eq!(fx.engine.recover_calls(), 2);
+    assert!(fx.warnings.all().is_empty());
 }
 
 #[test]
@@ -336,7 +405,8 @@ fn an_explicit_version_is_pinned_and_an_untested_xray_needs_consent() {
         let staged = fx.offline(Core::Xray, "26.4.0");
         fx.ui.push(answer);
         let result = fx.run(CoreSelection::One(Core::Xray), Some("v26.4.0"), false);
-        assert_eq!(fx.ui.prompts(), [xray_prompt("26.4.0")]);
+        assert_eq!(fx.warnings.all(), [xray_warning("26.4.0")]);
+        assert_eq!(fx.ui.prompts(), [CONTINUE]);
         if accepted {
             result.unwrap();
             let applied = fx.request();
@@ -352,13 +422,25 @@ fn an_explicit_version_is_pinned_and_an_untested_xray_needs_consent() {
             assert!(fx.staging_dirs().is_empty());
         }
     }
-    // -y accepts.
+    // -y accepts, and the warning is still printed.
     let mut fx = Fx::both();
     fx.offline(Core::Xray, "26.4.0");
     fx.ui.set_assume_yes(true);
     fx.run(CoreSelection::One(Core::Xray), Some("26.4.0"), false)
         .unwrap();
-    assert_eq!(fx.applied().len(), 1);
+    assert_eq!(fx.warnings.all(), [xray_warning("26.4.0")]);
+    assert_eq!(replaced(&fx.request()), [Core::Xray]);
+    // Without a terminal and without -y nobody can consent: refused after
+    // the warning, before anything is downloaded.
+    let mut fx = Fx::both();
+    fx.offline(Core::Xray, "26.4.0");
+    fx.ui.set_interactive(false);
+    let err = fx
+        .run(CoreSelection::One(Core::Xray), Some("26.4.0"), false)
+        .unwrap_err();
+    assert_eq!(err.to_string(), NO_TERMINAL);
+    assert_eq!(fx.warnings.all(), [xray_warning("26.4.0")]);
+    assert!(fx.applied().is_empty() && fx.staging_dirs().is_empty());
 }
 
 #[test]
@@ -437,14 +519,50 @@ fn update_core_and_latest_clear_the_pin() {
         assert_eq!(v.singbox_pin, None, "{version:?}");
         assert_eq!(v.xray_pin.as_deref(), Some("26.3.27"), "{version:?}");
     }
-    // A pin change alone is still applied (without replacing anything).
+}
+
+#[test]
+fn a_pin_only_change_is_saved_without_a_transaction() {
+    // `update xray` with the pinned 26.3.27 installed clears the pin
+    // (`install --xray-version 26.3.27` set it): nothing restarts.
     let fx = Fx::new(&[Core::Xray], None, Some("26.3.27"));
     fx.live(Core::Xray, "26.3.27");
     fx.run(CoreSelection::One(Core::Xray), None, false).unwrap();
-    let applied = fx.request();
-    assert!(applied.request.intents.replace_cores.is_empty());
-    assert_eq!(versions(&applied).xray_pin, None);
+    assert!(fx.applied().is_empty(), "no apply for metadata");
+    assert_eq!(fx.saved().versions.xray_pin, None);
     assert!(fx.staging_dirs().is_empty());
+    assert_eq!(fx.engine.recover_calls(), 2);
+    // `update singbox 1.14.2` with 1.14.2 installed sets the pin.
+    let fx = Fx::both();
+    fx.run(CoreSelection::One(Core::Singbox), Some("1.14.2"), false)
+        .unwrap();
+    assert!(fx.applied().is_empty());
+    let saved = fx.saved();
+    assert_eq!(saved.versions.singbox_pin.as_deref(), Some("1.14.2"));
+    assert_eq!(saved.versions.xray_pin, None, "other pins untouched");
+    let mut expected = fx::original(&fx);
+    expected.versions.singbox_pin = Some("1.14.2".into());
+    assert_eq!(saved, expected, "nothing else changes");
+    assert!(fx.curl_calls().is_empty());
+    // Running it again changes nothing at all.
+    let hash = StateStore::current_hash(&fx.ctx).unwrap();
+    fx.run(CoreSelection::One(Core::Singbox), Some("1.14.2"), false)
+        .unwrap();
+    assert_eq!(StateStore::current_hash(&fx.ctx).unwrap(), hash);
+}
+
+mod fx {
+    use super::*;
+
+    /// The configuration [`Fx::both`] starts from.
+    pub fn original(fx: &Fx) -> NodeConfig {
+        let mut cfg = fixtures::config(&[
+            (Protocol::VlessReality, 443, Core::Singbox),
+            (Protocol::Shadowsocks, 8388, Core::Xray),
+        ]);
+        cfg.installed_at = fx.saved().installed_at;
+        cfg
+    }
 }
 
 #[test]
@@ -544,11 +662,129 @@ fn errors_before_the_transaction() {
         env: &env,
         engine: &engine,
         on_phase: &|_| {},
+        warn: &|m| panic!("unexpected warning {m}"),
     };
     let err = updater
         .update_cores(CoreSelection::All, None, false)
         .unwrap_err();
     assert!(matches!(err, Error::NotInstalled), "{err}");
+}
+
+// ---- locks, concurrent changes, v2 configurations -------------------------
+
+#[test]
+fn the_node_lock_is_free_while_asking_and_downloading() {
+    let mut fx = Fx::both();
+    fx.offline(Core::Xray, "26.4.0");
+    let paths = fx.ctx.paths.clone();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    fx.on_confirm(move || {
+        let locks = (busy(&paths.lock()), busy(&paths.update_lock()));
+        record.lock().unwrap().push(locks);
+    });
+    fx.run(CoreSelection::One(Core::Xray), Some("26.4.0"), false)
+        .unwrap();
+    // Renewals and device changes may take the node lock meanwhile; a
+    // second update may not start.
+    assert_eq!(*seen.lock().unwrap(), [(false, true)]);
+    assert_eq!(replaced(&fx.request()), [Core::Xray]);
+}
+
+#[test]
+fn a_change_while_asking_is_committed_on_top_when_the_plan_still_holds() {
+    let mut fx = Fx::both();
+    fx.offline(Core::Xray, "26.4.0");
+    let ctx = fx.ctx.clone();
+    fx.on_confirm(move || {
+        let mut cfg = StateStore::load_required(&ctx).unwrap().config;
+        cfg.node_name = "东京".into();
+        StateStore::save(&ctx, &cfg).unwrap();
+    });
+    fx.run(CoreSelection::One(Core::Xray), Some("26.4.0"), false)
+        .unwrap();
+    let applied = fx.request();
+    assert_eq!(applied.request.config.node_name, "东京");
+    assert_eq!(
+        applied.request.expected,
+        StateStore::current_hash(&fx.ctx).unwrap(),
+        "the CAS hash is the re-read one"
+    );
+    assert_eq!(versions(&applied).xray_pin.as_deref(), Some("26.4.0"));
+}
+
+#[test]
+fn a_change_that_breaks_the_plan_is_a_conflict() {
+    // The live Xray changed while the user was asked.
+    let mut fx = Fx::both();
+    fx.offline(Core::Xray, "26.4.0");
+    let (live, bytes) = (
+        fx.ctx.paths.core_bin(Core::Xray),
+        says(Core::Xray, "26.3.28"),
+    );
+    fx.on_confirm(move || write(&live, 0o755, &bytes));
+    let err = fx
+        .run(CoreSelection::One(Core::Xray), Some("26.4.0"), false)
+        .unwrap_err();
+    assert!(matches!(err, Error::Conflict), "{err}");
+    assert!(fx.applied().is_empty());
+    // The verified download is kept and named, as after any failure.
+    assert_eq!(fx.staging_dirs().len(), 1);
+    let kept = format!(
+        "已验证的内核更新文件保留: {}",
+        fx.staging_dirs()[0].display()
+    );
+    assert_eq!(fx.warnings.all(), [xray_warning("26.4.0"), kept]);
+
+    // The node stopped using the selected core meanwhile.
+    let mut fx = Fx::both();
+    fx.offline(Core::Xray, "26.4.0");
+    let ctx = fx.ctx.clone();
+    fx.on_confirm(move || {
+        let mut cfg = StateStore::load_required(&ctx).unwrap().config;
+        cfg.inbounds.retain(|i| i.core != Core::Xray);
+        StateStore::save(&ctx, &cfg).unwrap();
+    });
+    let err = fx
+        .run(CoreSelection::One(Core::Xray), Some("26.4.0"), false)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "当前配置未使用 Xray，无需更新");
+    assert!(fx.applied().is_empty());
+}
+
+#[test]
+fn a_v2_configuration_shows_its_warnings_and_carries_its_devices() {
+    let pairs = [("SB_VERSION", "1.14.2"), ("SB_VERSION_WANT", "1.12.0")];
+    let mut fx = Fx::v2(&pairs);
+    fx.live(Core::Singbox, "1.14.2");
+    fx.offline(Core::Singbox, "1.14.3");
+    let Origin::V2 { warnings, .. } = StateStore::load_required(&fx.ctx).unwrap().origin else {
+        panic!("v2 expected");
+    };
+    assert!(warnings
+        .contains(&"v2 固定的 sing-box 版本 1.12.0 与已安装 1.14.2 不一致，已取消固定".to_owned()));
+    fx.run(CoreSelection::All, None, false).unwrap();
+    assert_eq!(fx.warnings.all(), warnings, "printed once");
+    let applied = fx.request();
+    assert_eq!(replaced(&applied), [Core::Singbox]);
+    assert_eq!(applied.request.expected, fx.loaded_hash);
+    let devices = applied.request.intents.migrated_devices.clone();
+    assert_eq!(devices.map(|d| d.len()), Some(2));
+    assert_eq!(versions(&applied).singbox_pin, None);
+}
+
+#[test]
+fn a_pin_change_on_a_v2_configuration_is_its_first_full_transaction() {
+    let fx = Fx::v2(&[("SB_VERSION", "1.14.2")]);
+    fx.live(Core::Singbox, "1.14.2");
+    fx.run(CoreSelection::One(Core::Singbox), Some("1.14.2"), false)
+        .unwrap();
+    let applied = fx.request();
+    assert!(applied.request.intents.replace_cores.is_empty());
+    assert_eq!(versions(&applied).singbox_pin.as_deref(), Some("1.14.2"));
+    assert!(applied.request.intents.migrated_devices.is_some());
+    // Nothing was saved behind the transaction's back.
+    assert_eq!(StateStore::current_hash(&fx.ctx).unwrap(), fx.loaded_hash);
 }
 
 // ---- the network path ----------------------------------------------------------

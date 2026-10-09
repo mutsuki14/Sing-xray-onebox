@@ -7,8 +7,9 @@
 //!
 //! Changes from v2: arity errors come from the shared parser (`多余的参数:
 //! …` instead of `只接受一个更新渠道` / `用法: …`); `update-channel` without
-//! an argument needs no root (G-8.1#16); `update` accepts `--force`
-//! (downgrade or reinstall).
+//! an argument needs no root (G-8.1#16) — a user who may not read the
+//! saved channel (installed node, `ROOT` 0700) is told that reading it
+//! needs root; `update` accepts `--force` (downgrade or reinstall).
 
 use super::channel::{self, Channel};
 use super::cores::CoreSelection;

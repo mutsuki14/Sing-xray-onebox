@@ -15,11 +15,22 @@
 //! without `--force`; bare `update` / `all` keeps a newer installed core
 //! instead (with a hint), so a deliberately newer core never breaks the
 //! routine update. A target equal to the installed version is not
-//! reinstalled unless `--force`. An Xray target other than 26.3.27 asks
-//! for confirmation (`-y` accepts). Every target is resolved, confirmed and
-//! downloaded (verified) into `BIN/.core-update-<24hex>` before one apply
-//! transaction swaps the binaries (`Intents.replace_cores`) together with
-//! the updated pins; a failed transaction keeps the staged files.
+//! reinstalled unless `--force`. An Xray target other than 26.3.27 prints
+//! a warning (always, `-y` included) and asks to continue (`-y` accepts).
+//! Every target is resolved, confirmed and downloaded (verified) into
+//! `BIN/.core-update-<24hex>` before one apply transaction swaps the
+//! binaries (`Intents.replace_cores`) together with the updated pins; a
+//! failed transaction keeps the staged files. When no binary changes and
+//! only pins do, the configuration is saved without a transaction
+//! (`已更新固定版本`): pins only steer later installs, nothing restarts.
+//!
+//! Locks: the update lock for the whole run; the node lock twice — first
+//! to recover leftovers and read the configuration, then, after the
+//! lookups, the question and the downloads (which may take minutes and must
+//! not block renewals or device changes meanwhile), to recover again,
+//! re-read the configuration and commit. The plan must still hold then
+//! (same targets and pins, same live core versions), else
+//! `Error::Conflict`; the apply's compare-and-swap uses the re-read hash.
 //!
 //! Changes from v2:
 //! - only cores the configuration uses are targets (G-8.1#2: an unused
@@ -33,12 +44,14 @@
 //! - an exact target that is already installed (or kept, or a refused
 //!   downgrade) is decided without a release lookup; nothing is downloaded
 //!   or applied when every target is already installed and no pin changes;
-//!   a pin change alone is applied without replacing a binary;
+//!   a pin change alone is saved without restarting anything (a node still
+//!   in v2 form gets the full transaction: it is its first v3 change);
+//! - the node lock is not held during lookups, the question and downloads;
 //! - staging is announced as kept only when it still holds a verified
 //!   binary (v2 also announced an empty directory). Kept directories are
 //!   `.core-*` leftovers that `host::cores` sweeps after an hour.
 
-use super::{Updater, UPDATE_BUSY};
+use super::{selfupdate, Updater, UPDATE_BUSY};
 use crate::apply::ApplyRequest;
 use crate::domain::config::CoreVersions;
 use crate::domain::defaults::XRAY_TESTED_VERSION;
@@ -61,6 +74,10 @@ pub const DONE: &str = "内核更新完成";
 pub const NOTHING_TO_DO: &str = "所选内核已是目标版本，无需更新";
 pub const UNKNOWN_CORE: &str = "未知内核";
 pub const CANCELLED: &str = "已取消内核更新";
+/// Success of a pin-only change (no transaction).
+pub const PINS_SAVED: &str = "已更新固定版本";
+/// The question after [`xray_warning`].
+pub const CONTINUE: &str = "继续？";
 /// Name prefix of the staging directory inside `BIN` (v2 layout).
 pub const STAGING_PREFIX: &str = ".core-update-";
 const ONE_VERSION_TWO_CORES: &str =
@@ -250,11 +267,23 @@ pub fn describe(core: Core, current: Option<&str>, target: &str, decision: Decis
     }
 }
 
-/// The confirmation for an Xray other than the tested version.
-pub fn xray_prompt(version: &str) -> String {
+/// The warning before installing an Xray other than the tested version
+/// (followed by [`CONTINUE`]).
+pub fn xray_warning(version: &str) -> String {
     format!(
-        "指定的 Xray {version} 可能拒绝 sing-box REALITY 客户端；经过测试版本为 {XRAY_TESTED_VERSION}，继续？"
+        "指定的 Xray {version} 可能拒绝 sing-box REALITY 客户端；经过测试版本为 {XRAY_TESTED_VERSION}"
     )
+}
+
+/// How a core update ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Committed {
+    /// The apply transaction ran.
+    Applied,
+    /// Only pins changed; saved without a transaction.
+    Pins,
+    /// Nothing left to change.
+    Nothing,
 }
 
 /// `cfg` with the plans' pins and the installed versions of replaced cores.
@@ -294,23 +323,41 @@ impl Updater<'_> {
         force: bool,
     ) -> Result<()> {
         let wanted = Wanted::parse(version)?;
-        let paths = &self.ctx.paths;
-        let _update = FileLock::acquire(&paths.update_lock(), UPDATE_BUSY)?;
-        let lock = FileLock::acquire(&paths.lock(), BUSY_MESSAGE)?;
-        self.engine.recover(self.ctx, &lock)?;
-        let loaded = StateStore::load_required(self.ctx)?;
+        let _update = FileLock::acquire(&self.ctx.paths.update_lock(), UPDATE_BUSY)?;
+        let loaded = {
+            let lock = self.node_lock()?;
+            let loaded = self.recover_and_load(&lock)?;
+            selfupdate::sweep_unreferenced(&self.ctx.paths);
+            loaded
+        };
         if let Origin::V2 { warnings, .. } = &loaded.origin {
-            warnings.iter().for_each(out::warn);
+            warnings.iter().for_each(|w| (self.warn)(w));
         }
         let targets = targets(&loaded.config, selection, &wanted)?;
         let plans = self.plan(targets, force)?;
         self.confirm(&plans)?;
-        let config = updated_config(&loaded.config, &plans);
-        if !plans.iter().any(Plan::installs) && config == loaded.config {
-            out::ok(NOTHING_TO_DO);
-            return Ok(());
-        }
-        self.stage_and_apply(&lock, &loaded, config, &plans)
+        let unchanged = updated_config(&loaded.config, &plans) == loaded.config;
+        let outcome = if !plans.iter().any(Plan::installs) && unchanged {
+            Committed::Nothing
+        } else {
+            self.stage_and_commit(selection, &wanted, &plans)?
+        };
+        out::ok(match outcome {
+            Committed::Applied => DONE,
+            Committed::Pins => PINS_SAVED,
+            Committed::Nothing => NOTHING_TO_DO,
+        });
+        Ok(())
+    }
+
+    fn node_lock(&self) -> Result<FileLock> {
+        FileLock::acquire(&self.ctx.paths.lock(), BUSY_MESSAGE)
+    }
+
+    /// Finish leftovers under the node lock, then read the configuration.
+    fn recover_and_load(&self, lock: &FileLock) -> Result<Loaded> {
+        self.engine.recover(self.ctx, lock)?;
+        StateStore::load_required(self.ctx)
     }
 
     /// Decide what to do with every target, resolving releases only where
@@ -382,28 +429,28 @@ impl Updater<'_> {
             .flatten()
     }
 
-    /// Ask before installing an Xray other than the tested version.
+    /// Warn about (always, `-y` included) and ask before installing an
+    /// Xray other than the tested version.
     fn confirm(&self, plans: &[Plan]) -> Result<()> {
         let untested = plans.iter().find(|p| {
             p.installs() && p.target.core == Core::Xray && p.version != XRAY_TESTED_VERSION
         });
         if let Some(plan) = untested {
-            let prompt = xray_prompt(&plan.version);
-            ensure!(self.ctx.ui.confirm(&prompt, false)?, "{CANCELLED}");
+            (self.warn)(&xray_warning(&plan.version));
+            ensure!(self.ctx.ui.confirm(CONTINUE, false)?, "{CANCELLED}");
         }
         Ok(())
     }
 
     /// Download every installing plan into a fresh staging directory, then
-    /// apply. The staging directory is removed on success and kept (and
+    /// commit. The staging directory is removed on success and kept (and
     /// named) on failure when it holds a verified binary.
-    fn stage_and_apply(
+    fn stage_and_commit(
         &self,
-        lock: &FileLock,
-        loaded: &Loaded,
-        config: NodeConfig,
+        selection: CoreSelection,
+        wanted: &Wanted,
         plans: &[Plan],
-    ) -> Result<()> {
+    ) -> Result<Committed> {
         let installing: Vec<(Core, &Resolved)> = plans
             .iter()
             .filter_map(|p| p.source().map(|r| (p.target.core, r)))
@@ -415,17 +462,66 @@ impl Updater<'_> {
         };
         let result = self
             .download_all(staging.as_deref(), &installing)
-            .and_then(|staged| {
-                let mut req = ApplyRequest::from_loaded(loaded, config, REASON);
-                req.intents.replace_cores = staged;
-                self.engine.apply(self.ctx, lock, req)
-            });
+            .and_then(|staged| self.commit(selection, wanted, plans, staged));
         if let Some(dir) = &staging {
-            settle_staging(dir, result.is_ok());
+            settle_staging(dir, result.is_ok(), self.warn);
         }
-        result?;
-        out::ok(DONE);
-        Ok(())
+        result
+    }
+
+    /// Under the node lock again: recover, re-read the configuration, check
+    /// that the plan still holds, then persist it — through one apply
+    /// transaction, or for a pin-only change of a v3 configuration by
+    /// saving it (the lock is held and the configuration was just read, so
+    /// nothing can have changed it meanwhile).
+    fn commit(
+        &self,
+        selection: CoreSelection,
+        wanted: &Wanted,
+        plans: &[Plan],
+        staged: Vec<(Core, PathBuf)>,
+    ) -> Result<Committed> {
+        let lock = self.node_lock()?;
+        let loaded = self.recover_and_load(&lock)?;
+        self.check_unchanged(&loaded.config, selection, wanted, plans)?;
+        let config = updated_config(&loaded.config, plans);
+        if staged.is_empty() {
+            if config == loaded.config {
+                return Ok(Committed::Nothing);
+            }
+            if loaded.origin == Origin::V3 {
+                StateStore::save(self.ctx, &config)?;
+                return Ok(Committed::Pins);
+            }
+        }
+        let mut req = ApplyRequest::from_loaded(&loaded, config, REASON);
+        req.intents.replace_cores = staged;
+        self.engine.apply(self.ctx, &lock, req)?;
+        Ok(Committed::Applied)
+    }
+
+    /// The plan was made without the node lock: it still holds when `cfg`
+    /// yields the same targets (cores in use, pins) and the live cores
+    /// report the versions the decisions were based on.
+    fn check_unchanged(
+        &self,
+        cfg: &NodeConfig,
+        selection: CoreSelection,
+        wanted: &Wanted,
+        plans: &[Plan],
+    ) -> Result<()> {
+        let now = targets(cfg, selection, wanted)?;
+        let same_targets =
+            now.len() == plans.len() && now.iter().zip(plans).all(|(t, p)| *t == p.target);
+        let same_cores = same_targets
+            && plans
+                .iter()
+                .all(|p| self.current_version(p.target.core) == p.current);
+        if same_cores {
+            Ok(())
+        } else {
+            Err(Error::Conflict)
+        }
     }
 
     /// Download and verify each core into `dir` (`{dir}/{binary}`).
@@ -462,12 +558,12 @@ fn create_staging(bin: &Path) -> Result<PathBuf> {
 
 /// Remove the staging directory, except after a failure that left a
 /// verified binary in it (v2 message).
-fn settle_staging(dir: &Path, succeeded: bool) {
+fn settle_staging(dir: &Path, succeeded: bool, warn: &dyn Fn(&str)) {
     let holds_binary = Core::ALL
         .iter()
         .any(|core| dir.join(core.binary()).is_file());
     if !succeeded && holds_binary {
-        out::warn(format!("已验证的内核更新文件保留: {}", dir.display()));
+        warn(&format!("已验证的内核更新文件保留: {}", dir.display()));
     } else {
         let _ = remove_tree_if_exists(dir);
     }

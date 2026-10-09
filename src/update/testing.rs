@@ -1,5 +1,6 @@
 //! Fixtures shared by the update tests: fake programs that answer
-//! `version`, a recording apply engine, an injected environment.
+//! `version`, a recording apply engine, an injected environment, a warning
+//! recorder.
 
 use super::Engine;
 use crate::apply::program_journal;
@@ -7,7 +8,7 @@ use crate::apply::ApplyRequest;
 use crate::ctx::Ctx;
 use crate::domain::protocol::Core;
 use crate::error::{Error, Result, EXIT_STALE_PROCESS};
-use crate::sys::exec::{FakeExec, Output};
+use crate::sys::exec::{Cmd, FakeExec, Output};
 use crate::sys::lock::FileLock;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -30,19 +31,33 @@ pub fn program(output: &str) -> Vec<u8> {
 /// `{path} version` prints what the file at `path` carries (fake programs
 /// from [`program`]); a missing file fails like a missing program.
 pub fn answer_versions(exec: &FakeExec) {
-    exec.on_fn(
-        |cmd| cmd.args == ["version"],
-        |cmd| {
-            let Ok(bytes) = fs::read(&cmd.program) else {
-                return Ok(Output::failure(127, "not found"));
-            };
-            let at = bytes.windows(MARKER.len()).position(|w| w == MARKER);
-            Ok(match at {
-                Some(at) => Output::success(String::from_utf8_lossy(&bytes[at + MARKER.len()..])),
-                None => Output::failure(1, "exec format error"),
-            })
-        },
-    );
+    exec.on_fn(|cmd| cmd.args == ["version"], version_reply);
+}
+
+/// What `{program} version` prints for a fake program (see [`program`]).
+pub fn version_reply(cmd: &Cmd) -> Result<Output> {
+    let Ok(bytes) = fs::read(&cmd.program) else {
+        return Ok(Output::failure(127, "not found"));
+    };
+    let at = bytes.windows(MARKER.len()).position(|w| w == MARKER);
+    Ok(match at {
+        Some(at) => Output::success(String::from_utf8_lossy(&bytes[at + MARKER.len()..])),
+        None => Output::failure(1, "exec format error"),
+    })
+}
+
+/// Records what an updater's warning sink receives.
+#[derive(Debug, Default)]
+pub struct Warnings(Mutex<Vec<String>>);
+
+impl Warnings {
+    pub fn push(&self, message: &str) {
+        self.0.lock().unwrap().push(message.to_owned());
+    }
+
+    pub fn all(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 /// Write `bytes` to `path` with `mode`, creating parents.
