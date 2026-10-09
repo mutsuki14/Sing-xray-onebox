@@ -41,6 +41,7 @@ variable (not just seven) at the fixture.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import contextlib
 import dataclasses
@@ -158,6 +159,49 @@ class Results:
                                 "failures": self.failures, "skipped": self.skipped,
                                 **extra, "results": self.entries})
         return int(self.failures > 0 or not self.entries)
+
+
+# Core name → (CI variable, names looked up on PATH outside REQUIRE_FULL).
+TOOL_VARIABLES = {
+    "singbox": ("ONEBOX_TEST_SINGBOX", ("sing-box",)),
+    "xray": ("ONEBOX_TEST_XRAY", ("xray",)),
+    "mihomo": ("ONEBOX_TEST_MIHOMO", ("mihomo",)),
+}
+
+
+def resolve_tools(results: Results, required, optional=()) -> dict[str, str] | None:
+    """``onebox`` plus the named cores (keys of :data:`TOOL_VARIABLES`).
+
+    A missing required tool is recorded as the failure ``prerequisites``
+    (``None`` is returned); a missing optional one is a skip (a failure
+    under REQUIRE_FULL) and is left out of the result.
+    """
+    tools = {}
+    try:
+        tools["onebox"] = onebox_binary()
+        for name in required:
+            variable, names = TOOL_VARIABLES[name]
+            tools[name] = tool(variable, path_names=names)
+    except Unavailable as error:
+        results.record("prerequisites", False, str(error))
+        return None
+    for name in optional:
+        variable, names = TOOL_VARIABLES[name]
+        try:
+            tools[name] = tool(variable, path_names=names)
+        except Unavailable as error:
+            results.skip(f"{name}-tool", str(error))
+    return tools
+
+
+def comma_list(allowed):
+    """argparse type: a non-empty comma list of values from ``allowed``."""
+    def parse(text: str) -> list[str]:
+        values = [v for v in text.split(",") if v]
+        if not values or any(v not in allowed for v in values):
+            raise argparse.ArgumentTypeError(f"choose from {','.join(allowed)}")
+        return values
+    return parse
 
 
 def describe(error: BaseException) -> str:
@@ -1095,6 +1139,156 @@ def socks_client(kind: str, port: int, outbounds: list[dict], *, udp_ip: bool = 
     return {"mixed-port": port, "bind-address": LOOPBACK, "allow-lan": False, "mode": "rule",
             "log-level": "warning", "ipv6": False, "dns": {"enable": False},
             "proxies": outbounds, "rules": ["MATCH," + first["name"]]}
+
+
+# Logical targets of the relay checks. Only the server under test rewrites
+# them to the loopback fixtures (rewrite_targets), so a direct connection
+# can never satisfy a check.
+TARGET_NAME = "native-e2e.invalid"
+TARGET_IP = "192.0.2.53"
+
+
+def rewrite_targets(kind: str, config: dict) -> None:
+    """Make a rendered server send TARGET_NAME / TARGET_IP to loopback (test-only edit)."""
+    if kind == "singbox":
+        rewrite = [
+            {"domain": [TARGET_NAME], "action": "route-options", "override_address": LOOPBACK},
+            {"ip_cidr": [TARGET_IP + "/32"], "action": "route-options", "override_address": LOOPBACK},
+        ]
+        config["route"]["rules"] = rewrite + config["route"].get("rules", [])
+        return
+    config["outbounds"].append({"tag": "native-target", "protocol": "freedom", "settings": {
+        "redirect": f"{LOOPBACK}:0", "finalRules": [{"action": "allow"}]}})
+    config["routing"]["rules"] = [
+        {"type": "field", "domain": ["full:" + TARGET_NAME], "outboundTag": "native-target"},
+        {"type": "field", "ip": [TARGET_IP + "/32"], "outboundTag": "native-target"},
+    ] + config["routing"].get("rules", [])
+
+
+def abstract_socket_bound(name: str) -> bool:
+    """Whether the abstract unix socket ``@name`` is bound in this network namespace."""
+    try:
+        lines = Path("/proc/net/unix").read_text().splitlines()[1:]
+    except OSError:
+        return False
+    return any(line.split()[-1] == "@" + name for line in lines if len(line.split()) >= 8)
+
+
+class Bench:
+    """Fixtures shared by the proxy suites.
+
+    ``tools`` maps ``onebox``/``singbox``/``xray``/``mihomo`` to executables
+    (``xray`` is required: it generates the REALITY keys). Provides ports,
+    the PKI (``reality.test`` leaf for the TLS fixture, CA-signed and
+    self-signed ``onebox.test``), the marker servers, REALITY keys plus an
+    unrelated public key for negative checks, and a base environment that
+    trusts the test CA through ``SSL_CERT_FILE``.
+    """
+
+    def __init__(self, root: Path, tools: dict[str, str], results: Results,
+                 marker_prefix: str = "onebox-e2e-"):
+        self.root, self.tools, self.results = root, tools, results
+        self.ports = Ports()
+        self.pki = Pki(root / "pki")
+        self.reality_cert = self.pki.leaf("reality.test")
+        self.ca_cert = self.pki.leaf("onebox.test")
+        self.self_cert = self.pki.self_signed("onebox.test")
+        self.fixture = MarkerFixtures(self.ports, self.reality_cert, prefix=marker_prefix)
+        self.base_env = clean_env(SSL_CERT_FILE=str(self.pki.bundle))
+        self.keys = x25519_pair(tools["xray"], self.base_env)
+        self.wrong_public = x25519_pair(tools["xray"], self.base_env)[1]
+
+    def close(self) -> None:
+        self.fixture.close()
+
+    def node(self, protocols: list[tuple[str, str]], *, custom_ca: bool = False,
+             **overrides) -> FixtureNode:
+        """A node with fresh ports for ``(protocol, core)`` pairs.
+
+        ``custom_ca`` selects the CA-signed custom certificate (not pinned,
+        VMess over TLS, Hysteria2 obfuscation) instead of the self-signed one.
+        REALITY and ShadowTLS hand shakes go to the TLS marker fixture.
+        """
+        cert = self.ca_cert if custom_ca else self.self_cert
+        settings = dict(
+            inbounds=[Inbound(p, self.ports.get(), core) for p, core in protocols],
+            reality_keys=self.keys, reality_dest=f"{LOOPBACK}:{self.fixture.tls_port}",
+            guard_port=self.ports.get(), proxy_cert=cert,
+            tls_mode="custom" if custom_ca else "self",
+            custom_source=cert if custom_ca else None, pinned=not custom_ca,
+            vmess_tls=custom_ca, hy2_obfs=custom_ca)
+        settings.update(overrides)
+        return FixtureNode(**settings)
+
+    def layout(self, directory: Path) -> Layout:
+        """A fresh case directory with an isolated layout in ``<directory>/root``."""
+        directory.mkdir(parents=True)
+        return Layout(directory / "root", self.base_env)
+
+    def onebox(self, env, *args):
+        return onebox_json(self.tools["onebox"], env, *args)
+
+    def outbound(self, env, protocol: str, core: str) -> dict:
+        return self.onebox(env, "render", "outbound", protocol, core)
+
+    def server_config(self, env, kind: str) -> dict:
+        """``render server`` with :func:`rewrite_targets` and an informative log level."""
+        config = self.onebox(env, "render", "server", kind)
+        # Keep fixture connection diagnostics in the log for failure reports.
+        set_log_level(kind, config, "debug" if VERBOSE else "info")
+        rewrite_targets(kind, config)
+        return config
+
+    def target_tcp(self, proxy_port: int, timeout: float = 10) -> None:
+        """HTTP marker from TARGET_NAME through the SOCKS proxy on ``proxy_port``.
+
+        Xray's REALITY library samples post-handshake target records for five
+        seconds on cold start, then polls that cache every five seconds; a
+        five-second deadline races it. Hence a ten-second single attempt,
+        without warming up or retrying.
+        https://github.com/XTLS/REALITY/blob/9234c772ba8f/record_detect.go
+        """
+        socks_http_marker(proxy_port, TARGET_NAME, self.fixture.http_port, self.fixture.marker,
+                          timeout)
+
+    def target_udp(self, proxy_port: int) -> None:
+        """UDP echo from TARGET_IP through the SOCKS proxy on ``proxy_port``."""
+        socks_udp_echo(proxy_port, TARGET_IP, self.fixture.udp_port, self.fixture.marker)
+
+    def start(self, kind: str, directory: Path, config: dict, env, name: str) -> Process:
+        """Write ``config`` to ``<directory>/<name>.json``, check it and start the core."""
+        directory.mkdir(parents=True, exist_ok=True)
+        if VERBOSE:
+            set_log_level(kind, config, "debug")
+        path = directory / f"{name}.json"
+        write_json(path, config)
+        return core_start(kind, self.tools[kind], path, env, name)
+
+    def start_server(self, kind: str, directory: Path, config: dict, env,
+                     node: FixtureNode) -> Process:
+        """:meth:`start` a server core and wait for the node's first TCP listener
+        (a UDP-only node: the core must survive 0.2 s)."""
+        process = self.start(kind, directory, config, env, "server")
+        try:
+            tcp = [i for i in node.inbounds if i.protocol not in UDP_PROTOCOLS]
+            if tcp:
+                process.wait_tcp(tcp[0].port)
+            else:
+                process.stay_alive(0.2)
+            return process
+        except BaseException:
+            process.close()
+            raise
+
+    def start_client(self, kind: str, directory: Path, config: dict, env, port: int) -> Process:
+        """:meth:`start` a client core and wait for its SOCKS listener ``port``."""
+        process = self.start(kind, directory, config, env, "client")
+        try:
+            process.wait_tcp(port)
+            return process
+        except BaseException:
+            process.close()
+            raise
 
 
 # ---------------------------------------------------------------------------

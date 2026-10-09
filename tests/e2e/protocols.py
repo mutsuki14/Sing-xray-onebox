@@ -45,8 +45,6 @@ import sys
 
 import _harness as h
 
-TARGET_NAME = "native-e2e.invalid"
-TARGET_IP = "192.0.2.53"
 SERVERS = ("singbox", "xray")
 CLIENTS = ("singbox", "xray", "mihomo")
 
@@ -55,11 +53,7 @@ CLIENTS = ("singbox", "xray", "mihomo")
 class Profile:
     name: str
     protocols: frozenset[str]
-    custom_ca: bool         # CA-signed custom certificate instead of self-signed
-
-    @property
-    def vmess_tls(self) -> bool:
-        return self.custom_ca
+    custom_ca: bool         # see h.Bench.node
 
 
 PROFILES = {
@@ -95,84 +89,15 @@ def plan(args) -> list[tuple[Profile, str, str, str]]:
     return cases
 
 
-class Matrix:
+class Matrix(h.Bench):
     def __init__(self, root: Path, tools: dict[str, str], args, results: h.Results):
-        self.root, self.tools, self.args, self.results = root, tools, args, results
-        self.ports = h.Ports()
-        self.pki = h.Pki(root / "pki")
-        self.reality_cert = self.pki.leaf("reality.test")
-        self.ca_cert = self.pki.leaf("onebox.test")
-        self.self_cert = self.pki.self_signed("onebox.test")
-        self.fixture = h.MarkerFixtures(self.ports, self.reality_cert, prefix="onebox-native-")
-        self.base_env = h.clean_env(SSL_CERT_FILE=str(self.pki.bundle))
-        self.keys = h.x25519_pair(tools["xray"], self.base_env)
-        self.wrong_public = h.x25519_pair(tools["xray"], self.base_env)[1]
-
-    def close(self):
-        self.fixture.close()
-
-    # -- fixtures -----------------------------------------------------------
-
-    def node(self, protocols: list[tuple[str, str]], profile: Profile) -> h.FixtureNode:
-        """A node with fresh ports and credentials for ``(protocol, core)`` pairs."""
-        cert = self.ca_cert if profile.custom_ca else self.self_cert
-        return h.FixtureNode(
-            inbounds=[h.Inbound(p, self.ports.get(), core) for p, core in protocols],
-            reality_keys=self.keys,
-            reality_dest=f"{h.LOOPBACK}:{self.fixture.tls_port}",
-            guard_port=self.ports.get(),
-            proxy_cert=cert,
-            tls_mode="custom" if profile.custom_ca else "self",
-            custom_source=cert if profile.custom_ca else None,
-            pinned=not profile.custom_ca,
-            vmess_tls=profile.vmess_tls,
-            hy2_obfs=profile.custom_ca,
-        )
-
-    def layout(self, directory: Path) -> h.Layout:
-        directory.mkdir(parents=True)
-        return h.Layout(directory / "root", self.base_env)
-
-    def onebox(self, env, *args):
-        return h.onebox_json(self.tools["onebox"], env, *args)
+        super().__init__(root, tools, results, marker_prefix="onebox-native-")
+        self.args = args
 
     # -- server ---------------------------------------------------------------
 
-    def server_config(self, env, server: str) -> dict:
-        """``render server`` plus the test-only target rewrites."""
-        config = self.onebox(env, "render", "server", server)
-        # Keep fixture connection diagnostics in the log for failure reports.
-        h.set_log_level(server, config, "debug" if h.VERBOSE else "info")
-        if server == "singbox":
-            rewrite = [
-                {"domain": [TARGET_NAME], "action": "route-options", "override_address": h.LOOPBACK},
-                {"ip_cidr": [TARGET_IP + "/32"], "action": "route-options",
-                 "override_address": h.LOOPBACK},
-            ]
-            config["route"]["rules"] = rewrite + config["route"].get("rules", [])
-        else:
-            config["outbounds"].append({"tag": "native-target", "protocol": "freedom", "settings": {
-                "redirect": f"{h.LOOPBACK}:0", "finalRules": [{"action": "allow"}]}})
-            config["routing"]["rules"] = [
-                {"type": "field", "domain": ["full:" + TARGET_NAME], "outboundTag": "native-target"},
-                {"type": "field", "ip": [TARGET_IP + "/32"], "outboundTag": "native-target"},
-            ] + config["routing"].get("rules", [])
-        return config
-
-    def start_server(self, directory: Path, node: h.FixtureNode, server: str, env) -> h.Process:
-        path = directory / "server.json"
-        h.write_json(path, self.server_config(env, server))
-        process = h.core_start(server, self.tools[server], path, env, "server")
-        try:
-            tcp = [i for i in node.inbounds if i.protocol not in h.UDP_PROTOCOLS]
-            if tcp:
-                process.wait_tcp(tcp[0].port)
-            else:
-                process.stay_alive(0.2)
-            return process
-        except BaseException:
-            process.close()
-            raise
+    def start_node(self, directory: Path, node: h.FixtureNode, server: str, env) -> h.Process:
+        return self.start_server(server, directory, self.server_config(env, server), env, node)
 
     # -- clients --------------------------------------------------------------
 
@@ -185,7 +110,7 @@ class Matrix:
             assert len(proxies) == 1, f"expected one mihomo proxy, got {len(proxies)}"
             assert provider == {"proxies": proxies}, "client provider disagrees with client mihomo"
             return proxies
-        outbound = self.onebox(env, "render", "outbound", protocol, client)
+        outbound = self.outbound(env, protocol, client)
         if client == "singbox":
             full = self.onebox(env, "client", "singbox-notun")
             by_tag = {out["tag"]: out for out in full["outbounds"]}
@@ -198,14 +123,6 @@ class Matrix:
         first["tag"] = outbound["tag"]
         assert first == outbound, "client xray disagrees with render outbound"
         return [outbound]
-
-    def start_client(self, directory: Path, client: str, config: dict, env) -> h.Process:
-        directory.mkdir()
-        if h.VERBOSE:
-            h.set_log_level(client, config, "debug")
-        path = directory / "client.json"
-        h.write_json(path, config)
-        return h.core_start(client, self.tools[client], path, env, "client")
 
     # -- cases ----------------------------------------------------------------
 
@@ -240,7 +157,7 @@ class Matrix:
         name = f"{profile.name}/{server}/{protocol}"
         directory = self.root / name
         layout = self.layout(directory)
-        node = self.node([(protocol, server)], profile)
+        node = self.node([(protocol, server)], custom_ca=profile.custom_ca)
         node.write(layout, form)
         env = layout.env()
         if not self.results.attempt(f"{name}/probe[{form}]", lambda: self.check_probe(env, protocol)):
@@ -249,7 +166,7 @@ class Matrix:
             self.results.attempt(f"{name}/v3-matches-v2",
                                  lambda: self.check_v2_parity(layout, node, server))
         try:
-            with self.start_server(directory, node, server, env) as process:
+            with self.start_node(directory, node, server, env) as process:
                 for client in self.args.clients:
                     if client in self.tools and client_supports(client, protocol):
                         self.client_checks(name, directory, protocol, client, process, env)
@@ -260,9 +177,8 @@ class Matrix:
         port = self.ports.get()
         try:
             config = h.socks_client(client, port, self.client_outbounds(env, protocol, client))
-            with self.start_client(directory / client, client, config, env) as native:
-                native.wait_tcp(port)
-                for transport, request in (("tcp", self.tcp_marker), ("udp", self.udp_marker)):
+            with self.start_client(client, directory / client, config, env, port) as native:
+                for transport, request in (("tcp", self.target_tcp), ("udp", self.target_udp)):
                     label = f"{name}/{client}/{transport}"
                     try:
                         request(port)
@@ -273,17 +189,6 @@ class Matrix:
                                             f"{native.tail()}\nSERVER:\n{server.tail()}")
         except Exception as error:  # noqa: BLE001
             self.results.record(f"{name}/{client}/start", False, h.describe(error))
-
-    def tcp_marker(self, port: int, timeout: float = 10) -> None:
-        # Xray's REALITY library samples post-handshake target records for
-        # five seconds on cold start, then polls that cache every five
-        # seconds; a five-second deadline races it. Keep the ten-second
-        # single-attempt budget, without warming up or retrying.
-        # https://github.com/XTLS/REALITY/blob/9234c772ba8f/record_detect.go
-        h.socks_http_marker(port, TARGET_NAME, self.fixture.http_port, self.fixture.marker, timeout)
-
-    def udp_marker(self, port: int) -> None:
-        h.socks_udp_echo(port, TARGET_IP, self.fixture.udp_port, self.fixture.marker)
 
     # -- negative -------------------------------------------------------------
 
@@ -307,17 +212,17 @@ class Matrix:
         protocol = "anytls-reality"
         directory = self.root / "authentication"
         layout = self.layout(directory)
-        node = self.node([(protocol, "singbox")], PROFILES["self"])
+        node = self.node([(protocol, "singbox")])
         node.write(layout, form)
         env = layout.env()
         try:
-            with self.start_server(directory, node, "singbox", env) as server:
+            with self.start_node(directory, node, "singbox", env) as server:
                 for mode in self.NEGATIVE_MODES:
                     self.negative_mode(directory, mode, node, server, env)
                 for client in ("xray", "mihomo"):
                     result = h.run_onebox(self.tools["onebox"], env, "client", client, check=False)
-                    self.results.record(f"authentication/reject-{client}-export",
-                                        result.code != 0 and not result.stdout,
+                    ok = result.code != 0 and not result.stdout
+                    self.results.record(f"authentication/reject-{client}-export", ok, "" if ok else
                                         f"exit {result.code}, stdout {result.stdout[:200]!r}")
         except Exception as error:  # noqa: BLE001
             self.results.record("authentication/server", False, h.describe(error))
@@ -328,9 +233,8 @@ class Matrix:
             outbounds = self.client_outbounds(env, "anytls-reality", "singbox")
             self.tamper(outbounds[0], mode, node)
             config = h.socks_client("singbox", port, outbounds)
-            with self.start_client(directory / mode, "singbox", config, env) as client:
-                client.wait_tcp(port)
-                ok, _ = h.reached(lambda: self.tcp_marker(port, timeout=3))
+            with self.start_client("singbox", directory / mode, config, env, port) as client:
+                ok, _ = h.reached(lambda: self.target_tcp(port, timeout=3))
                 assert client.alive() and server.alive(), "rejection was caused by a core crash"
                 assert ok == mode.startswith("positive"), \
                     "reached the target" if ok else "did not reach the target"
@@ -339,22 +243,13 @@ class Matrix:
             self.results.record(f"authentication/{mode}", False, h.describe(error))
 
 
-def comma_list(allowed):
-    def parse(text: str) -> list[str]:
-        values = [v for v in text.split(",") if v]
-        if not values or any(v not in allowed for v in values):
-            raise argparse.ArgumentTypeError(f"choose from {','.join(allowed)}")
-        return values
-    return parse
-
-
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--protocols", type=comma_list(h.PROTOCOLS), default=list(h.PROTOCOLS))
-    parser.add_argument("--servers", type=comma_list(SERVERS), default=list(SERVERS))
-    parser.add_argument("--clients", type=comma_list(CLIENTS), default=list(CLIENTS))
-    parser.add_argument("--profiles", type=comma_list(tuple(PROFILES)), default=list(PROFILES))
+    parser.add_argument("--protocols", type=h.comma_list(h.PROTOCOLS), default=list(h.PROTOCOLS))
+    parser.add_argument("--servers", type=h.comma_list(SERVERS), default=list(SERVERS))
+    parser.add_argument("--clients", type=h.comma_list(CLIENTS), default=list(CLIENTS))
+    parser.add_argument("--profiles", type=h.comma_list(tuple(PROFILES)), default=list(PROFILES))
     parser.add_argument("--states", choices=("mixed", *h.STATE_FORMS), default="mixed")
     parser.add_argument("--negative-only", action="store_true")
     parser.add_argument("--skip-negative", action="store_true")
@@ -362,28 +257,11 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def resolve_tools(args, results: h.Results) -> dict[str, str] | None:
-    """Required: onebox, sing-box, Xray. mihomo is optional unless REQUIRE_FULL."""
-    tools = {}
-    try:
-        tools["onebox"] = h.onebox_binary()
-        tools["singbox"] = h.tool("ONEBOX_TEST_SINGBOX", path_names=("sing-box",))
-        tools["xray"] = h.tool("ONEBOX_TEST_XRAY", path_names=("xray",))
-    except h.Unavailable as error:
-        results.record("prerequisites", False, str(error))
-        return None
-    if "mihomo" in args.clients:
-        try:
-            tools["mihomo"] = h.tool("ONEBOX_TEST_MIHOMO", path_names=("mihomo",))
-        except h.Unavailable as error:
-            results.skip("mihomo-client", str(error))
-    return tools
-
-
 def main(argv=None) -> int:
     args = parse_args(argv)
     results = h.Results("Protocol E2E")
-    tools = resolve_tools(args, results)
+    optional = ["mihomo"] if "mihomo" in args.clients else []
+    tools = h.resolve_tools(results, ["singbox", "xray"], optional)
     if tools is None:
         return results.finish(args.report)
     with h.Workspace("onebox-e2e-protocols-") as root:
