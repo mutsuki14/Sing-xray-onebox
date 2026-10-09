@@ -3,7 +3,7 @@
 ## 导出
 
 ```bash
-onebox info                  # 节点信息、凭据与分享链接
+onebox info                  # 节点信息、凭据与导出方式
 onebox client mihomo         # mihomo / Clash Meta 完整配置（YAML）
 onebox client provider       # 只含节点的 mihomo proxy-provider
 onebox client singbox        # sing-box 完整配置，TUN 模式
@@ -11,16 +11,17 @@ onebox client singbox-notun  # sing-box 完整配置，仅本地代理端口
 onebox client xray           # Xray 客户端配置
 onebox client links          # 分享链接，每行一个
 onebox client sub            # Base64 订阅内容
-onebox qr                    # 在终端显示每条分享链接的二维码
+onebox qr                    # 在终端显示每条分享链接的二维码（同 client qr）
 ```
 
-- `onebox client` 不带格式时交互选择；`config` 是 `client` 的别名，`link`、`base64`、`clash`、`sing-box` 等别名也可用。
+- `onebox client` 不带格式时交互选择（只列出当前协议组合支持的格式）；`config` 是 `client` 的别名，格式名也接受 `link`、`base64`、`clash`、`sing-box`、`sing-box-notun`。
 - 输出写到标准输出，保存文件：`onebox client mihomo > mihomo.yaml`。提示信息写到标准错误，不会混进文件。
 - 每种格式只包含它支持的协议（见 [README 支持矩阵](../README.md#协议与客户端支持)）；当前组合没有可用节点时报错。
-- 二维码由程序直接绘制，不需要安装 `qrencode`；只有能生成通用链接的协议才有二维码。
+- 二维码由程序直接绘制，不需要安装 `qrencode`，每个二维码下方附带对应链接；只有能生成通用链接的协议才有二维码。
+- `mihomo` / `provider` 输出标准 YAML（v2 输出的是 mihomo 也能读取的 JSON 文本），结构不变。
 - 需要随时可更新的链接，使用[远程订阅](subscription.md)。
 
-服务器上也保存了一份，每次配置变更后整体重新生成（不要在该目录存放自己的文件）：
+服务器上也保存了一份（目录 0700、文件 0600），每次配置变更后整体替换，不支持的格式不会出现（不要在该目录存放自己的文件）：
 
 | 文件（`/etc/onebox/client/`） | 内容 |
 |---|---|
@@ -48,8 +49,8 @@ onebox qr                    # 在终端显示每条分享链接的二维码
 
 | 配置 | 本地端口 |
 |---|---|
-| sing-box（仅代理端口版） | 混合代理 2080 |
-| sing-box / mihomo 控制面板 | 9090，需要密钥（`onebox info` 中显示） |
+| sing-box（两种版本） | 混合代理 2080；TUN 版另有 TUN 入站 |
+| sing-box / mihomo 控制面板 | 9090，需要密钥（`onebox info` 中的“控制面板密钥”） |
 | mihomo | 混合代理 7890，DNS 1053 |
 | Xray | SOCKS 10808，HTTP 10809 |
 
@@ -72,7 +73,7 @@ onebox qr                    # 在终端显示每条分享链接的二维码
 | sing-box | 内嵌服务端证书 |
 | mihomo | `fingerprint` |
 | Xray | `pinnedPeerCertSha256` |
-| 分享链接 | `insecure=1` / `allowInsecure=1`，同时附带 `pcs`、`pinSHA256` 等指纹参数，兼顾新旧客户端 |
+| 分享链接 | `insecure=1` / `allowInsecure=1`，同时附带 `pcs`、`pinSHA256`、`hpkp` 等指纹参数，兼顾新旧客户端 |
 
 注意：
 
@@ -96,7 +97,7 @@ onebox add anytls-reality --reality-site www.example.com --site-https on
 ```
 
 - 服务端与客户端都需要 sing-box ≥ 1.12，且为带 `with_utls` 的构建（官方发行包已包含）。
-- **只包含在 sing-box 完整配置中**（`singbox`、`singbox-notun`，含远程订阅的这两种格式）。mihomo、Xray、分享链接、Base64 和二维码都不包含它；导出这些格式时程序会提示。
+- **只包含在 sing-box 完整配置中**（`singbox`、`singbox-notun`，含远程订阅的这两种格式）。mihomo、provider、Xray、分享链接、Base64 和二维码都不包含它：导出 mihomo、provider、Xray、分享链接或 Base64 时会在标准错误提示；`qr` 只显示其他协议的二维码，不另行提示（只有 AnyTLS-REALITY 等不能生成链接的协议时报错 `没有可生成二维码的通用链接，请使用 sing-box 配置`）。
 - 不要把普通 `anytls://` 链接用于此协议。其他应用能否使用，取决于其内置 sing-box 版本以及是否支持导入完整配置。
 
 ## 常见导入问题
