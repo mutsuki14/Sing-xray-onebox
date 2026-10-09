@@ -755,4 +755,17 @@ fn child_report_keeps_stdout_and_warning_lines() {
         }
     );
     assert_eq!(child_report(&Output::success("")), ChildReport::default());
+    // The child repeats its warnings on stdout for v2 parents: shown once.
+    let echoed = Output {
+        code: 0,
+        stdout: "[警告] 已取消固定\n配置已更新\n".into(),
+        stderr: "[警告] 已取消固定\n".into(),
+    };
+    assert_eq!(
+        child_report(&echoed),
+        ChildReport {
+            stdout: "配置已更新".into(),
+            warnings: vec!["已取消固定".into()],
+        }
+    );
 }

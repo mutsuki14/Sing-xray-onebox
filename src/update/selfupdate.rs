@@ -409,7 +409,8 @@ fn regenerate(ctx: &Ctx, lock: &FileLock) -> Result<ChildReport> {
 /// What a successful child `regen` printed that the user should still see.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChildReport {
-    /// Its stdout, trimmed (v2 echoed it).
+    /// Its stdout, trimmed (v2 echoed it), without the `[警告]` copies a
+    /// self-update child repeats there for v2 parents (`cli::session`).
     pub stdout: String,
     /// Its `[警告]` lines from stderr, without the tag (pin, migration or
     /// certificate notices); progress lines are dropped.
@@ -418,8 +419,13 @@ pub struct ChildReport {
 
 /// Summarize a successful child's output.
 pub fn child_report(output: &Output) -> ChildReport {
+    let stdout: Vec<&str> = output
+        .stdout
+        .lines()
+        .filter(|line| warning_text(line).is_none())
+        .collect();
     ChildReport {
-        stdout: output.stdout.trim().to_owned(),
+        stdout: stdout.join("\n").trim().to_owned(),
         warnings: output.stderr.lines().filter_map(warning_text).collect(),
     }
 }

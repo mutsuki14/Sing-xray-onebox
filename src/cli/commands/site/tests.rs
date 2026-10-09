@@ -26,13 +26,25 @@ fn site_node() -> NodeConfig {
 fn parsing() {
     assert_eq!(action("site").unwrap(), SiteAction::Info);
     assert_eq!(action("site status").unwrap(), SiteAction::Info);
-    assert_eq!(
-        action("site enable www.example.com --tls cf").unwrap(),
-        SiteAction::Enable {
-            domain: "www.example.com".into(),
-            cert: WebCert::Cloudflare
-        }
-    );
+    // (command line, HTTPS entrance)
+    for (line, https_entry) in [
+        ("site enable www.example.com --tls cf", true),
+        ("site enable www.example.com --tls cf --site-https on", true),
+        (
+            "site enable www.example.com --tls cf --site-https off",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            action(line).unwrap(),
+            SiteAction::Enable {
+                domain: "www.example.com".into(),
+                cert: WebCert::Cloudflare,
+                https_entry,
+            },
+            "{line}"
+        );
+    }
     assert_eq!(
         action("site template --title 手记").unwrap(),
         SiteAction::Template(PageEdit {
@@ -60,6 +72,10 @@ fn parsing() {
             "site enable a.example.com --tls self",
             crate::cert::PUBLIC_REQUIRED,
         ),
+        (
+            "site enable a.example.com --site-https maybe",
+            "--site-https 应为 on/off",
+        ),
         ("site https", "用法: site https on|off"),
         ("site https maybe", "用法: site https on|off"),
         ("site title", "用法: site title 标题"),
@@ -85,26 +101,30 @@ fn root_policy() {
 #[test]
 fn enable_and_disable() {
     let bench = Bench::installed(&config(&[(VlessReality, 443, XR)]));
-    let enable = SiteAction::Enable {
+    let enable = |https_entry| SiteAction::Enable {
         domain: "WWW.Example.com".into(),
         cert: WebCert::Http01,
+        https_entry,
     };
-    let (req, message) = plan_change(&bench.session(), enable).unwrap().unwrap();
+    let (req, message) = plan_change(&bench.session(), enable(true))
+        .unwrap()
+        .unwrap();
     assert_eq!(req.reason, "启用网站");
     assert!(message.is_none());
     let site = req.config.site.clone().unwrap();
     assert_eq!(site.domain, "www.example.com");
     assert!(site.https_entry);
     assert_eq!(req.config.reality.dest.to_string(), "127.0.0.1:10443");
+    // Closed from the start, on a new site and on an open existing one.
+    for cfg in [config(&[(VlessReality, 443, XR)]), site_node()] {
+        let bench = Bench::installed(&cfg);
+        let (req, _) = plan_change(&bench.session(), enable(false))
+            .unwrap()
+            .unwrap();
+        assert!(!req.config.site.unwrap().https_entry);
+    }
     let bench = Bench::installed(&config(&[(Trojan, 443, SB)]));
-    let err = plan_change(
-        &bench.session(),
-        SiteAction::Enable {
-            domain: "www.example.com".into(),
-            cert: WebCert::Http01,
-        },
-    )
-    .unwrap_err();
+    let err = plan_change(&bench.session(), enable(true)).unwrap_err();
     assert_eq!(
         err.to_string(),
         "自建 REALITY 网站需要先开启 REALITY 协议；独立订阅请用 subscription enable"

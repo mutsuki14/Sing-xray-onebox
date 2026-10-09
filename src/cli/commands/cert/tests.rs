@@ -15,6 +15,21 @@ fn invocation(line: &str) -> (bool, Matches) {
     (inv.spec.root.required(&inv.matches), inv.matches)
 }
 
+/// Manual renewals are forced (F-8.1#3): the help must not read like a
+/// due check, or repeated runs hit the Let's Encrypt rate limits.
+#[test]
+fn renew_help_says_manual_runs_are_forced() {
+    let cert_renew = CERT.subcommands.iter().find(|c| c.name == "renew");
+    for summary in [RENEW.summary, cert_renew.map_or("", |c| c.summary)] {
+        assert!(
+            summary.starts_with("立即强制续期") && summary.contains("--cron"),
+            "{summary}"
+        );
+        assert!(summary.contains("30 天内到期"), "{summary}");
+    }
+    assert!(CRON.help.contains("30 天内到期"), "{}", CRON.help);
+}
+
 #[test]
 fn command_forms_and_root() {
     let (root, m) = invocation("cert");
@@ -213,6 +228,75 @@ fn identity_change_apply_carries_the_resolved_credentials() {
     );
     let creds = bench.engine.single().intents.cloudflare.unwrap();
     assert_eq!(creds.get("CF_Token"), Some("fake-token-0123"));
+}
+
+/// A renewer that deploys a new pinned pair (the leaf changed) outside
+/// any transaction, as `cert::renew_all` does.
+fn rotating(
+    ctx: &Ctx,
+    _lock: &FileLock,
+    _cfg: &NodeConfig,
+    _opts: &RenewOptions,
+    _cf: Option<&CfCredentials>,
+) -> Result<RenewReport> {
+    let dir = CertDir::proxy(&ctx.paths);
+    std::fs::write(dir.key(), "NEW KEY").unwrap();
+    std::fs::write(dir.cert(), "NEW CERT").unwrap();
+    std::fs::write(dir.metadata_file(), "{\"new\":true}").unwrap();
+    Ok(RenewReport {
+        renewed: vec![CertScope::Proxy],
+        proxy_identity_changed: true,
+        ..RenewReport::default()
+    })
+}
+
+/// The republishing apply fails: the old pair (and its metadata) is put
+/// back and the running cores restarted, so pinned clients keep working
+/// and the next renewal retries; the error says so.
+#[test]
+fn a_failed_republish_puts_the_previous_pair_back() {
+    let _guard = serial();
+    let bench = Bench::installed(&trojan());
+    let dir = CertDir::proxy(&bench.ctx.paths);
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.key(), "OLD KEY").unwrap();
+    std::fs::write(dir.cert(), "OLD CERT").unwrap();
+    // No metadata before: it is removed again.
+    bench.live.set_running("onebox-sing-box");
+    bench
+        .exec
+        .on(
+            "systemctl",
+            &["restart", "onebox-sing-box"],
+            crate::sys::exec::Output::success(""),
+        )
+        .on(
+            "systemctl",
+            &["is-active", "--quiet", "onebox-sing-box"],
+            crate::sys::exec::Output::success(""),
+        );
+    bench
+        .engine
+        .fail_applies_with("配置未应用，已恢复原状态: 内核启动失败");
+    let err = renew_with(&bench.session(), CertScopes::ALL, true, rotating).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{PAIR_RESTORED}: 配置未应用，已恢复原状态: 内核启动失败")
+    );
+    assert_eq!(std::fs::read_to_string(dir.key()).unwrap(), "OLD KEY");
+    assert_eq!(std::fs::read_to_string(dir.cert()).unwrap(), "OLD CERT");
+    assert!(!dir.metadata_file().exists());
+    assert_eq!(
+        bench.engine.calls(),
+        [Call::RecoverLocked, Call::ApplyLocked]
+    );
+    let history = bench.exec.history();
+    assert!(
+        history
+            .iter()
+            .any(|c| c == "systemctl restart onebox-sing-box"),
+        "{history:?}"
+    );
 }
 
 #[test]

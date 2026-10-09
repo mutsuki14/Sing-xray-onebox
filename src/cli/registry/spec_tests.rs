@@ -145,18 +145,18 @@ fn root_policy_table() {
         ("qr", false),
         ("render", false),
         ("render outbound trojan xray", false),
-        ("status", false),
+        ("status", true),
         ("start", true),
         ("stop", true),
         ("restart", true),
         ("log", false),
         ("logs xray", false),
-        ("service onebox-site", false),
+        ("service onebox-site", true),
         ("service onebox-site log", false),
         ("service onebox-site restart", true),
-        ("tune", false),
-        ("tune status", false),
-        ("tune hy2 auto", false),
+        ("tune", true),
+        ("tune status", true),
+        ("tune hy2 auto", true),
         ("tune hy2 auto --apply", true),
         ("tune reset --apply", true),
         ("cert", false),
@@ -309,7 +309,7 @@ fn global_help_snapshot() {
 
 维护:
   regen           按当前状态重新生成并应用全部配置（凭据不变；也用于从 v2 迁移）
-  renew           检查并续期全部证书（计划任务每天执行 renew --cron）
+  renew           立即强制续期全部证书（计划任务每天执行 renew --cron，只续期 30 天内到期的）
   backup          备份当前配置
   backups         列出备份
   restore         恢复备份
@@ -342,12 +342,13 @@ fn command_help_snapshots() {
 用法:
   onebox tune [status]
   onebox tune hy2 auto|conservative|measured [--up N --down N] [--apply]
+  onebox tune hy2 [档位] [--obfs on|off] [--hop 起-止|off] [--apply]
   onebox tune resource balanced|low-memory|throughput [--apply]
   onebox tune reset [--apply]
 
 子命令:
   status    当前调优设置
-  hy2       Hysteria2 拥塞与带宽档位
+  hy2       Hysteria2 拥塞与带宽档位、混淆与端口跳跃
   resource  QUIC 接收窗口与并发流档位
   reset     恢复默认调优
 

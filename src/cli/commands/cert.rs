@@ -18,7 +18,11 @@
 //! `cert info` also shows the standalone subscription certificate;
 //! `cert set` without `--tls` asks interactively and is an error under
 //! `-y` (v2 silently picked self-signed); `cert-renew subscription` renews
-//! like `cert renew subscription`.
+//! like `cert renew subscription`; when the republishing apply after a
+//! proxy identity change fails, the previous pair is put back (the renewal
+//! deployed it outside the transaction, so the apply's rollback kept the
+//! new one while clients still pinned the old one) and the next renewal
+//! retries.
 
 use crate::cert::cloudflare::{self, CfCredentials};
 use crate::cert::{self, CertDir, CertScopes, RenewOptions, RenewReport};
@@ -30,10 +34,15 @@ use crate::ctx::Ctx;
 use crate::domain::config::{NodeConfig, SubscriptionMode};
 use crate::domain::plan;
 use crate::error::{Error, Result};
+use crate::host::service::WAIT_RUNNING;
+use crate::sys::fs::{atomic_write, read_bounded, remove_file_if_exists};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
 
-const CRON: OptSpec = OptSpec::flag("cron", "计划任务模式：只续期到期证书，无事可做时不输出");
+const CRON: OptSpec = OptSpec::flag(
+    "cron",
+    "计划任务模式：只续期到期的证书（30 天内到期，或自备证书已更新），无事可做时不输出",
+);
 const SET_NEEDS_TLS: &str = "cert set 需要 --tls self|acme|cf|custom";
 /// How long a scheduled renewal waits for a concurrent operation.
 const CRON_LOCK_WAIT: Duration = Duration::from_secs(600);
@@ -61,10 +70,14 @@ pub const CERT: CommandSpec = CommandSpec::new("cert", Group::Feature, "代理�
         CommandSpec::new("set", Group::Feature, "更换代理证书方式")
             .options(&[opt::TLS, opt::DOMAIN, opt::CERT, opt::KEY])
             .handler(set_command),
-        CommandSpec::new("renew", Group::Feature, "续期证书（手动执行时强制续期）")
-            .args(&[TARGET_ARG])
-            .options(&[CRON])
-            .handler(renew_command),
+        CommandSpec::new(
+            "renew",
+            Group::Feature,
+            "立即强制续期证书（--cron 只续期 30 天内到期的）",
+        )
+        .args(&[TARGET_ARG])
+        .options(&[CRON])
+        .handler(renew_command),
     ])
     .root(Root::NotRequired)
     .handler(info_command);
@@ -78,7 +91,7 @@ pub const CERT_RENEW: CommandSpec =
 pub const RENEW: CommandSpec = CommandSpec::new(
     "renew",
     Group::Maintain,
-    "检查并续期全部证书（计划任务每天执行 renew --cron）",
+    "立即强制续期全部证书（计划任务每天执行 renew --cron，只续期 30 天内到期的）",
 )
 .options(&[CRON])
 .handler(renew_all_command);
@@ -209,6 +222,13 @@ pub fn renew_with(
     };
     session.engine.recover_locked(ctx, &lock)?;
     let loaded = session.load()?;
+    // The renewal deploys outside any transaction: keep the previous proxy
+    // pair to put back if the republishing apply below does not happen.
+    let saved = if scopes.proxy && loaded.config.tls.is_some() {
+        Some(SavedPair::save(&CertDir::proxy(&ctx.paths))?)
+    } else {
+        None
+    };
     let report = renewer(ctx, &lock, &loaded.config, &opts, cf.as_ref())?;
     if report.proxy_identity_changed {
         session.info("代理证书已更换，正在重新发布客户端配置");
@@ -216,9 +236,90 @@ pub fn renew_with(
         // The apply renews what is still due (e.g. a target that just
         // failed) and never prompts: it gets the credentials resolved above.
         req.intents.cloudflare = cf.clone();
-        session.engine.apply_locked(ctx, &lock, req)?;
+        if let Err(e) = session.engine.apply_locked(ctx, &lock, req) {
+            return Err(unpublished(session, &loaded.config, saved.as_ref(), e));
+        }
     }
     summarize(session, &report, cron)
+}
+
+/// The renewed proxy pair is live but the apply that republishes clients
+/// failed (or was refused before its journal existed, or cancelled): its
+/// rollback keeps whatever `ROOT/tls` held when it started — the new pair
+/// — while clients still pin the old one. Put the previous pair back and
+/// restart the running cores, so the node serves what clients pin; the
+/// next renewal finds the certificate due again and retries. Never claims
+/// a restored state while the new pair is still live.
+fn unpublished(
+    session: &Session,
+    cfg: &NodeConfig,
+    saved: Option<&SavedPair>,
+    error: Error,
+) -> Error {
+    let restored = saved
+        .ok_or_else(|| Error::msg("没有续期前的证书副本"))
+        .and_then(SavedPair::restore)
+        .and_then(|()| restart_running_cores(session, cfg));
+    match restored {
+        Ok(()) => error.wrap(PAIR_RESTORED),
+        Err(e) => Error::msg(format!(
+            "代理证书已更换，但重新发布客户端配置失败（{}），也未能恢复续期前的证书: {e}；\
+             客户端固定的证书指纹已失效，请执行 onebox regen 重新发布",
+            error.report_text()
+        )),
+    }
+}
+
+/// Context of a failed republish after the previous pair was put back.
+pub const PAIR_RESTORED: &str = "客户端配置未重新发布，已恢复续期前的代理证书（下次续期时重试）";
+
+/// The deployed proxy pair and its metadata (`None`: the file did not
+/// exist), as they were before a renewal.
+struct SavedPair {
+    files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
+}
+
+impl SavedPair {
+    fn save(dir: &CertDir) -> Result<SavedPair> {
+        // Key before certificate, as pairs are deployed.
+        let files = [dir.key(), dir.cert(), dir.metadata_file()]
+            .into_iter()
+            .map(|path| {
+                let bytes = match std::fs::symlink_metadata(&path) {
+                    Ok(_) => Some(read_bounded(&path, cert::store::PEM_MAX_BYTES)?),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(Error::io(&path, e)),
+                };
+                Ok((path, bytes))
+            })
+            .collect::<Result<_>>()?;
+        Ok(SavedPair { files })
+    }
+
+    fn restore(&self) -> Result<()> {
+        for (path, bytes) in &self.files {
+            match bytes {
+                Some(bytes) => atomic_write(path, bytes, 0o600)?,
+                None => {
+                    remove_file_if_exists(path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Restart the node's running cores so they load the deployed pair.
+fn restart_running_cores(session: &Session, cfg: &NodeConfig) -> Result<()> {
+    let services = session.services();
+    for core in cfg.cores() {
+        let name = core.service();
+        if session.live.running(name) {
+            services.restart(name)?;
+            services.wait_running(name, WAIT_RUNNING)?;
+        }
+    }
+    Ok(())
 }
 
 /// The command's result: failures make it fail; a manual run with no

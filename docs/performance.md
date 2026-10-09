@@ -9,6 +9,8 @@ onebox tune status                              # 当前设置（等同不带参
 onebox tune hy2 auto                            # 预览：BBR 自动估计带宽
 onebox tune hy2 conservative --apply            # 保守 BBR
 onebox tune hy2 measured --up 20 --down 100 --apply
+onebox tune hy2 --obfs on --apply               # 开启 Salamander 混淆（客户端需重新导入）
+onebox tune hy2 --hop 20000-40000 --apply       # 修改 UDP 端口跳跃范围；--hop off 关闭
 onebox tune resource low-memory --apply
 onebox tune resource throughput --apply
 onebox tune resource balanced --apply           # 撤销接收窗口覆盖，保留拥塞选择
@@ -22,12 +24,15 @@ onebox tune reset --apply                       # 恢复默认：不调优 Hyste
 | `hy2 auto` | 服务端忽略客户端声明的带宽，由 BBR 自动估计 | sing-box 承载的 Hysteria2 |
 | `hy2 conservative` | 同上，并使用保守 BBR 档位 | sing-box 服务端/客户端 ≥ 1.14；mihomo ≥ 1.19.32 |
 | `hy2 measured` | 指定上传 / 下载带宽，使用 Hysteria 带宽控制 | sing-box 服务端；sing-box / mihomo 客户端 |
+| `hy2 --obfs on\|off` | Salamander 混淆（安装时的 `--hy2-obfs`） | Hysteria2；客户端需重新导入 |
+| `hy2 --hop 起-止\|off` | UDP 端口跳跃范围（起始 ≥ 1024），`off` 关闭；与其他 UDP 端口或 FRP 冲突时拒绝 | Hysteria2；客户端需重新导入 |
 | `resource balanced` | 不覆盖 sing-box 的 QUIC 接收窗口与并发流默认值 | 默认 |
 | `resource low-memory` | 流 / 连接接收窗口 2 / 5 MiB，服务端并发流上限 64 | sing-box Hysteria2 ≥ 1.14 |
 | `resource throughput` | 流 / 连接接收窗口 16 / 40 MiB，服务端并发流上限 1024 | 同上；高延迟高带宽链路需实测 |
 
 - `--up` / `--down` 以**客户端视角**填写，单位 Mbps，必须是 1–10000 的整数，只能用于 `measured`；按实际可用带宽并留余量。切换到其他档位时会清除之前的带宽值。
-- 这些调优不作用于 TUIC；Xray 承载的 Hysteria2 不支持调优，会直接报错并提示改用 sing-box 承载。
+- `--obfs` / `--hop` 可与档位一起给出（如 `tune hy2 auto --obfs on`），只改它们时省略档位；预览另起一行显示 `Hysteria2 混淆=… 端口跳跃=…`，应用后提示客户端需要重新导入配置或刷新订阅。安装后修改它们不再需要重装（v2 只能在添加 Hysteria2 时设置）。
+- 这些调优不作用于 TUIC；Xray 承载的 Hysteria2 不支持档位调优（混淆与端口跳跃不受此限制），会直接报错并提示改用 sing-box 承载。
 - 分享链接和 Xray 客户端不携带调优字段，需要 sing-box / mihomo 完整配置。
 - 系统 TCP BBR、UDP 缓冲区和 QUIC 拥塞控制是不同层面的设置；这里不修改 sysctl（TCP BBR 见 [bbr.md](bbr.md)）。
 - 需要保留调优前的状态时，先执行 `onebox backup before-tuning`。

@@ -8,7 +8,10 @@
 //! for it because concurrent `@reboot` lines (no-init autostart) start
 //! services while `net-apply` may hold it. A service whose own start takes
 //! that lock (`onebox-network`, `onebox-frps`) is started without it.
-//! `status` and `log` take no lock and need no root.
+//! `status` and `log` take no lock; `status` needs root (the node state and,
+//! without an init system, the service specs live in root-only
+//! directories — a spec that cannot be read is an error, never `已停止`),
+//! `log` does not.
 //!
 //! A started daemon must be running within [`WAIT_RUNNING`]; a oneshot
 //! (`onebox-network`) has no process once it finished, so its start
@@ -30,7 +33,6 @@ use crate::host::service::{validate_name, Scope, ServiceDef, ServiceKind, Servic
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
 
-const FRP_BUSY: &str = "另一个 FRP 操作正在进行；稍后重试";
 const START_WAIT: Duration = Duration::from_secs(300);
 const LOG_LINES: usize = 200;
 
@@ -63,9 +65,14 @@ impl Action {
         })
     }
 
-    /// Read-only actions need neither root nor a lock.
+    /// Read-only actions take no lock.
     pub fn read_only(self) -> bool {
         matches!(self, Action::Status | Action::Log)
+    }
+
+    /// Only `log` runs without root (`status` reads root-only state).
+    pub fn needs_root(self) -> bool {
+        self != Action::Log
     }
 
     fn done(self) -> &'static str {
@@ -88,7 +95,7 @@ const fn core_action(name: &'static str, summary: &'static str) -> CommandSpec {
 pub const START: CommandSpec = core_action("start", "启动代理内核");
 pub const STOP: CommandSpec = core_action("stop", "停止代理内核");
 pub const RESTART: CommandSpec = core_action("restart", "重启代理内核");
-pub const STATUS: CommandSpec = core_action("status", "代理内核运行状态").root(Root::NotRequired);
+pub const STATUS: CommandSpec = core_action("status", "代理内核运行状态");
 
 pub const LOG: CommandSpec = CommandSpec::new("log", Group::Service, "代理内核日志（最近 200 行）")
     .aliases(&["logs"])
@@ -121,7 +128,7 @@ pub const HOP_CLEAR: CommandSpec =
 fn service_needs_root(m: &Matches) -> bool {
     m.positional(1)
         .map_or(Ok(Action::Status), Action::parse)
-        .is_ok_and(|a| !a.read_only())
+        .is_ok_and(Action::needs_root)
 }
 
 fn cores_command(ctx: &Ctx, m: &Matches) -> Result<()> {
@@ -129,8 +136,10 @@ fn cores_command(ctx: &Ctx, m: &Matches) -> Result<()> {
     with_system(ctx, |s| cores(s, action))
 }
 
-/// `start|stop|restart|status` for every core the node uses.
+/// `start|stop|restart|status` for every core the node uses (root: even
+/// `status` reads the root-only node state).
 pub fn cores(session: &Session, action: Action) -> Result<()> {
+    session.require_root()?;
     let loaded = session.load()?;
     let services = session.services();
     if action == Action::Status {
@@ -149,7 +158,6 @@ pub fn cores(session: &Session, action: Action) -> Result<()> {
             .collect();
         return session.data(&lines.join("\n"));
     }
-    session.require_root()?;
     let _lock = node_lock(session, action)?;
     for core in loaded.config.cores() {
         act(session, &services, core.service(), action)?;
@@ -166,7 +174,8 @@ fn lock(session: &Session, scope: Scope, action: Action) -> Result<FileLock> {
     let path = scope.lock_path(&session.ctx.paths);
     let busy = match scope {
         Scope::Node => BUSY_MESSAGE,
-        Scope::Frp => FRP_BUSY,
+        // The FRP module's wording, whoever holds its lock.
+        Scope::Frp => crate::frp::runtime::BUSY,
     };
     match FileLock::acquire(&path, busy) {
         Err(Error::Busy(_)) if action == Action::Start => {
@@ -192,7 +201,7 @@ fn act(session: &Session, services: &Services, name: &str, action: Action) -> Re
         Action::Enable => services.enable(name),
         Action::Disable => services.disable(name),
         Action::Remove => services.remove(name),
-        Action::Status => session.data(&services.status_line(name)),
+        Action::Status => session.data(&services.status_line(name)?),
         Action::Log => session.data(&services.logs(name, LOG_LINES)?),
     }
 }
@@ -227,10 +236,12 @@ fn service_command(ctx: &Ctx, m: &Matches) -> Result<()> {
 pub fn service(session: &Session, name: &str, action: Action) -> Result<()> {
     validate_name(name)?;
     let services = session.services();
+    if action.needs_root() {
+        session.require_root()?;
+    }
     if action.read_only() {
         return act(session, &services, name, action);
     }
-    session.require_root()?;
     let def = ServiceDef::skeleton(&session.ctx.paths, name);
     let starts_itself =
         matches!(action, Action::Start | Action::Restart) && def.takes_lock() == Some(def.scope());

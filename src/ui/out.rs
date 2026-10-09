@@ -75,6 +75,14 @@ pub fn color_allowed(is_terminal: bool, no_color: Option<&std::ffi::OsStr>) -> b
     is_terminal && no_color.is_none_or(|v| v.is_empty())
 }
 
+/// Whether stdout output (command results such as QR codes) may be colored.
+pub fn data_color_enabled() -> bool {
+    color_allowed(
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").as_deref(),
+    )
+}
+
 /// Whether stderr output should be colored.
 pub fn color_enabled() -> bool {
     color_allowed(

@@ -40,11 +40,12 @@ fn actions() {
 
 #[test]
 fn root_policy() {
-    assert!(!root("service onebox-site"));
-    assert!(!root("service onebox-site status"));
+    // `status` reads root-only state (node state, no-init service specs).
+    assert!(root("service onebox-site"));
+    assert!(root("service onebox-site status"));
     assert!(!root("service onebox-site log"));
     assert!(root("service onebox-site restart"));
-    assert!(!root("status"));
+    assert!(root("status"));
     assert!(!root("log xray"));
     assert!(root("start"));
 }
@@ -52,7 +53,6 @@ fn root_policy() {
 #[test]
 fn service_status_and_log_are_read_only() {
     let mut bench = Bench::new();
-    bench.is_root = false;
     bench
         .exec
         .on(
@@ -62,12 +62,19 @@ fn service_status_and_log_are_read_only() {
         )
         .on("journalctl", &[], Output::success("line 1\nline 2\n"));
     service(&bench.session(), "onebox-site", Action::Status).unwrap();
+    assert!(!bench.ctx.paths.lock().exists(), "no lock taken");
+    bench.is_root = false;
     service(&bench.session(), "onebox-site", Action::Log).unwrap();
     assert_eq!(bench.output(), "onebox-site: 运行中\nline 1\nline 2");
     assert!(!bench.ctx.paths.lock().exists(), "no lock taken");
     let err = service(&bench.session(), "nginx", Action::Status).unwrap_err();
     assert_eq!(err.to_string(), "服务名无效");
-    let err = service(&bench.session(), "onebox-site", Action::Stop).unwrap_err();
+    // Status reads root-only state: refused, never a silent 已停止.
+    for action in [Action::Status, Action::Stop] {
+        let err = service(&bench.session(), "onebox-site", action).unwrap_err();
+        assert_eq!(err.to_string(), "此操作需要 root 权限", "{action:?}");
+    }
+    let err = cores(&bench.session(), Action::Status).unwrap_err();
     assert_eq!(err.to_string(), "此操作需要 root 权限");
 }
 
@@ -120,6 +127,25 @@ fn service_changes_take_the_scope_lock() {
             .any(|c| c == "systemctl start onebox-network"),
         "{history:?}"
     );
+}
+
+#[test]
+fn frp_service_changes_say_the_frp_busy_message() {
+    let bench = Bench::new();
+    let held = FileLock::acquire_waiting(
+        &bench.ctx.paths.frp_lock(),
+        crate::frp::runtime::BUSY,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(20),
+    )
+    .unwrap();
+    let err = service(&bench.session(), "onebox-frps", Action::Stop).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        crate::frp::runtime::BUSY,
+        "one wording for the FRP lock"
+    );
+    drop(held);
 }
 
 #[test]

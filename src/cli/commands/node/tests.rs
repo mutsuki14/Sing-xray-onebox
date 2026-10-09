@@ -1,10 +1,13 @@
 use super::*;
+use crate::cli::args::{parse, Globals};
 use crate::cli::session::testing::{Bench, Call};
-use crate::domain::config::ProxyCertMode;
-use crate::domain::fixtures::config;
+use crate::domain::config::{ProxyCertMode, WebCert};
+use crate::domain::fixtures::{config, with_site};
 use crate::domain::protocol::Core::{Singbox as SB, Xray as XR};
 use crate::domain::protocol::Transport;
 use Protocol::*;
+
+static SPECS: [CommandSpec; 1] = [ADD];
 
 fn reality_node() -> NodeConfig {
     config(&[(VlessReality, 443, XR)])
@@ -12,6 +15,80 @@ fn reality_node() -> NodeConfig {
 
 fn port_of(cfg: &NodeConfig, p: Protocol) -> u16 {
     cfg.inbound(p).unwrap().port
+}
+
+/// `add` options from a command line, against `cfg` (its site).
+fn add_args(cfg: &NodeConfig, line: &str) -> AddArgs {
+    let argv: Vec<String> = line.split_whitespace().map(String::from).collect();
+    let parsed = parse(&SPECS, &argv, Globals::default()).unwrap_or_else(|e| panic!("{e}"));
+    AddArgs::from_matches(&parsed.matches, cfg.site.as_ref()).unwrap()
+}
+
+#[test]
+fn add_sni_moves_shadowtls_and_touches_reality_only_where_present() {
+    let trojan = config(&[(Trojan, 443, SB)]);
+    let line = "add shadowtls --sni www.apple.com";
+    // (node, REALITY SNI afterwards)
+    for (cfg, reality_sni) in [
+        (reality_node(), "www.apple.com"),
+        (trojan.clone(), trojan.reality.sni.as_str()),
+    ] {
+        let bench = Bench::installed(&cfg);
+        bench.unattended();
+        let args = add_args(&cfg, line);
+        let (req, _) = plan_add(&bench.session(), Some(Shadowtls), &args)
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.config.shadowtls.sni, "www.apple.com", "{cfg:?}");
+        assert_eq!(req.config.shadowtls.dest, None);
+        assert_eq!(req.config.reality.sni, reality_sni);
+        if !cfg.any_reality() {
+            assert_eq!(req.config.reality, cfg.reality, "no dormant REALITY target");
+        }
+    }
+    // Neither handshake on the resulting node: refused, not stored.
+    let bench = Bench::installed(&trojan);
+    bench.unattended();
+    let args = add_args(&trojan, "add tuic --sni www.apple.com");
+    let err = plan_add(&bench.session(), Some(Tuic), &args).unwrap_err();
+    assert_eq!(err.to_string(), NO_HANDSHAKE);
+}
+
+#[test]
+fn add_without_a_protocol_is_refused_unattended() {
+    let bench = Bench::installed(&reality_node());
+    bench.unattended();
+    let err = plan_add(&bench.session(), None, &AddArgs::default()).unwrap_err();
+    assert_eq!(err.to_string(), ADD_NEEDS_PROTOCOL);
+    assert!(bench.ui.prompts().is_empty(), "nothing is picked");
+    assert!(bench.engine.calls().is_empty());
+}
+
+#[test]
+fn add_reality_site_keeps_the_site_certificate_and_entrance() {
+    let mut cfg = with_site(reality_node(), "www.example.com", false);
+    if let Some(site) = cfg.site.as_mut() {
+        site.cert = WebCert::Cloudflare;
+    }
+    let bench = Bench::installed(&cfg);
+    bench.unattended();
+    // (command line, HTTPS entrance afterwards)
+    for (line, https) in [
+        ("add tuic --reality-site new.example.com", false),
+        (
+            "add tuic --reality-site new.example.com --site-https on",
+            true,
+        ),
+    ] {
+        let args = add_args(&cfg, line);
+        let (req, _) = plan_add(&bench.session(), Some(Tuic), &args)
+            .unwrap()
+            .unwrap();
+        let site = req.config.site.unwrap();
+        assert_eq!(site.domain, "new.example.com", "{line}");
+        assert_eq!(site.cert, WebCert::Cloudflare, "{line}");
+        assert_eq!(site.https_entry, https, "{line}");
+    }
 }
 
 #[test]

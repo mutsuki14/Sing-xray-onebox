@@ -373,9 +373,28 @@ fn openrc_running_checks_the_supervised_child() {
     f.exec.on("rc-service", &[], Output::failure(3, "stopped"));
     assert!(!f.services(InitSystem::Openrc).running(XRAY_NAME));
     assert_eq!(
-        f.services(InitSystem::Openrc).status_line(XRAY_NAME),
+        f.services(InitSystem::Openrc)
+            .status_line(XRAY_NAME)
+            .unwrap(),
         "onebox-xray: 已停止"
     );
+}
+
+/// Without an init system the state comes from the saved spec: a missing
+/// one is "stopped", one that exists but cannot be read is an error.
+#[test]
+fn no_init_status_never_reports_an_unreadable_spec_as_stopped() {
+    let f = Fixture::new();
+    let services = f.services(InitSystem::None);
+    assert_eq!(
+        services.status_line(XRAY_NAME).unwrap(),
+        "onebox-xray: 已停止",
+        "not configured"
+    );
+    let spec = f.xray().spec_path();
+    fs::create_dir_all(spec.parent().unwrap()).unwrap();
+    fs::write(&spec, "{ damaged").unwrap();
+    assert!(services.status_line(XRAY_NAME).is_err());
 }
 
 #[test]
@@ -394,7 +413,10 @@ fn wait_running_reports_the_service() {
     f.exec.on("systemctl", &["is-active"], Output::success(""));
     let services = f.services(InitSystem::Systemd);
     services.wait_running(XRAY_NAME, Duration::ZERO).unwrap();
-    assert_eq!(services.status_line(XRAY_NAME), "onebox-xray: 运行中");
+    assert_eq!(
+        services.status_line(XRAY_NAME).unwrap(),
+        "onebox-xray: 运行中"
+    );
 }
 
 #[test]

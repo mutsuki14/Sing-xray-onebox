@@ -141,15 +141,17 @@ fn choose(session: &Session, spec: &NodeSpec) -> Result<Option<Export>> {
     Ok(choice.and_then(|i| exports.get(i).copied()))
 }
 
-/// QR codes of every share link, each followed by the link.
+/// QR codes of every share link, each followed by the link. On a terminal
+/// the codes carry explicit colors, so light themes do not invert them.
 fn qr(session: &Session, spec: &NodeSpec) -> Result<()> {
     if spec.for_format(ClientFormat::Links).is_empty() {
         return Err(Error::msg(NO_LINKS));
     }
     let links = render::client(spec, ClientFormat::Links)?;
+    let color = crate::ui::out::data_color_enabled();
     let mut blocks = Vec::new();
     for link in links.lines().filter(|l| !l.trim().is_empty()) {
-        blocks.push(format!("{}{link}", crate::ui::qr::render(link)?));
+        blocks.push(format!("{}{link}", crate::ui::qr::render(link, color)?));
     }
     session.data(&blocks.join("\n\n"))
 }

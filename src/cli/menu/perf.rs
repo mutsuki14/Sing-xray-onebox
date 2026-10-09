@@ -27,6 +27,7 @@ impl Menu<'_> {
             "Hysteria2 调优：自动（BBR）",
             "Hysteria2 调优：保守",
             "Hysteria2 调优：指定带宽",
+            "Hysteria2 混淆与端口跳跃",
             "资源档位",
             "重置调优",
             "体检（doctor）",
@@ -43,30 +44,37 @@ impl Menu<'_> {
             0 => self.tune(hy2(Hy2Profile::Auto)),
             1 => self.tune(hy2(Hy2Profile::Conservative)),
             2 => self.tune(self.measured()?),
-            3 => match self.resource()? {
+            3 => self.tune(self.hy2_transport()?),
+            4 => match self.resource()? {
                 Some(profile) => self.tune(Tune::Resource(profile)),
                 None => Ok(()),
             },
-            4 => self.tune(Tune::Reset),
-            5 => self.dispatch(&["doctor"]),
-            6 => self.probe_menu(),
-            7 => self.bench(),
-            8 => self.failover(),
-            9 => self.dispatch(&["reality-check"]),
+            5 => self.tune(Tune::Reset),
+            6 => self.dispatch(&["doctor"]),
+            7 => self.probe_menu(),
+            8 => self.bench(),
+            9 => self.failover(),
+            10 => self.dispatch(&["reality-check"]),
             _ => self.dispatch(&["bbr"]),
         })
     }
 
-    /// Preview a tuning change, apply it when confirmed (root).
+    /// Preview a tuning change, apply it when confirmed (root, which the
+    /// preview needs too: the node state is root-only).
     fn tune(&self, change: Tune) -> Result<()> {
+        self.session.require_root()?;
         let loaded = self.loaded()?;
-        let next = tune::plan_tune(&loaded.config, change)?;
-        self.session.data(&tune::preview_line(&next))?;
+        let next = tune::plan_live(self.session, &loaded.config, change)?;
+        self.session.data(&tune::preview_text(&next, change))?;
         if !self.session.ui().confirm("应用此调优配置？", true)? {
             return Ok(());
         }
-        self.session.require_root()?;
-        self.session.apply(request(&loaded, next, "调优"))
+        let reimport = tune::needs_reimport(&loaded.config, &next);
+        self.session.apply(request(&loaded, next, "调优"))?;
+        if reimport {
+            self.session.info(tune::REIMPORT);
+        }
+        Ok(())
     }
 
     fn measured(&self) -> Result<Tune> {
@@ -75,11 +83,19 @@ impl Menu<'_> {
         let default = |v: Option<u32>| v.unwrap_or(100).to_string();
         let up = ask_number(ui, "上传 Mbps", &default(hy2.up_mbps), HY2_MBPS)?;
         let down = ask_number(ui, "下载 Mbps", &default(hy2.down_mbps), HY2_MBPS)?;
-        Ok(Tune::Hy2 {
-            profile: Hy2Profile::Measured,
-            up: Some(up),
-            down: Some(down),
-        })
+        Ok(Tune::hy2(Hy2Profile::Measured, Some(up), Some(down)))
+    }
+
+    /// Salamander obfuscation and the hopping range, defaulting to the
+    /// current settings.
+    fn hy2_transport(&self) -> Result<Tune> {
+        let hy2 = self.loaded()?.config.hy2;
+        let ui = self.session.ui();
+        let obfs = ui.confirm("启用 Salamander 混淆?", hy2.obfs)?;
+        let current = hy2.hop.map_or_else(|| "off".to_owned(), |r| r.to_string());
+        let check = |answer: &str| tune::hop(answer).map(|_| answer.trim().to_owned());
+        let answer = ui.input_with("UDP 端口跳跃范围（起-止，off 关闭）", &current, &check)?;
+        Ok(Tune::hy2_transport(Some(obfs), Some(tune::hop(&answer)?)))
     }
 
     fn resource(&self) -> Result<Option<ResourceProfile>> {
@@ -238,11 +254,7 @@ impl Menu<'_> {
 type Check = fn(&str) -> Result<String>;
 
 fn hy2(profile: Hy2Profile) -> Tune {
-    Tune::Hy2 {
-        profile,
-        up: None,
-        down: None,
-    }
+    Tune::hy2(profile, None, None)
 }
 
 fn tuning_state(cfg: &NodeConfig) -> String {
@@ -258,6 +270,15 @@ fn tuning_state(cfg: &NodeConfig) -> String {
             Some(p) => p.id().to_owned(),
         };
         parts.push(format!("Hysteria2 调优 {profile}"));
+        parts.push(format!(
+            "混淆 {}",
+            if cfg.hy2.obfs { "开启" } else { "关闭" }
+        ));
+        let hop = cfg
+            .hy2
+            .hop
+            .map_or_else(|| "关闭".to_owned(), |r| r.to_string());
+        parts.push(format!("端口跳跃 {hop}"));
     }
     parts.push(format!("资源档位 {}", cfg.resource_profile));
     format!("  {}", parts.join(" · "))

@@ -11,7 +11,7 @@ onebox service onebox-site restart   # 单独控制某个 Onebox 服务
 onebox service onebox-site log
 ```
 
-`service 服务名 [操作]` 支持的操作：`start`、`stop`、`restart`、`enable`、`disable`、`remove`、`status`（默认）、`log`。服务没有 `reload`，请用 `restart`。`onebox status` 要读取节点状态文件，需要 root；`service` 的 `status` 和 `log` 不需要 root，非 root 用户可用 `onebox service onebox-sing-box status` 查看内核是否运行（无 init 环境除外：服务定义只有 root 可读，非 root 查询总显示 `已停止`）。`start` 遇到正在进行的配置变更时会等待其结束（最长 5 分钟）再启动，并确认服务已经运行。
+`service 服务名 [操作]` 支持的操作：`start`、`stop`、`restart`、`enable`、`disable`、`remove`、`status`（默认）、`log`。服务没有 `reload`，请用 `restart`。`onebox status` 与 `service … status` 要读取只有 root 可读的节点状态文件或服务定义，都需要 root；服务定义无法读取或已损坏时报错，而不是显示 `已停止`。`log` 与 `service … log` 不需要 root（能否读到日志取决于系统日志的权限）。`start` 遇到正在进行的配置变更时会等待其结束（最长 5 分钟）再启动，并确认服务已经运行。
 
 日志位置：systemd 上来自 `journalctl`；OpenRC 和无 init 环境写入 `/var/log/onebox/<服务名>.log`（FRP 服务写入 `/var/log/onebox-frp/`）。
 
@@ -110,7 +110,7 @@ Onebox 只管理自己带标记的 crontab 行，不改动其他行：
 | `# onebox:boot:服务名` | `@reboot` | 仅无 init 环境：开机执行 `onebox service 服务名 start` | `/var/log/onebox/boot.log`（FRP 为 `/var/log/onebox-frp/boot.log`） |
 
 - `renew` 行只在存在 Let's Encrypt 或自备证书（代理、网站或独立订阅）时安装；只有自签证书的节点不需要计划任务。需要 Let's Encrypt 证书但 cron 未运行时，配置变更会在开始前报错；自备证书只给出警告。
-- 续期等待正在进行的配置操作结束（最长 10 分钟），只续期到期的证书，并只重启受影响的服务：代理证书 → 代理内核，网站证书 → `onebox-site`，独立订阅证书 → `onebox-subscription-web`。只有客户端固定了代理证书指纹（自签证书，或不受公共信任的自备证书）且证书被更换，或证书的公共信任状态改变时，才执行一次完整配置事务，重新发布客户端配置与订阅；Let's Encrypt 代理证书的常规续期只重启代理内核。无事可做时不输出。
+- 续期等待正在进行的配置操作结束（最长 10 分钟），只续期到期的证书，并只重启受影响的服务：代理证书 → 代理内核，网站证书 → `onebox-site`，独立订阅证书 → `onebox-subscription-web`。只有客户端固定了代理证书指纹（自签证书，或不受公共信任的自备证书）且证书被更换，或证书的公共信任状态改变时，才执行一次完整配置事务，重新发布客户端配置与订阅；Let's Encrypt 代理证书的常规续期只重启代理内核。这次配置事务失败（或被拒绝、取消）时，恢复续期前的代理证书并重启代理内核，客户端继续可用，下次续期时重试，命令报错 `客户端配置未重新发布，已恢复续期前的代理证书（下次续期时重试）: …`。无事可做时不输出。
 - 时间按系统时区。每行都带固定的 `PATH` 和 Onebox 的路径环境变量，不含任何凭据。日志目录被删除（或 `/var/log` 位于重启即清空的 tmpfs）时，任务先重新创建该目录再运行。
 - 手动执行 `onebox renew` 会强制续期全部证书（单个证书：`onebox cert renew proxy|site|subscription`）。
 - 以 `#` 开头（被注释掉）的行不算 Onebox 的行，Onebox 不会改动或删除它。手工改过的 Onebox 行在配置失败回滚时不会被重新安装（会给出警告），重新应用配置即可重建。

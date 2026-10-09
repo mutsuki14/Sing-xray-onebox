@@ -15,15 +15,20 @@
 //! `协议=端口`; `port` without a port under `-y` keeps the current one and
 //! changes nothing; `del` never deletes by default: Enter at its menu goes
 //! back, and without a terminal (or under `-y`) the protocol must be named
-//! (v2 deleted the first protocol).
+//! (v2 deleted the first protocol); `add` without a terminal (or under
+//! `-y`) needs the protocol too, instead of adding the first one not yet
+//! enabled; `add --sni` moves the ShadowTLS handshake as well and touches
+//! REALITY only when the node has it (as `sni --sni`); `add --reality-site`
+//! keeps an existing site's certificate method and HTTPS entrance.
 
 use crate::apply::ApplyRequest;
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec};
+use crate::cli::commands::site::retitled_page;
 use crate::cli::options::{self as opt, CertArgs, RealityArgs};
 use crate::cli::session::{request, with_system, LiveProbe, Session};
 use crate::cli::wizard::steps;
 use crate::ctx::Ctx;
-use crate::domain::config::{NodeConfig, PortRange, WebCert};
+use crate::domain::config::{NodeConfig, PortRange, SiteConfig};
 use crate::domain::plan::{self, AddOptions, RealityChoice};
 use crate::domain::protocol::{Core, Protocol};
 use crate::error::Result;
@@ -34,6 +39,10 @@ use crate::ui;
 pub const UPDATED: &str = "配置已更新";
 /// `del` without a protocol where nobody can choose one.
 pub const DEL_NEEDS_PROTOCOL: &str = "请指定要删除的协议，例如 onebox del tuic";
+/// `add` without a protocol where nobody can choose one.
+pub const ADD_NEEDS_PROTOCOL: &str = "请指定要添加的协议，例如 onebox add tuic";
+/// `--sni` on a node that will have neither handshake.
+const NO_HANDSHAKE: &str = "没有启用 REALITY 或 ShadowTLS";
 const ANYTLS_REALITY_HINT: &str =
     "AnyTLS-REALITY: onebox client singbox，或使用 sing-box 远程配置订阅";
 
@@ -109,11 +118,13 @@ pub struct AddArgs {
 }
 
 impl AddArgs {
-    pub fn from_matches(m: &Matches) -> Result<AddArgs> {
+    /// `site` is the node's current website (`--reality-site` keeps its
+    /// certificate method and HTTPS entrance).
+    pub fn from_matches(m: &Matches, site: Option<&SiteConfig>) -> Result<AddArgs> {
         Ok(AddArgs {
             core: opt::core(m, "core")?,
             port: m.value("port").map(str::to_owned),
-            reality: opt::reality_args(m, WebCert::Http01)?,
+            reality: opt::reality_args(m, site)?,
             cert: opt::cert_args(m, None)?,
             hy2_obfs: m.flag("hy2-obfs"),
             hy2_hop: opt::hop(m)?,
@@ -140,8 +151,11 @@ impl AddArgs {
 
 fn add_command(ctx: &Ctx, m: &Matches) -> Result<()> {
     let protocol = m.positional(0).map(str::parse).transpose()?;
-    let args = AddArgs::from_matches(m)?;
-    with_system(ctx, |s| add(s, protocol, &args))
+    with_system(ctx, |s| {
+        let loaded = s.load()?;
+        let args = AddArgs::from_matches(m, loaded.config.site.as_ref())?;
+        add(s, protocol, &args)
+    })
 }
 
 /// `add`: plan, apply, v2 tail.
@@ -167,10 +181,15 @@ pub fn plan_add(
     let cfg = &loaded.config;
     let protocol = match protocol {
         Some(p) => p,
-        None => match choose_new(session, cfg)? {
-            Some(p) => p,
-            None => return Ok(None),
-        },
+        // Nothing is picked for the user: a forgotten protocol in a script
+        // must not open a port and change every client export.
+        None => {
+            ensure!(session.ui().interactive(), "{ADD_NEEDS_PROTOCOL}");
+            match choose_new(session, cfg)? {
+                Some(p) => p,
+                None => return Ok(None),
+            }
+        }
     };
     ensure!(!cfg.has(protocol), "协议已存在");
     let mut opts = add_options(session, cfg, protocol, args)?;
@@ -193,16 +212,27 @@ pub fn plan_add(
         }
     }
     next = handshake_extras(&next, &args.reality, &env)?;
-    Ok(Some((request(&loaded, next, "添加协议"), protocol)))
+    let page = retitled_page(session, cfg, &next)?;
+    let mut req = request(&loaded, next, "添加协议");
+    req.intents.site_content = page;
+    Ok(Some((req, protocol)))
 }
 
-/// `--reality-dest` after `--sni`, and `--site-https` for an existing site.
+/// The ShadowTLS half of `--sni`, `--reality-dest` after `--sni`, and
+/// `--site-https` for an existing site (the order of `sni`).
 fn handshake_extras(
     cfg: &NodeConfig,
     reality: &RealityArgs,
     env: &plan::PlanEnv,
 ) -> Result<NodeConfig> {
     let mut next = cfg.clone();
+    if let Some(sni) = &reality.shadowtls_sni {
+        let shadowtls = next.has(Protocol::Shadowtls);
+        ensure!(shadowtls || next.any_reality(), "{NO_HANDSHAKE}");
+        if shadowtls {
+            next = plan::set_shadowtls_sni(&next, sni)?;
+        }
+    }
     if let Some(dest) = &reality.dest_after_sni {
         next = plan::set_reality_target(&next, &RealityChoice::Dest(dest.clone()), env)?;
     }
@@ -215,7 +245,9 @@ fn handshake_extras(
 
 /// Turn `add` options into the planner's, asking for the REALITY target of
 /// the first REALITY inbound and for a certificate a new protocol needs
-/// (interactive only, when the command line did not decide).
+/// (interactive only, when the command line did not decide). `--sni` moves
+/// REALITY only on a node that will have it; its ShadowTLS half is applied
+/// by [`handshake_extras`].
 fn add_options(
     session: &Session,
     cfg: &NodeConfig,
@@ -223,9 +255,13 @@ fn add_options(
     args: &AddArgs,
 ) -> Result<AddOptions> {
     let ui = session.ui();
+    let will_have_reality = cfg.any_reality() || protocol.reality();
     let mut reality = args.reality.choice.clone();
+    if args.reality.shadowtls_sni.is_some() && !will_have_reality {
+        reality = RealityChoice::Default;
+    }
     if protocol.reality() && !cfg.any_reality() && args.reality.is_empty() && ui.interactive() {
-        reality = steps::reality_menu(ui, "选择 REALITY 伪装目标")?;
+        reality = steps::reality_menu(ui, "选择 REALITY 伪装目标", None)?;
     }
     let mut cert = args.cert.choice.clone();
     let needs_new_cert = protocol.certificate() && cfg.tls.is_none();
