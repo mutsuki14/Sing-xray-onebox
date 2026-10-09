@@ -6,10 +6,12 @@
 //! context-free built-ins → `Ctx::system` → root policy → handler.
 
 pub mod args;
+pub mod commands;
 pub mod help;
 pub mod options;
 pub mod registry;
 pub mod session;
+pub mod wizard;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};

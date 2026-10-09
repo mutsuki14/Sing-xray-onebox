@@ -1,7 +1,7 @@
 //! Test doubles for [`Session`]: an engine that records requests and a
 //! host with scripted facts.
 
-use super::{Engine, Live, Session};
+use super::{Engine, Live, Printer, Session};
 use crate::apply::ApplyRequest;
 use crate::ctx::Ctx;
 use crate::domain::config::NodeConfig;
@@ -14,6 +14,7 @@ use crate::sys::exec::FakeExec;
 use crate::sys::fs::TempDir;
 use crate::sys::lock::FileLock;
 use crate::sys::rand::{Random, SeqRandom};
+use crate::ui::out::Level;
 use crate::ui::ScriptedPrompter;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -157,6 +158,23 @@ impl Live for FakeLive {
     }
 }
 
+/// Captured output: data lines (stdout) and status lines (`[完成] …`).
+#[derive(Default)]
+pub struct Capture {
+    data: Mutex<Vec<String>>,
+    notes: Mutex<Vec<String>>,
+}
+
+impl Printer for Capture {
+    fn data(&self, text: &str) -> Result<()> {
+        lock(&self.data).push(text.to_owned());
+        Ok(())
+    }
+    fn status(&self, level: Level, text: &str) {
+        lock(&self.notes).push(format!("{} {text}", level.tag()));
+    }
+}
+
 /// Everything a handler test needs; build a [`Session`] with [`Bench::session`].
 pub struct Bench {
     pub dir: TempDir,
@@ -166,6 +184,7 @@ pub struct Bench {
     pub engine: Recorder,
     pub live: FakeLive,
     pub is_root: bool,
+    pub printed: Capture,
 }
 
 impl Bench {
@@ -180,6 +199,7 @@ impl Bench {
             engine: Recorder::default(),
             live: FakeLive::default(),
             is_root: true,
+            printed: Capture::default(),
         }
     }
 
@@ -191,7 +211,17 @@ impl Bench {
     }
 
     pub fn session(&self) -> Session<'_> {
-        Session::new(&self.ctx, &self.engine, &self.live, self.is_root)
+        Session::new(&self.ctx, &self.engine, &self.live, self.is_root).with_printer(&self.printed)
+    }
+
+    /// Everything printed on stdout so far, joined by newlines.
+    pub fn output(&self) -> String {
+        lock(&self.printed.data).join("\n")
+    }
+
+    /// Status lines printed so far (`[完成] …`, `[警告] …`).
+    pub fn notes(&self) -> Vec<String> {
+        lock(&self.printed.notes).clone()
     }
 
     /// Answer the next questions in order.

@@ -29,7 +29,8 @@ use crate::host::service::Services;
 use crate::state::{Loaded, Origin, StateStore};
 use crate::sys::lock::FileLock;
 use crate::sys::rand::{OsRandom, Random};
-use crate::ui::{out, Prompter};
+use crate::ui::out::{self, Level};
+use crate::ui::Prompter;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -149,11 +150,31 @@ impl Facts {
     }
 }
 
+/// Where a handler's output goes: command results to stdout, status lines
+/// (`[完成]`/`[提示]`/`[警告]`/`[错误]`) to stderr. Tests capture both.
+pub trait Printer: Send + Sync {
+    fn data(&self, text: &str) -> Result<()>;
+    fn status(&self, level: Level, text: &str);
+}
+
+/// The terminal (`ui::out`).
+pub struct StdPrinter;
+
+impl Printer for StdPrinter {
+    fn data(&self, text: &str) -> Result<()> {
+        out::data(text)
+    }
+    fn status(&self, level: Level, text: &str) {
+        out::status(level, text);
+    }
+}
+
 pub struct Session<'a> {
     pub ctx: &'a Ctx,
     pub engine: &'a dyn Engine,
     pub live: &'a dyn Live,
     pub is_root: bool,
+    printer: &'a dyn Printer,
     warned: AtomicBool,
 }
 
@@ -169,8 +190,36 @@ impl<'a> Session<'a> {
             engine,
             live,
             is_root,
+            printer: &StdPrinter,
             warned: AtomicBool::new(false),
         }
+    }
+
+    /// The same session printing through `printer` (tests).
+    pub fn with_printer(mut self, printer: &'a dyn Printer) -> Session<'a> {
+        self.printer = printer;
+        self
+    }
+
+    /// A command result on stdout (one trailing newline).
+    pub fn data(&self, text: &str) -> Result<()> {
+        self.printer.data(text.trim_end_matches('\n'))
+    }
+
+    pub fn ok(&self, text: impl std::fmt::Display) {
+        self.printer.status(Level::Ok, &text.to_string());
+    }
+
+    pub fn info(&self, text: impl std::fmt::Display) {
+        self.printer.status(Level::Info, &text.to_string());
+    }
+
+    pub fn warn(&self, text: impl std::fmt::Display) {
+        self.printer.status(Level::Warn, &text.to_string());
+    }
+
+    pub fn error(&self, text: impl std::fmt::Display) {
+        self.printer.status(Level::Error, &text.to_string());
     }
 
     pub fn ui(&self) -> &dyn Prompter {
@@ -214,7 +263,7 @@ impl<'a> Session<'a> {
         if let Origin::V2 { warnings, .. } = &loaded.origin {
             if !self.warned.swap(true, Ordering::SeqCst) {
                 for warning in warnings {
-                    out::warn(warning);
+                    self.warn(warning);
                 }
             }
         }
@@ -232,6 +281,13 @@ impl<'a> Session<'a> {
     pub fn apply(&self, mut req: ApplyRequest) -> Result<()> {
         if req.intents.cloudflare.is_none() {
             let needed = cloudflare_targets(self.ctx, &req.config, req.intents.renew);
+            if !needed.is_empty() && self.ui().interactive() {
+                let labels: Vec<&str> = needed.iter().map(|s| s.label()).collect();
+                self.info(format!(
+                    "{}使用 Cloudflare DNS 验证，需要 API Token",
+                    labels.join("、")
+                ));
+            }
             req.intents.cloudflare = resolve_cloudflare(self.ui(), &needed)?;
         }
         self.engine.apply(self.ctx, req)
@@ -289,11 +345,6 @@ pub fn resolve_cloudflare(
     if !ui.interactive() {
         return Err(Error::msg(cloudflare::MISSING));
     }
-    let labels: Vec<&str> = needed.iter().map(|s| s.label()).collect();
-    out::info(format!(
-        "{}使用 Cloudflare DNS 验证，需要 API Token",
-        labels.join("、")
-    ));
     cloudflare::prompt(ui).map(Some)
 }
 
