@@ -66,6 +66,30 @@ fn the_node_lock_is_free_while_asking_and_downloading() {
 }
 
 #[test]
+fn the_commit_waits_for_a_short_operation_holding_the_node_lock() {
+    // A renewal takes the node lock while the user answers; it is done
+    // shortly after the downloads finished.
+    let mut fx = Fx::both();
+    fx.offline(Core::Xray, "26.4.0");
+    let path = fx.ctx.paths.lock();
+    let holder = Arc::new(Mutex::new(None));
+    let spawned = holder.clone();
+    fx.on_confirm(move || {
+        let lock = FileLock::acquire(&path, "x").unwrap();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(lock);
+        });
+        *spawned.lock().unwrap() = Some(thread);
+    });
+    fx.run(CoreSelection::One(Core::Xray), Some("26.4.0"), false)
+        .unwrap();
+    assert_eq!(replaced(&fx.request()), [Core::Xray]);
+    let thread = holder.lock().unwrap().take().unwrap();
+    thread.join().unwrap();
+}
+
+#[test]
 fn a_change_while_asking_is_committed_on_top_when_the_plan_still_holds() {
     let mut fx = Fx::both();
     fx.offline(Core::Xray, "26.4.0");

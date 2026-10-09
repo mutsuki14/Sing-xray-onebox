@@ -28,9 +28,10 @@
 //! to recover leftovers and read the configuration, then, after the
 //! lookups, the question and the downloads (which may take minutes and must
 //! not block renewals or device changes meanwhile), to recover again,
-//! re-read the configuration and commit. The plan must still hold then
-//! (same targets and pins, same live core versions), else
-//! `Error::Conflict`; the apply's compare-and-swap uses the re-read hash.
+//! re-read the configuration and commit. A short operation holding it then
+//! is waited for (up to a minute). The plan must still hold then (same
+//! targets and pins, same live core versions), else `Error::Conflict`; the
+//! apply's compare-and-swap uses the re-read hash.
 //!
 //! Changes from v2:
 //! - only cores the configuration uses are targets (G-8.1#2: an unused
@@ -67,6 +68,7 @@ use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use crate::ui::out;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Progress label of the apply transaction.
 pub const REASON: &str = "更新内核";
@@ -78,6 +80,11 @@ pub const CANCELLED: &str = "已取消内核更新";
 pub const PINS_SAVED: &str = "已更新固定版本";
 /// The question after [`xray_warning`].
 pub const CONTINUE: &str = "继续？";
+/// Shown while the commit waits for another operation's node lock.
+pub const WAITING: &str = "另一个配置操作正在进行，等待其完成…";
+/// How long the commit waits for the node lock.
+const COMMIT_WAIT: Duration = Duration::from_secs(60);
+const COMMIT_POLL: Duration = Duration::from_millis(200);
 /// Name prefix of the staging directory inside `BIN` (v2 layout).
 pub const STAGING_PREFIX: &str = ".core-update-";
 const ONE_VERSION_TWO_CORES: &str =
@@ -354,6 +361,20 @@ impl Updater<'_> {
         FileLock::acquire(&self.ctx.paths.lock(), BUSY_MESSAGE)
     }
 
+    /// The node lock for the commit. The question was answered and the
+    /// downloads are done, so an operation holding it briefly (a renewal,
+    /// a device change) is waited for instead of failing the update.
+    fn commit_lock(&self) -> Result<FileLock> {
+        match self.node_lock() {
+            Err(Error::Busy(_)) => {
+                out::info(WAITING);
+                let path = self.ctx.paths.lock();
+                FileLock::acquire_waiting(&path, BUSY_MESSAGE, COMMIT_WAIT, COMMIT_POLL)
+            }
+            other => other,
+        }
+    }
+
     /// Finish leftovers under the node lock, then read the configuration.
     fn recover_and_load(&self, lock: &FileLock) -> Result<Loaded> {
         self.engine.recover(self.ctx, lock)?;
@@ -481,7 +502,7 @@ impl Updater<'_> {
         plans: &[Plan],
         staged: Vec<(Core, PathBuf)>,
     ) -> Result<Committed> {
-        let lock = self.node_lock()?;
+        let lock = self.commit_lock()?;
         let loaded = self.recover_and_load(&lock)?;
         self.check_unchanged(&loaded.config, selection, wanted, plans)?;
         let config = updated_config(&loaded.config, plans);
