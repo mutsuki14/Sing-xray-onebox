@@ -28,14 +28,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/m
 
 ```bash
 # 国内服务器（GitHub 访问困难）：经 HTTPS 镜像前缀下载。引导脚本、校验文件和程序
-# 都由镜像提供，镜像可以同时替换它们：使用镜像即信任镜像，请只用可信镜像
+# 都由镜像提供，镜像可以同时替换它们：使用镜像即信任镜像，请只用可信镜像。
+# 程序随后下载内核等文件时也经镜像，但 Release 元数据始终直连 api.github.com，申请
+# Let's Encrypt 证书需直连 raw.githubusercontent.com：主机仍需能访问这两个地址（见 docs/install.md#系统要求）
 GH_PROXY=https://ghfast.top/ bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh)
 
 # Alpine 等无 Bash 的系统（先 apk add curl）：引导脚本是 POSIX sh
 curl -fsSL https://raw.githubusercontent.com/mutsuki14/Sing-xray-onebox/main/onebox.sh -o onebox.sh && sh onebox.sh
 
-# 离线：先把 onebox.sh、程序和同一 Release 的 SHA256SUMS（从 GitHub Release 页面直接取得）放到当前目录，
-# 自行校验并赋予执行权限，再交给引导脚本（它不校验 ONEBOX_NATIVE_BIN）
+# 本地传入程序（不经引导脚本下载）：先把 onebox.sh、程序和同一 Release 的 SHA256SUMS
+# （从 GitHub Release 页面直接取得）放到当前目录，自行校验并赋予执行权限，再交给引导脚本
+# （它不校验 ONEBOX_NATIVE_BIN）。安装节点时仍会联网下载 sing-box / Xray、缺失的依赖包并检测公网地址；
+# 完全离线需预装依赖、为所用内核设置 ONEBOX_SINGBOX_BIN / ONEBOX_XRAY_BIN、用 --addr 指定地址，且不用 Let's Encrypt
+# 证书（见 docs/install.md#环境变量）
 grep ' onebox-linux-amd64-musl$' SHA256SUMS | sha256sum -c - && chmod 700 onebox-linux-amd64-musl \
   && ONEBOX_NATIVE_BIN=./onebox-linux-amd64-musl sh onebox.sh
 
@@ -68,7 +73,7 @@ Onebox 3.0.0 · sing-box 1.14.2 · Xray 26.3.27
 请选择 [默认: 0]:
 ```
 
-未安装时顶部显示 `尚未安装节点`，菜单为 `1) 安装  2) 安装预演  3) FRP 服务端  4) BBR  5) 更新程序`；存在快照时另有 `恢复快照`，存在未完成的配置事务时另有 `故障恢复`。每个子菜单先显示当前设置，再列出操作（`0) 返回`）；输入有误会提示并重新询问；操作失败显示 `[错误] …` 后回到原菜单。在菜单提示处按 Ctrl+D 退出（退出码 130），在某个操作的提问中按 Ctrl+D 只取消该操作。没有终端时（例如通过管道运行）`onebox` 打印命令概览而不打开菜单。
+未安装时顶部显示 `尚未安装节点`，菜单为 `1) 安装  2) 安装预演  3) FRP 服务端  4) BBR  5) 更新程序`；存在快照时另有 `恢复快照`，存在未完成的配置事务时另有 `故障恢复`。每个子菜单先显示当前设置，再列出操作（`0) 返回`）；输入有误会提示并重新询问；操作失败显示 `[错误] …` 后回到原菜单。在菜单提示处按 Ctrl+D 退出（退出码 130），在某个操作的提问中按 Ctrl+D 只取消该操作。只有既没有终端输入、也打不开 `/dev/tty` 时（例如 cron、CI、不分配终端的 `ssh 主机 onebox`），`onebox` 才打印命令概览而不打开菜单；标准输入是管道但仍在终端中运行时，菜单照常从终端读取。
 
 ## 安装向导
 
@@ -77,8 +82,8 @@ Onebox 3.0.0 · sing-box 1.14.2 · Xray 26.3.27
 | 步骤 | 内容 |
 |---|---|
 | 1/5 协议组合 | 选择预设 1–6，或 7 自定义多选（含两种内核都支持的协议时再选优先内核） |
-| 2/5 伪装目标 | 仅选了 REALITY 协议时：Microsoft、Apple、自定义域名或自有域名一键建站 |
-| 3/5 证书 | 仅选了需要证书的协议（或 VMess-WS）时：无域名推荐自签；有域名可选 Let's Encrypt（HTTP-01 / Cloudflare DNS）或自备证书 |
+| 2/5 伪装目标 | 选择了任一 REALITY 类协议、且命令行未指定伪装目标时：Microsoft、Apple、自定义域名或自有域名一键建站 |
+| 3/5 证书 | 选择了任一需要证书的协议（或 VMess-WS）、且未给出 `--tls` 时：无域名推荐自签；有域名可选 Let's Encrypt（HTTP-01 / Cloudflare DNS）或自备证书 |
 | 4/5 连接地址与端口 | 显示检测到的公网 IPv4 / IPv6 作为默认地址；端口自动分配，可选自定义 |
 | 5/5 确认 | 汇总表（协议、内核、端口、传输层），`确认安装？ [Y/n]` |
 

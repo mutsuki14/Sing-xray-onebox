@@ -25,7 +25,7 @@ onebox add vless-reality --reality-site www.example.com
 onebox site enable www.example.com --tls cf
 ```
 
-交互方式：安装向导第 2 步或 `onebox sni` 中选择“自有域名一键建站”，输入域名和标题，选择是否开启 HTTPS 443 入口（默认开启）以及网站证书方式。用命令行 `--reality-site` 新建网站时证书使用 HTTP-01（已有网站时沿用原证书方式），需要其他方式时用 `onebox site enable 域名 --tls cf|custom`。`--reality-site` 不能与 `--sni`、`--reality-dest` 同时使用。切换后客户端需要更新 SNI（重新导入配置或刷新订阅）。
+交互方式：安装向导第 2 步或 `onebox sni` 中选择“自有域名一键建站”，输入域名和标题，选择是否开启 HTTPS 443 入口（默认开启）以及网站证书方式。`install --reality-site` 与 `add … --reality-site` 的网站证书总是 HTTP-01（已有网站使用 cf / custom 时也会改回 HTTP-01）；`onebox sni --reality-site` 对已有网站沿用原证书方式。需要其他方式时用 `onebox site enable 域名 --tls cf|custom`。`--reality-site` 与 `onebox site enable` 都会把 HTTPS 443 入口设为开启：用 `--reality-site` 时可加 `--site-https off` 保持关闭，`site enable` 之后需执行 `onebox site https off`。`--reality-site` 不能与 `--sni`、`--reality-dest` 同时使用。切换后客户端需要更新 SNI（重新导入配置或刷新订阅）。
 
 ## 流量如何处理
 
@@ -69,7 +69,7 @@ onebox site restore latest
 - **更换模板**：`site template` 按模板重新生成主页并发布（未指定模板时为 `minimal`），会替换手工修改或导入的内容（原内容先备份）。
 - **修改配色、标题、描述**：只适用于模板生成的页面；导入或手工修改过的页面会被拒绝（`网站已被手动修改或导入，请编辑原网页后重新导入`）。
 - **导入**：目录内必须有 `index.html`；只复制文件、不执行；拒绝符号链接、特殊文件、系统目录、Onebox 配置目录和递归导入；内容上限 256 MiB、100000 个文件。
-- **备份与恢复**：每次发布前完整备份原网站（保留最近 10 份），发布失败自动恢复；`site restore latest` 或 `site restore 备份ID` 手动恢复。证书验证目录始终保留。
+- **备份与恢复**：每次发布前完整备份原网站（保留最近 10 份），发布失败自动恢复；`site restore`（默认 latest）或 `site restore 备份ID` 手动恢复；备份 ID 是 `/etc/onebox/site/content-backups/` 下的目录名，菜单 **5) 自有域名网站 → 恢复内容** 会按时间列出可选备份（`site info` 只显示备份数量）。证书验证目录始终保留。
 
 ## 证书
 
@@ -88,7 +88,7 @@ onebox site restore latest
 ## 关闭与卸载
 
 - 切换回外部 REALITY 目标、执行 `site disable`，或删除最后一个 REALITY 协议时，程序停止托管网站及其续期，**网页内容和内容备份保留**。
-- 网站设置（标题、模板、配色、描述、证书方式）不会保留：之后重新启用时从默认值开始，除非在命令中指定。v2 会保留这些设置。
+- 网站设置（标题、模板、配色、描述、证书方式）不会保留：之后重新启用时从默认值开始，除非在命令中指定。v2 会保留这些设置。重新启用时继续使用保留的 `index.html`，不会按新标题或默认模板重新生成：`--site-title` 只记入网站设置，已有主页不变（只有尚无主页时才按它自动生成）。需要按当前设置重新生成主页时执行 `onebox site template [模板] --title …`（未改动过的生成页面也可用 `onebox site title …`）。
 - 订阅正在复用网站时，需先 `onebox subscription disable` 或切换订阅模式，才能关闭网站或更换网站域名。
 - `onebox uninstall` 同样保留网页内容和内容备份。
 - 文件位置：网页 `/var/lib/onebox-site/`，管理目录与证书 `/etc/onebox/site/`，内容备份 `/etc/onebox/site/content-backups/`。

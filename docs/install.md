@@ -10,7 +10,7 @@
 | 架构 | 预编译：`amd64`、`arm64`、`386`（i586 及以上）、`armv7`。其他架构需源码构建，并受上游内核支持限制 |
 | 权限 | 安装和修改配置需要 root；节点配置仅 root 可读，查看节点信息、导出客户端配置也需要 root。`help`、`version`、未安装时的 `plan`，以及使用探测配置文件的 `bench`、`failover` 不需要 root |
 | 依赖 | `openssl`、`curl`、`iproute2` 缺失时通过 apt-get / dnf / yum / apk / pacman / zypper 自动安装；使用 Let's Encrypt 证书时还需要 cron（缺失时自动安装并启动）；网站、独立 HTTPS 订阅和 FRP 网站模式另需 nginx（同样自动安装） |
-| 网络 | 下载程序与代理内核需访问 GitHub；受限网络设置 `GH_PROXY`（见下文[环境变量](#环境变量)中的信任说明） |
+| 网络 | 引导脚本下载程序，以及 Onebox 下载代理内核、FRP、BBRv3 内核包和程序更新，都需访问 GitHub。设置 `GH_PROXY` 后引导脚本的下载全部经前缀；Onebox 自己的下载只有文件本身经前缀，Release 元数据（api.github.com）、缺少摘要时的 `SHA256SUMS` / `.dgst`（github.com），以及 Let's Encrypt 证书所需的 acme.sh 脚本（raw.githubusercontent.com）始终直连，主机必须能直接访问这些地址（见下文[环境变量](#环境变量)中的信任说明）。安装时还会访问 api.ipify.org / api6.ipify.org 检测公网地址（检测失败时用 `--addr` 指定） |
 
 | 架构 | Release 资产 | Rust 目标 |
 |---|---|---|
@@ -64,7 +64,7 @@ onebox install --preset 1 --reality-site www.example.com --site-title '我的手
 onebox install --preset 1 -y --force
 ```
 
-- 没有终端时（例如在脚本中运行）同样按无人值守处理；无法检测公网地址时报错，请用 `--addr` 指定。
+- 既没有终端输入、也打不开 `/dev/tty` 时（例如 cron、CI、不分配终端的 `ssh 主机 onebox install …`）同样按无人值守处理；在终端里执行的脚本仍会进入交互向导，脚本中请始终加 `-y`。无人值守时无法检测公网地址会报错，请用 `--addr` 指定。
 - 已安装时，交互重装会先确认（`重新安装会生成新凭据并清除订阅设备，继续？`）；`-y` 重装必须同时给出 `--force`，否则报错并提示改用 `onebox regen`（保留现有凭据重新生成配置）。v2 的 `-y` 重装会直接覆盖，v3 改为必须加 `--force`。
 
 ### 安装选项
@@ -81,7 +81,7 @@ onebox install --preset 1 -y --force
 | `--port 协议=端口` | 指定协议端口，可重复 |
 | `--sni 域名` | REALITY 与 ShadowTLS 的伪装域名，握手目标为 `域名:443` |
 | `--reality-dest 主机:端口` | 单独指定 REALITY 握手目标（SNI 不变）；与 `--sni` 同时给出时在其后生效 |
-| `--reality-site 域名` | 以自有域名网站作为 REALITY 目标（域名需解析到本机），见 [website.md](website.md)；不能与 `--sni`、`--reality-dest` 同用。用此选项时网站证书为 HTTP-01（在交互向导第 2 步选择建站才能选其他方式，安装后也可用 `onebox site enable 域名 --tls cf\|custom` 更换） |
+| `--reality-site 域名` | 以自有域名网站作为 REALITY 目标（域名需解析到本机），见 [website.md](website.md)；不能与 `--sni`、`--reality-dest` 同用。用此选项时网站证书为 HTTP-01（在交互向导第 2 步选择建站才能选其他方式，安装后也可用 `onebox site enable 域名 --tls cf\|custom` 更换）；HTTPS 443 入口默认开启（见 `--site-https`），`site enable` 也会把它重新开启，需要关闭时之后执行 `onebox site https off` |
 | `--site-title 标题` | 自动生成主页的标题，默认“山间手记”；只能与 `--reality-site` 同用 |
 | `--site-https on\|off` | 网站的 HTTPS 443 入口，默认 `on`；只能与 `--reality-site` 同用 |
 | `--tls self\|acme\|cf\|custom` | 代理证书：自签 / HTTP-01（`http` 同 `acme`）/ Cloudflare DNS / 自备；后三种需要 `--domain` |
@@ -99,6 +99,7 @@ onebox install --preset 1 -y --force
 | `--dry-run` | 仅预览，不做任何修改（等同 `plan`） |
 | `-y` / `--yes` | 通用选项：无人值守（使用默认值并自动确认） |
 
+- `--singbox-version` / `--xray-version`（及 `ONEBOX_SINGBOX_VERSION` / `ONEBOX_XRAY_VERSION`）只决定尚未安装的内核下载哪个版本，并记为固定版本；重装时已安装且能运行的内核原样保留，指定的版本号与之不同时只提示 `已安装 …；更换指定版本请执行 onebox update …`。更换已安装内核的版本请执行 `onebox update singbox|xray 版本`（降级加 `--force`）。
 - `latest` 表示不固定版本：sing-box 安装最新稳定版，Xray 仍安装 `26.3.27`；需要更新的 Xray 时，安装后执行 `onebox update xray latest`（会提示兼容风险并要求确认）。
 - 每个命令只接受自己的选项，写错或不适用的选项会报错（如 `install 不支持选项 --bogus；请执行 onebox install --help`）。
 
@@ -106,7 +107,7 @@ onebox install --preset 1 -y --force
 
 | 变量 | 作用 |
 |---|---|
-| `GH_PROXY` | GitHub 下载加速前缀，必须以 `https://` 开头。引导脚本的 `SHA256SUMS` 与程序都经该前缀下载，镜像可同时替换二者，请只使用可信镜像。安装后 Onebox 下载代理内核、FRP、BBRv3 内核包和程序更新时，校验值直接从 GitHub 获取（api.github.com 元数据；缺少摘要时为直接从 github.com 下载的 `SHA256SUMS` / `.dgst`），前缀只传输文件内容 |
+| `GH_PROXY` | GitHub 下载加速前缀，必须以 `https://` 开头。引导脚本的 `SHA256SUMS` 与程序都经该前缀下载，镜像可同时替换二者，请只使用可信镜像。Onebox 程序（安装、添加协议、更新时）下载代理内核、FRP、BBRv3 内核包和程序更新时只有文件内容经前缀传输；Release 元数据和校验值（api.github.com，缺少摘要时为 github.com 上的 `SHA256SUMS` / `.dgst`）以及 acme.sh 脚本（raw.githubusercontent.com，程序固定其 SHA-256）始终直连 GitHub、不经前缀 |
 | `GH_TOKEN` | 可选的 GitHub 令牌，只用于提高 API 请求的速率限制 |
 | `ONEBOX_NATIVE_BIN` | 引导脚本直接运行该本地程序，不联网、不校验 |
 | `ONEBOX_SINGBOX_BIN` / `ONEBOX_XRAY_BIN` | 使用该本地内核文件代替下载（离线安装与更新；不能是符号链接） |
@@ -157,7 +158,7 @@ onebox cert renew proxy                          # 立即续期代理证书（�
 - 存在 Let's Encrypt 或自备证书（代理、网站或独立 HTTPS 订阅）时，程序在 crontab 写入一条计划任务：每天 4:17（系统时区）执行 `onebox renew --cron`，日志写入 `/var/log/onebox/renew.log`。只有自签证书时不写计划任务。使用 Let's Encrypt 而 cron 无法运行时，在开始配置前报错（`cron 未运行，无法启用证书自动续期；请启动系统 cron 服务`）；自备证书只警告。
 - 计划任务只续期到期的证书，无事可做时不输出：Let's Encrypt 证书 30 天内到期时续期，自签证书 30 天内到期时重新生成，自备证书在源文件内容变化后重新部署。
 - 续期不执行完整配置事务，只重启受影响且正在运行的服务：代理证书 → 代理内核（sing-box / Xray）；网站证书（也是 `site` 模式订阅使用的证书）→ `onebox-site`；独立 HTTPS 订阅证书 → `onebox-subscription-web`。例外：代理证书的身份变化时——客户端固定的证书指纹改变（如自签证书重新生成、私有 CA 签发的自备证书更换），或证书是否公有可信发生变化——程序用当前配置执行一次完整配置事务，重新发布客户端配置和订阅，此时客户端需要重新导入或刷新订阅。
-- 手动执行 `onebox renew`、`onebox cert renew`、`onebox site renew` 或 `onebox subscription renew` 时，所选的 Let's Encrypt 证书不论是否到期都会续期，请勿频繁执行。续期与其他修改共用一把锁，计划任务遇到其他操作时最多等待 10 分钟。
+- 手动执行 `onebox renew`、`onebox cert renew`、`onebox site renew` 或 `onebox subscription renew` 时，所选的 Let's Encrypt 证书不论是否到期都会续期，请勿频繁执行。续期与其他修改共用一把锁，计划任务遇到其他操作时最多等待 10 分钟；取得锁后先完成或回滚遗留的未完成配置事务（同 `onebox recover`），再检查证书。
 - 面向浏览器的网站和 HTTPS 订阅必须使用公有可信证书，不能自签。
 - 更新了自备证书的源文件后，可等待计划任务，或立即执行 `onebox cert renew proxy`（网站用 `onebox site renew`）重新部署。
 

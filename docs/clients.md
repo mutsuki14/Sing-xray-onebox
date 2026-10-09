@@ -97,7 +97,7 @@ onebox add anytls-reality --reality-site www.example.com --site-https on
 ```
 
 - 服务端与客户端都需要 sing-box ≥ 1.12，且为带 `with_utls` 的构建（官方发行包已包含）。
-- **只包含在 sing-box 完整配置中**（`singbox`、`singbox-notun`，含远程订阅的这两种格式）。mihomo、Xray、分享链接、Base64 和二维码都不包含它；导出这些格式时程序会提示。
+- **只包含在 sing-box 完整配置中**（`singbox`、`singbox-notun`，含远程订阅的这两种格式）。mihomo、provider、Xray、分享链接、Base64 和二维码都不包含它：导出 mihomo、provider、Xray、分享链接或 Base64 时会在标准错误提示；`qr` 只显示其他协议的二维码，不另行提示（只有 AnyTLS-REALITY 等不能生成链接的协议时报错 `没有可生成二维码的通用链接，请使用 sing-box 配置`）。
 - 不要把普通 `anytls://` 链接用于此协议。其他应用能否使用，取决于其内置 sing-box 版本以及是否支持导入完整配置。
 
 ## 常见导入问题
