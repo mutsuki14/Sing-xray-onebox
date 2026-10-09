@@ -8,7 +8,7 @@
 //!
 //! Changes from v2: no full apply (v2 restarted every core for a
 //! renewal, G-8.1#9); a renewal failure is an error under `--cron` too
-//! instead of being hidden (G-8.1#18).
+//! instead of being hidden (G-8.1#18); `--cron` in ip mode prints nothing.
 
 use super::endpoint::IP_RENEW;
 use crate::cert::{renew_all, CertScope, CertScopes, CfCredentials, RenewOptions};
@@ -41,7 +41,12 @@ pub fn renew(
         return Ok(());
     };
     if matches!(sub.mode, SubscriptionMode::Ip { .. }) {
-        return out::data(IP_RENEW);
+        // Scheduled runs stay silent when there is nothing to do.
+        return if scheduled {
+            Ok(())
+        } else {
+            out::data(IP_RENEW)
+        };
     }
     let report = renew_all(ctx, lock, cfg, &options(scheduled), cf)?;
     match report.failed.first() {

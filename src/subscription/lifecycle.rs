@@ -73,6 +73,7 @@ pub fn prepare(
         return Ok(());
     };
     check_subscription_family(cfg, ipv6(paths))?;
+    ensure_dir(&paths.subscription(), 0o700)?;
     if listener == Listener::Unix {
         frontend::check_socket_path(paths)?;
     }

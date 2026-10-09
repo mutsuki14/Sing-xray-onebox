@@ -69,6 +69,12 @@ fn v2_data_means_the_v2_socket_layout() {
         "v2 nginx owns the port"
     );
     assert!(!paths.devices().exists(), "the worker writes nothing");
+    std::fs::write(paths.state(), r#"{"values":{}}"#).unwrap();
+    assert_eq!(
+        resolve(paths).unwrap(),
+        Listener::Unix,
+        "v2 data is recognized without migrating it"
+    );
 }
 
 #[test]

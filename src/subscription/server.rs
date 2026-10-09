@@ -28,7 +28,7 @@ use crate::ctx::Ctx;
 use crate::domain::config::{NodeConfig, SubscriptionMode};
 use crate::error::{Context, Error, Result};
 use crate::paths::Paths;
-use crate::state::{Origin, StateStore};
+use crate::state::StateStore;
 use crate::sys::exec::Cmd;
 use crate::sys::fs::{atomic_write, read_bounded, remove_file_if_exists};
 use crate::sys::rand::OsRandom;
@@ -116,11 +116,21 @@ pub fn resolve(paths: &Paths) -> Result<Listener> {
     if let Some(listener) = recorded(paths)? {
         return Ok(listener);
     }
-    let loaded = StateStore::load_from(paths, &mut OsRandom)?.ok_or(Error::NotInstalled)?;
-    match loaded.origin {
-        Origin::V2 { .. } => Ok(Listener::Unix),
-        Origin::V3 => Listener::of(&loaded.config).ok_or_else(|| Error::msg(NOT_ENABLED)),
+    if v2_state(paths) {
+        return Ok(Listener::Unix);
     }
+    let loaded = StateStore::load_from(paths, &mut OsRandom)?.ok_or(Error::NotInstalled)?;
+    Listener::of(&loaded.config).ok_or_else(|| Error::msg(NOT_ENABLED))
+}
+
+/// `state.json` is v2's `{"values":{…}}` document. Checked without
+/// migrating it: the v2 layout needs nothing from the values, so a v3
+/// worker started on v2 data never depends on the migration succeeding.
+fn v2_state(paths: &Paths) -> bool {
+    read_bounded(&paths.state(), crate::domain::defaults::STATE_MAX_BYTES)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|doc| doc.get("values").is_some())
 }
 
 /// A listening socket the accept loop takes connections from.

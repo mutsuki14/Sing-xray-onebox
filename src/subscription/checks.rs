@@ -5,6 +5,8 @@
 //!
 //! Read-only: service queries, file reads and `openssl` for the
 //! certificate dates.
+//!
+//! Changes from v2: new — v2's doctor did not look at the subscription.
 
 use super::devices::DeviceStore;
 use super::endpoint::endpoint;

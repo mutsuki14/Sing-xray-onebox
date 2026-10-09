@@ -7,13 +7,20 @@
 //! - [`snapshot`]: `subscription/published.json`, every supported remote
 //!   format, written atomically by the publish stage.
 //! - [`server`] + [`http`]: the worker `onebox subscription serve` — TCP
-//!   in ip mode, a unix socket behind nginx otherwise.
+//!   in ip mode, a unix socket behind nginx otherwise; the listener of the
+//!   generation being published is recorded in `subscription/listener.json`
+//!   (the worker restarts before `state.json` is written).
 //! - [`frontend`]: the `/sub/` location for the site and the standalone
 //!   `onebox-subscription-web` nginx.
 //! - [`lifecycle`]: the apply hooks (prepare, certificates, services,
 //!   publish) re-exported below with the signatures the apply engine uses.
 //! - [`endpoint`]: URLs and texts; [`request`] + [`cli`]: the commands;
 //!   [`renew`]: certificate renewal without an apply; [`checks`]: doctor.
+//!
+//! Files under `ROOT/subscription/` (all inside the apply snapshot):
+//! `devices.json`, `published.json`, `listener.json`, `nginx.conf`
+//! (standalone), `tls/` (standalone certificate), v2's `settings.json`
+//! (read, never written). Real-socket tests: `e2e.rs` (ignored).
 //!
 //! Changes from v2 (details in each module): ip mode is served by the
 //! worker directly on TCP, without nginx; the worker is restarted when the
