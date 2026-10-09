@@ -10,7 +10,7 @@
 | `site` | `https://www.example.com/sub/令牌/格式` | 已启用[自有域名网站](website.md) | 复用网站的域名、证书和公网端口（443 入口关闭时为 REALITY 端口），不增加端口 |
 | `standalone` | `https://sub.example.com:8448/sub/令牌/格式` | 解析到本机的独立域名 + 公有可信证书 | 独立 HTTPS 入口（专用 nginx 实例 `onebox-subscription-web`），默认端口 8448 |
 
-可在菜单 **4) 远程订阅** 中选择（菜单每次都询问模式及该模式的全部选项，端口默认沿用当前值），或用命令指定。命令行每次执行 `enable` 都重新推断模式，不沿用当前模式：给了 `--address` 为 `ip`，给了 `--domain` 为 `standalone`，否则有网站时为 `site`，再否则为 `ip`；省略的 `--port` 回到 8448，`ip` 模式省略 `--address` 时回到默认地址（见下文），`standalone` 模式省略 `--tls` 时回到 `cf`。修改已启用的订阅（例如只改端口）时请写全 `--mode` 及该模式的全部选项，否则 `standalone` 订阅可能被改成 `site` 或 HTTP 明文的 `ip`。
+可在菜单 **4) 远程订阅** 中选择（菜单每次都询问模式及该模式的全部选项，端口默认沿用当前值），或用命令指定。订阅尚未启用时，命令行按给出的选项推断模式：给了 `--address` 为 `ip`，给了 `--domain` 为 `standalone`，否则有网站时为 `site`，再否则为 `ip`。对已启用的订阅再次执行 `enable` 时只修改给出的选项：模式保持不变（更换模式必须写 `--mode`，不写 `--mode` 时给出其他模式的选项会报错），省略的 `--address`、`--domain`、`--tls`（以及自备证书的 `--cert`、`--key` 中省略的一项）和 `--port` 沿用当前值。例如 `onebox subscription enable --port 9443` 只改端口。用 `--mode` 在 `ip` 与 `standalone` 之间切换时端口同样沿用；从 `site` 切换时端口回到 8448。
 
 > **安全提示**：`ip` 模式使用 HTTP 明文，链路上的第三方可以看到订阅令牌和其中的节点凭据。令牌只做访问授权，不能为 HTTP 加密。需要加密传输时请用 `site` 或 `standalone`。
 
@@ -36,16 +36,16 @@ onebox subscription enable --mode standalone --domain sub.example.com \
 
 | 选项 | 说明 |
 |---|---|
-| `--mode ip\|site\|standalone` | 托管模式。省略时：给了 `--address` 为 `ip`，给了 `--domain` 为 `standalone`，否则有网站时为 `site`，再否则为 `ip` |
+| `--mode ip\|site\|standalone` | 托管模式。省略时：已启用的订阅保持当前模式；否则给了 `--address` 为 `ip`，给了 `--domain` 为 `standalone`，有网站时为 `site`，再否则为 `ip` |
 | `--address IP`（同 `--ip`） | 仅 `ip` 模式：链接中的地址 |
-| `--domain 域名` | 仅 `standalone` 模式（必填）：订阅域名 |
-| `--port 端口` | `ip` / `standalone` 模式的端口，默认 8448 |
-| `--tls cf\|http\|custom` | 仅 `standalone` 模式：证书方式，默认 `cf`；`custom` 需同时给出 `--cert`、`--key` |
+| `--domain 域名` | 仅 `standalone` 模式（首次启用时必填）：订阅域名 |
+| `--port 端口` | `ip` / `standalone` 模式的端口，默认 8448（已启用时默认沿用当前端口） |
+| `--tls cf\|http\|custom` | 仅 `standalone` 模式：证书方式，默认 `cf`（已启用时默认沿用当前方式）；`custom` 需同时给出 `--cert`、`--key` |
 | `--name 名称` | 首个设备的名称，默认 `default` |
 
 - `ip` 模式的地址默认取节点的连接地址（当它是 IP 时），否则取检测到的公网 IPv4、IPv6；必须是 IP 字面量（不含端口、路径）。该端口由 Onebox 自己的订阅服务直接提供（不需要 nginx），在本机所有地址上监听（支持 IPv6 时为双栈 `[::]`，否则 `0.0.0.0`），便于 NAT 环境使用；`--address` 只决定链接中显示的地址。v2 在 ip 模式下另起一个 nginx（`onebox-subscription-web`）转发，v3 不再需要，升级后会自动移除。
 - `standalone` 会检查端口占用并申请证书，不接管已有服务；域名需事先解析到本机。端口允许时可用 `--port 443`。已启用自有域名网站时 TCP 80 由网站占用，`standalone` 请用 `cf` 或 `custom` 证书（或直接改用 `site`）。
-- `site` 模式忽略 `--domain`、`--port`、`--tls`、`--cert`、`--key`，并提示已忽略哪些选项。
+- `--mode site` 忽略 `--domain`、`--port`、`--tls`、`--cert`、`--key`，并提示已忽略哪些选项。
 - 首次启用会创建设备 `default`（或 `--name` 指定的名称）并显示其链接。`ip` 和 `standalone` 需要在云安全组放行所用的 TCP 端口（HTTP-01 另需 80）；本机防火墙由程序放行。
 - 订阅不经过 FRP 发布。
 

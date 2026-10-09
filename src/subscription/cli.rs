@@ -69,11 +69,11 @@ const ENABLE: CommandSpec = CommandSpec::new("enable", Group::Feature, "启用�
         "subscription enable --mode standalone --domain 域名 [--port 8448] [--tls cf|http|custom [--cert 证书 --key 私钥]]",
     ])
     .options(&[
-        OptSpec::value("mode", "模式", "ip（HTTP 直连）| site（复用自有网站）| standalone（独立域名 HTTPS）"),
+        OptSpec::value("mode", "模式", "ip（HTTP 直连）| site（复用自有网站）| standalone（独立域名 HTTPS）；已启用时省略则保持当前模式，其他省略的选项沿用当前值"),
         OptSpec::value("address", "IP", "ip 模式的订阅地址（IPv4 或 IPv6，不加方括号；默认节点 IP）"),
         OptSpec::value("ip", "IP", "同 --address"),
         OptSpec::value("domain", "域名", "standalone 模式的订阅域名（需已解析到本机）"),
-        OptSpec::value("port", "端口", "ip / standalone 模式的端口（默认 8448）"),
+        OptSpec::value("port", "端口", "ip / standalone 模式的端口（默认 8448，已启用时沿用当前端口）"),
         OptSpec::value("tls", "方式", "standalone 证书：cf（默认）| http | custom"),
         OptSpec::value("cert", "路径", "--tls custom 的完整证书链"),
         OptSpec::value("key", "路径", "--tls custom 的私钥"),
