@@ -62,46 +62,16 @@ impl Node {
         journal::write(&self.ctx.paths, &journal).unwrap();
     }
 
-    /// Script systemd: services become active once started/restarted and
-    /// inactive once stopped; `MainPID` is `main_pid`.
     pub fn systemd(&self, main_pid: u32) -> Systemd {
-        let state = Systemd::default();
-        std::fs::create_dir_all(self.ctx.paths.system("/run/systemd/system")).unwrap();
-        let active = state.active.clone();
-        let actions = state.actions.clone();
-        self.fake.on_fn(
-            |c| c.program == "systemctl",
-            move |c| Ok(systemctl(c.args.as_slice(), &active, &actions, main_pid)),
-        );
-        state
+        systemd(&self.fake, &self.ctx.paths, main_pid)
     }
 
-    /// nginx (old syntax), the `www-data` worker and its group.
     pub fn nginx(&self) {
-        self.fake
-            .provide("nginx")
-            .on("id", &["-u", "www-data"], Output::success("33\n"))
-            .on("id", &["-gn", "www-data"], Output::success("www-data\n"))
-            .on("getent", &["group", "www-data"], Output::success("www-data:x:33:\n"))
-            .on("nginx", &["-T"], Output::failure(1, ""))
-            .on("nginx", &["-t"], Output::success(""))
-            .on_fn(
-                |c| c.program_name() == "nginx" && c.args == ["-v"],
-                |_| Ok(Output::failure(0, "nginx version: nginx/1.24.0 (Ubuntu)\n")),
-            );
+        nginx(&self.fake);
     }
 
-    /// `/proc/net/tcp` with LISTEN sockets on `ports` (and no IPv6).
     pub fn listening(&self, ports: &[u16]) {
-        let net = self.ctx.paths.system("/proc/net");
-        std::fs::create_dir_all(&net).unwrap();
-        let mut table = String::from("  sl  local_address rem_address   st\n");
-        for (i, port) in ports.iter().enumerate() {
-            table.push_str(&format!(
-                "   {i}: 00000000:{port:04X} 00000000:0000 0A 0\n"
-            ));
-        }
-        std::fs::write(net.join("tcp"), table).unwrap();
+        listening(&self.ctx.paths, ports);
     }
 
     /// `/proc/PID/exe` of the system root pointing at `target`.
@@ -113,12 +83,54 @@ impl Node {
         std::os::unix::fs::symlink(target, link).unwrap();
     }
 
-    /// A program file at `EXE`.
+    /// A (new) program file at `EXE`, replacing any old one by rename like
+    /// a self-update does.
     pub fn install_exe(&self) {
         let exe = &self.ctx.paths.executable;
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(exe, b"\x7fELF fake").unwrap();
+        let temp = exe.with_extension("new");
+        std::fs::write(&temp, b"\x7fELF fake").unwrap();
+        std::fs::rename(temp, exe).unwrap();
     }
+}
+
+/// Script systemd on `fake`: services become active once started or
+/// restarted and inactive once stopped; `MainPID` is `main_pid`.
+pub fn systemd(fake: &FakeExec, paths: &crate::paths::Paths, main_pid: u32) -> Systemd {
+    let state = Systemd::default();
+    std::fs::create_dir_all(paths.system("/run/systemd/system")).unwrap();
+    let active = state.active.clone();
+    let actions = state.actions.clone();
+    fake.on_fn(
+        |c| c.program == "systemctl",
+        move |c| Ok(systemctl(c.args.as_slice(), &active, &actions, main_pid)),
+    );
+    state
+}
+
+/// nginx (old syntax), the `www-data` worker and its group on `fake`.
+pub fn nginx(fake: &FakeExec) {
+    fake.provide("nginx")
+        .on("id", &["-u", "www-data"], Output::success("33\n"))
+        .on("id", &["-gn", "www-data"], Output::success("www-data\n"))
+        .on("getent", &["group", "www-data"], Output::success("www-data:x:33:\n"))
+        .on("nginx", &["-T"], Output::failure(1, ""))
+        .on("nginx", &["-t"], Output::success(""))
+        .on_fn(
+            |c| c.program_name() == "nginx" && c.args == ["-v"],
+            |_| Ok(Output::failure(0, "nginx version: nginx/1.24.0 (Ubuntu)\n")),
+        );
+}
+
+/// `/proc/net/tcp` of the system root with LISTEN sockets on `ports`.
+pub fn listening(paths: &crate::paths::Paths, ports: &[u16]) {
+    let net = paths.system("/proc/net");
+    std::fs::create_dir_all(&net).unwrap();
+    let mut table = String::from("  sl  local_address rem_address   st\n");
+    for (i, port) in ports.iter().enumerate() {
+        table.push_str(&format!("   {i}: 00000000:{port:04X} 00000000:0000 0A 0\n"));
+    }
+    std::fs::write(net.join("tcp"), table).unwrap();
 }
 
 /// What the scripted systemd saw.
@@ -157,7 +169,7 @@ fn systemctl(
             };
         }
         "show" => return Output::success(format!("MainPID={main_pid}\n")),
-        "is-enabled" => return Output::success("enabled\n"),
+        "is-enabled" => return Output::failure(1, "disabled\n"),
         "start" | "restart" => {
             active.insert(unit.clone());
         }
