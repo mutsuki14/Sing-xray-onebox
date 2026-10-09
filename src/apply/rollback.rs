@@ -210,9 +210,13 @@ fn restore_services(
             continue;
         }
         let result = if journal.enabled_services().iter().any(|n| n == name) {
-            services.enable(name).map_err(|e| format!("启用 {name}: {e}"))
+            services
+                .enable(name)
+                .map_err(|e| format!("启用 {name}: {e}"))
         } else {
-            services.disable(name).map_err(|e| format!("停用 {name}: {e}"))
+            services
+                .disable(name)
+                .map_err(|e| format!("停用 {name}: {e}"))
         };
         errors.extend(result.err());
     }

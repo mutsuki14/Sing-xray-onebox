@@ -218,3 +218,46 @@ fn nothing_reachable_from_apply_recover_boot_or_backups_asks_a_question() {
     assert!(host.ui.errors().is_empty(), "{:?}", host.ui.errors());
     assert_invariants(&host);
 }
+
+/// `atomic_write` leftovers of crashed runs are swept from every owned
+/// directory before the journal snapshot, so a rollback does not bring
+/// them back; recent ones (possibly a concurrent writer's) stay.
+#[test]
+fn stale_temp_files_are_swept_before_the_journal_snapshot() {
+    use crate::sys::fs::TEMP_PREFIX;
+    use std::time::{Duration, SystemTime};
+    let host = Host::new();
+    host.install(two_cores());
+    let paths = host.paths().clone();
+    let dirs = [
+        paths.root.clone(),
+        paths.clients(),
+        paths.tls().join("acme"),
+        paths.site_root.clone(),
+        paths.subscription_acme(),
+        paths.bin.clone(),
+        paths.systemd.clone(),
+        paths.initd.clone(),
+        paths.executable.parent().unwrap().to_path_buf(),
+    ];
+    let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    let stale: Vec<_> = dirs
+        .iter()
+        .map(|dir| dir.join(format!("{TEMP_PREFIX}state.json-1234")))
+        .collect();
+    for path in &stale {
+        crate::apply::testing::file(path, 0o600, b"partial");
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(hour_ago).unwrap();
+    }
+    let fresh = paths.tls().join(format!("{TEMP_PREFIX}cert.pem-5678"));
+    crate::apply::testing::file(&fresh, 0o600, b"being written");
+    host.features
+        .inject(Fault::Fail(Checkpoint::Stage(Phase::PrepareState)));
+    host.apply(host.change(two_cores(), "修改")).unwrap_err();
+    for path in &stale {
+        assert!(!exists(path), "{}", path.display());
+    }
+    assert!(exists(&fresh));
+    assert_no_journal(&host);
+}

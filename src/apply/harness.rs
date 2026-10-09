@@ -7,7 +7,7 @@ use super::features::{Checkpoint, Features};
 use super::request::ApplyRequest;
 use crate::cert::CfCredentials;
 use crate::ctx::Ctx;
-use crate::domain::config::Device;
+use crate::domain::config::{Device, ProxyCertMode};
 use crate::domain::fixtures;
 use crate::domain::protocol::{Core, Protocol};
 use crate::domain::NodeConfig;
@@ -148,18 +148,38 @@ impl Features for FakeFeatures {
         Ok(SitePrepared::default())
     }
 
+    /// Like `cert::prepare_proxy`: the committed self-signed test pair is
+    /// deployed to `ROOT/tls` (whatever the mode: ACME and custom sources
+    /// are not exercised here), trust is recorded (an ACME certificate
+    /// counts as publicly trusted), and whether the pair changed is
+    /// returned.
     fn proxy_certificate(
         &self,
-        _ctx: &Ctx,
+        ctx: &Ctx,
         cfg: &mut NodeConfig,
         force: bool,
         _cf: Option<&CfCredentials>,
     ) -> Result<bool> {
         self.record(format!("proxy_certificate force={force}"));
-        if cfg.needs_cert() {
-            return Err(Error::msg("fake: no certificates in these tests"));
+        if !cfg.needs_cert() {
+            return Ok(false);
         }
-        Ok(false)
+        let (cert, key) = crate::render::fixtures::cert_pair("selfsigned");
+        let tls = ctx.paths.tls();
+        let mut changed = false;
+        for (source, name) in [(cert, "cert.pem"), (key, "key.pem")] {
+            let bytes = fs::read(source)?;
+            let target = tls.join(name);
+            if fs::read(&target).ok() != Some(bytes.clone()) {
+                crate::sys::fs::atomic_write(&target, &bytes, 0o600)?;
+                changed = true;
+            }
+        }
+        if let Some(tls) = cfg.tls.as_mut() {
+            let acme = matches!(tls.mode, ProxyCertMode::Acme { .. });
+            tls.record_trust(acme);
+        }
+        Ok(changed)
     }
 
     fn site_location(&self, _paths: &Paths, _cfg: &NodeConfig) -> Option<SiteSubscription> {
@@ -331,10 +351,21 @@ impl Host {
         self.push_fault(needle, false);
     }
 
+    /// Make the next command whose line contains `needle` die of a Ctrl+C
+    /// (SIGINT is raised; the apply's signal scope must be installed).
+    pub fn interrupt_command(&self, needle: &str) {
+        lock(&self.faults).push(CommandFault {
+            needle: needle.to_owned(),
+            once: true,
+            interrupt: true,
+        });
+    }
+
     fn push_fault(&self, needle: &str, once: bool) {
         lock(&self.faults).push(CommandFault {
             needle: needle.to_owned(),
             once,
+            interrupt: false,
         });
     }
 

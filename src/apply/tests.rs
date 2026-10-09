@@ -4,7 +4,9 @@ mod boot;
 mod commit;
 mod faults;
 mod journals;
+mod network;
 mod policies;
+mod rollback;
 
 use super::features::Checkpoint;
 use super::harness::{line, ran, Host, Unit, OLD_MANAGER};

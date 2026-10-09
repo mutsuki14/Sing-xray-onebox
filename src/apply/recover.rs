@@ -91,10 +91,7 @@ pub fn settle_signal<T>(result: Result<T>) -> Result<T> {
     if error.is_cancelled() {
         return Err(error);
     }
-    Err(Error::Cancelled.wrap(format!(
-        "{}（操作被信号 {n} 中断）",
-        error.report_text()
-    )))
+    Err(Error::Cancelled.wrap(format!("{}（操作被信号 {n} 中断）", error.report_text())))
 }
 
 /// `message` as the error, keeping exit code 130 when `cause` was a

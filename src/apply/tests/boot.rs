@@ -115,3 +115,39 @@ fn boot_on_a_host_without_a_node_says_so() {
     let err = boot_locked(&host.ctx, &host.lock, &host.features).unwrap_err();
     assert!(matches!(err, Error::NotInstalled), "{err}");
 }
+
+#[test]
+fn a_failed_address_refresh_still_restores_the_saved_rules() {
+    let host = installed_host();
+    let live_rules = host.world().iptables;
+    reboot(&host);
+    host.fail_always("ip -j address");
+    let err = boot_locked(&host.ctx, &host.lock, &host.features).unwrap_err();
+    assert!(
+        err_text(&err).starts_with("已按保存的配置恢复防火墙规则，但无法读取本机地址"),
+        "{err}"
+    );
+    assert_eq!(host.world().iptables, live_rules);
+    assert_eq!(host.installed().routing.own_cidrs, ["203.0.113.10/32"]);
+}
+
+/// Boot waits for the node lock instead of failing when another operation
+/// (a `@reboot` service start, a renewal) holds it.
+#[test]
+fn boot_waits_for_the_node_lock() {
+    use crate::apply::boot::boot_lock;
+    use crate::sys::lock::{FileLock, BUSY_MESSAGE};
+    use std::time::Duration;
+    let dir = crate::sys::fs::TempDir::new("boot-lock").unwrap();
+    let paths = crate::paths::Paths::isolated(dir.path());
+    let held = FileLock::acquire(&paths.lock(), BUSY_MESSAGE).unwrap();
+    let err = boot_lock(&paths, Duration::ZERO).unwrap_err();
+    assert!(matches!(err, Error::Busy(_)), "{err}");
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+    });
+    let lock = boot_lock(&paths, Duration::from_secs(30)).unwrap();
+    assert!(!lock.is_inherited());
+    releaser.join().unwrap();
+}

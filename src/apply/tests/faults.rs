@@ -257,3 +257,36 @@ fn a_failure_after_the_commit_point_is_not_rolled_back() {
     assert_no_journal(&host);
     assert_eq!(host.installed().inbounds, singbox_only().inbounds);
 }
+
+/// A Ctrl+C before the journal exists (here: while the cron daemon is
+/// probed for an ACME renewal) ends in a cancellation, exit 130, and does
+/// not cancel the next operation of the session.
+#[test]
+fn a_signal_during_preflight_cancels_and_is_consumed() {
+    use crate::domain::config::WebCert;
+    use crate::domain::fixtures::{self, with_site};
+    use crate::domain::protocol::{Core, Protocol};
+    let host = installed_host();
+    let before = host.world();
+    let reality = fixtures::config(&[(Protocol::VlessReality, 443, Core::Singbox)]);
+    let mut cfg = with_site(reality, "example.com", false);
+    if let Some(site) = cfg.site.as_mut() {
+        site.cert = WebCert::Cloudflare;
+    }
+    host.interrupt_command("systemctl is-active --quiet cron");
+    let err = host.apply(host.change(cfg, "启用网站")).unwrap_err();
+    assert!(err.is_cancelled(), "{err}");
+    assert_eq!(err.exit_code(), 130);
+    let text = err_text(&err);
+    assert!(
+        text.ends_with(&format!("（操作被信号 {} 中断）", libc::SIGINT)),
+        "{text}"
+    );
+    assert_eq!(signal::pending(), None, "the signal is consumed");
+    assert!(host.features.calls().is_empty(), "no stage ran");
+    assert_eq!(before.diff(&host.world()), Vec::<String>::new());
+    assert_no_journal(&host);
+    // The next apply is not cancelled by it.
+    host.apply(host.change(singbox_only(), "修改")).unwrap();
+    assert_invariants(&host);
+}

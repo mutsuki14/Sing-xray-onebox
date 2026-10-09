@@ -165,3 +165,64 @@ fn an_install_over_an_existing_hash_needs_the_current_state() {
     host.apply(req).unwrap();
     assert_eq!(host.installed().inbounds, singbox_only().inbounds);
 }
+
+/// A state.json that cannot be read no longer blocks a reinstall: the
+/// snapshot keeps its bytes for a rollback (which skips the old network
+/// rules with a warning). A v1 installation is still refused.
+#[test]
+fn a_reinstall_over_an_unreadable_state_json_works_and_rolls_back_to_it() {
+    use crate::apply::harness::Fault;
+    let host = Host::new();
+    host.install(two_cores());
+    let state = host.paths().state();
+    fs::write(&state, b"{ corrupt").unwrap();
+    let before = host.world();
+    host.features
+        .inject(Fault::Fail(Checkpoint::Stage(Phase::StartCores)));
+    let req = ApplyRequest::install(&host.ctx, singbox_only(), "重装").unwrap();
+    let text = err_text(&host.apply(req).unwrap_err());
+    assert!(text.starts_with("配置未应用，已恢复原状态"), "{text}");
+    assert_eq!(fs::read(&state).unwrap(), b"{ corrupt");
+    let after = host.world();
+    assert_eq!(before.file_diff(&after), Vec::<String>::new());
+    assert_eq!(before.units, after.units);
+    assert_no_journal(&host);
+    host.features.clear();
+    let req = ApplyRequest::install(&host.ctx, singbox_only(), "重装").unwrap();
+    host.apply(req).unwrap();
+    assert_eq!(host.installed().inbounds, singbox_only().inbounds);
+    assert_invariants(&host);
+    // Only onebox.conf (v1): the v1 message, nothing touched.
+    fs::remove_file(&state).unwrap();
+    crate::apply::testing::file(&host.paths().legacy_v1_state(), 0o600, b"A=1\n");
+    let req = ApplyRequest::install(&host.ctx, two_cores(), "安装").unwrap();
+    let err = host.apply(req).unwrap_err().to_string();
+    assert!(err.contains("onebox.conf"), "{err}");
+    assert_no_journal(&host);
+}
+
+/// The port plan is checked against FRP through `apply::frp_reservations`
+/// before anything changes: an FRP state whose ports cannot be read
+/// refuses the apply.
+#[test]
+fn ports_are_checked_against_frp_before_anything_changes() {
+    use crate::frp::model::{managed_path, state_path};
+    let host = Host::new();
+    host.install(two_cores());
+    assert!(crate::apply::frp_reservations(host.paths())
+        .unwrap()
+        .is_empty());
+    crate::apply::testing::file(
+        &managed_path(host.paths()),
+        0o600,
+        b"Managed by Onebox FRP\n",
+    );
+    crate::apply::testing::file(&state_path(host.paths()), 0o600, b"garbage");
+    let before = host.world();
+    host.features.clear();
+    let err = host.apply(host.change(singbox_only(), "修改")).unwrap_err();
+    assert!(err.to_string().starts_with("FRP 状态"), "{err}");
+    assert!(host.features.calls().is_empty());
+    assert_eq!(before.diff(&host.world()), Vec::<String>::new());
+    assert_no_journal(&host);
+}

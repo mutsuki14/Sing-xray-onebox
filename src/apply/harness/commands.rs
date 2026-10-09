@@ -17,12 +17,14 @@ pub struct Unit {
 
 pub type Units = Arc<Mutex<BTreeMap<String, Unit>>>;
 
-/// One injected command failure: a needle of the command line, and
-/// whether it fires only once.
+/// One injected command failure: a needle of the command line, whether it
+/// fires only once, and whether the command is "killed by Ctrl+C" (SIGINT
+/// raised in this process, as the forwarding wait scope would see it).
 #[derive(Clone, Debug)]
 pub struct CommandFault {
     pub needle: String,
     pub once: bool,
+    pub interrupt: bool,
 }
 
 pub type Faults = Arc<Mutex<Vec<CommandFault>>>;
@@ -32,12 +34,15 @@ pub type Faults = Arc<Mutex<Vec<CommandFault>>>;
 pub(super) fn fault_rule(exec: &FakeExec) -> Faults {
     let faults: Faults = Arc::default();
     let shared = faults.clone();
+    let interrupted = Arc::new(Mutex::new(false));
+    let raise = interrupted.clone();
     exec.on_fn(
         move |cmd| {
             let line = cmd.display();
             let mut faults = lock(&shared);
             match faults.iter().position(|f| line.contains(f.needle.as_str())) {
                 Some(i) => {
+                    *lock(&interrupted) = faults[i].interrupt;
                     if faults[i].once {
                         faults.remove(i);
                     }
@@ -46,7 +51,15 @@ pub(super) fn fault_rule(exec: &FakeExec) -> Faults {
                 None => false,
             }
         },
-        |cmd| {
+        move |cmd| {
+            if std::mem::take(&mut *lock(&raise)) {
+                // SAFETY: raising SIGINT while the apply's signal scope has a
+                // recording handler installed (the test holds TEST_LOCK).
+                unsafe {
+                    libc::raise(libc::SIGINT);
+                }
+                return Ok(Output::failure(130, "interrupted"));
+            }
             Ok(Output::failure(
                 1,
                 format!("injected failure: {}", cmd.display()),

@@ -14,9 +14,12 @@
 //! state keys; one canonical service order; preconditions checked before
 //! the journal exists; v3 journals (version 2) record their reason, the
 //! typed old configuration, positioned cron lines and their own target list;
-//! cancellation keeps exit code 130; unremovable firewall rules no longer
-//! block rollbacks; HTTP-01 stops old TCP-80 holders whatever certificate
-//! needs the port (G21).
+//! cancellation keeps exit code 130 and a pending signal never outlives a
+//! failed operation; rollbacks are best effort where v2 stopped at the
+//! first problem (rules or hops that cannot be removed are kept recorded,
+//! old rules that cannot be re-created only warn, every service is still
+//! enabled and started); boot waits for the node lock; HTTP-01 stops old
+//! TCP-80 holders whatever certificate needs the port (G21).
 
 pub mod boot;
 pub mod engine;
@@ -33,8 +36,8 @@ pub mod transaction;
 
 pub use features::{Checkpoint, Features, SystemFeatures};
 pub use request::{
-    apply, apply_locked, boot, frp_reservations, node_lock, recover, recover_locked,
-    ApplyRequest, Intents,
+    apply, apply_locked, boot, frp_reservations, node_lock, recover, recover_locked, ApplyRequest,
+    Intents,
 };
 
 #[cfg(test)]
