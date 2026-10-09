@@ -27,7 +27,7 @@ use crate::cli::args::{CommandSpec, Group, Matches, OptSpec, Root};
 use crate::cli::options::{self as opt, CertArgs, RealityArgs};
 use crate::cli::session::{with_system, LiveProbe, Session};
 use crate::ctx::Ctx;
-use crate::domain::config::{Host, NodeConfig, PortRange, WebCert};
+use crate::domain::config::{Host, NodeConfig, PortRange};
 use crate::domain::plan::{self, InstallRequest, ProtocolChoice, RealityChoice};
 use crate::domain::presets;
 use crate::domain::protocol::{Core, Protocol};
@@ -149,7 +149,7 @@ impl InstallArgs {
             !m.flag("json") || m.dry_run || m.path.first() == Some(&"plan"),
             "--json 仅用于 plan 或 install --dry-run"
         );
-        let reality = opt::reality_args(m, WebCert::Http01)?;
+        let reality = opt::reality_args(m, None)?;
         ensure!(
             reality.site_https.is_none(),
             "--site-https 需要先启用自建站"

@@ -25,7 +25,7 @@ onebox add vless-reality --reality-site www.example.com
 onebox site enable www.example.com --tls cf
 ```
 
-交互方式：安装向导第 2 步或 `onebox sni` 中选择“自有域名一键建站”，输入域名和标题，选择是否开启 HTTPS 443 入口（默认开启）以及网站证书方式。`install --reality-site` 与 `add … --reality-site` 的网站证书总是 HTTP-01（已有网站使用 cf / custom 时也会改回 HTTP-01）；`onebox sni --reality-site` 对已有网站沿用原证书方式。需要其他方式时用 `onebox site enable 域名 --tls cf|custom`。`--reality-site` 与 `onebox site enable` 都会把 HTTPS 443 入口设为开启：用 `--reality-site` 时可加 `--site-https off` 保持关闭，`site enable` 之后需执行 `onebox site https off`。`--reality-site` 不能与 `--sni`、`--reality-dest` 同时使用。切换后客户端需要更新 SNI（重新导入配置或刷新订阅）。
+交互方式：安装向导第 2 步或 `onebox sni` 中选择“自有域名一键建站”，输入域名和标题，选择是否开启 HTTPS 443 入口（默认开启）以及网站证书方式。`onebox sni --reality-site` 与 `add … --reality-site` 对已有网站沿用原证书方式和 HTTPS 443 入口设置（可用 `--site-https on|off` 改变入口）；新建网站（包括 `install --reality-site`）的证书为 HTTP-01，入口默认开启，可加 `--site-https off` 保持关闭。需要其他证书方式时用 `onebox site enable 域名 --tls cf|custom`。`onebox site enable` 会把 HTTPS 443 入口设为开启，之后需执行 `onebox site https off`。`--reality-site` 不能与 `--sni`、`--reality-dest` 同时使用。切换后客户端需要更新 SNI（重新导入配置或刷新订阅）。
 
 ## 流量如何处理
 

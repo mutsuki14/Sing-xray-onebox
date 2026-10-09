@@ -13,7 +13,7 @@
 //! absolute against the working directory.
 
 use super::args::{Matches, OptSpec};
-use crate::domain::config::{AcmeMethod, Host, HostPort, PortRange, WebCert};
+use crate::domain::config::{AcmeMethod, Host, HostPort, PortRange, SiteConfig, WebCert};
 use crate::domain::plan::{OwnSite, ProxyCertChoice, RealityChoice};
 use crate::domain::presets;
 use crate::domain::protocol::{Core, Protocol};
@@ -52,8 +52,11 @@ pub const REALITY_SITE: OptSpec = OptSpec::value(
 );
 pub const SITE_TITLE: OptSpec =
     OptSpec::value("site-title", "标题", "自动生成主页的标题（默认 山间手记）");
-pub const SITE_HTTPS: OptSpec =
-    OptSpec::value("site-https", "on|off", "网站的 HTTPS 443 入口（默认 on）");
+pub const SITE_HTTPS: OptSpec = OptSpec::value(
+    "site-https",
+    "on|off",
+    "网站的 HTTPS 443 入口（新建网站默认 on，已有网站保持原设置）",
+);
 pub const TLS: OptSpec = OptSpec::value(
     "tls",
     "self|acme|cf|custom",
@@ -313,8 +316,10 @@ impl RealityArgs {
 }
 
 /// Parse `--sni --reality-dest --reality-site --site-title --site-https`.
-/// `site_cert` is the certificate of a newly enabled site.
-pub fn reality_args(m: &Matches, site_cert: WebCert) -> Result<RealityArgs> {
+/// `site` is the node's current website: `--reality-site` keeps its
+/// certificate method and HTTPS entrance (unless `--site-https` is given);
+/// a newly enabled site uses HTTP-01 with the entrance on.
+pub fn reality_args(m: &Matches, site: Option<&SiteConfig>) -> Result<RealityArgs> {
     let sni = m.value("sni");
     let dest = m.value("reality-dest").map(handshake_target).transpose()?;
     let https = m
@@ -329,8 +334,8 @@ pub fn reality_args(m: &Matches, site_cert: WebCert) -> Result<RealityArgs> {
         let site = OwnSite {
             domain: domain.to_owned(),
             title: m.value("site-title").map(str::to_owned),
-            https_entry: https.unwrap_or(true),
-            cert: site_cert,
+            https_entry: https.or(site.map(|s| s.https_entry)).unwrap_or(true),
+            cert: site.map_or(WebCert::Http01, |s| s.cert.clone()),
         };
         return Ok(RealityArgs {
             choice: RealityChoice::OwnSite(site),

@@ -19,7 +19,7 @@ use crate::cli::options::{self as opt, RealityArgs};
 use crate::cli::session::{request, with_system, LiveProbe, Session};
 use crate::cli::wizard::steps;
 use crate::ctx::Ctx;
-use crate::domain::config::{Host, NodeConfig, WebCert};
+use crate::domain::config::{Host, NodeConfig};
 use crate::domain::plan::{self, RealityChoice};
 use crate::domain::protocol::Protocol;
 use crate::error::{Error, Result};
@@ -111,12 +111,7 @@ pub fn plan_addr(session: &Session, args: &AddrArgs) -> Result<Option<ApplyReque
 fn sni_command(ctx: &Ctx, m: &Matches) -> Result<()> {
     with_system(ctx, |s| {
         let loaded = s.load()?;
-        let site_cert = loaded
-            .config
-            .site
-            .as_ref()
-            .map_or(WebCert::Http01, |site| site.cert.clone());
-        let args = opt::reality_args(m, site_cert)?;
+        let args = opt::reality_args(m, loaded.config.site.as_ref())?;
         run(s, plan_sni(s, &args)?)
     })
 }

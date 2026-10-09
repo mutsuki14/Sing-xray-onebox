@@ -195,8 +195,7 @@ fn web_certificates() {
 
 #[test]
 fn handshake_options() {
-    let parse =
-        |values: &[(&'static str, &str)]| reality_args(&matches(values, &[]), WebCert::Http01);
+    let parse = |values: &[(&'static str, &str)]| reality_args(&matches(values, &[]), None);
     assert!(parse(&[]).unwrap().is_empty());
     let sni = parse(&[("sni", "www.apple.com")]).unwrap();
     assert_eq!(sni.choice, RealityChoice::Custom("www.apple.com".into()));
@@ -243,5 +242,39 @@ fn handshake_options() {
             message,
             "{values:?}"
         );
+    }
+}
+
+#[test]
+fn reality_site_keeps_the_current_site_settings() {
+    use crate::domain::fixtures::{config, with_site};
+    let mut cfg = with_site(
+        config(&[(Protocol::VlessReality, 443, Core::Xray)]),
+        "www.example.com",
+        false,
+    );
+    let current = cfg.site.as_mut().unwrap();
+    current.cert = WebCert::Cloudflare;
+    let own = |values: &[(&'static str, &str)]| {
+        let args = reality_args(&matches(values, &[]), cfg.site.as_ref()).unwrap();
+        let RealityChoice::OwnSite(own) = args.choice else {
+            panic!("own site expected");
+        };
+        (own.cert, own.https_entry)
+    };
+    // (options, certificate, HTTPS entrance)
+    for (values, cert, https) in [
+        (
+            &[("reality-site", "a.example.com")][..],
+            WebCert::Cloudflare,
+            false,
+        ),
+        (
+            &[("reality-site", "a.example.com"), ("site-https", "on")][..],
+            WebCert::Cloudflare,
+            true,
+        ),
+    ] {
+        assert_eq!(own(values), (cert, https), "{values:?}");
     }
 }
