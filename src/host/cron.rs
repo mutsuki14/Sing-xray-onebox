@@ -51,7 +51,7 @@ mod transaction;
 pub use crate::host::service::Scope;
 pub use line::line;
 pub use scheduler::{ensure_scheduler, ensure_scheduler_as, scheduler_active, NOT_RUNNING};
-pub use transaction::{restore, snapshot, CronSnapshot};
+pub use transaction::{check_snapshot, restore, snapshot, CronSnapshot};
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};

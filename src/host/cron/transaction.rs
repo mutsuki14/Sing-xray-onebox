@@ -1,9 +1,10 @@
 //! Transaction support: snapshots of the owned lines of a [`Scope`] with
 //! their positions, and restoring them (see the parent module docs).
 
-use super::{available, Crontab, Form, Line, Scope, Tag};
+use super::{available, Crontab, Form, Line, Ownership, Scope, Tag};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::paths::Paths;
 use serde::{Deserialize, Serialize};
 
 pub(super) const NOT_OWNED: &str = "事务记录的 crontab 行不属于 Onebox，拒绝恢复";
@@ -57,12 +58,7 @@ impl Crontab {
 
     /// The snapshot's lines (with anchors, 0 without) after validation.
     fn restorable(&self, snapshot: &CronSnapshot, scope: Scope) -> Result<Vec<(usize, Line)>> {
-        if let Some(anchors) = &snapshot.anchors {
-            let ordered = anchors.windows(2).all(|w| w[0] <= w[1]);
-            if anchors.len() != snapshot.lines.len() || !ordered {
-                return Err(Error::msg(BAD_ANCHORS));
-            }
-        }
+        let checked = check_lines(&self.ownership, snapshot, scope)?;
         let mut present: Vec<&str> = self
             .lines
             .iter()
@@ -70,19 +66,12 @@ impl Crontab {
             .map(|l| l.text.as_str())
             .collect();
         let mut wanted = Vec::with_capacity(snapshot.lines.len());
-        for (index, text) in snapshot.lines.iter().enumerate() {
-            let (tag, form) = self
-                .ownership
-                .classify_form(text)
-                .filter(|(t, _)| scope.covers(t) && !text.contains(['\n', '\0']))
-                .ok_or_else(|| Error::msg(NOT_OWNED))?;
+        for (index, (text, (tag, form))) in snapshot.lines.iter().zip(checked).enumerate() {
             if form == Form::Retired {
                 match present.iter().position(|p| p == text) {
                     Some(at) => _ = present.remove(at),
                     None => continue,
                 }
-            } else if !self.ownership.restorable(text, &tag, form) {
-                return Err(Error::msg(UNKNOWN_SHAPE));
             }
             let anchor = snapshot.anchors.as_ref().map_or(0, |a| a[index]);
             let line = Line {
@@ -137,6 +126,44 @@ impl Crontab {
             }
         }
     }
+}
+
+/// Everything [`Crontab::restore`] requires of `snapshot` that does not
+/// depend on the current crontab: well-formed anchors, and every line
+/// owned within `scope` with a shape some Onebox version writes (retired
+/// renewal jobs are accepted: a restore keeps them only while the crontab
+/// still has them). Pure, so a journal can be checked before a rollback
+/// changes anything.
+pub fn check_snapshot(paths: &Paths, snapshot: &CronSnapshot, scope: Scope) -> Result<()> {
+    check_lines(&Ownership::of(paths), snapshot, scope).map(drop)
+}
+
+/// [`check_snapshot`], returning each line's classification.
+fn check_lines(
+    ownership: &Ownership,
+    snapshot: &CronSnapshot,
+    scope: Scope,
+) -> Result<Vec<(Tag, Form)>> {
+    if let Some(anchors) = &snapshot.anchors {
+        let ordered = anchors.windows(2).all(|w| w[0] <= w[1]);
+        if anchors.len() != snapshot.lines.len() || !ordered {
+            return Err(Error::msg(BAD_ANCHORS));
+        }
+    }
+    snapshot
+        .lines
+        .iter()
+        .map(|text| {
+            let (tag, form) = ownership
+                .classify_form(text)
+                .filter(|(t, _)| scope.covers(t) && !text.contains(['\n', '\0']))
+                .ok_or_else(|| Error::msg(NOT_OWNED))?;
+            if form != Form::Retired && !ownership.restorable(text, &tag, form) {
+                return Err(Error::msg(UNKNOWN_SHAPE));
+            }
+            Ok((tag, form))
+        })
+        .collect()
 }
 
 /// Whether `line` is owned within `scope`.

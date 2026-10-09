@@ -36,7 +36,7 @@ use crate::apply::program_journal;
 use crate::apply::snapshot::{self, node_allowlist, v2_node_allowlist, Allowlist, Snapshot};
 use crate::domain::config::NodeConfig;
 use crate::error::{Context, Error, Result};
-use crate::host::cron::CronSnapshot;
+use crate::host::cron::{self, CronSnapshot, Scope};
 use crate::host::service as svc;
 use crate::paths::Paths;
 use crate::sys::fs::{atomic_write, read_bounded};
@@ -404,10 +404,12 @@ impl Journal {
     }
 
     /// Everything a rollback relies on, checked before the engine changes
-    /// anything: service names, the recorded old state, and the snapshot in
-    /// `files/` against [`Journal::allowlist`]. The engine calls this before
-    /// entering `rollback-stop` (v2 ran `validate_files` there), so a
-    /// malformed journal never stops services and then aborts half-way.
+    /// anything: service names, the recorded old state, the journaled cron
+    /// lines (owned by the node, of a shape Onebox writes, sane anchors —
+    /// what `cron::restore` in `rollback-services` will require), and the
+    /// snapshot in `files/` against [`Journal::allowlist`]. The engine calls
+    /// this before entering `rollback-stop` (v2 ran `validate_files` there),
+    /// so a malformed journal never stops services and then aborts half-way.
     pub fn validate(&self, paths: &Paths) -> Result<()> {
         self.validate_with(paths, &self.allowlist(paths))
     }
@@ -417,6 +419,7 @@ impl Journal {
     pub fn validate_with(&self, paths: &Paths, allow: &Allowlist) -> Result<()> {
         self.check_services()?;
         self.check_old_state()?;
+        cron::check_snapshot(paths, &self.cron(), Scope::Node)?;
         snapshot::validate(self.snapshot(), &files_dir(paths), allow)
     }
 
