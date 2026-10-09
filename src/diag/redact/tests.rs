@@ -155,6 +155,15 @@ fn raw_json_values_become_known_values() {
         "port 8443 onebox-xray vless-reality",
         "ports are no credentials; protocol and core ids are vocabulary"
     );
+
+    let mut v2 = Redactor::new();
+    let raw = r#"{"values": {"NODE_NAME": "onebox", "SS_METHOD": "2022-blake3-aes-128-gcm",
+        "VMESS_TLS": "false", "TEMPLATE": "minimal", "UUID": "secret-uuid-value"}}"#;
+    assert!(v2.add_raw(raw));
+    assert_eq!(
+        v2.redact("执行 onebox regen；false；minimal；2022-blake3-aes-128-gcm；secret-uuid-value"),
+        "执行 onebox regen；false；minimal；2022-blake3-aes-128-gcm；<secret>"
+    );
 }
 
 #[test]

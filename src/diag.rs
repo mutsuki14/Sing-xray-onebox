@@ -6,8 +6,8 @@
 //! the node state, pending journals and the installed program always; per
 //! used core its binary, version and configuration; the services the
 //! configuration needs; the certificates in effect (proxy, site, standalone
-//! subscription); the site's nginx configuration; the renewal cron line
-//! when a certificate needs it; the firewall and hop ledgers; the FRP state
+//! subscription); the private nginx configurations (site, standalone
+//! subscription); the renewal cron line when a certificate needs it; the firewall and hop ledgers; the FRP state
 //! when FRP is installed; then the checks of feature modules passed to
 //! [`doctor_with`] / [`support_with`] (see [`registry`]).
 //!

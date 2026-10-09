@@ -27,6 +27,25 @@ pub const DOMAIN: &str = "<domain>";
 pub const IP: &str = "<ip>";
 /// Shorter known values are not replaced: they would mangle ordinary words.
 const MIN_KNOWN: usize = 4;
+/// Raw values that are words of doctor's own lines, never credentials.
+const VOCABULARY: [&str; 6] = ["onebox", "true", "false", "none", "null", "auto"];
+/// Keys (lowercase) of raw values that are identifiers, not credentials:
+/// replacing them would garble the report (`onebox` is the default node
+/// name).
+const VOCABULARY_KEYS: [&str; 12] = [
+    "node_name",
+    "protocol",
+    "protocols",
+    "core",
+    "type",
+    "mode",
+    "method",
+    "ss_method",
+    "template",
+    "theme",
+    "resource_profile",
+    "profile",
+];
 /// Keys whose numeric values are credentials (`"password": 12345678`).
 const CREDENTIAL_KEYS: [&str; 11] = [
     "pass", "secret", "token", "uuid", "key", "path", "short", "service", "auth", "psk", "obfs",
@@ -171,9 +190,10 @@ impl Redactor {
     /// as sensitive: its load error may echo any of them (`ws_path 路径无效:
     /// /x`, ``invalid type: integer `12345678` ``). JSON gives its string
     /// leaves and the numbers under credential-like keys, a `KEY=value` file
-    /// (FRP's v1 `state.conf`) its values. Protocol and core ids are kept.
-    /// `false` when `text` is neither format: the caller must then not show
-    /// the load error at all.
+    /// (FRP's v1 `state.conf`) its values. Identifiers that also make up
+    /// doctor's own wording (protocol and core ids, `onebox`, `true`, the
+    /// values of [`VOCABULARY_KEYS`]) are kept. `false` when `text` is
+    /// neither format: the caller must then not show the load error at all.
     pub fn add_raw(&mut self, text: &str) -> bool {
         if let Ok(doc) = serde_json::from_str::<Value>(text) {
             self.add_json(&doc, "");
@@ -184,10 +204,12 @@ impl Redactor {
             .map(str::trim)
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .collect();
-        let pairs: Option<Vec<&str>> = lines.iter().map(|l| conf_value(l)).collect();
+        let pairs: Option<Vec<(&str, &str)>> = lines.iter().map(|l| conf_pair(l)).collect();
         match pairs {
-            Some(values) if !values.is_empty() => {
-                values.into_iter().for_each(|v| self.add_leaf(v));
+            Some(pairs) if !pairs.is_empty() => {
+                for (key, value) in pairs {
+                    self.add_leaf(key, value);
+                }
                 true
             }
             _ => false,
@@ -196,7 +218,7 @@ impl Redactor {
 
     fn add_json(&mut self, value: &Value, key: &str) {
         match value {
-            Value::String(s) => self.add_leaf(s),
+            Value::String(s) => self.add_leaf(key, s),
             Value::Number(n) if credential_key(key) => self.add(&n.to_string(), SECRET),
             Value::Array(items) => items.iter().for_each(|v| self.add_json(v, key)),
             Value::Object(map) => map.iter().for_each(|(k, v)| self.add_json(v, k)),
@@ -204,10 +226,13 @@ impl Redactor {
         }
     }
 
-    /// A raw value, classified by its shape.
-    fn add_leaf(&mut self, value: &str) {
+    /// A raw value under `key`, classified by its shape.
+    fn add_leaf(&mut self, key: &str, value: &str) {
         let value = value.trim();
-        let vocabulary = Protocol::ALL.iter().any(|p| p.id() == value)
+        let key = key.to_ascii_lowercase();
+        let vocabulary = VOCABULARY_KEYS.contains(&key.as_str())
+            || VOCABULARY.contains(&value)
+            || Protocol::ALL.iter().any(|p| p.id() == value)
             || Core::ALL
                 .iter()
                 .any(|c| c.id() == value || c.binary() == value);
@@ -240,12 +265,12 @@ pub fn looks_like_domain(word: &str) -> bool {
     scrub::domain_len(word) == Some(word.len())
 }
 
-/// The value of a `KEY=value` line (quotes removed); `None` for any other
-/// line.
-fn conf_value(line: &str) -> Option<&str> {
+/// The key and value of a `KEY=value` line (quotes removed); `None` for
+/// any other line.
+fn conf_pair(line: &str) -> Option<(&str, &str)> {
     let (key, value) = line.split_once('=')?;
     let key_ok = !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    key_ok.then(|| value.trim().trim_matches(['"', '\'']))
+    key_ok.then(|| (key, value.trim().trim_matches(['"', '\''])))
 }
 
 fn credential_key(key: &str) -> bool {
