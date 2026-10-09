@@ -136,13 +136,60 @@ fn valid_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// v2's `semver`: leading `v`s stripped, everything from the first `-`
+/// dropped (`3.0.1-rc1` is `3.0.1`), exactly three numeric fields.
+pub fn semver(version: &str) -> Result<(u64, u64, u64)> {
+    let main = version
+        .trim_start_matches('v')
+        .split('-')
+        .next()
+        .unwrap_or("");
+    let fields: Option<Vec<u64>> = main.split('.').map(|f| f.parse().ok()).collect();
+    match fields.as_deref() {
+        Some(&[major, minor, patch]) => Ok((major, minor, patch)),
+        _ => bail!("版本需要 major.minor.patch"),
+    }
+}
+
+/// Refuse to self-update to `version` (the downloaded manager's `version`
+/// output) unless it is 3.x or newer. A 2.x child `regen` validates the
+/// journal before it looks at the inherited lock and refuses version 2, so
+/// such an update could only fail and be rolled back. The updater calls
+/// this before anything is downloaded (with the release tag) and again with
+/// the probed version, before anything is replaced.
+pub fn supported_target(version: &str) -> Result<()> {
+    let (major, ..) = semver(version)?;
+    ensure!(
+        major >= 3,
+        "不支持自更新到 {version}：2.x 及更早版本无法处理 3.x 的自更新恢复记录"
+    );
+    Ok(())
+}
+
+/// Refuse to record `version` (the installed manager's `version` output)
+/// as the `old` manager unless it is 3.x or newer: recovery runs the
+/// restored manager's `regen` while the journal exists, and a 2.x manager
+/// refuses version 2, so the recovery could never finish. A 2.x manager
+/// updates itself (its own journal is version 1).
+pub fn supported_installed(version: &str) -> Result<()> {
+    let (major, ..) = semver(version)?;
+    ensure!(
+        major >= 3,
+        "已安装的管理程序为 {version}，请先执行 onebox update-script 由它升级到 3.x"
+    );
+    Ok(())
+}
+
 impl ProgramJournal {
     /// A v3 journal in phase `prepared`.
     ///
-    /// Writers must only record a v3 manager as `old`: recovery runs the
+    /// Both managers must be 3.x or newer (the updater checks with
+    /// [`supported_installed`] and [`supported_target`]): recovery runs the
     /// restored `old` manager's `regen` while this journal still exists, and
-    /// a v2 manager validates it first and refuses version 2 (and v3-only
-    /// snapshot targets), so the recovery could never finish.
+    /// the update itself runs the `new` manager's `regen` under the
+    /// inherited lock; a 2.x manager validates the journal first in both
+    /// cases and refuses version 2 (and v3-only snapshot targets), so the
+    /// update would always fail and its recovery could never finish.
     pub fn new(
         work: String,
         old_sha256: Option<String>,

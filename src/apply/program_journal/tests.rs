@@ -719,3 +719,30 @@ fn a_foreign_lock_is_refused() {
     assert_eq!(err.to_string(), "配置锁不属于当前实例");
     assert!(journal_path(fx.paths()).exists());
 }
+
+#[test]
+fn only_3x_managers_take_part_in_a_self_update() {
+    assert_eq!(semver("v3.0.1-rc1").unwrap(), (3, 0, 1));
+    assert_eq!(semver("vv10.2.3").unwrap(), (10, 2, 3));
+    for bad in ["", "3.0", "3.0.0.1", "3.x.0", "../../1", " 3.0.0"] {
+        assert_eq!(
+            semver(bad).unwrap_err().to_string(),
+            "版本需要 major.minor.patch",
+            "{bad:?}"
+        );
+    }
+    for good in ["3.0.0", "v3.0.0", "3.1.0-rc1", "4.0.0"] {
+        supported_target(good).unwrap();
+        supported_installed(good).unwrap();
+    }
+    assert_eq!(
+        supported_target("v2.0.1").unwrap_err().to_string(),
+        "不支持自更新到 v2.0.1：2.x 及更早版本无法处理 3.x 的自更新恢复记录"
+    );
+    assert!(supported_target("1.9.9").is_err());
+    assert_eq!(
+        supported_installed("2.0.1").unwrap_err().to_string(),
+        "已安装的管理程序为 2.0.1，请先执行 onebox update-script 由它升级到 3.x"
+    );
+    assert!(supported_installed("3.0").is_err());
+}
