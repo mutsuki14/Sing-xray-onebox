@@ -259,6 +259,35 @@ fn bare_groups_run_their_default_action() {
     }
 }
 
+/// Every manual renewal forces its Let's Encrypt certificates (F-8.1#3):
+/// no `renew` help may read like a due check, or repeated runs hit the
+/// Let's Encrypt rate limits.
+#[test]
+fn every_renew_help_says_manual_runs_are_forced() {
+    for line in [
+        "renew",
+        "cert renew",
+        "frps renew",
+        "site renew",
+        "subscription renew",
+    ] {
+        let spec = invoke(line).unwrap_or_else(|e| panic!("{line}: {e}")).spec;
+        assert!(
+            spec.summary.starts_with("立即强制续期"),
+            "{line}: {}",
+            spec.summary
+        );
+        assert!(
+            spec.summary.contains("30 天内到期"),
+            "{line}: {}",
+            spec.summary
+        );
+        for cron in spec.options.iter().filter(|o| o.long == "cron") {
+            assert!(cron.help.contains("30 天内到期"), "{line}: {}", cron.help);
+        }
+    }
+}
+
 #[test]
 fn global_help_snapshot() {
     let text = help::global_help(COMMANDS);

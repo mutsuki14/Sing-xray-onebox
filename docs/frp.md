@@ -121,7 +121,7 @@ onebox frps restart                 # 重启
 onebox frps log                     # frps 与网站服务最近 80 行日志（别名 logs）
 onebox frps update                  # 更新到官方最新稳定版
 onebox frps update 0.71.0           # 指定版本（不低于 0.71.0）
-onebox frps renew                   # 检查控制证书并续期网站证书
+onebox frps renew                   # 检查控制证书并立即强制续期网站证书
 onebox frps rotate-token            # 更换 token，随后重新导出客户端
 onebox frps rotate-ca               # 更换私有 CA，随后重新导出客户端
 onebox frps uninstall               # 单独卸载 FRP

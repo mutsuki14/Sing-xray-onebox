@@ -113,11 +113,11 @@ const PUBLISH: CommandSpec =
 const RENEW: CommandSpec = CommandSpec::new(
     "renew",
     Group::Feature,
-    "续期 HTTPS 订阅证书（site 模式即网站证书；ip 模式无需）",
+    "立即强制续期 HTTPS 订阅证书（--cron 只续期 30 天内到期的；site 模式即网站证书，ip 模式无需）",
 )
 .options(&[OptSpec::flag(
     "cron",
-    "计划任务模式：仅在到期时续期，无事可做时不输出",
+    "计划任务模式：只续期到期的证书（30 天内到期，或自备证书已更新），无事可做时不输出",
 )])
 .handler(renew_command);
 

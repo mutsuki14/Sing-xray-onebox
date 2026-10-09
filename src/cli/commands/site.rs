@@ -78,7 +78,10 @@ pub const SITE: CommandSpec = CommandSpec::new("site", Group::Feature, "自有�
         sub("preview", "预览主页（写入 preview.html，不发布）")
             .args(&[ArgSpec::optional("模板", "minimal（默认）/ profile / docs")])
             .options(&[TITLE, DESCRIPTION, THEME]),
-        sub("renew", "续期网站证书"),
+        sub(
+            "renew",
+            "立即强制续期网站证书（每日计划任务 renew --cron 只续期 30 天内到期的）",
+        ),
     ])
     .root(Root::NotRequired)
     .handler(site_command);
