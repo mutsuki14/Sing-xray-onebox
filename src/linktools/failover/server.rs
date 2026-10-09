@@ -15,11 +15,16 @@
 //!   instead of stopping the service; other accept errors still stop it
 //!   (exit 1) through the run's own cancel token (D-8.1#24);
 //! - a core that exits is reported and restarted (see [`super::revive`]);
-//! - a panicking health check fails only its own entry (v2: the round).
+//! - a panicking health check fails only its own entry (v2: the round);
+//! - the listener is bound by the caller before any core starts ([`bind`]);
+//! - a thread the OS refuses (pids limit) costs one client (`05 FF`) or
+//!   slows one round (the check runs on the round's thread); it never
+//!   panics the service (see [`super::threads`]).
 
 use super::policy::FailoverPolicy;
 use super::relay;
 use super::revive::{revive, Backoff, ProxySlot};
+use super::threads::{spawn_with, Spawner, Task};
 use crate::error::{Error, Result};
 use crate::linktools::cancel::CancelToken;
 use crate::linktools::core_client::Proxy;
@@ -27,7 +32,8 @@ use crate::linktools::socks::{self, Handshake, SocksEndpoint, REPLY_HOST_UNREACH
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex, PoisonError};
 use std::thread::Scope;
 use std::time::{Duration, Instant};
@@ -102,15 +108,23 @@ impl Drop for Slot<'_> {
     }
 }
 
+/// The client side of one connection: how long the upstream connect may
+/// take, the relay's idle reaper, the run's token and the thread source.
+#[derive(Clone, Copy)]
+pub struct ClientPolicy<'a> {
+    pub upstream_timeout: Duration,
+    pub idle: Duration,
+    pub cancel: &'a CancelToken,
+    pub spawner: &'a dyn Spawner,
+}
+
 /// Serve one client: handshake, route through the active entry's core
 /// (looked up after the request, so policy switches affect new
 /// connections only), reply, relay.
 pub fn handle_client(
     mut stream: TcpStream,
     route: &dyn Fn() -> Option<SocksEndpoint>,
-    upstream_timeout: Duration,
-    cancel: &CancelToken,
-    idle: Duration,
+    policy: ClientPolicy,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
@@ -121,11 +135,11 @@ pub fn handle_client(
     };
     let upstream = route()
         .ok_or_else(|| Error::msg("无健康入口"))
-        .and_then(|endpoint| socks::connect(&endpoint, &target, upstream_timeout));
+        .and_then(|endpoint| socks::connect(&endpoint, &target, policy.upstream_timeout));
     match upstream {
         Ok(upstream) => {
             stream.write_all(&socks::REPLY_SUCCEEDED)?;
-            relay::relay(stream, upstream, cancel, idle)
+            relay::relay(stream, upstream, policy.cancel, policy.idle, policy.spawner)
         }
         Err(e) => {
             let _ = stream.write_all(&REPLY_HOST_UNREACHABLE);
@@ -163,7 +177,8 @@ pub struct Service<'a> {
     pub health: &'a (dyn Fn(usize) -> bool + Sync),
     /// Start a fresh proxy for entry `i` (after its core died).
     pub restart: &'a (dyn Fn(usize) -> Result<Box<dyn Proxy>> + Sync),
-    pub port: u16,
+    /// The local SOCKS5 listener from [`bind`].
+    pub listener: &'a TcpListener,
     /// Pause between the end of a round and the next one.
     pub interval: Duration,
     /// Timeout of the upstream SOCKS connect (`--timeout`).
@@ -171,6 +186,22 @@ pub struct Service<'a> {
     pub max_clients: usize,
     /// Relay idle reaper.
     pub idle: Duration,
+    /// Starts every helper thread (real: `threads::OsThreads`).
+    pub spawner: &'a dyn Spawner,
+}
+
+/// Bind the local SOCKS5 listener on `127.0.0.1:<port>` (non-blocking, for
+/// the acceptor). `failover` binds it before starting any core, so a busy
+/// port fails at once and no temporary core's random port can take it.
+pub fn bind(port: u16) -> Result<TcpListener> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .map_err(|e| Error::io(format!("127.0.0.1:{port}"), e).wrap("无法监听本机 SOCKS5 端口"))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
+fn thread_error(e: io::Error) -> Error {
+    Error::msg(format!("无法创建线程: {e}"))
 }
 
 /// Run until `cancel` is tripped. Events go to `emit` as JSON lines; the
@@ -182,17 +213,21 @@ pub fn serve(
     cancel: &CancelToken,
     emit: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<()> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, svc.port)).map_err(|e| {
-        Error::io(format!("127.0.0.1:{}", svc.port), e).wrap("无法监听本机 SOCKS5 端口")
-    })?;
-    listener.set_nonblocking(true)?;
+    let port = svc.listener.local_addr()?.port();
     let active = Active::default();
     let slots = Slots::new(svc.max_clients);
     let failure = Mutex::new(None);
+    let shared = (&active, &slots, &failure);
     std::thread::scope(|scope| {
-        scope.spawn(|| accept_loop(scope, &listener, svc, &active, &slots, cancel, &failure));
-        if let Err(e) = monitor(scope, svc, policy, &active, cancel, emit) {
-            record(&failure, e);
+        let (active, slots, failure) = shared;
+        let acceptor: Task =
+            Box::new(move || accept_loop(scope, svc, active, slots, cancel, failure));
+        let outcome = match svc.spawner.spawn(scope, "onebox-accept", acceptor) {
+            Ok(_) => monitor(scope, svc, port, policy, active, cancel, emit),
+            Err(e) => Err(thread_error(e)),
+        };
+        if let Err(e) = outcome {
+            record(failure, e);
             cancel.cancel();
         }
         // Stopping the cores closes every upstream, which wakes the relays.
@@ -211,10 +246,10 @@ fn record(failure: &Mutex<Option<Error>>, e: Error) {
     slot.get_or_insert(e);
 }
 
-/// Accept until cancelled; each client gets a scoped handler thread.
+/// Accept until cancelled; each client gets a scoped handler thread (a
+/// client whose thread the OS refuses is rejected like one over the limit).
 fn accept_loop<'scope>(
     scope: &'scope Scope<'scope, '_>,
-    listener: &'scope TcpListener,
     svc: &'scope Service,
     active: &'scope Active,
     slots: &'scope Slots,
@@ -227,15 +262,25 @@ fn accept_loop<'scope>(
             .and_then(|i| svc.proxies.get(i))
             .map(|slot| slot.get().endpoint().clone())
     };
+    let policy = ClientPolicy {
+        upstream_timeout: svc.upstream_timeout,
+        idle: svc.idle,
+        cancel,
+        spawner: svc.spawner,
+    };
     while !cancel.is_cancelled() {
-        match listener.accept() {
+        match svc.listener.accept() {
             Ok((stream, _)) => match slots.try_take() {
                 Some(slot) => {
-                    scope.spawn(move || {
-                        let _slot = slot;
-                        let timeout = svc.upstream_timeout;
-                        let _ = handle_client(stream, &route, timeout, cancel, svc.idle);
-                    });
+                    let work = move |(stream, _slot): (TcpStream, Slot<'scope>)| {
+                        let _ = handle_client(stream, &route, policy);
+                    };
+                    let item = (stream, slot);
+                    if let Err((_, (stream, _slot))) =
+                        spawn_with(svc.spawner, scope, "onebox-client", item, work)
+                    {
+                        reject(stream);
+                    }
                 }
                 None => reject(stream),
             },
@@ -260,10 +305,12 @@ fn transient(e: &io::Error) -> bool {
     )
 }
 
-/// Health rounds and events until cancelled.
+/// Health rounds and events until cancelled. A round whose thread the OS
+/// refuses runs on the monitor's own thread (it waits for it anyway).
 fn monitor<'scope>(
     scope: &'scope Scope<'scope, '_>,
     svc: &'scope Service,
+    port: u16,
     mut policy: FailoverPolicy,
     active: &Active,
     cancel: &CancelToken,
@@ -279,10 +326,13 @@ fn monitor<'scope>(
     while !cancel.is_cancelled() {
         if !running && Instant::now() >= next_round {
             running = true;
-            let tx = tx.clone();
-            scope.spawn(move || {
-                let _ = tx.send(round(svc));
+            let sender = tx.clone();
+            let task: Task = Box::new(move || {
+                let _ = sender.send(round(svc));
             });
+            if svc.spawner.spawn(scope, "onebox-round", task).is_err() {
+                let _ = tx.send(round(svc));
+            }
         }
         let health = match rx.recv_timeout(MONITOR_TICK) {
             Ok(health) => health,
@@ -296,7 +346,7 @@ fn monitor<'scope>(
             emit(&switch_event(svc.ids, old, new).to_string())?;
         }
         if !ready {
-            emit(&ready_event(svc.ids, svc.port).to_string())?;
+            emit(&ready_event(svc.ids, port).to_string())?;
             ready = true;
         }
         revive(
@@ -313,17 +363,29 @@ fn monitor<'scope>(
     Ok(())
 }
 
-/// One health check per proxy, in parallel.
+/// One health check per proxy, in parallel. A check whose thread the OS
+/// refuses runs on the round's own thread: a slower round, not a false
+/// verdict about the entry. A panicking check fails only its entry.
 fn round(svc: &Service) -> Vec<bool> {
+    let results: Vec<AtomicBool> = svc.proxies.iter().map(|_| AtomicBool::new(false)).collect();
     std::thread::scope(|scope| {
-        let checks: Vec<_> = (0..svc.proxies.len())
-            .map(|i| scope.spawn(move || (svc.health)(i)))
-            .collect();
-        checks
-            .into_iter()
-            .map(|check| check.join().unwrap_or(false))
-            .collect()
-    })
+        let mut checks = Vec::new();
+        for (i, result) in results.iter().enumerate() {
+            let task: Task = Box::new(move || result.store((svc.health)(i), Ordering::SeqCst));
+            match svc.spawner.spawn(scope, "onebox-check", task) {
+                Ok(check) => checks.push(check),
+                Err(_) => {
+                    let healthy = catch_unwind(AssertUnwindSafe(|| (svc.health)(i)));
+                    result.store(healthy.unwrap_or(false), Ordering::SeqCst);
+                }
+            }
+        }
+        for check in checks {
+            // A panicked check left its result false.
+            let _ = check.join();
+        }
+    });
+    results.into_iter().map(AtomicBool::into_inner).collect()
 }
 
 #[cfg(test)]

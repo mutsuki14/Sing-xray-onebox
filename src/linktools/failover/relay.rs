@@ -13,13 +13,17 @@
 //!
 //! Changes from v2: no non-blocking busy loop with 5 ms sleeps (up to
 //! 25 600 wake-ups per second with 128 connections, D-8.1#23); the stop
-//! signal is the run's `CancelToken` instead of a process-global flag.
+//! signal is the run's `CancelToken` instead of a process-global flag; a
+//! helper thread the OS refuses ends this connection with an error instead
+//! of a panic (see [`super::threads`]).
 
+use super::threads::{Spawner, Task};
 use crate::error::{Error, Result};
 use crate::linktools::cancel::CancelToken;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How often a blocked direction rechecks cancellation and idleness.
@@ -70,12 +74,14 @@ fn retryable(e: &io::Error) -> bool {
 }
 
 /// Relay until both sides are done (see module docs). `Ok` also covers a
-/// stop by cancellation or idleness.
+/// stop by cancellation or idleness; a refused helper thread is an error
+/// (both sockets are shut down).
 pub fn relay(
     client: TcpStream,
     upstream: TcpStream,
     cancel: &CancelToken,
     idle: Duration,
+    spawner: &dyn Spawner,
 ) -> Result<()> {
     for stream in [&client, &upstream] {
         stream.set_nonblocking(false)?;
@@ -89,12 +95,28 @@ pub fn relay(
         cancel,
         idle,
     };
+    let back_result = Mutex::new(None);
     std::thread::scope(|scope| {
-        let back = scope.spawn(|| pump(&upstream, &client, &shared));
+        let back: Task = Box::new(|| {
+            let done = pump(&upstream, &client, &shared);
+            *back_result.lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
+        });
+        let back = match spawner.spawn(scope, "onebox-relay", back) {
+            Ok(handle) => handle,
+            Err(e) => {
+                shared.abort(&client, &upstream);
+                bail!("无法创建转发线程: {e}");
+            }
+        };
         let forward = pump(&client, &upstream, &shared);
-        let back = back
-            .join()
-            .unwrap_or_else(|_| Err(Error::msg("转发线程异常退出")));
+        let back = match back.join() {
+            Ok(()) => back_result
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .unwrap_or(Ok(())),
+            Err(_) => Err(Error::msg("转发线程异常退出")),
+        };
         forward.and(back)
     })
 }
@@ -149,6 +171,8 @@ fn write_all(dst: &TcpStream, mut data: &[u8], shared: &Shared) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::threads::testing::Refusing;
+    use super::super::threads::OsThreads;
     use super::*;
     use std::net::{Ipv4Addr, TcpListener};
     use std::thread;
@@ -170,7 +194,7 @@ mod tests {
         let cancel = CancelToken::manual();
         let worker = {
             let cancel = cancel.clone();
-            thread::spawn(move || relay(left, right, &cancel, IDLE))
+            thread::spawn(move || relay(left, right, &cancel, IDLE, &OsThreads))
         };
         a.write_all(b"request").unwrap();
         a.shutdown(Shutdown::Write).unwrap();
@@ -190,7 +214,7 @@ mod tests {
         let (mut a, left) = pair();
         let (right, mut b) = pair();
         let cancel = CancelToken::manual();
-        let worker = thread::spawn(move || relay(left, right, &cancel, IDLE));
+        let worker = thread::spawn(move || relay(left, right, &cancel, IDLE, &OsThreads));
         let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
         let expected = data.clone();
         let writer = {
@@ -219,7 +243,7 @@ mod tests {
         let cancel = CancelToken::manual();
         let remote = cancel.clone();
         let started = Instant::now();
-        let worker = thread::spawn(move || relay(left, right, &remote, IDLE));
+        let worker = thread::spawn(move || relay(left, right, &remote, IDLE, &OsThreads));
         thread::sleep(Duration::from_millis(100));
         cancel.cancel();
         worker.join().unwrap().unwrap();
@@ -231,7 +255,7 @@ mod tests {
         let (right, _b) = pair();
         let started = Instant::now();
         let quiet = CancelToken::manual();
-        relay(left, right, &quiet, Duration::from_millis(1500)).unwrap();
+        relay(left, right, &quiet, Duration::from_millis(1500), &OsThreads).unwrap();
         let took = started.elapsed();
         assert!(
             took >= Duration::from_millis(1500) && took < Duration::from_secs(5),
@@ -240,11 +264,23 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_helper_thread_closes_the_connection() {
+        let (mut a, left) = pair();
+        let (right, mut b) = pair();
+        let refusing = Refusing::new("onebox-relay", 1);
+        let err = relay(left, right, &CancelToken::manual(), IDLE, &refusing).unwrap_err();
+        assert!(err.to_string().starts_with("无法创建转发线程"), "{err}");
+        let mut rest = Vec::new();
+        assert_eq!(a.read_to_end(&mut rest).unwrap(), 0, "client side closed");
+        assert_eq!(b.read_to_end(&mut rest).unwrap(), 0, "upstream side closed");
+    }
+
+    #[test]
     fn a_reset_side_stops_the_other_direction() {
         let (a, left) = pair();
         let (right, mut b) = pair();
         let cancel = CancelToken::manual();
-        let worker = thread::spawn(move || relay(left, right, &cancel, IDLE));
+        let worker = thread::spawn(move || relay(left, right, &cancel, IDLE, &OsThreads));
         // `a` closes with unread data, so the kernel resets the connection.
         b.write_all(b"never read").unwrap();
         thread::sleep(Duration::from_millis(200));

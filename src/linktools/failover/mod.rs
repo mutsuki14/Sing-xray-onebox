@@ -4,17 +4,23 @@
 //! connections (spec D §2.5). Events are JSON lines on stdout.
 //!
 //! Exit: Ctrl+C / SIGTERM is the normal way to stop the service and exits
-//! 0 (deliberate, kept from v2 and now documented, D-8.1#2); a listener
-//! failure exits 1.
+//! 0 (deliberate, kept from v2 and now documented, D-8.1#2) — also while
+//! the cores are still starting; a listener failure exits 1.
 //!
-//! Changes from v2: see [`server`], [`relay`] and [`revive`] (dead cores
-//! are restarted); without `--entries` the entry pair is the first
-//! TCP-capable plus the first UDP-only entry (v2).
+//! Changes from v2: see [`server`], [`relay`], [`revive`] (dead cores are
+//! restarted) and [`threads`]; the listener is bound before the first core
+//! starts (v2 bound it after all of them, so a busy `--port` failed only
+//! after up to 8 × 23 s of startup, and a core's random port could take a
+//! `--port` in the ephemeral range); Ctrl+C during startup is the same
+//! normal stop as later (it surfaced as the EOF message `输入结束，操作已取消`,
+//! exit 130); without `--entries` the entry pair is the first TCP-capable
+//! plus the first UDP-only entry (v2).
 
 pub mod policy;
 pub mod relay;
 pub mod revive;
 pub mod server;
+pub mod threads;
 
 pub use policy::FailoverPolicy;
 pub use revive::ProxySlot;
@@ -58,8 +64,8 @@ pub fn run(ctx: &Ctx, opts: &FailoverOptions) -> Result<()> {
     failover(ctx, &launcher, &entries, opts, cancel, &mut emit)
 }
 
-/// Start every entry's core (in order; a failure stops the cores already
-/// started), then serve until cancelled.
+/// Bind the listener, start every entry's core (in order; a failure stops
+/// the cores already started), then serve until cancelled.
 pub fn failover(
     ctx: &Ctx,
     launcher: &dyn Launcher,
@@ -69,10 +75,17 @@ pub fn failover(
     emit: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<()> {
     ensure!(ENTRY_RANGE.contains(&entries.len()), "{COUNT_ERROR}");
-    let proxies = entries
+    let listener = server::bind(opts.port)?;
+    let started = entries
         .iter()
         .map(|entry| launcher.launch(entry).map(ProxySlot::new))
-        .collect::<Result<Vec<ProxySlot>>>()?;
+        .collect::<Result<Vec<ProxySlot>>>();
+    let proxies = match started {
+        Ok(proxies) => proxies,
+        // Ctrl+C while the cores start: the normal stop, as while serving.
+        Err(e) if e.is_cancelled() || cancel.is_cancelled() => return Ok(()),
+        Err(e) => return Err(e),
+    };
     let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
     let health = |i: usize| {
         let Some(slot) = proxies.get(i) else {
@@ -98,11 +111,12 @@ pub fn failover(
         proxies: &proxies,
         health: &health,
         restart: &restart,
-        port: opts.port,
+        listener: &listener,
         interval: Duration::from_secs(opts.interval),
         upstream_timeout: Duration::from_secs(opts.common.timeout),
         max_clients: server::MAX_CLIENTS,
         idle: relay::IDLE,
+        spawner: &threads::OsThreads,
     };
     let policy = FailoverPolicy::new(ids.len(), opts.failures, opts.recoveries, opts.cooldown);
     server::serve(&svc, policy, cancel, emit)
@@ -170,6 +184,61 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "缺少客户端内核: xray");
+    }
+
+    #[test]
+    fn a_busy_port_fails_before_any_core_starts() {
+        let dir = TempDir::new("linktools-test").unwrap();
+        let (ctx, _, _) = Ctx::test(dir.path());
+        let busy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = busy.local_addr().unwrap().port();
+        let a = entry("a", Core::Singbox, Transport::Tcp);
+        let b = entry("b", Core::Xray, Transport::Udp);
+        let launcher = FakeLauncher::new(45300);
+        let opts = FailoverOptions {
+            port,
+            ..FailoverOptions::default()
+        };
+        let err = failover(
+            &ctx,
+            &launcher,
+            &[&a, &b],
+            &opts,
+            &CancelToken::manual(),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with(&format!("无法监听本机 SOCKS5 端口: 127.0.0.1:{port}")),
+            "{err}"
+        );
+        assert!(launcher.launched().is_empty(), "no core was started");
+    }
+
+    #[test]
+    fn ctrl_c_during_startup_is_the_normal_stop() {
+        let dir = TempDir::new("linktools-test").unwrap();
+        let (ctx, exec, _) = Ctx::test(dir.path());
+        let a = entry("a", Core::Singbox, Transport::Tcp);
+        let b = entry("b", Core::Xray, Transport::Udp);
+        let cancel = CancelToken::manual();
+        let mut launcher = FakeLauncher::new(45400);
+        launcher.interrupted = vec!["b".into()];
+        launcher.cancel_on_launch = Some(cancel.clone());
+        let events = Mutex::new(Vec::new());
+        let mut emit = |line: &str| {
+            events.lock().unwrap().push(line.to_owned());
+            Ok(())
+        };
+        let opts = FailoverOptions {
+            port: 0,
+            ..FailoverOptions::default()
+        };
+        failover(&ctx, &launcher, &[&a, &b], &opts, &cancel, &mut emit).unwrap();
+        assert_eq!(launcher.launched(), [("a".to_string(), 45400)]);
+        assert!(events.lock().unwrap().is_empty(), "never served");
+        assert!(exec.calls().is_empty(), "no health check");
     }
 
     #[test]

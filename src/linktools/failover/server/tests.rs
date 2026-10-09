@@ -1,5 +1,7 @@
 use super::*;
 use crate::linktools::failover::revive::ProxySlot;
+use crate::linktools::failover::threads::testing::Refusing;
+use crate::linktools::failover::threads::OsThreads;
 use crate::linktools::socks::USERNAME;
 use crate::linktools::testutil::FakeProxy;
 use std::io::Read;
@@ -102,12 +104,11 @@ fn ping_via(front: u16, origin: u16) -> std::result::Result<String, Vec<u8>> {
     Ok(text)
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A bound service listener and its port.
+fn listener() -> (TcpListener, u16) {
+    let listener = bind(0).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
 }
 
 #[test]
@@ -151,13 +152,13 @@ fn front_once(route: Option<SocksEndpoint>) -> (u16, thread::JoinHandle<Result<(
     let worker = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
         let cancel = CancelToken::manual();
-        handle_client(
-            stream,
-            &|| route.clone(),
-            Duration::from_secs(2),
-            &cancel,
-            relay::IDLE,
-        )
+        let policy = ClientPolicy {
+            upstream_timeout: Duration::from_secs(2),
+            idle: relay::IDLE,
+            cancel: &cancel,
+            spawner: &OsThreads,
+        };
+        handle_client(stream, &|| route.clone(), policy)
     });
     (port, worker)
 }
@@ -241,18 +242,19 @@ fn wait_for(events: &Mutex<Vec<String>>, needle: &str) {
 fn the_service_switches_on_failure_and_stops_cleanly() {
     let h = harness(2);
     let origin = echo_origin();
-    let port = free_port();
+    let (listener, port) = listener();
     let health = |i: usize| h.healthy[i].load(Ordering::SeqCst);
     let svc = Service {
         ids: &h.ids,
         proxies: &h.proxies,
         health: &health,
         restart: &no_restart,
-        port,
+        listener: &listener,
         interval: Duration::from_millis(50),
         upstream_timeout: Duration::from_secs(2),
         max_clients: MAX_CLIENTS,
         idle: relay::IDLE,
+        spawner: &OsThreads,
     };
     let events = Mutex::new(Vec::new());
     let cancel = CancelToken::manual();
@@ -291,27 +293,138 @@ fn the_service_switches_on_failure_and_stops_cleanly() {
         h.proxies.iter().all(|p| p.get().exited().is_some()),
         "cores stopped"
     );
+    // The caller still owns the listener, but nobody serves it any more.
+    let mut late = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    late.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    late.write_all(&[5, 1, 0]).unwrap();
+    let mut reply = [0u8; 2];
     assert!(
-        TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(),
-        "listener closed"
+        late.read_exact(&mut reply).is_err(),
+        "no handshake answered"
     );
 }
 
-#[test]
-fn over_capacity_clients_are_refused_and_bind_errors_reported() {
+/// Serve two healthy entries while `spawner` refuses some threads (EAGAIN)
+/// and run `check(harness, port, origin)` once the service is ready.
+fn serve_refusing(spawner: &Refusing, check: impl Fn(&Harness, u16, u16)) {
     let h = harness(2);
-    let port = free_port();
+    let origin = echo_origin();
+    let (listener, port) = listener();
     let health = |_: usize| true;
     let svc = Service {
         ids: &h.ids,
         proxies: &h.proxies,
         health: &health,
         restart: &no_restart,
-        port,
+        listener: &listener,
+        interval: Duration::from_secs(60),
+        upstream_timeout: Duration::from_secs(2),
+        max_clients: MAX_CLIENTS,
+        idle: relay::IDLE,
+        spawner,
+    };
+    let events = Mutex::new(Vec::new());
+    let cancel = CancelToken::manual();
+    thread::scope(|scope| {
+        let served = scope.spawn(|| {
+            let mut emit = |line: &str| {
+                events.lock().unwrap().push(line.to_owned());
+                Ok(())
+            };
+            serve(&svc, FailoverPolicy::new(2, 1, 1, 0), &cancel, &mut emit)
+        });
+        wait_for(&events, "ready");
+        assert_eq!(
+            events.lock().unwrap()[0],
+            r#"{"event":"switch","from":null,"to":"e0"}"#,
+            "checks that could not get a thread still ran"
+        );
+        check(&h, port, origin);
+        cancel.cancel();
+        served.join().unwrap().unwrap();
+    });
+}
+
+#[test]
+fn a_refused_client_thread_costs_only_that_client() {
+    let refusing = Refusing::new("onebox-client", 1);
+    serve_refusing(&refusing, |h, port, origin| {
+        let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        first
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut reply = [0u8; 2];
+        first.read_exact(&mut reply).unwrap();
+        assert_eq!(
+            reply,
+            socks::NO_ACCEPTABLE_METHODS,
+            "refused like a full service"
+        );
+        assert_eq!(
+            ping_via(port, origin).unwrap(),
+            "ping",
+            "the service survived"
+        );
+        assert_eq!(h.tunnels[0].load(Ordering::SeqCst), 1);
+    });
+    assert_eq!(refusing.refused(), 1);
+}
+
+/// CONNECT through `front`; true when the connection then closes without
+/// relaying anything.
+fn closed_after_connect(front: u16, origin: u16) -> bool {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, front)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(&[5, 1, 0]).unwrap();
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method).unwrap();
+    let mut request = vec![5, 1, 0];
+    request.extend(socks::encode_address("127.0.0.1", origin).unwrap());
+    stream.write_all(&request).unwrap();
+    let mut reply = [0u8; 10];
+    stream.read_exact(&mut reply).unwrap();
+    let _ = stream.write_all(b"ping");
+    let mut rest = Vec::new();
+    matches!(stream.read_to_end(&mut rest), Ok(0) | Err(_))
+}
+
+#[test]
+fn refused_relay_and_round_threads_do_not_stop_the_service() {
+    for (name, count) in [
+        ("onebox-relay", 1),
+        ("onebox-check", 2),
+        ("onebox-round", 1),
+    ] {
+        let refusing = Refusing::new(name, count);
+        serve_refusing(&refusing, |_, port, origin| {
+            if name == "onebox-relay" {
+                assert!(closed_after_connect(port, origin), "relay refused");
+            }
+            assert_eq!(ping_via(port, origin).unwrap(), "ping", "{name}");
+        });
+        assert_eq!(refusing.refused(), count, "{name}");
+    }
+}
+
+#[test]
+fn over_capacity_clients_are_refused_and_bind_errors_reported() {
+    let h = harness(2);
+    let (listener, port) = listener();
+    let health = |_: usize| true;
+    let svc = Service {
+        ids: &h.ids,
+        proxies: &h.proxies,
+        health: &health,
+        restart: &no_restart,
+        listener: &listener,
         interval: Duration::from_secs(60),
         upstream_timeout: Duration::from_secs(2),
         max_clients: 1,
         idle: relay::IDLE,
+        spawner: &OsThreads,
     };
     let cancel = CancelToken::manual();
     let ready = AtomicBool::new(false);
@@ -340,13 +453,7 @@ fn over_capacity_clients_are_refused_and_bind_errors_reported() {
         assert_eq!(reply, socks::NO_ACCEPTABLE_METHODS);
 
         // A second service cannot bind the same port.
-        let err = serve(
-            &svc,
-            FailoverPolicy::new(2, 3, 3, 60),
-            &CancelToken::manual(),
-            &mut |_| Ok(()),
-        )
-        .unwrap_err();
+        let err = bind(port).unwrap_err();
         assert!(
             err.to_string()
                 .starts_with(&format!("无法监听本机 SOCKS5 端口: 127.0.0.1:{port}")),
@@ -362,7 +469,7 @@ fn over_capacity_clients_are_refused_and_bind_errors_reported() {
 fn a_dead_core_is_restarted_and_routed_to_again() {
     let h = harness(2);
     let origin = echo_origin();
-    let port = free_port();
+    let (listener, port) = listener();
     let health = |i: usize| h.healthy[i].load(Ordering::SeqCst);
     let (replacement, replacement_tunnels) = fake_upstream();
     let restarts = AtomicUsize::new(0);
@@ -376,11 +483,12 @@ fn a_dead_core_is_restarted_and_routed_to_again() {
         proxies: &h.proxies,
         health: &health,
         restart: &restart,
-        port,
+        listener: &listener,
         interval: Duration::from_millis(50),
         upstream_timeout: Duration::from_secs(2),
         max_clients: MAX_CLIENTS,
         idle: relay::IDLE,
+        spawner: &OsThreads,
     };
     let events = Mutex::new(Vec::new());
     let cancel = CancelToken::manual();

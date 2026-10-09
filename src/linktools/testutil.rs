@@ -205,10 +205,12 @@ pub fn tls_server() -> TlsServer {
 }
 
 /// A launcher of fake proxies: ports are handed out from `base` in launch
-/// order (scripted curl rules match on them); ids in `fail` fail.
+/// order (scripted curl rules match on them); ids in `fail` fail; ids in
+/// `interrupted` fail like a Ctrl+C during startup (`Error::Cancelled`).
 pub struct FakeLauncher {
     next_port: AtomicU16,
     pub fail: Vec<String>,
+    pub interrupted: Vec<String>,
     launched: Mutex<Vec<(String, u16)>>,
     /// Cancel this token when launching (Ctrl+C during startup).
     pub cancel_on_launch: Option<CancelToken>,
@@ -219,6 +221,7 @@ impl FakeLauncher {
         FakeLauncher {
             next_port: AtomicU16::new(base),
             fail: Vec::new(),
+            interrupted: Vec::new(),
             launched: Mutex::new(Vec::new()),
             cancel_on_launch: None,
         }
@@ -237,6 +240,9 @@ impl Launcher for FakeLauncher {
         }
         if self.fail.contains(&entry.id) {
             return Err(Error::msg("缺少客户端内核: xray"));
+        }
+        if self.interrupted.contains(&entry.id) {
+            return Err(Error::Cancelled);
         }
         let port = self.next_port.fetch_add(1, Ordering::SeqCst);
         self.launched.lock().unwrap().push((entry.id.clone(), port));
