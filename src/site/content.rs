@@ -8,8 +8,11 @@
 //! `.well-known` (pending ACME challenges) is carried over, the live root
 //! is backed up, then the two trees are swapped atomically
 //! (`renameat2(RENAME_EXCHANGE)`, or two renames with rollback where the
-//! filesystem lacks it). Sources may not contain symlinks or special files
-//! and are limited to 256 MiB; modes are forced to 0755/0644. Publishing
+//! filesystem lacks it). Sources may not contain symlinks, special files or
+//! hard links and are limited to 256 MiB; they are read through descriptors
+//! (`copy_tree`), so a source another user can write cannot redirect the
+//! copy by swapping a directory for a symlink midway. Modes are forced to
+//! 0755/0644. Publishing
 //! only happens inside an apply, after the transaction snapshot, so an
 //! interruption is rolled back with everything else.
 //!
@@ -33,6 +36,8 @@
 //!   an import (v2 dropped nested `.well-known` directories, F-8.1#19);
 //! - imports from inside the private configuration tree (`ROOT`, FRP root)
 //!   are refused, not only from `/etc` itself;
+//! - hard links in a source are refused and sources are copied through
+//!   descriptors, not by path (v2 copied whatever a swapped path named);
 //! - error messages name the offending path.
 
 use crate::error::{Error, Result};
@@ -43,7 +48,7 @@ use crate::sys::fs::{
 };
 use crate::sys::time::now;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Marker proving Onebox owns a directory (`onebox\n`, 0600).
@@ -298,7 +303,12 @@ impl<'a> ContentStore<'a> {
 
     fn publish_staged(&self, source: &Path, stage: &Path, id: &str, generated: bool) -> Result<()> {
         let limits = CopyLimits::new(MAX_CONTENT_BYTES, MAX_CONTENT_ENTRIES).message(LIMIT_MESSAGE);
-        copy_tree(source, stage, &|p| top_level_skip(source, p), &limits)?;
+        // The source may be writable by another user: copy_tree reads it
+        // through descriptors, so swapping its directories for symlinks
+        // during the copy cannot reach outside it, and hard links (which
+        // could name a file only root may read) are refused there as well.
+        let from_source = limits.refuse_hard_links();
+        copy_tree(source, stage, &|p| top_level_skip(source, p), &from_source)?;
         let live_challenges = self.web_root().join(".well-known");
         if live_challenges.is_dir() {
             copy_tree(
@@ -380,7 +390,9 @@ fn top_level_skip(base: &Path, path: &Path) -> bool {
         })
 }
 
-/// Refuse symlinks and special files anywhere in `dir` (v2 messages).
+/// Refuse symlinks, special files and hard links anywhere in `dir` (v2
+/// messages; hard links are new). A check by path, for clear messages
+/// before anything is staged; the copy enforces the same rules itself.
 fn scan(dir: &Path, top: bool) -> Result<()> {
     for entry in fs::read_dir(dir).map_err(|e| Error::io(dir, e))? {
         let path = entry.map_err(|e| Error::io(dir, e))?.path();
@@ -399,6 +411,11 @@ fn scan(dir: &Path, top: bool) -> Result<()> {
         } else if !meta.is_file() {
             return Err(Error::msg(format!(
                 "网站内容包含特殊文件: {}",
+                path.display()
+            )));
+        } else if meta.nlink() > 1 {
+            return Err(Error::msg(format!(
+                "网站内容不能包含硬链接: {}",
                 path.display()
             )));
         }

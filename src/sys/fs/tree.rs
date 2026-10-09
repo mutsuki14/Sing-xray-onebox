@@ -1,13 +1,20 @@
 //! Tree operations: budgeted recursive copy and skip-aware removal (the
 //! primitives behind snapshots, backups and site content imports).
+//!
+//! [`copy_tree`] walks its source with descriptors: every entry is opened
+//! relative to its parent directory's descriptor with `O_NOFOLLOW`, so a
+//! directory swapped for a symlink while it is being copied (an import
+//! source writable by another local user) cannot redirect the rest of the
+//! walk outside the tree.
 
-use super::{
-    atomic_write_with, ensure_dir, fsync_dir, not_found, open_regular, symlink_error, MODE_MASK,
-};
+use super::{atomic_write_with, ensure_dir, fsync_dir, not_found, symlink_error, MODE_MASK};
 use crate::error::{Error, Result};
-use std::fs;
+use std::ffi::{CStr, CString, OsStr, OsString};
+use std::fs::{self, File};
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 /// Budget for [`copy_tree`], checked before each entry is created so a huge
@@ -20,6 +27,9 @@ pub struct CopyLimits {
     pub max_entries: usize,
     /// Error text when a limit is exceeded; `None` → `复制内容超过上限: {path}`.
     pub message: Option<&'static str>,
+    /// Whether files with more than one hard link are copied. An untrusted
+    /// source (`site import`) may link a file only root can read.
+    pub hard_links: bool,
 }
 
 impl CopyLimits {
@@ -30,12 +40,19 @@ impl CopyLimits {
             max_bytes,
             max_entries,
             message: None,
+            hard_links: true,
         }
     }
 
     /// Use a caller-specific message (e.g. v2's `备份超过 4096 文件或 64 MiB 限制`).
     pub const fn message(mut self, message: &'static str) -> CopyLimits {
         self.message = Some(message);
+        self
+    }
+
+    /// Refuse files with more than one hard link (`不允许硬链接: {path}`).
+    pub const fn refuse_hard_links(mut self) -> CopyLimits {
+        self.hard_links = false;
         self
     }
 
@@ -58,10 +75,13 @@ pub struct CopyStats {
 /// Recursively copy `src` to `dst`, streaming file contents and preserving
 /// permission bits. `skip(path)` is called with each entry's source path and
 /// excludes it (and its subtree). Symlinks and special files anywhere in the
-/// tree are refused, and so is a `dst` inside `src` unless it lies in a
-/// skipped subtree (a snapshot staged in `ROOT/.transaction`). `limits` is
-/// enforced while copying; on any error `dst` may be partially populated and
-/// the caller removes it.
+/// tree are refused (hard links too when `limits` says so), and so is a
+/// `dst` inside `src` unless it lies in a skipped subtree (a snapshot staged
+/// in `ROOT/.transaction`). The source is read through descriptors (module
+/// docs): `src` itself is opened by path without following a final symlink,
+/// everything below it relative to its parent. `limits` is enforced while
+/// copying; on any error `dst` may be partially populated and the caller
+/// removes it.
 pub fn copy_tree(
     src: &Path,
     dst: &Path,
@@ -74,7 +94,7 @@ pub fn copy_tree(
         limits,
         stats: CopyStats::default(),
     };
-    copy.entry(src, dst, true)?;
+    copy.entry(None, src.as_os_str(), src, dst, true)?;
     Ok(copy.stats)
 }
 
@@ -85,8 +105,21 @@ struct TreeCopy<'a> {
 }
 
 impl TreeCopy<'_> {
-    fn entry(&mut self, src: &Path, dst: &Path, root: bool) -> Result<()> {
-        let meta = fs::symlink_metadata(src).map_err(|e| Error::io(src, e))?;
+    /// Copy the entry `name` of the open directory `parent` (`None`: `name`
+    /// is the root's path) to `dst`; `src` is its path, for `skip` and errors.
+    fn entry(
+        &mut self,
+        parent: Option<&File>,
+        name: &OsStr,
+        src: &Path,
+        dst: &Path,
+        root: bool,
+    ) -> Result<()> {
+        // Inspect through an O_PATH descriptor first: it opens neither
+        // devices nor FIFOs, and with O_NOFOLLOW it pins a symlink itself.
+        let meta = open_at(parent, name, libc::O_PATH)
+            .and_then(|probe| probe.metadata())
+            .map_err(|e| Error::io(src, e))?;
         let mode = meta.permissions().mode() & MODE_MASK;
         if meta.file_type().is_symlink() {
             return Err(symlink_error(src));
@@ -94,18 +127,37 @@ impl TreeCopy<'_> {
         if !meta.is_file() && !meta.is_dir() {
             return Err(Error::msg(format!("不支持的特殊文件: {}", src.display())));
         }
+        if meta.is_file() && meta.nlink() > 1 && !self.limits.hard_links {
+            return Err(Error::msg(format!("不允许硬链接: {}", src.display())));
+        }
         if !root {
             if self.stats.entries >= self.limits.max_entries {
                 return Err(self.limits.exceeded(src));
             }
             self.stats.entries += 1;
         }
+        let kind = if meta.is_dir() { libc::O_DIRECTORY } else { 0 };
+        let source =
+            open_at(parent, name, libc::O_RDONLY | libc::O_NONBLOCK | kind).map_err(|e| match e
+                .raw_os_error()
+            {
+                Some(libc::ELOOP) => symlink_error(src),
+                _ => Error::io(src, e),
+            })?;
+        // Swapped between the two opens: refuse rather than guess.
+        let opened = source.metadata().map_err(|e| Error::io(src, e))?;
+        if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
+            return Err(Error::msg(format!(
+                "复制期间源内容被替换: {}",
+                src.display()
+            )));
+        }
         if meta.is_file() {
             let remaining = self.limits.max_bytes.saturating_sub(self.stats.bytes);
-            if meta.len() > remaining {
+            if opened.len() > remaining {
                 return Err(self.limits.exceeded(src));
             }
-            let copied = copy_file_limited(src, dst, mode, remaining)?
+            let copied = copy_file_limited(source, dst, mode, remaining)?
                 .ok_or_else(|| self.limits.exceeded(src))?;
             self.stats.bytes += copied;
             return Ok(());
@@ -113,16 +165,12 @@ impl TreeCopy<'_> {
         // Fill the directory while it is private and writable; its real mode
         // (possibly read-only) is applied once the children are in place.
         ensure_dir(dst, 0o700)?;
-        let mut entries = fs::read_dir(src)
-            .map_err(|e| Error::io(src, e))?
-            .map(|entry| entry.map(|e| e.file_name()))
-            .collect::<io::Result<Vec<_>>>()
-            .map_err(|e| Error::io(src, e))?;
+        let mut entries = list_dir(&source).map_err(|e| Error::io(src, e))?;
         entries.sort();
         for name in entries {
             let child = src.join(&name);
             if !(self.skip)(&child) {
-                self.entry(&child, &dst.join(&name), false)?;
+                self.entry(Some(&source), &name, &child, &dst.join(&name), false)?;
             }
         }
         ensure_dir(dst, mode)?;
@@ -130,15 +178,78 @@ impl TreeCopy<'_> {
     }
 }
 
-/// [`copy_file`] that stops at `max` bytes even if the source grows while it
-/// is copied: `Ok(None)` (and no `dst` written) when it is larger.
+/// `openat(parent, name, flags | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY)`;
+/// without a parent, `name` is a path (relative to the working directory).
+fn open_at(parent: Option<&File>, name: &OsStr, flags: libc::c_int) -> io::Result<File> {
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "路径包含 NUL 字符"))?;
+    let dir = parent.map_or(libc::AT_FDCWD, |p| p.as_raw_fd());
+    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NOCTTY;
+    // SAFETY: `name` is a live NUL-terminated string and `dir` is AT_FDCWD
+    // or a descriptor that `parent` keeps open for the duration of the call.
+    let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a fresh descriptor owned by nobody else.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// The names in the open directory `dir`, without `.` and `..`.
+fn list_dir(dir: &File) -> io::Result<Vec<OsString>> {
+    // fdopendir takes over the descriptor it is given: hand it a duplicate
+    // so `dir` stays usable for the openat calls on its children.
+    // SAFETY: F_DUPFD_CLOEXEC on a descriptor that `dir` keeps open.
+    let fd = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is our own fresh duplicate.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so `fd` is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    let mut names = Vec::new();
+    let result = loop {
+        // readdir reports both the end and an error as NULL; only errno
+        // tells them apart, so clear it first.
+        // SAFETY: errno is thread-local, and `stream` is a live DIR* used
+        // only by this loop.
+        let entry = unsafe {
+            *libc::__errno_location() = 0;
+            libc::readdir(stream)
+        };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break match error.raw_os_error() {
+                Some(0) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        // SAFETY: `entry` points into `stream` until the next readdir call,
+        // and d_name is NUL-terminated; the name is copied out right here.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(OsStr::from_bytes(name).to_owned());
+        }
+    };
+    // SAFETY: `stream` is live and closed exactly once, with its descriptor.
+    unsafe { libc::closedir(stream) };
+    result.map(|()| names)
+}
+
+/// Stream `source` into `dst` (atomically, with `mode`), stopping at `max`
+/// bytes even if the source grows while it is copied: `Ok(None)` (and no
+/// `dst` written) when it is larger.
 pub(super) fn copy_file_limited(
-    src: &Path,
+    source: File,
     dst: &Path,
     mode: u32,
     max: u64,
 ) -> Result<Option<u64>> {
-    let (source, _) = open_regular(src)?;
     let mut copied = 0;
     let mut too_large = false;
     let result = atomic_write_with(dst, mode, |file| {

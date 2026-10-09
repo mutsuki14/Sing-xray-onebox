@@ -166,6 +166,14 @@ fn unsafe_sources_leave_the_live_site_untouched() {
     let err = store.import(&src).unwrap_err().to_string();
     assert!(err.starts_with("网站内容不能包含符号链接"), "{err}");
     fs::remove_file(src.join("assets/secret")).unwrap();
+    // A hard link may name a file only root can read (no symlink needed).
+    fs::create_dir_all(s.paths.tls()).unwrap();
+    fs::write(s.paths.tls().join("key.pem"), "private").unwrap();
+    fs::hard_link(s.paths.tls().join("key.pem"), src.join("assets/key.pem")).unwrap();
+    let err = store.import(&src).unwrap_err().to_string();
+    let linked = src.join("assets/key.pem");
+    assert_eq!(err, format!("网站内容不能包含硬链接: {}", linked.display()));
+    fs::remove_file(&linked).unwrap();
     let fifo = src.join("pipe");
     let made = crate::sys::exec::SystemExec
         .run(&crate::sys::exec::Cmd::new("mkfifo").arg(fifo.to_string_lossy()))
