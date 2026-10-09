@@ -9,12 +9,12 @@
 //! the temporary firewall owner `acme` for TCP 80 around the acme.sh call.
 //!
 //! When the proxy certificate identity changes (the renewed pair needs
-//! pinning where the stored configuration's clients do not pin, or the
-//! reverse, or the leaf SHA-256 changed while they pin), the report says so: the
-//! caller must then run a full apply with the unchanged configuration,
-//! which re-records the trust, republishes client configurations and the
-//! subscription, and restarts the cores (renewal does not restart them
-//! itself in that case).
+//! pinning where the clients of the stored configuration do not pin, or
+//! the reverse, or the leaf SHA-256 changed while they pin), the report
+//! says so: the caller must then run a full apply with the unchanged
+//! configuration, which re-records the trust, republishes client
+//! configurations and the subscription, and restarts the cores (renewal
+//! does not restart them itself in that case).
 //!
 //! Cloudflare credentials: each DNS-01 target uses what is stored for its
 //! directory (or the environment); the CLI resolves credentials for the

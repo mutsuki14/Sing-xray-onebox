@@ -79,9 +79,12 @@ fn get(port: u16, request: &str) -> String {
 fn answers_real_connections_and_stops_cleanly() {
     let root = webroot_with("abc", "abc.key");
     // "/" as the system root: the host's real IPv6 facts (dual-stack or v4).
-    let responder = Responder::start(root.path(), 0, Path::new("/")).unwrap();
+    // A port outside the ephemeral range, which no parallel test binding
+    // port 0 can take over once it is released.
+    let wanted = crate::cert::testing::free_port();
+    let responder = Responder::start(root.path(), wanted, Path::new("/")).unwrap();
     let port = responder.port();
-    assert_ne!(port, 0);
+    assert_eq!(port, wanted);
     let reply = get(
         port,
         "GET /.well-known/acme-challenge/abc HTTP/1.1\r\nHost: a.example.com\r\n\r\n",
@@ -102,10 +105,14 @@ fn answers_real_connections_and_stops_cleanly() {
         .unwrap();
     assert!(err.to_string().starts_with(PORT_BUSY), "{err}");
     responder.stop();
-    assert!(
-        TcpStream::connect(("127.0.0.1", port)).is_err(),
-        "port released"
-    );
+    // A child another test forks at that moment holds a copy of the socket
+    // until it execs (close-on-exec): the port is released very soon, not
+    // necessarily at once.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        assert!(std::time::Instant::now() < deadline, "port released");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

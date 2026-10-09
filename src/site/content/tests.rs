@@ -95,10 +95,10 @@ fn restored_template_pages_survive_later_applies() {
     let store = ContentStore::new(&s.paths);
     store.prepare().unwrap();
     // `site template docs --title A`, then `site template profile --title B`
-    // (backs up the docs/A page), then `site restore latest`.
+    // (backs up the docs/A page), then `site restore <that backup>`.
     store.publish_template("docs A").unwrap();
-    store.publish_template("profile B").unwrap();
-    store.restore("latest").unwrap();
+    let docs = store.publish_template("profile B").unwrap();
+    store.restore(&docs).unwrap();
     assert_eq!(read(store.index()), "docs A");
     assert!(store.is_generated().unwrap());
     // The next unrelated apply still renders profile/B from the settings.

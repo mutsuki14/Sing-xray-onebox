@@ -232,7 +232,9 @@ pub fn args(
 
 /// Run acme.sh for `domains`; `Ok(true)` when it produced new files to
 /// deploy (see [`issued_pair`]), `Ok(false)` for an unforced renewal that
-/// was not due.
+/// was not due — the pair acme.sh holds may still be newer than the
+/// deployed one (a deployment that failed after an earlier renewal), so
+/// the engine deploys it in both cases.
 pub fn obtain(
     engine: &Engine,
     dir: &CertDir,
