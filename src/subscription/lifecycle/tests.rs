@@ -51,7 +51,11 @@ fn prepare_writes_migrated_devices_once_and_clears_on_reinstall() {
 
     std::fs::write(paths.subscription_v2_settings(), "{}").unwrap();
     std::fs::write(paths.published(), "{}").unwrap();
-    server::record(paths, Listener::Unix).unwrap();
+    let unix = server::Record {
+        listener: Listener::Unix,
+        group: None,
+    };
+    server::record(paths, &unix).unwrap();
     prepare(&engine, &ip(8448), Some(&v2), true).unwrap();
     for gone in [
         paths.devices(),
@@ -234,6 +238,12 @@ fn publish_standalone_starts_nginx_with_the_tested_config() {
     let conf = String::from_utf8(tested).unwrap();
     assert!(conf.contains("listen 8448 ssl http2;") && conf.contains("server_name _;"));
     assert_eq!(server::recorded(paths).unwrap(), Some(Listener::Unix));
+    let record = server::read_record(paths).unwrap().unwrap();
+    assert_eq!(
+        record.group.as_deref(),
+        Some("www-data"),
+        "the rendered user"
+    );
     assert_eq!(
         systemd.actions(),
         [
@@ -243,6 +253,21 @@ fn publish_standalone_starts_nginx_with_the_tested_config() {
             format!("enable {WEB_SERVICE}"),
         ]
     );
+    // Another nginx account (a different ONEBOX_NGINX_BIN) restarts the
+    // worker, so its socket follows.
+    let conf = frontend::conf_file(paths);
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace("user www-data www-data;", "user nginx nginx;"),
+    )
+    .unwrap();
+    let before = systemd.actions().len();
+    publish(&engine, &cfg, &spec(&cfg)).unwrap();
+    let after = systemd.actions()[before..].to_vec();
+    assert!(after.contains(&format!("restart {SERVICE}")), "{after:?}");
+    let record = server::read_record(paths).unwrap().unwrap();
+    assert_eq!(record.group.as_deref(), Some("nginx"));
 
     // Switching to ip mode removes the dedicated nginx and its config, and
     // restarts the worker on TCP.
@@ -255,6 +280,43 @@ fn publish_standalone_starts_nginx_with_the_tested_config() {
     let after = systemd.actions()[before..].to_vec();
     assert!(after.contains(&format!("stop {WEB_SERVICE}")), "{after:?}");
     assert!(after.contains(&format!("restart {SERVICE}")), "{after:?}");
+}
+
+#[test]
+fn the_socket_group_is_the_user_of_the_installed_nginx_config() {
+    let node = Node::new("sub-life-group");
+    let paths = &node.ctx.paths;
+    let on_site = site();
+    let https = standalone(WebCert::Cloudflare, 8448);
+    let write = |path: std::path::PathBuf, text: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    assert_eq!(socket_group(paths, &on_site), None, "no config yet");
+    write(
+        crate::site::conf_file(paths),
+        "user nginx nginx;\nworker_processes 1;\n",
+    );
+    write(
+        frontend::conf_file(paths),
+        "user nobody nogroup;\nworker_processes 1;\n",
+    );
+    let cases: [(&NodeConfig, Option<&str>); 4] = [
+        (&on_site, Some("nginx")),
+        (&https, Some("nogroup")),
+        (&ip(8448), None),
+        (&reality(), None),
+    ];
+    for (cfg, want) in cases {
+        assert_eq!(
+            socket_group(paths, cfg).as_deref(),
+            want,
+            "{:?}",
+            cfg.subscription
+        );
+    }
+    write(crate::site::conf_file(paths), "user www-data;\n");
+    assert_eq!(socket_group(paths, &on_site), None, "no group named");
 }
 
 #[test]

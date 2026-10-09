@@ -310,15 +310,28 @@ pub fn resolve(
     given: Option<&CfCredentials>,
     env: EnvLookup,
 ) -> Result<CfCredentials> {
+    resolve_available(ctx, dir, given, env)?.ok_or_else(|| Error::msg(MISSING))
+}
+
+/// [`resolve`] when nothing will be issued: complete credentials are still
+/// merged and persisted (given ones, or a migrated environment, are then
+/// there for the renewal that needs them), incomplete ones are `None`
+/// instead of [`MISSING`].
+pub fn resolve_available(
+    ctx: &Ctx,
+    dir: &Path,
+    given: Option<&CfCredentials>,
+    env: EnvLookup,
+) -> Result<Option<CfCredentials>> {
     let mut credentials = merged_with(ctx, dir, env)?;
     if let Some(given) = given.filter(|c| c.is_complete()) {
         credentials.absorb(given.values.clone(), valid_value);
     }
     if !credentials.is_complete() {
-        return Err(Error::msg(MISSING));
+        return Ok(None);
     }
     persist(dir, &credentials)?;
-    Ok(credentials)
+    Ok(Some(credentials))
 }
 
 #[cfg(test)]

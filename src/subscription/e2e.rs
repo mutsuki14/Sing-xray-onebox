@@ -85,7 +85,11 @@ impl Live {
 
     /// Start the worker for `listener` and wait until it accepts.
     fn start_worker(&self, listener: Listener) {
-        server::record(&self.ctx.paths, listener).unwrap();
+        let record = server::Record {
+            listener,
+            group: None,
+        };
+        server::record(&self.ctx.paths, &record).unwrap();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             if let Err(e) = server::serve(&ctx) {

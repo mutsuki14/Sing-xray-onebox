@@ -11,6 +11,10 @@
 //! - anything else is issued anew (ACME `--issue --force`, a new
 //!   self-signed pair); [`Engine::will_contact_acme`] answers in advance
 //!   whether acme.sh will run (the site starts its bootstrap nginx then);
+//! - Cloudflare credentials are required only when acme.sh runs, so a
+//!   valid DNS-01 pair that is not due needs none — the same rule as
+//!   `renew::credentials_needed_for_apply`, what the CLI asks for; complete
+//!   ones (given, stored or from the environment) are stored either way;
 //! - when acme.sh answers "not due" (exit 2), the pair it holds is still
 //!   deployed if it differs (v2 did the same): a renewal whose deployment
 //!   failed earlier is picked up instead of being reported as "unchanged"
@@ -35,7 +39,7 @@ use crate::error::Result;
 use crate::host::init::{self, InitSystem};
 use crate::host::os::{process_env, EnvLookup};
 use crate::host::service::Services;
-use crate::sys::fs::read_bounded;
+use crate::sys::fs::{read_bounded, read_bounded_following};
 use crate::sys::time::now;
 use crate::ui::out;
 use std::path::Path;
@@ -124,10 +128,18 @@ impl<'a> Engine<'a> {
     ) -> Result<bool> {
         spec.check()?;
         dir.ensure()?;
-        let credentials = self.credentials(dir, spec, cf)?;
         let previous = self.previous(dir);
+        let matches = previous.as_ref().is_none_or(|m| m.matches(spec));
+        let request = match spec.source {
+            Source::Acme(_) => self.acme_request(dir, spec, matches, force),
+            _ => None,
+        };
+        // Credentials are required only when acme.sh runs: a valid DNS-01
+        // pair that is not due needs none, which is also all the CLI asks
+        // for (`renew::credentials_needed_for_apply`).
+        let credentials = self.credentials(dir, spec, cf, request.is_some())?;
         let mut metadata = Metadata::attempt(spec, previous.as_ref(), now());
-        let result = self.ensure_pair(dir, spec, previous.as_ref(), force, credentials.as_ref());
+        let result = self.ensure_pair(dir, spec, previous.as_ref(), request, credentials.as_ref());
         let outcome = self.record(dir, &mut metadata, result, ISSUE_FAILED)?;
         if outcome == Renewal::Deferred {
             out::warn(format!("{}: {RENEW_DEFERRED}", spec.primary()));
@@ -135,12 +147,14 @@ impl<'a> Engine<'a> {
         Ok(outcome.changed())
     }
 
+    /// Custom and self-signed pairs by their own rules; ACME pairs by
+    /// running `request` (`None`: keep the pair).
     fn ensure_pair(
         &self,
         dir: &CertDir,
         spec: &CertSpec,
         previous: Option<&Metadata>,
-        force: bool,
+        request: Option<Request>,
         credentials: Option<&CfCredentials>,
     ) -> Result<Renewal> {
         let matches = previous.is_none_or(|m| m.matches(spec));
@@ -153,7 +167,7 @@ impl<'a> Engine<'a> {
                     selfsigned::generate(self.ctx, dir, &spec.domains).map(Renewal::from_changed)
                 }
             }
-            Source::Acme(challenge) => match self.acme_request(dir, spec, matches, force) {
+            Source::Acme(challenge) => match request {
                 Some(request) => self.acme(dir, spec, challenge, request, credentials),
                 None => Ok(Renewal::Unchanged),
             },
@@ -194,13 +208,14 @@ impl<'a> Engine<'a> {
     ) -> Result<Renewal> {
         spec.check()?;
         dir.ensure()?;
-        let credentials = self.credentials(dir, spec, cf)?;
+        // An ACME renewal always runs acme.sh (DNS-01 needs credentials).
+        let credentials = self.credentials(dir, spec, cf, true)?;
         let previous = self.previous(dir);
         let mut metadata = Metadata::attempt(spec, previous.as_ref(), now());
         let matches = previous.as_ref().is_none_or(|m| m.matches(spec));
         let result = match &spec.source {
             Source::Custom { .. } | Source::SelfSigned => {
-                self.ensure_pair(dir, spec, previous.as_ref(), false, None)
+                self.ensure_pair(dir, spec, previous.as_ref(), None, None)
             }
             Source::Acme(challenge) => {
                 let request = if matches && dir.has_pair() {
@@ -261,14 +276,15 @@ impl<'a> Engine<'a> {
         Err(missing_file(missing))
     }
 
-    /// Readable custom sources that would deploy different bytes.
+    /// Readable custom sources that would deploy different bytes (sources
+    /// read through symlinks, as `install_pair` reads them).
     fn custom_changed(&self, dir: &CertDir, cert: &Path, key: &Path) -> bool {
         let Ok(chain) = deployable_chain(self.ctx, cert, key) else {
             return false;
         };
         let deployed = read_bounded(&dir.cert(), PEM_MAX_BYTES).ok();
         let key_now = read_bounded(&dir.key(), PEM_MAX_BYTES).ok();
-        let key_new = read_bounded(key, PEM_MAX_BYTES).ok();
+        let key_new = read_bounded_following(key, PEM_MAX_BYTES).ok();
         deployed.as_deref() != Some(chain.as_bytes()) || key_now != key_new
     }
 
@@ -295,16 +311,22 @@ impl<'a> Engine<'a> {
         })
     }
 
-    /// Cloudflare credentials for DNS-01 specs (resolved and persisted).
+    /// Cloudflare credentials for DNS-01 specs, resolved and persisted when
+    /// complete; missing ones are an error only when `required` (acme.sh
+    /// will run).
     fn credentials(
         &self,
         dir: &CertDir,
         spec: &CertSpec,
         cf: Option<&CfCredentials>,
+        required: bool,
     ) -> Result<Option<CfCredentials>> {
         match spec.source {
-            Source::Acme(Challenge::Cloudflare) => {
+            Source::Acme(Challenge::Cloudflare) if required => {
                 cloudflare::resolve(self.ctx, dir.path(), cf, self.env).map(Some)
+            }
+            Source::Acme(Challenge::Cloudflare) => {
+                cloudflare::resolve_available(self.ctx, dir.path(), cf, self.env)
             }
             _ => Ok(None),
         }

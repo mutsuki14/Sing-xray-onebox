@@ -35,7 +35,11 @@ fn the_record_wins_over_the_configuration() {
     assert_eq!(resolve(paths).unwrap(), Listener::Unix);
 
     // publish records the generation being applied before state.json.
-    record(paths, Listener::Tcp { port: 9000 }).unwrap();
+    let tcp = Record {
+        listener: Listener::Tcp { port: 9000 },
+        group: None,
+    };
+    record(paths, &tcp).unwrap();
     assert_eq!(recorded(paths).unwrap(), Some(Listener::Tcp { port: 9000 }));
     assert_eq!(
         std::fs::read_to_string(listener_file(paths)).unwrap(),
@@ -49,6 +53,31 @@ fn the_record_wins_over_the_configuration() {
         resolve(paths).is_err(),
         "a corrupt record is not guessed around"
     );
+}
+
+#[test]
+fn the_socket_group_is_the_recorded_nginx_account() {
+    let node = Node::new("sub-srv-group");
+    let ctx = &node.ctx;
+    let paths = &ctx.paths;
+    let unix = Record {
+        listener: Listener::Unix,
+        group: Some("nginx".into()),
+    };
+    record(paths, &unix).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(listener_file(paths)).unwrap(),
+        "{\"type\":\"unix\",\"group\":\"nginx\"}\n"
+    );
+    assert_eq!(read_record(paths).unwrap(), Some(unix));
+    // Recorded: nginx is not consulted (the daemon's environment may name
+    // another nginx than the apply's ONEBOX_NGINX_BIN).
+    assert_eq!(socket_group(ctx).unwrap(), "nginx");
+    assert!(node.fake.history().is_empty(), "{:?}", node.fake.history());
+    // A record without a group (older publish): resolved as before.
+    std::fs::write(listener_file(paths), "{\"type\":\"unix\"}\n").unwrap();
+    crate::subscription::testing::nginx(&node.fake);
+    assert_eq!(socket_group(ctx).unwrap(), "www-data");
 }
 
 #[test]

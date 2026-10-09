@@ -113,6 +113,51 @@ fn ensure_dir_modes_and_refusals() {
 }
 
 #[test]
+fn following_reads_resolve_links_but_keep_type_and_size_rules() {
+    let dir = tmp();
+    // certbot layout: live/NAME/fullchain.pem -> ../../archive/NAME/fullchain1.pem
+    let archive = dir.join("archive/a.example.com");
+    let live = dir.join("live/a.example.com");
+    fs::create_dir_all(&archive).unwrap();
+    fs::create_dir_all(&live).unwrap();
+    fs::write(archive.join("fullchain1.pem"), b"PEM").unwrap();
+    symlink(
+        "../../archive/a.example.com/fullchain1.pem",
+        live.join("fullchain.pem"),
+    )
+    .unwrap();
+    symlink(dir.path(), dir.join("to-dir")).unwrap();
+    symlink(dir.join("nowhere"), dir.join("dangling")).unwrap();
+    symlink(dir.join("loop"), dir.join("loop")).unwrap();
+    let fifo = std::ffi::CString::new(dir.join("fifo").as_os_str().as_bytes()).unwrap();
+    // SAFETY: valid NUL-terminated path; mkfifo has no other preconditions.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let linked = live.join("fullchain.pem");
+    assert!(
+        read_bounded(&linked, 100).is_err(),
+        "owned reads never follow"
+    );
+    let cases: [(&Path, u64, Option<&[u8]>); 7] = [
+        (&linked, 100, Some(b"PEM")),
+        (&archive.join("fullchain1.pem"), 100, Some(b"PEM")),
+        (&linked, 2, None),
+        (&dir.join("to-dir"), 100, None),
+        (&dir.join("dangling"), 100, None),
+        (&dir.join("loop"), 100, None),
+        (&dir.join("fifo"), 100, None),
+    ];
+    for (path, max, want) in cases {
+        let got = read_bounded_following(path, max);
+        assert_eq!(got.as_deref().ok(), want, "{}", path.display());
+    }
+    let err = read_bounded_following(&dir.join("loop"), 100).unwrap_err();
+    assert!(
+        !err.to_string().contains("不允许符号链接"),
+        "a loop is an I/O error here: {err}"
+    );
+}
+
+#[test]
 fn string_reads() {
     let dir = tmp();
     let file = dir.join("t");

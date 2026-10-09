@@ -107,6 +107,7 @@ fn create_follows_v2_name_rules_and_hashes_the_token() {
     let mut store = DeviceStore {
         devices: Vec::new(),
         source: Source::Empty,
+        endpoint: None,
     };
     let mut rng = Xorshift(7);
     let new = store.create("  手机  ", &mut rng, 42).unwrap();
@@ -165,6 +166,7 @@ fn ids_collide_rarely_but_never_twice() {
     let mut store = DeviceStore {
         devices: vec![device("0000000000000000", "a", TOKEN)],
         source: Source::Devices,
+        endpoint: None,
     };
     let new = store.create("b", &mut Repeating(0), 1).unwrap();
     assert_ne!(new.id, "0000000000000000");
@@ -178,6 +180,7 @@ fn revoke_and_reset_by_exact_id() {
             device("00000000000000bb", "b", TOKEN),
         ],
         source: Source::Devices,
+        endpoint: None,
     };
     let mut rng = SeqRandom(1);
     assert_eq!(
@@ -287,6 +290,37 @@ fn changes_need_the_lock_an_enabled_subscription_and_no_pending_journal() {
         revoke(ctx, &lock, &phone.id).unwrap_err().to_string(),
         UNKNOWN_ID
     );
+}
+
+#[test]
+fn a_node_still_in_v2_state_refuses_device_changes() {
+    let node = Node::new("sub-dev-v2-node");
+    let ctx = &node.ctx;
+    // v2 still owns the node (the v3 bootstrap runs from a temp file).
+    std::fs::create_dir_all(&ctx.paths.root).unwrap();
+    std::fs::write(
+        ctx.paths.state(),
+        r#"{"values":{"PROTOCOLS":"vless-reality"}}"#,
+    )
+    .unwrap();
+    let id = "00000000000000aa";
+    write_v2_settings(&node, true, json!([v2_device(id, "手机")]));
+    let lock = node.lock();
+    let mut rng = SeqRandom(1);
+    for err in [
+        add_with(ctx, &lock, &ip(8448), "laptop", &mut rng, 9).unwrap_err(),
+        revoke(ctx, &lock, id).unwrap_err(),
+        reset_with(ctx, &lock, id, &mut rng, 9).unwrap_err(),
+        record_endpoint(ctx, &lock, "http://203.0.113.10:8448").unwrap_err(),
+    ] {
+        assert_eq!(err.to_string(), V2_NODE);
+    }
+    assert!(!ctx.paths.devices().exists(), "nothing v2 would not read");
+    assert_eq!(serving(&ctx.paths).len(), 1, "the v2 device still works");
+    // Once migrated (state.json in v3 shape), changes work again.
+    node.save(&ip(8448));
+    revoke(ctx, &lock, id).unwrap();
+    assert!(list(&ctx.paths).unwrap().is_empty());
 }
 
 #[test]

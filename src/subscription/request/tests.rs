@@ -42,7 +42,9 @@ fn option_values_are_checked_like_v2() {
 #[test]
 fn mode_is_inferred_in_v2_order() {
     let plain = reality();
-    let with_site = site();
+    // The site without a subscription yet (an enabled one keeps its mode).
+    let mut with_site = site();
+    with_site.subscription = None;
     type Case<'a> = (&'a [(&'static str, &'a str)], &'a NodeConfig, Mode);
     let cases: [Case; 6] = [
         (&[], &plain, Mode::Ip),
@@ -152,6 +154,183 @@ fn site_mode_ignores_and_names_endpoint_options() {
     assert_eq!(r.choice(&cfg).unwrap(), (SubscriptionChoice::Site, None));
     assert_eq!(r.ignored_in_site_mode(), ["--port", "--tls"]);
     assert!(request(&[]).unwrap().ignored_in_site_mode().is_empty());
+}
+
+#[test]
+fn an_enabled_subscription_keeps_what_is_not_given() {
+    use crate::subscription::testing::{ip, standalone};
+    let custom = || WebCert::Custom {
+        cert: "/c.pem".into(),
+        key: "/k.pem".into(),
+    };
+    let address = |cfg: &NodeConfig| match &cfg.subscription.as_ref().unwrap().mode {
+        SubscriptionMode::Ip { address } => *address,
+        other => panic!("{other:?}"),
+    };
+    let ip_cfg = ip(9000);
+    let ip_address = address(&ip_cfg);
+    let custom_cfg = standalone(custom(), 9443);
+    let http_cfg = standalone(WebCert::Http01, 9443);
+    let standalone_choice = |cert: WebCert| SubscriptionChoice::Standalone {
+        domain: "sub.example.com".into(),
+        cert,
+    };
+    type Case<'a> = (
+        &'a NodeConfig,
+        &'a [(&'static str, &'a str)],
+        SubscriptionChoice,
+        Option<u16>,
+    );
+    let cases: [Case; 12] = [
+        // ip: the address and the port stay, each can be changed alone.
+        (
+            &ip_cfg,
+            &[],
+            SubscriptionChoice::Ip {
+                address: Some(ip_address),
+            },
+            Some(9000),
+        ),
+        (
+            &ip_cfg,
+            &[("port", "9001")],
+            SubscriptionChoice::Ip {
+                address: Some(ip_address),
+            },
+            Some(9001),
+        ),
+        (
+            &ip_cfg,
+            &[("address", "192.0.2.9")],
+            SubscriptionChoice::Ip {
+                address: Some("192.0.2.9".parse().unwrap()),
+            },
+            Some(9000),
+        ),
+        (
+            &ip_cfg,
+            &[("mode", "ip")],
+            SubscriptionChoice::Ip {
+                address: Some(ip_address),
+            },
+            Some(9000),
+        ),
+        // standalone: domain, certificate method (and custom paths), port.
+        (
+            &http_cfg,
+            &[("port", "9444")],
+            standalone_choice(WebCert::Http01),
+            Some(9444),
+        ),
+        (
+            &http_cfg,
+            &[("domain", "other.example.com")],
+            SubscriptionChoice::Standalone {
+                domain: "other.example.com".into(),
+                cert: WebCert::Http01,
+            },
+            Some(9443),
+        ),
+        (
+            &http_cfg,
+            &[("tls", "cf")],
+            standalone_choice(WebCert::Cloudflare),
+            Some(9443),
+        ),
+        (&custom_cfg, &[], standalone_choice(custom()), Some(9443)),
+        (
+            &custom_cfg,
+            &[("cert", "/new.pem")],
+            standalone_choice(WebCert::Custom {
+                cert: "/new.pem".into(),
+                key: "/k.pem".into(),
+            }),
+            Some(9443),
+        ),
+        (
+            &custom_cfg,
+            &[("tls", "custom"), ("key", "/new.key")],
+            standalone_choice(WebCert::Custom {
+                cert: "/c.pem".into(),
+                key: "/new.key".into(),
+            }),
+            Some(9443),
+        ),
+        // An explicit mode change carries the port of an ip/standalone
+        // endpoint over, but never a site's.
+        (
+            &custom_cfg,
+            &[("mode", "ip")],
+            SubscriptionChoice::Ip { address: None },
+            Some(9443),
+        ),
+        (
+            &site(),
+            &[("mode", "standalone"), ("domain", "sub.example.com")],
+            standalone_choice(WebCert::Cloudflare),
+            None,
+        ),
+    ];
+    for (cfg, options, want, port) in cases {
+        assert_eq!(
+            choice(options, cfg).unwrap(),
+            (want, port),
+            "{options:?} on {:?}",
+            cfg.subscription
+        );
+    }
+    // A site-mode subscription stays one.
+    assert_eq!(
+        choice(&[], &site()).unwrap(),
+        (SubscriptionChoice::Site, None)
+    );
+}
+
+#[test]
+fn changing_an_enabled_mode_needs_mode() {
+    use crate::subscription::testing::{ip, standalone};
+    let https = standalone(WebCert::Cloudflare, 8448);
+    type Case<'a> = (&'a NodeConfig, &'a [(&'static str, &'a str)], &'a str);
+    let cases: [Case; 5] = [
+        (
+            &https,
+            &[("address", "192.0.2.1")],
+            "standalone 模式，--address",
+        ),
+        (
+            &ip(8448),
+            &[("domain", "sub.example.com")],
+            "ip 模式，--domain",
+        ),
+        (
+            &ip(8448),
+            &[("tls", "cf"), ("key", "/k")],
+            "ip 模式，--tls --key",
+        ),
+        (&site(), &[("port", "9000")], "site 模式，--port"),
+        (
+            &site(),
+            &[("domain", "sub.example.com")],
+            "site 模式，--domain",
+        ),
+    ];
+    for (cfg, options, what) in cases {
+        assert_eq!(
+            err(choice(options, cfg)),
+            format!("订阅当前为 {what} 不适用；{OTHER_MODE}"),
+            "{options:?}"
+        );
+    }
+    // With --mode the same options switch the mode.
+    let switched = choice(&[("mode", "ip"), ("address", "192.0.2.1")], &https).unwrap();
+    assert_eq!(
+        switched.0,
+        SubscriptionChoice::Ip {
+            address: Some("192.0.2.1".parse().unwrap())
+        }
+    );
+    // Options of the kept mode are fine; `--cert` alone needs a custom pair.
+    assert_eq!(err(choice(&[("cert", "/c")], &https)), PATHS_NOT_CUSTOM);
 }
 
 #[test]

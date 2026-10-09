@@ -13,7 +13,10 @@
 //! - the deployed `cert.pem` holds only `CERTIFICATE` blocks, the
 //!   key-matching leaf first (`TlsMaterial::with_leaf_first`), so the file's
 //!   first certificate is what TLS servers send and what clients pin;
-//! - metadata never holds credentials, and `last_error` is fixed text.
+//! - metadata never holds credentials, and `last_error` is fixed text;
+//! - source pairs are read through symlinks (certbot's `live/` names link
+//!   into `archive/`, and v2 read them with `fs::read` too); the deployed
+//!   pair and the metadata, which Onebox owns, never are.
 //!
 //! Changes from v2: custom chains given CA-first are deployed leaf-first
 //! (v2 copied them as they were, so nginx and the cores served the CA, and
@@ -28,7 +31,9 @@ use crate::error::{Error, Result};
 use crate::paths::Paths;
 use crate::render::spec::{CERT_FILE, KEY_FILE};
 use crate::render::tls::TlsMaterial;
-use crate::sys::fs::{atomic_write, ensure_dir, read_bounded, remove_file_if_exists};
+use crate::sys::fs::{
+    atomic_write, ensure_dir, read_bounded, read_bounded_following, remove_file_if_exists,
+};
 use crate::sys::time::{format_utc, now};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -192,12 +197,13 @@ impl Metadata {
 }
 
 /// The chain to deploy from a source pair: every `CERTIFICATE` block of
-/// `cert`, the block matching `key` first (found by public key).
+/// `cert`, the block matching `key` first (found by public key). Sources
+/// are read through symlinks (module docs).
 pub fn deployable_chain(ctx: &Ctx, cert: &Path, key: &Path) -> Result<String> {
     if let Some(missing) = [cert, key].into_iter().find(|p| !p.is_file()) {
         return Err(openssl::missing_file(missing));
     }
-    let text = String::from_utf8(read_bounded(cert, PEM_MAX_BYTES)?)
+    let text = String::from_utf8(read_bounded_following(cert, PEM_MAX_BYTES)?)
         .map_err(|_| Error::msg("证书文件不是有效的 PEM 文本"))?;
     let material = TlsMaterial::from_pem(&text)?;
     let leaf = openssl::leaf_index(ctx, &material, key)?;
@@ -216,7 +222,7 @@ pub fn install_pair(
 ) -> Result<bool> {
     dir.ensure()?;
     let chain = deployable_chain(ctx, cert, key)?;
-    let key_bytes = read_bounded(key, PEM_MAX_BYTES)?;
+    let key_bytes = read_bounded_following(key, PEM_MAX_BYTES)?;
     let staged = dir
         .path()
         .join(format!(".stage-{}.pem", crate::sys::rand::hex(8)?));

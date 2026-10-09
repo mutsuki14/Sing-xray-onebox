@@ -233,6 +233,45 @@ fn after_enable_creates_the_first_device_once() {
 }
 
 #[test]
+fn reenabling_compares_with_the_endpoint_recorded_at_disable() {
+    let node = Node::new("sub-cli-reenable");
+    let ctx = &node.ctx;
+    let enabled = ip(8448);
+    let disabled = reality();
+    let id = "00000000000000aa";
+    DeviceStore::write(&ctx.paths, &[device(id, "phone", TOKEN)]).unwrap();
+    // Nothing recorded (never disabled since v3 wrote the devices): unknown.
+    assert_eq!(published_endpoint(ctx, &disabled), None);
+    let old = endpoint::endpoint(&enabled).unwrap();
+    assert_eq!(published_endpoint(ctx, &enabled).as_deref(), Some(&*old));
+
+    // What `disable` records after its apply; device changes keep it, and
+    // the worker still serves the devices.
+    let lock = node.lock();
+    devices::record_endpoint(ctx, &lock, &old).unwrap();
+    devices::reset(ctx, &lock, id).unwrap();
+    assert_eq!(devices::serving(&ctx.paths).len(), 1);
+    drop(lock);
+    let recorded = published_endpoint(ctx, &disabled);
+    assert_eq!(recorded.as_deref(), Some(&*old));
+    let cases = [
+        (enabled.clone(), endpoint::UNCHANGED.to_owned()),
+        (
+            ip(9000),
+            endpoint::enabled_message(Some("http://changed.invalid"), &ip(9000)),
+        ),
+    ];
+    for (next, want) in cases {
+        assert_eq!(
+            endpoint::enabled_message(recorded.as_deref(), &next),
+            want,
+            "{:?}",
+            next.subscription
+        );
+    }
+}
+
+#[test]
 fn cloudflare_credentials_are_resolved_before_the_apply() {
     let node = Node::new("sub-cli-cf");
     let ctx = &node.ctx;

@@ -6,7 +6,8 @@
 //! reset.
 //!
 //! Storage: `ROOT/subscription/devices.json` (`{"schema":1,"devices":[…]}`,
-//! pretty JSON, 0600, atomic). Until v3 writes that file, the device list
+//! plus `"endpoint"` once the subscription was disabled; pretty JSON, 0600,
+//! atomic). Until v3 writes that file, the device list
 //! of a v2 node is read from v2's `subscription/settings.json`, read-only:
 //! the first device change (or the first apply carrying the migrated
 //! devices) writes `devices.json`, which from then on is the only source.
@@ -14,7 +15,11 @@
 //! upgrade still finds its own file.
 //!
 //! Device changes run under the node lock and refuse a pending journal
-//! (`存在未完成配置事务，请先执行 recover 后修改订阅设备`); the store is read
+//! (`存在未完成配置事务，请先执行 recover 后修改订阅设备`) and a node whose
+//! `state.json` is still v2's ([`V2_NODE`]: run from the bootstrap script
+//! before the migration, v3 would write a `devices.json` the installed v2
+//! program and its worker never read, and the migration would then
+//! prefer it over later v2 changes); the store is read
 //! after the lock is taken, so a concurrent revoke cannot be overwritten by
 //! an add. Callers load the node configuration before a change (they need
 //! it to print URLs), so a configuration that fails to load changes
@@ -50,6 +55,9 @@ pub const NAME_MAX_BYTES: usize = 80;
 pub const SCHEMA: u32 = 1;
 /// Refusal while a node or self-update journal is pending (v2 text).
 pub const PENDING: &str = "存在未完成配置事务，请先执行 recover 后修改订阅设备";
+/// Refusal while `state.json` is still v2's: the installed v2 program and
+/// its worker read only v2's `settings.json`, which v3 never writes.
+pub const V2_NODE: &str = "节点仍是 v2 状态：请先完成 v3 迁移（v2 执行 onebox update-script，或 sh onebox.sh regen），再修改订阅设备";
 pub const NOT_ENABLED: &str = "请先 subscription enable";
 pub const UNKNOWN_ID: &str = "设备 ID 不存在";
 pub const BAD_NAME: &str = "设备名称应为 1–80 字节且不能含控制字符（一个汉字占 3 字节）";
@@ -94,6 +102,10 @@ pub enum Source {
 struct DevicesFile {
     schema: u32,
     devices: Vec<Device>,
+    /// The endpoint the devices' URLs carried when the subscription was
+    /// last disabled ([`record_endpoint`]); absent while never disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
 }
 
 /// The device part of v2 `settings.json` (other fields are ignored).
@@ -110,6 +122,7 @@ struct V2Settings {
 pub struct DeviceStore {
     devices: Vec<Device>,
     source: Source,
+    endpoint: Option<String>,
 }
 
 impl DeviceStore {
@@ -117,22 +130,30 @@ impl DeviceStore {
     /// skipped, as the v2 migration does), else empty.
     pub fn load(paths: &Paths) -> Result<DeviceStore> {
         if let Some(bytes) = read_optional(&paths.devices())? {
-            let devices = parse_devices(&bytes)?;
+            let file = parse_file(&bytes)?;
             return Ok(DeviceStore {
-                devices,
+                devices: file.devices,
                 source: Source::Devices,
+                endpoint: file.endpoint,
             });
         }
         match read_optional(&paths.subscription_v2_settings())? {
             Some(bytes) => Ok(DeviceStore {
                 devices: valid_v2_devices(parse_v2(&bytes)?.devices),
                 source: Source::V2Settings,
+                endpoint: None,
             }),
             None => Ok(DeviceStore {
                 devices: Vec::new(),
                 source: Source::Empty,
+                endpoint: None,
             }),
         }
+    }
+
+    /// The endpoint recorded when the subscription was last disabled.
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_deref()
     }
 
     pub fn devices(&self) -> &[Device] {
@@ -150,20 +171,12 @@ impl DeviceStore {
     /// Write `devices` as `devices.json` (validated; `subscription/` is
     /// created or tightened to 0700).
     pub fn write(paths: &Paths, devices: &[Device]) -> Result<()> {
-        validate_all(devices)?;
-        ensure_dir(&paths.subscription(), 0o700)?;
-        let file = DevicesFile {
-            schema: SCHEMA,
-            devices: devices.to_vec(),
-        };
-        let mut text = serde_json::to_string_pretty(&file)?;
-        text.push('\n');
-        atomic_write(&paths.devices(), text.as_bytes(), 0o600)
+        write_file(paths, devices, None)
     }
 
-    /// Persist this store as `devices.json`.
+    /// Persist this store as `devices.json` (with its recorded endpoint).
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        Self::write(paths, &self.devices)
+        write_file(paths, &self.devices, self.endpoint.clone())
     }
 
     /// Add a device named `name` (trimmed) with a fresh token.
@@ -277,12 +290,28 @@ pub fn reset_with(
     mutate(&ctx.paths, |store| store.reset(id, rng, now))
 }
 
-/// The caller holds the node lock and no transaction is pending.
+/// `subscription disable` (after its apply, under `lock`): remember the
+/// endpoint the devices' URLs carry, so the next `enable` can tell whether
+/// they still work.
+pub fn record_endpoint(ctx: &Ctx, lock: &FileLock, endpoint: &str) -> Result<()> {
+    guard(ctx, lock)?;
+    mutate(&ctx.paths, |store| {
+        store.endpoint = Some(endpoint.to_owned());
+        Ok(())
+    })
+}
+
+/// The caller holds the node lock, no transaction is pending, and the node
+/// is no longer a v2 node ([`V2_NODE`]).
 fn guard(ctx: &Ctx, lock: &FileLock) -> Result<()> {
     lock.verify(&ctx.paths.lock())?;
     ensure!(
         !crate::apply::journal::pending(&ctx.paths)?.any(),
         "{PENDING}"
+    );
+    ensure!(
+        !crate::state::StateStore::is_v2_at(&ctx.paths)?,
+        "{V2_NODE}"
     );
     Ok(())
 }
@@ -358,7 +387,26 @@ fn validate_all(devices: &[Device]) -> Result<()> {
     Ok(())
 }
 
+/// Write `devices.json` (validated; `subscription/` is created or
+/// tightened to 0700).
+fn write_file(paths: &Paths, devices: &[Device], endpoint: Option<String>) -> Result<()> {
+    validate_all(devices)?;
+    ensure_dir(&paths.subscription(), 0o700)?;
+    let file = DevicesFile {
+        schema: SCHEMA,
+        devices: devices.to_vec(),
+        endpoint,
+    };
+    let mut text = serde_json::to_string_pretty(&file)?;
+    text.push('\n');
+    atomic_write(&paths.devices(), text.as_bytes(), 0o600)
+}
+
 fn parse_devices(bytes: &[u8]) -> Result<Vec<Device>> {
+    parse_file(bytes).map(|file| file.devices)
+}
+
+fn parse_file(bytes: &[u8]) -> Result<DevicesFile> {
     let file: DevicesFile = serde_json::from_slice(bytes).context(INVALID)?;
     ensure!(
         file.schema <= SCHEMA,
@@ -366,7 +414,7 @@ fn parse_devices(bytes: &[u8]) -> Result<Vec<Device>> {
         file.schema
     );
     validate_all(&file.devices)?;
-    Ok(file.devices)
+    Ok(file)
 }
 
 fn parse_v2(bytes: &[u8]) -> Result<V2Settings> {

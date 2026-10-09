@@ -130,3 +130,82 @@ fn ipv4_only_hosts_bind_one_listener() {
     );
     drop(responder);
 }
+
+/// One request on a fresh connection: whatever arrives (empty when the
+/// connection is closed or reset without a response).
+fn try_get(port: u16, request: &str) -> String {
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return String::new();
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.write_all(request.as_bytes());
+    let mut reply = Vec::new();
+    let _ = stream.read_to_end(&mut reply);
+    String::from_utf8_lossy(&reply).into_owned()
+}
+
+#[test]
+fn trickling_clients_cannot_hold_every_slot() {
+    let root = webroot_with("tok", "tok.key");
+    let fixture = TempDir::new("http01-trickle").unwrap();
+    let limits = Limits {
+        head: Duration::from_millis(300),
+        write: Duration::from_millis(300),
+    };
+    let responder = Responder::start_with(root.path(), 0, fixture.path(), limits).unwrap();
+    let port = responder.port();
+    // Every slot is taken by a client that never completes its head but
+    // sends a byte far more often than any per-read timeout.
+    let mut slow = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(b"GET / HTTP/1.1\r\nX: ").unwrap();
+        slow.push(stream);
+    }
+    let waited = Instant::now();
+    while responder.active.load(Ordering::SeqCst) < MAX_CONNECTIONS {
+        assert!(waited.elapsed() < Duration::from_secs(5), "slots taken");
+        std::thread::sleep(POLL);
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut streams: Vec<TcpStream> = slow.iter().map(|s| s.try_clone().unwrap()).collect();
+    let trickle = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                for stream in &mut streams {
+                    let _ = stream.write_all(b"x");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    // A validation request is answered once their head deadline passed.
+    let challenge = "GET /.well-known/acme-challenge/tok HTTP/1.1\r\nHost: a\r\n\r\n";
+    let started = Instant::now();
+    let reply = loop {
+        let reply = try_get(port, challenge);
+        if reply.starts_with("HTTP/1.1 200") || started.elapsed() > Duration::from_secs(4) {
+            break reply;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(reply.ends_with("tok.key"), "answered: {reply:?}");
+    // The trickling connections were closed by the responder, unanswered.
+    let mut first = slow.swap_remove(0);
+    first
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut rest = Vec::new();
+    let closed = first.read_to_end(&mut rest);
+    let timed_out =
+        |e: &std::io::Error| matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut);
+    assert!(
+        !closed.as_ref().is_err_and(timed_out),
+        "closed by the responder: {closed:?}"
+    );
+    assert!(rest.is_empty());
+    stop.store(true, Ordering::SeqCst);
+    trickle.join().unwrap();
+    drop(responder);
+}

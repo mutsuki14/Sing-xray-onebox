@@ -137,6 +137,17 @@ impl StateStore {
         exists(&paths.state()) || exists(&paths.legacy_v1_state())
     }
 
+    /// Whether `state.json` is still in v2 shape: a v2 node no v3 apply
+    /// has migrated yet, whose v2 programs still own the node. `false`
+    /// when there is no state.
+    pub fn is_v2_at(paths: &Paths) -> Result<bool> {
+        let Some(bytes) = read_state(&paths.state())? else {
+            return Ok(false);
+        };
+        let doc: Value = serde_json::from_slice(&bytes).context("state.json 无效")?;
+        Ok(matches!(detect(&doc)?, Format::V2))
+    }
+
     /// Validate, then write pretty JSON + newline (0600) atomically; the root
     /// directory is forced to 0700. When the file being replaced is a v2
     /// state, its exact bytes are first kept as `state.v2.json` (0600, never

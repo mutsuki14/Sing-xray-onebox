@@ -26,8 +26,9 @@
 //!
 //! Changes from v2: TCP listener in ip mode (no nginx); deadlines per
 //! exchange instead of per read; failed `accept` calls back off instead of
-//! spinning; the socket group comes from the nginx worker account Onebox
-//! renders into its configs.
+//! spinning; the socket group is the nginx worker account Onebox renders
+//! into its configs, recorded in `listener.json` by the publish stage
+//! ([`Record`]).
 
 use super::http::{self, Conn, Limits};
 use crate::ctx::Ctx;
@@ -89,8 +90,26 @@ pub fn listener_file(paths: &Paths) -> PathBuf {
     paths.subscription().join("listener.json")
 }
 
+/// `listener.json`: the listener and, for the unix socket, the group of
+/// the nginx worker account the apply rendered into the nginx
+/// configurations. The worker takes the socket group from here: a daemon's
+/// environment has no `ONEBOX_NGINX_BIN`, so resolving the account itself
+/// could read another nginx's `user` and lock the real workers out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Record {
+    #[serde(flatten)]
+    pub listener: Listener,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
 /// The listener recorded by the last publish (`None` without the file).
 pub fn recorded(paths: &Paths) -> Result<Option<Listener>> {
+    Ok(read_record(paths)?.map(|r| r.listener))
+}
+
+/// The whole record of the last publish (`None` without the file).
+pub fn read_record(paths: &Paths) -> Result<Option<Record>> {
     let path = listener_file(paths);
     match std::fs::symlink_metadata(&path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -103,12 +122,22 @@ pub fn recorded(paths: &Paths) -> Result<Option<Listener>> {
         .context("订阅监听记录 listener.json 无效")
 }
 
-/// Record the listener the next worker start uses (0600, atomic).
-pub fn record(paths: &Paths, listener: Listener) -> Result<()> {
+/// Record what the next worker start uses (0600, atomic).
+pub fn record(paths: &Paths, record: &Record) -> Result<()> {
     crate::sys::fs::ensure_dir(&paths.subscription(), 0o700)?;
-    let mut text = serde_json::to_string(&listener)?;
+    let mut text = serde_json::to_string(record)?;
     text.push('\n');
     atomic_write(&listener_file(paths), text.as_bytes(), 0o600)
+}
+
+/// The group the unix socket belongs to: the recorded one, else (no
+/// record yet, or one written before groups were recorded) the nginx
+/// worker account resolved here.
+fn socket_group(ctx: &Ctx) -> Result<String> {
+    match read_record(&ctx.paths)?.and_then(|r| r.group) {
+        Some(group) => Ok(group),
+        None => Ok(crate::host::nginx::worker(ctx)?.group),
+    }
 }
 
 /// Forget the recorded listener (subscription off).
@@ -349,7 +378,7 @@ pub fn serve(ctx: &Ctx) -> Result<()> {
             .map(|l| Box::new(l) as Box<dyn Acceptor>)
             .collect(),
         Listener::Unix => {
-            let group = crate::host::nginx::worker(ctx)?.group;
+            let group = socket_group(ctx)?;
             let gid = group_id(ctx, &group)?;
             vec![Box::new(bind_unix(&ctx.paths, gid)?)]
         }

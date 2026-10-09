@@ -213,6 +213,88 @@ fn custom_pairs_follow_their_sources() {
     );
 }
 
+/// certbot's layout: `live/NAME/{fullchain,privkey}.pem` are relative
+/// links to the newest `archive/NAME/{fullchain,privkey}N.pem`. Issue
+/// number `n` and point the links at it; returns the `live/` paths.
+fn certbot_issue(f: &Fixture, root: &Path, n: u32) -> (PathBuf, PathBuf) {
+    let issued = f.dir.join(format!("certbot-issue-{n}"));
+    let (chain, key) = f.ca.leaf(&issued, &["a.example.com"], 90, false);
+    let (archive, live) = (
+        root.join("archive/a.example.com"),
+        root.join("live/a.example.com"),
+    );
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::create_dir_all(&live).unwrap();
+    for (source, name) in [(&chain, "fullchain"), (&key, "privkey")] {
+        std::fs::copy(source, archive.join(format!("{name}{n}.pem"))).unwrap();
+        let link = live.join(format!("{name}.pem"));
+        let _ = std::fs::remove_file(&link);
+        let target = format!("../../archive/a.example.com/{name}{n}.pem");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+    }
+    (live.join("fullchain.pem"), live.join("privkey.pem"))
+}
+
+#[test]
+fn certbot_live_links_install_migrate_and_renew() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("engine-certbot");
+    let engine = engine(&f.ctx, InitSystem::None);
+    let letsencrypt = f.dir.join("letsencrypt");
+    let (cert, key) = certbot_issue(&f, &letsencrypt, 1);
+    let custom = spec(
+        &["a.example.com"],
+        Source::Custom {
+            cert: cert.clone(),
+            key: key.clone(),
+        },
+        Trust::Pinned,
+    );
+    let archive = letsencrypt.join("archive/a.example.com");
+    let archived = |name: &str| std::fs::read(archive.join(name));
+
+    // A fresh install from the live/ links.
+    let dir = CertDir::proxy(&f.ctx.paths);
+    assert!(engine.ensure(&dir, &custom, false, None).unwrap());
+    assert_eq!(
+        std::fs::read(dir.key()).unwrap(),
+        archived("privkey1.pem").unwrap()
+    );
+    assert!(
+        !crate::sys::fs::is_symlink(&dir.cert()),
+        "the copy is a file"
+    );
+    assert!(!engine.due(&dir, &custom).unwrap());
+
+    // A node migrated from v2: the pair v2 copied and its metadata naming
+    // the links. The apply keeps it.
+    let migrated = CertDir::new(f.dir.join("v2-tls"));
+    migrated.ensure().unwrap();
+    std::fs::copy(&cert, migrated.cert()).unwrap();
+    std::fs::copy(&key, migrated.key()).unwrap();
+    let mut v2 = Metadata::attempt(&custom, None, 1);
+    v2.last_success = 1;
+    migrated.save_metadata(&v2).unwrap();
+    assert!(!engine.ensure(&migrated, &custom, false, None).unwrap());
+    assert_eq!(migrated.metadata().unwrap().unwrap().last_error, None);
+    assert!(!engine.due(&migrated, &custom).unwrap());
+
+    // certbot renews and repoints the links: due, and redeployed.
+    certbot_issue(&f, &letsencrypt, 2);
+    assert!(engine.due(&dir, &custom).unwrap());
+    let renewed = engine.renew(&dir, &custom, RenewKind::Scheduled, None);
+    assert_eq!(renewed.unwrap(), Renewal::Changed);
+    assert_eq!(
+        std::fs::read(dir.key()).unwrap(),
+        archived("privkey2.pem").unwrap()
+    );
+    let newest = TlsMaterial::load(&archive.join("fullchain2.pem")).unwrap();
+    assert_eq!(pin(&dir), newest.pin());
+    assert!(!engine.due(&dir, &custom).unwrap());
+}
+
 #[test]
 fn deleted_custom_sources_keep_the_deployed_pair() {
     if !have_openssl() {

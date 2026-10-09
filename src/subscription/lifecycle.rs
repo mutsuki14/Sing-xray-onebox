@@ -17,9 +17,10 @@
 //!   `onebox-subscription-web` for the mode (both removed when off; the web
 //!   service and its config only exist in standalone mode).
 //! - [`publish`]: render and atomically write the snapshot, record the
-//!   listener, then start the worker — or restart it when its executable
-//!   (`/proc/PID/exe` versus `EXE`) or its listener changed (self-update,
-//!   mode or port change; G6/G13) — and wait until it listens; in
+//!   listener (with the nginx worker group for the unix socket), then
+//!   start the worker — or restart it when its executable (`/proc/PID/exe`
+//!   versus `EXE`) or the record changed (self-update, mode, port or nginx
+//!   account change; G6/G13) — and wait until it listens; in
 //!   standalone mode start the web service with the config the engine
 //!   tested and installed before this stage (K7: nothing is rendered or
 //!   tested here), in the other modes remove it. Off: remove both
@@ -48,7 +49,7 @@ use crate::host::service::{ServiceDef, Services, WAIT_RUNNING};
 use crate::paths::Paths;
 use crate::render::NodeSpec;
 use crate::site::NginxFacts;
-use crate::sys::fs::{atomic_write, ensure_dir, remove_file_if_exists};
+use crate::sys::fs::{atomic_write, ensure_dir, read_to_string_bounded, remove_file_if_exists};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -61,6 +62,8 @@ pub const ACME_FOREIGN: &str = "订阅 ACME 目录含未托管内容";
 const OWNED_MARKER: &str = ".onebox-owned";
 /// How long a (re)started worker gets to accept connections.
 const LISTEN_WAIT: Duration = Duration::from_secs(3);
+/// Largest installed nginx config read for its `user` directive.
+const NGINX_CONF_MAX: u64 = 1024 * 1024;
 
 /// prepare-state (module docs).
 pub fn prepare(
@@ -206,8 +209,12 @@ pub fn publish(engine: &Engine, cfg: &NodeConfig, spec: &NodeSpec) -> Result<()>
     check_subscription_family(cfg, ipv6(paths))?;
     let published = snapshot::render(spec)?;
     snapshot::write(paths, &published)?;
-    let previous = server::recorded(paths).ok().flatten();
-    server::record(paths, listener)?;
+    let previous = server::read_record(paths).ok().flatten();
+    let record = server::Record {
+        listener,
+        group: socket_group(paths, cfg),
+    };
+    server::record(paths, &record)?;
     if !standalone {
         services.remove(WEB_SERVICE)?;
         frontend::remove_conf(paths)?;
@@ -215,12 +222,27 @@ pub fn publish(engine: &Engine, cfg: &NodeConfig, spec: &NodeSpec) -> Result<()>
     if !services.exists(SERVICE) {
         services.write(&ServiceDef::subscription(paths))?;
     }
-    let restart = previous != Some(listener) || !worker_is_current(&services, paths);
+    let restart = previous.as_ref() != Some(&record) || !worker_is_current(&services, paths);
     run_worker(&services, paths, listener, restart)?;
     if standalone {
         start_web(engine, &services)?;
     }
     Ok(())
+}
+
+/// The group of the nginx in front of the unix socket: the `user`
+/// directive of its installed config, i.e. the account this apply rendered
+/// (the worker's own environment may name another nginx, see
+/// [`server::Record`]). `None` in ip mode or when it cannot be read (the
+/// worker then resolves the account itself).
+pub fn socket_group(paths: &Paths, cfg: &NodeConfig) -> Option<String> {
+    let conf = match cfg.subscription.as_ref()?.mode {
+        SubscriptionMode::Standalone { .. } => frontend::conf_file(paths),
+        SubscriptionMode::Site => crate::site::conf_file(paths),
+        SubscriptionMode::Ip { .. } => return None,
+    };
+    let text = read_to_string_bounded(&conf, NGINX_CONF_MAX).ok()?;
+    nginx::parse_user_directive(&text)?.1
 }
 
 /// Subscription off: no services, no snapshot (its credentials included).

@@ -15,7 +15,8 @@
 //! refuse (`配置已被其他操作修改…`) if `state.json` changed meanwhile — and
 //! creates the first device under the same lock (G31). `publish` resolves
 //! credentials the same way before the engine takes the lock. `disable`
-//! takes the lock first (nothing to ask). Device changes take the lock,
+//! records the endpoint the devices' URLs carry in `devices.json`, so a
+//! later `enable` with the same endpoint says the URLs still work. Device changes take the lock,
 //! load the configuration before changing anything (a reset never replaces
 //! a token it then cannot print, G-8.1#1), refuse a pending journal, and
 //! restart a running worker that is not the installed program (a v2
@@ -69,11 +70,11 @@ const ENABLE: CommandSpec = CommandSpec::new("enable", Group::Feature, "启用�
         "subscription enable --mode standalone --domain 域名 [--port 8448] [--tls cf|http|custom [--cert 证书 --key 私钥]]",
     ])
     .options(&[
-        OptSpec::value("mode", "模式", "ip（HTTP 直连）| site（复用自有网站）| standalone（独立域名 HTTPS）"),
+        OptSpec::value("mode", "模式", "ip（HTTP 直连）| site（复用自有网站）| standalone（独立域名 HTTPS）；已启用时省略则保持当前模式，其他省略的选项沿用当前值"),
         OptSpec::value("address", "IP", "ip 模式的订阅地址（IPv4 或 IPv6，不加方括号；默认节点 IP）"),
         OptSpec::value("ip", "IP", "同 --address"),
         OptSpec::value("domain", "域名", "standalone 模式的订阅域名（需已解析到本机）"),
-        OptSpec::value("port", "端口", "ip / standalone 模式的端口（默认 8448）"),
+        OptSpec::value("port", "端口", "ip / standalone 模式的端口（默认 8448，已启用时沿用当前端口）"),
         OptSpec::value("tls", "方式", "standalone 证书：cf（默认）| http | custom"),
         OptSpec::value("cert", "路径", "--tls custom 的完整证书链"),
         OptSpec::value("key", "路径", "--tls custom 的私钥"),
@@ -246,11 +247,22 @@ pub fn enable(ctx: &Ctx, request: &EnableRequest) -> Result<()> {
     // A journal left behind is finished first; if that (or anything
     // else) changed state.json since it was loaded, the apply refuses.
     apply::recover_locked(ctx, &lock)?;
-    let old_endpoint = endpoint::endpoint(&loaded.config);
+    let old_endpoint = published_endpoint(ctx, &loaded.config);
     let mut req = ApplyRequest::from_loaded(&loaded, next.clone(), "启用订阅");
     req.intents.cloudflare = cloudflare;
     apply::apply_locked(ctx, &lock, req)?;
     after_enable(ctx, &lock, old_endpoint.as_deref(), &next, name)
+}
+
+/// The endpoint existing device URLs carry: the enabled one, else the one
+/// recorded when the subscription was disabled (`None` when unknown, which
+/// the enable reports as a changed entry).
+fn published_endpoint(ctx: &Ctx, cfg: &NodeConfig) -> Option<String> {
+    endpoint::endpoint(cfg).or_else(|| {
+        DeviceStore::load(&ctx.paths)
+            .ok()
+            .and_then(|store| store.endpoint().map(str::to_owned))
+    })
 }
 
 /// The configuration an enable request asks for (options checked, ignored
@@ -332,6 +344,11 @@ pub fn disable(ctx: &Ctx) -> Result<()> {
     let lock = node_lock(ctx)?;
     apply::recover_locked(ctx, &lock)?;
     apply::apply_locked(ctx, &lock, req)?;
+    if let Some(old) = endpoint::endpoint(&loaded.config) {
+        // Best effort: without it the next enable only reports the entry
+        // as changed (the subscription is disabled either way).
+        let _ = devices::record_endpoint(ctx, &lock, &old);
+    }
     print(&[DISABLED.to_owned()])
 }
 

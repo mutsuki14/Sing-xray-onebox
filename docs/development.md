@@ -78,7 +78,7 @@ python3 tests/fetch_tools.py --check       # 校验 tests/tools.json，不联网
 |---|---|
 | `ONEBOX_INIT=systemd\|openrc\|none` | 指定 init 系统；`none` 时由 Onebox 自己管理进程，可在容器中完整运行生命周期 |
 | `ONEBOX_SINGBOX_BIN`、`ONEBOX_XRAY_BIN` | 用本地内核文件代替下载（离线安装、测试） |
-| `ONEBOX_NGINX_BIN` | 使用指定的 nginx 程序（不安装软件包，也不停用系统 nginx 服务） |
+| `ONEBOX_NGINX_BIN` | 使用指定的 nginx 程序（不安装软件包，也不停用系统 nginx 服务）。不写入服务环境：服务单元记录程序路径，订阅服务的 socket 用户组取自配置事务写入 `subscription/listener.json` 的 nginx 工作账号 |
 
 ## 测试
 

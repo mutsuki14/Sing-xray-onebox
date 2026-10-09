@@ -24,7 +24,7 @@ curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/mutsuki14/Sing-x
 GH_PROXY=https://ghfast.top/ sh onebox.sh regen
 ```
 
-引导脚本下载 3.0.0 程序并执行 `regen`，迁移时把自己安装到 `/usr/local/bin/onebox`；失败同样整体回滚，保留 v2。`GH_PROXY` 镜像同时提供程序和校验文件 `SHA256SUMS`，可以同时替换二者，请只使用可信的前缀。
+引导脚本下载 3.0.0 程序并执行 `regen`，迁移时把自己安装到 `/usr/local/bin/onebox`；失败同样整体回滚，保留 v2。迁移完成前（节点仍是 v2 状态），从引导脚本运行的 v3 拒绝修改订阅设备（`subscription add` / `revoke` / `reset`）：已安装的 v2 程序和订阅服务读不到 v3 的设备列表，撤销不会生效。`GH_PROXY` 镜像同时提供程序和校验文件 `SHA256SUMS`，可以同时替换二者，请只使用可信的前缀。
 
 **不要用 `install` 代替迁移**，重装会生成新凭据并清除订阅设备。升级后客户端无需重新导入；不过 v3 修复了若干客户端配置问题（见下文），重新导入或刷新订阅可获得修复。
 
@@ -120,6 +120,7 @@ v2 对所有命令接受同一组选项（无关的选项被忽略，个别甚�
 - `service 名称 reload` 不再支持，请用 `restart`。
 - 两个内核都在使用时 `update all 版本` 被拒绝（版本号只能用于单个内核）；`update 内核` 指定当前未使用的内核时报错。
 - `probe merge` 至少需要两份输入。
+- 对已启用的订阅执行 `subscription enable` 时保持当前模式，省略的选项沿用当前值（v2 重新推断模式并把省略的选项恢复默认，只改端口也可能把 HTTPS 订阅改成 HTTP 明文）；更换模式必须写 `--mode`，不写时给出其他模式的选项会报错（见 [subscription.md](subscription.md#三种入口)）。
 - `onebox client mihomo` 以及 `mihomo.yaml`、`provider.yaml` 和订阅的 `mihomo` / `provider` 格式输出标准 YAML，不再是 JSON；按 JSON 解析的脚本需要改用 YAML 解析。`onebox client` 的输出末尾只有一个换行。
 
 ## v3 修复的 v2 问题
