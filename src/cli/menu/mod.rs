@@ -10,7 +10,8 @@
 //! What an action's result does (G5): success and ordinary errors (`[错误]
 //! …`) return to the same menu; `Exit{2}` (warnings-only result) prints
 //! `[警告] …` and continues; a cancellation inside the action (EOF or
-//! Ctrl+C at one of its questions) prints `[提示]` and continues;
+//! Ctrl+C at one of its questions — the menu's prompter turns the signal
+//! into a cancellation, see [`interrupt`]) prints `[提示]` and continues;
 //! `Exit{0}` (a finished self-update) and `Exit{75}` end the process, so
 //! the replaced program never keeps running; EOF (or Ctrl+C) at a menu
 //! prompt itself — the main menu's or any submenu's — leaves with 130.
@@ -27,6 +28,7 @@
 //! actions no longer end the menu.
 
 mod feature;
+pub mod interrupt;
 mod node;
 mod perf;
 
@@ -41,6 +43,7 @@ use crate::state::Loaded;
 use crate::ui::menu::{choose, Entry};
 use crate::VERSION;
 use std::cell::Cell;
+use std::sync::Arc;
 
 /// Runs fixed command lines (the registry in production).
 pub trait Dispatcher {
@@ -58,11 +61,17 @@ impl Dispatcher for Registry {
 
 /// `onebox` without arguments. Without a terminal (and without `-y`) the
 /// command overview is printed instead, as a menu could not be answered.
+/// Questions asked from the menu (its own and its actions') are cancelled
+/// by Ctrl+C ([`interrupt::Interruptible`]).
 pub fn run(ctx: &Ctx) -> Result<()> {
     if let Some(help) = unanswerable(ctx.ui.as_ref()) {
         return crate::ui::out::data(&help);
     }
-    with_system(ctx, |session| Menu::new(session, &Registry).main())
+    let ctx = Ctx {
+        ui: Arc::new(interrupt::Interruptible::new(ctx.ui.clone())),
+        ..ctx.clone()
+    };
+    with_system(&ctx, |session| Menu::new(session, &Registry).main())
 }
 
 /// The command overview to print instead of a menu nobody can answer
