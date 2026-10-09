@@ -179,6 +179,33 @@ fn the_lock_is_probed_only_while_a_journal_exists() {
 }
 
 #[test]
+fn an_frp_operation_runs_while_its_journal_exists_and_its_lock_is_held() {
+    let dir = TempDir::new("diag-frp-lock").unwrap();
+    let paths = Paths::isolated(dir.path());
+    let lock = paths.frp_lock();
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    // (journal, lock held, running)
+    let cases = [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ];
+    for (journal, held, want) in cases {
+        let _ = fs::remove_dir(paths.frp_journal());
+        let _ = fs::remove_file(&lock);
+        if journal {
+            fs::create_dir(paths.frp_journal()).unwrap();
+        }
+        let guard = held.then(|| FileLock::acquire(&lock, BUSY_MESSAGE).unwrap());
+        assert_eq!(frp_operation_running(&paths), want, "{journal} {held}");
+        assert_eq!(lock.exists(), guard.is_some(), "probing never creates it");
+        // The node lock says nothing about FRP, and the reverse.
+        assert!(!operation_running(&paths));
+    }
+}
+
+#[test]
 fn failures_are_downgraded_while_an_operation_runs() {
     assert_eq!(
         downgrade(Check::fail("服务 onebox-xray", "未运行")),

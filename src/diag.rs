@@ -16,8 +16,9 @@
 //! while a journal exists is the node lock probed (briefly, on the existing
 //! lock file) to tell an operation in progress from one to recover; while
 //! one runs, services are stopped and files swapped on purpose, so every
-//! later failure is reported as a warning. Checks never abort the
-//! diagnosis: a failing probe becomes a `[失败]` or `[警告]` line.
+//! later failure is reported as a warning. The FRP journal and lock get the
+//! same treatment for the FRP lines. Checks never abort the diagnosis: a
+//! failing probe becomes a `[失败]` or `[警告]` line.
 //!
 //! Changes from v2:
 //! - checks cover the site, subscription and FRP, service autostart, the
@@ -149,9 +150,11 @@ pub type CheckFn = fn(&Doctor, Option<&NodeConfig>) -> Vec<Check>;
 
 /// Building blocks for the checks of feature modules, so that their lines
 /// match the built-in ones (names, wording, the 7-day certificate rule,
-/// running + autostart, the renewal line, `nginx -t`). Each takes the
-/// [`Doctor`] or its parts, never the real clock or a re-detected init.
+/// running + autostart, the renewal line, `nginx -t`, failures downgraded
+/// while an FRP operation runs). Each takes the [`Doctor`] or its parts,
+/// never the real clock or a re-detected init.
 pub mod probe {
+    pub use super::checks::{downgrade, frp_operation_running, TRANSIENT};
     pub use super::node::{service_check, service_name, service_verdict, Role, REGEN};
     pub use super::tls::{
         certificate_check, expiry_check, nginx_check, renewal_job_check, renewal_job_verdict,
@@ -185,7 +188,8 @@ impl<'a> Doctor<'a> {
 
     /// Run every applicable check (see the module docs), handing each one
     /// to `sink` as soon as it is known. `Err(NotInstalled)` when there is
-    /// nothing to diagnose: no node state, no FRP and no pending journal.
+    /// nothing to diagnose: no node state, no FRP and no pending journal
+    /// (node, self-update or FRP).
     pub fn diagnose(&self, extra: &[CheckFn], sink: &mut dyn FnMut(&Check)) -> Result<Diagnosis> {
         checks::diagnose(self, extra, sink)
     }

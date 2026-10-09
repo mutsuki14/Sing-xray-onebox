@@ -17,6 +17,8 @@ use crate::state::Origin;
 use crate::sys::exec::Cmd;
 use crate::sys::fs::TempDir;
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
+use std::io::ErrorKind;
+use std::path::Path;
 use std::time::Duration;
 
 pub const STATE: &str = "节点配置";
@@ -76,10 +78,13 @@ pub(super) fn diagnose(
     let ctx = doctor.ctx;
     let survey = Survey::gather(ctx);
     let running = operation_running(&ctx.paths);
+    let frp_running = frp_operation_running(&ctx.paths);
     // Decided before anything is printed: an interrupted first install
-    // leaves a journal but no state, and must still be diagnosed.
+    // (node or FRP) leaves a journal but no state, and must still be
+    // diagnosed. FRP's journal is its provider's line.
     let journal = journal_check(&ctx.paths, running);
-    let nothing = !survey.node.present() && !survey.frp.installed();
+    let nothing =
+        !survey.node.present() && !survey.frp.installed() && !present(&ctx.paths.frp_journal());
     if nothing && journal.status == CheckStatus::Pass {
         return Err(Error::NotInstalled);
     }
@@ -98,7 +103,8 @@ pub(super) fn diagnose(
     if survey.node.present() {
         run.extend(ledger_checks(ctx, survey.config()));
     }
-    run.extend(frp_check(&survey.frp));
+    let frp = frp_check(&survey.frp);
+    run.extend(frp.map(|check| if frp_running { downgrade(check) } else { check }));
     for provider in extra {
         run.extend(provider(doctor, survey.config()));
     }
@@ -171,13 +177,28 @@ pub fn operation_running(paths: &Paths) -> bool {
     let journal = [paths.transaction(), paths.self_update_journal()]
         .iter()
         .any(|p| std::fs::symlink_metadata(p).is_ok());
-    journal && node_lock_held(paths)
+    journal && lock_held(&paths.lock())
 }
 
-fn node_lock_held(paths: &Paths) -> bool {
-    let lock = paths.lock();
-    let exists = std::fs::symlink_metadata(&lock).is_ok_and(|m| m.is_file());
-    exists && matches!(FileLock::acquire(&lock, BUSY_MESSAGE), Err(Error::Busy(_)))
+/// Whether an FRP operation (install, configure, renewal, uninstall,
+/// recovery) runs right now: the FRP journal exists and another process
+/// holds the FRP lock, probed like [`operation_running`]. Its journal is
+/// then not one to recover, and what it stops or swaps on purpose is no
+/// fault: the FRP lines are downgraded like the node's ([`downgrade`]).
+pub fn frp_operation_running(paths: &Paths) -> bool {
+    present(&paths.frp_journal()) && lock_held(&paths.frp_lock())
+}
+
+/// Whether the existing lock file `lock` is held (nothing is created; the
+/// lock is released at once when it was free).
+fn lock_held(lock: &Path) -> bool {
+    let exists = std::fs::symlink_metadata(lock).is_ok_and(|m| m.is_file());
+    exists && matches!(FileLock::acquire(lock, BUSY_MESSAGE), Err(Error::Busy(_)))
+}
+
+/// Whether anything is at `path`; one that cannot be inspected counts.
+fn present(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).map_or_else(|e| e.kind() != ErrorKind::NotFound, |_| true)
 }
 
 /// The verdict on what [`journal::pending`] found; `running` = an operation

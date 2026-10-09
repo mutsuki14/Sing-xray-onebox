@@ -217,6 +217,10 @@ impl Paths {
         let parent = self.frp_root.parent().unwrap_or_else(|| Path::new("/"));
         parent.join(".onebox-frp.lock")
     }
+    /// The FRP transaction journal (`frp::journal`), next to the FRP lock.
+    pub fn frp_journal(&self) -> PathBuf {
+        self.frp_lock().with_file_name(".onebox-frp-journal")
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +240,7 @@ mod tests {
             PathBuf::from("/etc/onebox/xray.json")
         );
         assert_eq!(p.frp_lock(), PathBuf::from("/etc/.onebox-frp.lock"));
+        assert_eq!(p.frp_journal(), PathBuf::from("/etc/.onebox-frp-journal"));
         let derived = [
             (p.subscription_acme(), "/var/lib/onebox-subscription-acme"),
             (p.subscription_socket(), "/run/onebox/subscription.sock"),
