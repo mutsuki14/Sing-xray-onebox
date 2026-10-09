@@ -263,9 +263,11 @@ class HostGuardTest(unittest.TestCase):
         before = host.host_state(self.probes)
         self.rules.write_text(IPTABLES_SAVE.replace("282358:153519268", "282999:153600000")
                               .replace("06:08:03", "06:19:45")
-                              + "table ip t {\n  counter packets 1 bytes 2\n}\n")
+                              + "table ip t {\n  counter packets 1 bytes 2\n"
+                              + "  elements = { 192.0.2.1 timeout 1h expires 59m58s }\n}\n")
         changed = host.host_state(self.probes)
-        self.rules.write_text(IPTABLES_SAVE + "table ip t {\n  counter packets 9 bytes 99\n}\n")
+        self.rules.write_text(IPTABLES_SAVE + "table ip t {\n  counter packets 9 bytes 99\n"
+                              + "  elements = { 192.0.2.1 timeout 1h expires 12m3s }\n}\n")
         self.assertEqual(host.state_changes(changed, host.host_state(self.probes)), [])
         self.assertEqual(len(host.state_changes(before, changed)), 1)
 

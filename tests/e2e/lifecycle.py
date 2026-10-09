@@ -47,6 +47,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _lifecycle_fixtures as fx  # noqa: E402
+import _lifecycle_host as host  # noqa: E402
 import _lifecycle_sandbox as sb  # noqa: E402
 from _yaml import load_yaml  # noqa: E402
 
@@ -427,7 +428,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_pass(work: Path, label: str, binary: Path, core: Path, fixture_core: bool,
-             tripwire) -> None:
+             tripwire: host.Tripwire | None) -> None:
     sandbox = sb.Sandbox(work / label, binary, core, tripwire=tripwire)
     try:
         full_lifecycle(sandbox, fixture_core)
@@ -438,7 +439,9 @@ def run_pass(work: Path, label: str, binary: Path, core: Path, fixture_core: boo
             refusal.cleanup()
     finally:
         sandbox.cleanup()
-    print(f"PASS lifecycle ({label}): install, port, add, exports, backup/restore, conflicts, "
+    print(f"PASS lifecycle ({label}): install, "
+          + ("sealed boot oneshot, " if tripwire else "")
+          + "port, add, exports, backup/restore, conflicts, "
           + ("start-failure recovery, " if fixture_core else "")
           + "v2 migration, 1.x refusal, uninstall")
 
