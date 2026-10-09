@@ -70,7 +70,19 @@ impl Menu<'_> {
     /// v2's enable dialog with validated answers.
     fn subscription_enable(&self) -> Result<()> {
         let cfg = self.loaded()?.config;
-        let ui = self.session.ui();
+        let Some(mode) = self.subscription_mode(&cfg)? else {
+            return Ok(());
+        };
+        let mut argv: Vec<String> = ["subscription", "enable", "--mode"]
+            .map(String::from)
+            .to_vec();
+        argv.extend(self.mode_options(&cfg, mode)?);
+        let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+        self.dispatch(&words)
+    }
+
+    /// 0 = ip, 1 = site (only with an active site), 2 = standalone.
+    fn subscription_mode(&self, cfg: &NodeConfig) -> Result<Option<usize>> {
         let has_site = cfg.site_active().is_some();
         let items = [
             "ip（IP 直连 HTTP，无需域名）",
@@ -78,14 +90,22 @@ impl Menu<'_> {
             "standalone（独立域名 HTTPS）",
         ]
         .map(String::from);
-        let mode = loop {
+        loop {
             let default = usize::from(has_site);
-            match ui.select("订阅托管方式", &items, default, true)? {
-                None => return Ok(()),
+            match self
+                .session
+                .ui()
+                .select("订阅托管方式", &items, default, true)?
+            {
                 Some(1) if !has_site => self.session.warn(SITE_FOR_SUBSCRIPTION),
-                Some(i) => break i,
+                choice => return Ok(choice),
             }
-        };
+        }
+    }
+
+    /// The `--mode …` value and the options of that mode.
+    fn mode_options(&self, cfg: &NodeConfig, mode: usize) -> Result<Vec<String>> {
+        let ui = self.session.ui();
         let port_default = cfg
             .subscription
             .as_ref()
@@ -93,45 +113,38 @@ impl Menu<'_> {
             .map_or(defaults::SUBSCRIPTION_PORT, |s| s.port)
             .to_string();
         let port_check = |p: &str| opt::port(p).map(|p| p.to_string());
-        let mut argv: Vec<String> = ["subscription", "enable", "--mode"]
-            .map(String::from)
-            .to_vec();
-        match mode {
+        Ok(match mode {
             0 => {
                 self.session.warn(PLAINTEXT);
-                let default = plan::default_subscription_address(&cfg)
+                let default = plan::default_subscription_address(cfg)
                     .map(|ip| ip.to_string())
                     .unwrap_or_default();
-                let address = ui.input_with(
-                    "订阅 IP（IPv4 或 IPv6，无需方括号）",
-                    &default,
-                    &subscription_ip,
-                )?;
+                let prompt = "订阅 IP（IPv4 或 IPv6，无需方括号）";
+                let address = ui.input_with(prompt, &default, &subscription_ip)?;
                 let port = ui.input_with("HTTP 订阅端口", &port_default, &port_check)?;
-                argv.extend([
+                vec![
                     "ip".into(),
                     "--address".into(),
                     address,
                     "--port".into(),
                     port,
-                ]);
+                ]
             }
-            1 => argv.push("site".into()),
+            1 => vec!["site".into()],
             _ => {
                 let domain = ask_domain(ui, "订阅域名（已解析到本机）", "订阅域名无效")?;
                 let port = ui.input_with("HTTPS 端口", &port_default, &port_check)?;
-                argv.extend([
+                let mut options = vec![
                     "standalone".into(),
                     "--domain".into(),
                     domain,
                     "--port".into(),
                     port,
-                ]);
-                argv.extend(web_cert_args(&site_cert(ui)?));
+                ];
+                options.extend(web_cert_args(&site_cert(ui)?));
+                options
             }
-        }
-        let words: Vec<&str> = argv.iter().map(String::as_str).collect();
-        self.dispatch(&words)
+        })
     }
 
     pub(super) fn site_menu(&self) -> Result<()> {

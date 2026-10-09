@@ -25,7 +25,6 @@ use crate::domain::config::{NodeConfig, SiteTemplate, SiteTheme, WebCert};
 use crate::domain::{defaults, plan};
 use crate::error::{Error, Result};
 use crate::site::{ContentStore, SiteContent};
-use crate::state::Loaded;
 use std::path::Path;
 
 pub const PUBLISHED: &str = "网站已发布，原内容保存在网站备份目录";
@@ -174,100 +173,100 @@ pub fn info(session: &Session) -> Result<()> {
     session.data(&info.lines().join("\n"))
 }
 
+/// A planned site change.
+struct Change {
+    next: NodeConfig,
+    reason: &'static str,
+    content: Option<SiteContent>,
+    message: Option<&'static str>,
+}
+
+impl Change {
+    fn config(next: NodeConfig, reason: &'static str) -> Change {
+        Change {
+            next,
+            reason,
+            content: None,
+            message: None,
+        }
+    }
+
+    /// A change that republishes the generated homepage.
+    fn page(next: NodeConfig, reason: &'static str) -> Change {
+        Change {
+            next,
+            reason,
+            content: Some(SiteContent::Template),
+            message: Some(PUBLISHED),
+        }
+    }
+
+    /// A change that publishes other content.
+    fn content(
+        cfg: &NodeConfig,
+        reason: &'static str,
+        content: SiteContent,
+        message: &'static str,
+    ) -> Change {
+        Change {
+            next: cfg.clone(),
+            reason,
+            content: Some(content),
+            message: Some(message),
+        }
+    }
+}
+
 /// The request of a site change and the message printed after it.
 pub fn plan_change(
     session: &Session,
     action: SiteAction,
 ) -> Result<Option<(crate::apply::ApplyRequest, Option<&'static str>)>> {
     let loaded = session.load()?;
-    let cfg = &loaded.config;
+    let Some(change) = change(session, &loaded.config, action)? else {
+        return Ok(None);
+    };
+    let mut req = request(&loaded, change.next, change.reason);
+    req.intents.site_content = change.content;
+    Ok(Some((req, change.message)))
+}
+
+fn change(session: &Session, cfg: &NodeConfig, action: SiteAction) -> Result<Option<Change>> {
     let store = ContentStore::new(&session.ctx.paths);
-    let (next, reason, content, message) = match action {
+    let edits_page = matches!(
+        action,
+        SiteAction::Theme(_) | SiteAction::Title(_) | SiteAction::Description(_)
+    );
+    if edits_page {
+        require_generated(&store)?;
+    }
+    Ok(Some(match action {
         SiteAction::Enable { domain, cert } => {
             let facts = session.facts()?;
             let probe = LiveProbe(session.live);
             let env = facts.env(&probe, Some(cfg));
-            let next = plan::enable_site(cfg, &domain, cert, &env)?;
-            (next, "启用网站", None, None)
+            Change::config(plan::enable_site(cfg, &domain, cert, &env)?, "启用网站")
         }
-        SiteAction::Disable => (plan::disable_site(cfg)?, "关闭网站", None, None),
-        SiteAction::Https(on) => (plan::site_https(cfg, on)?, "修改网站入口", None, None),
-        SiteAction::Template(edit) => {
-            let next = edit_page(cfg, &edit)?;
-            (
-                next,
-                "更换网站模板",
-                Some(SiteContent::Template),
-                Some(PUBLISHED),
-            )
-        }
-        SiteAction::Theme(theme) => {
-            require_generated(&store)?;
-            let next = plan::site_theme(cfg, theme)?;
-            (
-                next,
-                "更换网站主题",
-                Some(SiteContent::Template),
-                Some(PUBLISHED),
-            )
-        }
-        SiteAction::Title(title) => {
-            require_generated(&store)?;
-            let next = plan::site_title(cfg, &title)?;
-            (
-                next,
-                "修改网站标题",
-                Some(SiteContent::Template),
-                Some(PUBLISHED),
-            )
-        }
+        SiteAction::Disable => Change::config(plan::disable_site(cfg)?, "关闭网站"),
+        SiteAction::Https(on) => Change::config(plan::site_https(cfg, on)?, "修改网站入口"),
+        SiteAction::Template(edit) => Change::page(edit_page(cfg, &edit)?, "更换网站模板"),
+        SiteAction::Theme(theme) => Change::page(plan::site_theme(cfg, theme)?, "更换网站主题"),
+        SiteAction::Title(title) => Change::page(plan::site_title(cfg, &title)?, "修改网站标题"),
         SiteAction::Description(text) => {
-            require_generated(&store)?;
-            let next = plan::site_description(cfg, &text)?;
-            (
-                next,
-                "修改网站描述",
-                Some(SiteContent::Template),
-                Some(PUBLISHED),
-            )
+            Change::page(plan::site_description(cfg, &text)?, "修改网站描述")
         }
         SiteAction::Import(dir) => {
             require_site(cfg)?;
             let source = store.check_import(Path::new(&dir))?;
-            (
-                cfg.clone(),
-                "导入网站",
-                Some(SiteContent::Import(source)),
-                Some(PUBLISHED),
-            )
+            Change::content(cfg, "导入网站", SiteContent::Import(source), PUBLISHED)
         }
         SiteAction::Restore(id) => {
             require_site(cfg)?;
             check_backup(&store, &id)?;
-            (
-                cfg.clone(),
-                "恢复网站内容",
-                Some(SiteContent::Restore(id)),
-                Some(RESTORED),
-            )
+            Change::content(cfg, "恢复网站内容", SiteContent::Restore(id), RESTORED)
         }
         SiteAction::Info | SiteAction::Preview(_) | SiteAction::Renew => return Ok(None),
-    };
-    Ok(Some((
-        with_content(&loaded, next, reason, content),
-        message,
-    )))
-}
-
-fn with_content(
-    loaded: &Loaded,
-    next: NodeConfig,
-    reason: &'static str,
-    content: Option<SiteContent>,
-) -> crate::apply::ApplyRequest {
-    let mut req = request(loaded, next, reason);
-    req.intents.site_content = content;
-    req
+    }))
 }
 
 /// `template`: the template (default minimal) plus optional edits.
