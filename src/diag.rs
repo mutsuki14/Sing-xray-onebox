@@ -48,6 +48,8 @@ mod tls;
 
 #[cfg(test)]
 pub(crate) mod fixture;
+#[cfg(test)]
+mod realcore;
 
 pub use cli::{COMMANDS, DOCTOR, SUPPORT};
 pub use redact::Redactor;

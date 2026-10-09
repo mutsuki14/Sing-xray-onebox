@@ -168,3 +168,27 @@ fn certificates_in_effect() {
     ip.subscription = Some(fixtures::ip_subscription(8448));
     assert_eq!(scopes(&ip), [CertScope::Proxy]);
 }
+
+#[test]
+fn real_openssl_certificates_by_remaining_validity() {
+    use crate::cert::testing::{have_openssl, self_signed, Fixture};
+    if !have_openssl() {
+        return;
+    }
+    for (days, status, text) in [
+        (3, CheckStatus::Warn, "将在 3 天内到期"),
+        (30, CheckStatus::Pass, "有效期至 "),
+    ] {
+        let fixture = Fixture::new("diag-cert");
+        let dir = CertDir::proxy(&fixture.ctx.paths);
+        self_signed(dir.path(), &["www.bing.com"], days);
+        let doctor = Doctor {
+            ctx: &fixture.ctx,
+            init: crate::host::init::InitSystem::None,
+            now: crate::sys::time::now(),
+        };
+        let check = certificate_check(&doctor, CertScope::Proxy, &dir);
+        assert_eq!(check.status, status, "{check:?}");
+        assert!(check.detail.contains(text), "{check:?}");
+    }
+}
