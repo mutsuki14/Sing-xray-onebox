@@ -157,6 +157,42 @@ fn private_outputs_never_overwrite_or_follow_symlinks() {
 }
 
 #[test]
+fn input_bundles_may_be_symlinks() {
+    let dir = TempDir::new("linktools-test").unwrap();
+    let real = dir.join("client").join("probe.json");
+    fs::create_dir(dir.join("client")).unwrap();
+    let b = bundle(vec![entry("a", Core::Singbox, Tcp)]);
+    write_bundle(&real, &b).unwrap();
+    let link = dir.join("probe.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(load(&link).unwrap(), b, "followed like v2");
+    let chain = dir.join("again.json");
+    std::os::unix::fs::symlink(&link, &chain).unwrap();
+    assert_eq!(load(&chain).unwrap(), b);
+
+    let dangling = dir.join("dangling.json");
+    std::os::unix::fs::symlink(dir.join("absent.json"), &dangling).unwrap();
+    let err = load(&dangling).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{}: 文件或目录不存在", dangling.display())
+    );
+    let to_dir = dir.join("dir.json");
+    std::os::unix::fs::symlink(dir.join("client"), &to_dir).unwrap();
+    let err = load(&to_dir).unwrap_err();
+    assert!(err.to_string().starts_with("文件类型或大小无效"), "{err}");
+    let big = dir.join("big.json");
+    fs::write(&big, vec![b' '; 2 * 1024 * 1024 + 1]).unwrap();
+    let big_link = dir.join("big-link.json");
+    std::os::unix::fs::symlink(&big, &big_link).unwrap();
+    assert_eq!(
+        load(&big_link).unwrap_err().to_string(),
+        load(&big).unwrap_err().to_string(),
+        "the 2 MiB cap applies to the target"
+    );
+}
+
+#[test]
 fn export_reads_the_installed_node() {
     let dir = TempDir::new("linktools-test").unwrap();
     let (ctx, _, _) = Ctx::test(dir.path());

@@ -12,6 +12,11 @@
 //! - outputs are written through `sys::fs::write_new_exclusive`: still
 //!   O_EXCL + O_NOFOLLOW + 0600, but a failed write no longer leaves a
 //!   partial file behind.
+//!
+//! Input bundles may be symlinks (`~/probe.json ->
+//! /etc/onebox/client/probe.json`, dotfile managers), as in v2: they are
+//! the user's own input, read with the user's rights, so only the resolved
+//! file must be a regular file of at most 2 MiB.
 
 use crate::ctx::Ctx;
 use crate::domain::protocol::Transport;
@@ -29,9 +34,11 @@ use std::path::{Path, PathBuf};
 /// Mode of every file the tools create for the user (bundles, reports).
 pub const PRIVATE_MODE: u32 = 0o600;
 
-/// Read a bundle file (regular file, ≤ 2 MiB, v2 validation rules).
+/// Read a bundle file (regular file, ≤ 2 MiB, v2 validation rules); a
+/// symlink is followed (see the module docs).
 pub fn load(path: &Path) -> Result<ProbeBundle> {
-    ProbeBundle::load(path)
+    let real = std::fs::canonicalize(path).map_err(|e| Error::io(path, e))?;
+    ProbeBundle::load(&real)
 }
 
 /// The installed node's bundle. `local` targets the node from the server
