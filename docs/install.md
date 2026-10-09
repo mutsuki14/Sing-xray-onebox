@@ -154,7 +154,7 @@ onebox cert set --tls custom --domain v.example.com --cert /root/fullchain.pem -
 onebox cert renew proxy                          # 立即续期代理证书（目标可选 proxy / site / subscription / all）
 ```
 
-- 证书由 acme.sh 3.1.6 向 Let's Encrypt 申请（程序固定其 SHA-256）；Cloudflare 凭据只传给 acme.sh，并以 0600 权限保存在证书目录中供续期使用。
+- 证书由 acme.sh 3.1.6 向 Let's Encrypt 申请（程序固定其 SHA-256）；Cloudflare 凭据只传给 acme.sh，并以 0600 权限保存在证书目录中供续期使用；只有确实要签发或续期时才需要凭据，证书有效且未到续期时间时，其他修改不会询问。
 - 存在 Let's Encrypt 或自备证书（代理、网站或独立 HTTPS 订阅）时，程序在 crontab 写入一条计划任务：每天 4:17（系统时区）执行 `onebox renew --cron`，日志写入 `/var/log/onebox/renew.log`。只有自签证书时不写计划任务。使用 Let's Encrypt 而 cron 无法运行时，在开始配置前报错（`cron 未运行，无法启用证书自动续期；请启动系统 cron 服务`）；自备证书只警告。
 - 计划任务只续期到期的证书，无事可做时不输出：Let's Encrypt 证书 30 天内到期时续期，自签证书 30 天内到期时重新生成，自备证书在源文件内容变化后重新部署。
 - 续期不执行完整配置事务，只重启受影响且正在运行的服务：代理证书 → 代理内核（sing-box / Xray）；网站证书（也是 `site` 模式订阅使用的证书）→ `onebox-site`；独立 HTTPS 订阅证书 → `onebox-subscription-web`。例外：代理证书的身份变化时——客户端固定的证书指纹改变（如自签证书重新生成、私有 CA 签发的自备证书更换），或证书是否公有可信发生变化——程序用当前配置执行一次完整配置事务，重新发布客户端配置和订阅，此时客户端需要重新导入或刷新订阅。

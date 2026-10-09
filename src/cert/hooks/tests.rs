@@ -289,6 +289,58 @@ fn prepare_proxy_records_trust() {
 }
 
 #[test]
+fn dns01_credentials_are_needed_exactly_when_acme_sh_runs() {
+    use crate::cert::renew::credentials_needed_for_apply_with;
+    use crate::cert::{cloudflare, CertScope, CertScopes};
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("hooks-cf-not-due");
+    serve_release(&f.fake);
+    let engine = engine(&f.ctx, InitSystem::None);
+    let names = ["proxy.example.com"];
+    let issued = f.ca.leaf(&f.dir.join("issued"), &names, 90, false);
+    fake_acme(
+        &f.fake,
+        AcmeScript {
+            issue: Some(issued),
+            ..AcmeScript::default()
+        },
+    );
+    let needed = |cfg: &NodeConfig, forced| credentials_needed_for_apply_with(&engine, cfg, forced);
+    let mut cfg = trojan(acme(AcmeMethod::Cloudflare));
+    assert_eq!(needed(&cfg, CertScopes::NONE), [CertScope::Proxy]);
+    let creds = CfCredentials::token("cf-token", Option::None).unwrap();
+    assert!(prepare_proxy_with(&engine, &mut cfg, false, Some(&creds)).unwrap());
+    assert_eq!(acme_calls(&f.fake).len(), 1);
+
+    // The stored credentials are deleted (a revoked token): a valid pair
+    // that is not due needs none, on either side, and nothing is stored.
+    let tls = CertDir::proxy(&f.ctx.paths);
+    let stored = cloudflare::store_path(tls.path());
+    std::fs::remove_file(&stored).unwrap();
+    assert!(needed(&cfg, CertScopes::NONE).is_empty());
+    assert!(!prepare_proxy_with(&engine, &mut cfg, false, Option::None).unwrap());
+    assert!(!prepare_proxy_with(&engine, &mut cfg, false, Option::None).unwrap());
+    assert_eq!(acme_calls(&f.fake).len(), 1);
+    assert!(!stored.exists());
+
+    // A forced renewal, or a pair that became due, runs acme.sh: the CLI
+    // asks, and the engine refuses to go on without credentials.
+    let forced = CertScopes::only(CertScope::Proxy);
+    assert_eq!(needed(&cfg, forced), [CertScope::Proxy]);
+    let err = prepare_proxy_with(&engine, &mut cfg, true, Option::None).unwrap_err();
+    assert_eq!(err.to_string(), cloudflare::MISSING);
+    let short = f.ca.leaf(&f.dir.join("short"), &names, 10, false);
+    std::fs::copy(&short.0, tls.cert()).unwrap();
+    std::fs::copy(&short.1, tls.key()).unwrap();
+    assert_eq!(needed(&cfg, CertScopes::NONE), [CertScope::Proxy]);
+    let err = prepare_proxy_with(&engine, &mut cfg, false, Option::None).unwrap_err();
+    assert_eq!(err.to_string(), cloudflare::MISSING);
+    assert_eq!(acme_calls(&f.fake).len(), 1);
+}
+
+#[test]
 fn web_certificates_must_be_publicly_trusted() {
     if !have_openssl() {
         return;
