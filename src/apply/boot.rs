@@ -26,7 +26,7 @@ use super::network;
 use super::recover;
 use super::request::ApplyRequest;
 use crate::ctx::Ctx;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::paths::Paths;
 use crate::state::StateStore;
 use crate::sys::lock::{inherited_lock_offered, FileLock, BUSY_MESSAGE};
@@ -69,8 +69,14 @@ pub fn boot_locked(ctx: &Ctx, lock: &FileLock, features: &dyn Features) -> Resul
             }
             Ok(_) => {}
             Err(e) => {
-                network::apply_rules(ctx, &loaded.config)?;
-                return Err(e.wrap("已按保存的配置恢复防火墙规则，但无法读取本机地址"));
+                return Err(match network::apply_rules(ctx, &loaded.config) {
+                    Ok(()) => e.wrap("已按保存的配置恢复防火墙规则，但无法读取本机地址"),
+                    Err(rules) => Error::msg(format!(
+                        "无法读取本机地址: {}；恢复防火墙规则失败: {}",
+                        e.report_text(),
+                        rules.report_text()
+                    )),
+                });
             }
         }
     }
