@@ -64,6 +64,7 @@ import threading
 import time
 import unittest
 import unittest.mock
+import uuid
 
 REPO = Path(__file__).resolve().parents[2]
 REQUIRE_FULL = os.environ.get("ONEBOX_TEST_REQUIRE_FULL") == "1"
@@ -827,6 +828,273 @@ def x25519_pair(xray: str, env=None) -> tuple[str, str]:
 def random_ss_key(size: int = 16) -> str:
     """Base64 key for Shadowsocks 2022 / ShadowTLS (``size`` bytes)."""
     return base64.b64encode(secrets.token_bytes(size)).decode()
+
+
+# ---------------------------------------------------------------------------
+# Node fixtures (v2 and v3 state of the same node)
+
+PROTOCOLS = (
+    "vless-reality", "vless-xhttp", "vless-grpc", "vless-ws", "vmess-ws",
+    "trojan", "shadowsocks", "hysteria2", "tuic", "anytls", "shadowtls",
+    "anytls-reality",
+)
+SINGBOX_ONLY = frozenset({"tuic", "anytls", "shadowtls", "anytls-reality"})
+# Protocols that always need the proxy certificate; VMess-WS needs it only
+# with VMess TLS (src/domain/protocol.rs capability table).
+CERTIFICATE_PROTOCOLS = frozenset({"vless-ws", "trojan", "hysteria2", "tuic", "anytls"})
+REALITY_PROTOCOLS = frozenset({"vless-reality", "vless-grpc", "vless-xhttp", "anytls-reality"})
+UDP_PROTOCOLS = frozenset({"hysteria2", "tuic"})
+STATE_FORMS = ("v2", "v3")
+
+
+def core_supports(core: str, protocol: str) -> bool:
+    """Server-core support (spec A §2.3): Xray lacks four, sing-box lacks XHTTP."""
+    return protocol != "vless-xhttp" if core == "singbox" else protocol not in SINGBOX_ONLY
+
+
+def transport_of(protocol: str) -> str:
+    """Probe-bundle transport of a protocol."""
+    if protocol in UDP_PROTOCOLS:
+        return "udp"
+    return "both" if protocol == "shadowsocks" else "tcp"
+
+
+@dataclasses.dataclass
+class Inbound:
+    protocol: str
+    port: int
+    core: str
+
+
+@dataclasses.dataclass
+class FixtureNode:
+    """One loopback node, writable as a v2 ``{"values"}`` or v3 schema-3 state.
+
+    Both forms describe the same node, so v3 must render them identically
+    (the v2 form goes through the real migration on every command).
+    ``proxy_cert`` is deployed to ``<ONEBOX_DIR>/tls``; ``custom_source`` is
+    the import source recorded for a custom certificate.
+    """
+
+    inbounds: list[Inbound]
+    reality_keys: tuple[str, str]
+    reality_dest: str
+    guard_port: int
+    proxy_cert: CertPair
+    tls_mode: str = "self"                 # "self" | "custom"
+    custom_source: CertPair | None = None
+    pinned: bool = True
+    vmess_tls: bool = False
+    hy2_obfs: bool = False
+    block_private: bool = False
+    block_bt: bool = True
+    own_cidrs: list[str] = dataclasses.field(default_factory=list)
+    reality_sni: str = "reality.test"
+    shadowtls_sni: str = "reality.test"
+    shadowtls_dest: str | None = None      # None: same as reality_dest
+    tls_name: str = "onebox.test"
+    node_name: str = "native-e2e"
+    address: str = LOOPBACK
+    paths: dict[str, str] = dataclasses.field(default_factory=lambda: {
+        "ws": "/native-ws", "vmess": "/native-vmess", "xhttp": "/native-xhttp", "grpc": "native-grpc"})
+    creds: dict[str, str] = dataclasses.field(default_factory=lambda: {
+        "uuid": str(uuid.uuid4()),
+        "password": secrets.token_hex(24),
+        "ss_password": random_ss_key(),
+        "shadowtls_password": secrets.token_hex(24),
+        "shadowtls_ss_password": random_ss_key(),
+        "hy2_obfs_password": secrets.token_hex(24),
+        "clash_secret": secrets.token_hex(16),
+        "short_id": secrets.token_hex(8),
+    })
+
+    def protocols(self) -> list[str]:
+        return [inbound.protocol for inbound in self.inbounds]
+
+    def inbound(self, protocol: str) -> Inbound:
+        return next(i for i in self.inbounds if i.protocol == protocol)
+
+    def needs_cert(self) -> bool:
+        protocols = self.protocols()
+        return (any(p in CERTIFICATE_PROTOCOLS for p in protocols)
+                or ("vmess-ws" in protocols and self.vmess_tls))
+
+    def hy2_profile(self) -> str | None:
+        # Xray cannot apply Hysteria2 tuning: v3 rejects it, v2 ignored it.
+        hy2 = [i for i in self.inbounds if i.protocol == "hysteria2"]
+        return "auto" if hy2 and hy2[0].core == "singbox" else None
+
+    def write(self, layout: Layout, form: str) -> None:
+        """Deploy the certificate and write ``state.json`` in ``form`` (v2|v3)."""
+        layout.install_proxy_cert(self.proxy_cert)
+        if form == "v2":
+            layout.write_v2_state(self.v2_values(layout))
+        elif form == "v3":
+            layout.write_state(self.v3_config())
+        else:
+            raise ValueError(f"unknown state form {form!r}")
+
+    def v2_values(self, layout: Layout) -> dict[str, str]:
+        """The keys a v2.0.1 install writes (spec A §3.4), all strings."""
+        flag = lambda value: "1" if value else "0"  # noqa: E731
+        private, public = self.reality_keys
+        c, p = self.creds, self.paths
+        values = {
+            "PROTOCOLS": " ".join(self.protocols()), "SERVER_ADDR": self.address,
+            "SERVER_IPV4": self.address, "SERVER_IPV6": "", "LISTEN_ADDR": self.address,
+            "NODE_NAME": self.node_name, "UUID": c["uuid"], "PASSWORD": c["password"],
+            "SS_METHOD": "2022-blake3-aes-128-gcm", "SS_PASSWORD": c["ss_password"],
+            "SHADOWTLS_PASSWORD": c["shadowtls_password"],
+            "SHADOWTLS_SS_PASSWORD": c["shadowtls_ss_password"], "CLASH_SECRET": c["clash_secret"],
+            "REALITY_PRIVATE_KEY": private, "REALITY_PUBLIC_KEY": public,
+            "REALITY_SHORT_ID": c["short_id"], "REALITY_SNI": self.reality_sni,
+            "REALITY_DEST": self.reality_dest, "SHADOWTLS_SNI": self.shadowtls_sni,
+            "SHADOWTLS_DEST": self.shadowtls_dest or self.reality_dest,
+            "REALITY_GUARD_PORT": str(self.guard_port), "REALITY_SITE_ENABLED": "0",
+            "REALITY_SITE_HTTPS": "0", "WS_PATH": p["ws"], "VMESS_PATH": p["vmess"],
+            "XHTTP_PATH": p["xhttp"], "GRPC_SERVICE": p["grpc"],
+            "VMESS_TLS": flag(self.vmess_tls), "HY2_OBFS": flag(self.hy2_obfs),
+            "HY2_OBFS_PASSWORD": c["hy2_obfs_password"], "HY2_PROFILE": self.hy2_profile() or "",
+            "RESOURCE_PROFILE": "balanced", "TLS_MODE": self.tls_mode, "TLS_SNI": self.tls_name,
+            "DOMAIN": self.tls_name, "CERT_PINNED": flag(self.pinned),
+            "CERT_FILE": str(layout.tls / "cert.pem"), "KEY_FILE": str(layout.tls / "key.pem"),
+            "BLOCK_PRIVATE": flag(self.block_private), "BLOCK_BT": flag(self.block_bt),
+        }
+        if self.own_cidrs:
+            values["OWN_IP_CIDRS"] = json.dumps(self.own_cidrs)
+        if self.tls_mode == "custom" and self.custom_source:
+            values["CUSTOM_CERT"] = str(self.custom_source.cert)
+            values["CUSTOM_KEY"] = str(self.custom_source.key)
+        for inbound in self.inbounds:
+            key = inbound.protocol.replace("-", "_")
+            values[f"PORT_{key}"] = str(inbound.port)
+            values[f"CORE_{key}"] = inbound.core
+        return values
+
+    def v3_tls(self) -> dict | None:
+        if not self.needs_cert():
+            return None
+        if self.tls_mode == "self":
+            return {"mode": {"type": "self-signed", "sni": self.tls_name}, "pinned": True}
+        source = self.custom_source or self.proxy_cert
+        return {"mode": {"type": "custom", "domain": self.tls_name, "cert": str(source.cert),
+                         "key": str(source.key)}, "pinned": self.pinned}
+
+    def v3_config(self) -> dict:
+        """The same node as a schema-3 ``NodeConfig`` (src/domain/config.rs)."""
+        private, public = self.reality_keys
+        c, p = self.creds, self.paths
+        protocols = self.protocols()
+        reality = any(proto in REALITY_PROTOCOLS for proto in protocols)
+        return {
+            "schema": 3, "node_name": self.node_name,
+            "server": {"addr": self.address, "ipv4": self.address, "ipv6": None,
+                       "ipv4_warp": False, "ipv6_warp": False},
+            "listen": self.address,
+            "inbounds": [dataclasses.asdict(inbound) for inbound in self.inbounds],
+            "creds": {
+                "uuid": c["uuid"], "password": c["password"],
+                "ss_method": "2022-blake3-aes-128-gcm", "ss_password": c["ss_password"],
+                "hy2_obfs_password": c["hy2_obfs_password"],
+                "shadowtls_password": c["shadowtls_password"],
+                "shadowtls_ss_password": c["shadowtls_ss_password"],
+                "clash_secret": c["clash_secret"],
+                "reality": ({"private_key": private, "public_key": public,
+                             "short_id": c["short_id"]} if reality else None),
+                "ws_path": p["ws"], "vmess_path": p["vmess"], "xhttp_path": p["xhttp"],
+                "grpc_service": p["grpc"],
+            },
+            "reality": {"sni": self.reality_sni, "dest": self.reality_dest,
+                        "guard_port": self.guard_port},
+            "shadowtls": {"sni": self.shadowtls_sni,
+                          "dest": self.shadowtls_dest or self.reality_dest},
+            "site": None,
+            "tls": self.v3_tls(),
+            "vmess_tls": self.vmess_tls and "vmess-ws" in protocols,
+            # v2's DOMAIN is the Host header of plain VMess-WS clients.
+            "vmess_host": self.tls_name if "vmess-ws" in protocols else None,
+            "hy2": {"obfs": self.hy2_obfs, "hop": None, "profile": self.hy2_profile(),
+                    "up_mbps": None, "down_mbps": None},
+            "resource_profile": "balanced",
+            "routing": {"block_private": self.block_private, "block_bt": self.block_bt,
+                        "own_cidrs": list(self.own_cidrs)},
+            "subscription": None,
+            "versions": {},
+            "installed_at": 0,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Proxy cores (sing-box, Xray, mihomo)
+
+CORES = ("singbox", "xray", "mihomo")
+
+
+def core_check(kind: str, binary: str, path: Path, env) -> None:
+    """The core's own configuration check (a failure raises CommandFailed)."""
+    argv = {
+        "singbox": [binary, "check", "-c", path],
+        "xray": [binary, "run", "-test", "-c", path],
+        "mihomo": [binary, "-t", "-d", path.parent, "-f", path],
+    }[kind]
+    run(argv, env=env)
+
+
+def core_start(kind: str, binary: str, path: Path, env, name: str = "core") -> Process:
+    """Check ``path`` and start the core in ``path.parent``.
+
+    mihomo opens its listener before it has applied the configuration and
+    closes early connections, and its "configuration complete" log only
+    means parsing ended. Its ``-post-up`` hook runs after ApplyConfig
+    returns, so the marker file it writes proves readiness without warming
+    up or retrying proxy traffic (mihomo v1.19.32 main.go / hub/executor).
+    """
+    core_check(kind, binary, path, env)
+    directory = path.parent
+    if kind == "mihomo":
+        ready = directory / "mihomo.ready"
+        # Fixed shell command; cwd is this fixture directory.
+        argv = [binary, "-d", directory, "-f", path, "-post-up", "printf ready > mihomo.ready"]
+        process = Process(argv, directory, env, name)
+        try:
+            process.wait_file(ready, "ready")
+        except BaseException:
+            process.close()
+            raise
+        return process
+    return Process([binary, "run", "-c", path], directory, env, name)
+
+
+def set_log_level(kind: str, config: dict, level: str) -> None:
+    if kind == "mihomo":
+        config["log-level"] = level
+    elif kind == "singbox":
+        config.setdefault("log", {})["level"] = level
+    else:
+        config.setdefault("log", {})["loglevel"] = level
+
+
+def socks_client(kind: str, port: int, outbounds: list[dict], *, udp_ip: bool = True) -> dict:
+    """A client core with a loopback SOCKS5 inbound on ``port`` and only ``outbounds``.
+
+    For mihomo ``outbounds`` are its ``proxies`` entries and every request
+    goes to the first one. ``udp_ip`` sets Xray's UDP relay address.
+    """
+    first = outbounds[0]
+    if kind == "singbox":
+        return {"log": {"level": "warn"}, "dns": {"servers": [{"type": "local", "tag": "local"}]},
+                "inbounds": [{"type": "socks", "listen": LOOPBACK, "listen_port": port}],
+                "outbounds": outbounds,
+                "route": {"final": first["tag"], "default_domain_resolver": "local"}}
+    if kind == "xray":
+        settings = {"udp": True, **({"ip": LOOPBACK} if udp_ip else {})}
+        return {"log": {"loglevel": "warning"},
+                "inbounds": [{"listen": LOOPBACK, "port": port, "protocol": "socks",
+                              "settings": settings}],
+                "outbounds": outbounds}
+    return {"mixed-port": port, "bind-address": LOOPBACK, "allow-lan": False, "mode": "rule",
+            "log-level": "warning", "ipv6": False, "dns": {"enable": False},
+            "proxies": outbounds, "rules": ["MATCH," + first["name"]]}
 
 
 # ---------------------------------------------------------------------------
