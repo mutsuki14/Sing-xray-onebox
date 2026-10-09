@@ -1,0 +1,1096 @@
+#!/usr/bin/env python3
+"""Shared helpers for the black-box suites in tests/e2e (not a suite itself).
+
+Every suite drives the real ``onebox`` binary and real proxy cores against
+loopback-only fixtures. This module provides the pieces the suites share:
+
+* the CI tool contract (:func:`tool`, :data:`REQUIRE_FULL`): every
+  ``ONEBOX_TEST_*`` variable names an executable; with
+  ``ONEBOX_TEST_REQUIRE_FULL=1`` a missing tool, privilege or other skip
+  reason is a failure, never a skip;
+* :class:`Results`: PASS/FAIL/SKIP records, the summary line, the optional
+  JSON report and the exit status (non-zero on any failure);
+* :class:`Workspace`: ``umask 077`` plus a private temporary root that is
+  removed afterwards unless ``KEEP=1``;
+* :class:`Ports`: loopback ports outside the kernel's ephemeral range, so a
+  core's outgoing connection can never steal a listener port;
+* :class:`Pki`: throw-away CA, CA-signed and self-signed P-256 certificates
+  generated with ``openssl`` for each run;
+* fixture servers: :class:`MarkerFixtures` (HTTP, TLS 1.3 and UDP echo
+  serving one random marker) and :class:`DnsFixture` (authoritative UDP DNS
+  that records the queries it receives);
+* :class:`Process`: a child in its own session, killed as a process group;
+* a SOCKS5 client (:func:`socks_open`, :func:`socks_http_marker`,
+  :func:`socks_udp_echo`) and :func:`tls_marker` for direct TLS checks;
+* :class:`Layout` and :func:`run_onebox`: an isolated Onebox directory
+  layout (every path variable points inside it) holding a v2
+  ``{"values": …}`` or v3 schema-3 ``state.json`` and the proxy certificate
+  at ``<ONEBOX_DIR>/tls/{cert,key}.pem``;
+* :func:`load_yaml`: a strict reader for exactly the YAML subset the v3
+  mihomo renderer emits (``client mihomo`` / ``client provider``).
+
+``python3 tests/e2e/_harness.py`` runs this module's self-tests.
+
+Changes from v2 (tests/native_e2e.py was both a suite and the library the
+policy suite imported): the helpers live in this module; the mihomo exports
+are read as YAML instead of JSON; the CI variable ``ONEBOX_TEST_MIHOMO``
+replaces ``MH`` (the ``SB``/``XR`` fallbacks are gone); skips are failures
+under ``ONEBOX_TEST_REQUIRE_FULL=1``; the HTTP fixtures no longer do a
+reverse DNS lookup when they bind; the layout points every Onebox path
+variable (not just seven) at the fixture.
+"""
+from __future__ import annotations
+
+import base64
+import contextlib
+import dataclasses
+import http.client
+import http.server
+import json
+import os
+from pathlib import Path
+import random
+import secrets
+import shutil
+import signal
+import socket
+import socketserver
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import unittest.mock
+
+REPO = Path(__file__).resolve().parents[2]
+REQUIRE_FULL = os.environ.get("ONEBOX_TEST_REQUIRE_FULL") == "1"
+VERBOSE = os.environ.get("VERBOSE") == "1"
+LOOPBACK = "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# Tool contract and results
+
+
+class Unavailable(Exception):
+    """A prerequisite (tool, privilege) is missing: skip, or fail under REQUIRE_FULL."""
+
+
+def tool(env_var: str, *, path_names: tuple[str, ...] = (), default: str | None = None) -> str:
+    """Return the executable named by ``env_var`` (absolute, resolved).
+
+    A set but unusable variable is always an error (``SystemExit``): it is a
+    misconfiguration, not a missing optional tool. An unset variable falls
+    back to ``default`` and then to ``path_names`` on ``PATH`` unless
+    ``ONEBOX_TEST_REQUIRE_FULL=1``, where CI must name every tool explicitly.
+    Raises :class:`Unavailable` when nothing is found.
+    """
+    value = os.environ.get(env_var)
+    if value:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise SystemExit(f"{env_var} is not an executable file: {value}")
+        return str(path)
+    if REQUIRE_FULL:
+        raise Unavailable(f"{env_var} is not set (ONEBOX_TEST_REQUIRE_FULL=1)")
+    candidates = [default] if default else []
+    candidates += [found for name in path_names if (found := shutil.which(name))]
+    for candidate in candidates:
+        path = Path(candidate).resolve()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    raise Unavailable(f"set {env_var} to an executable")
+
+
+def onebox_binary() -> str:
+    """``ONEBOX_TEST_BINARY``, default ``<repo>/target/debug/onebox``."""
+    return tool("ONEBOX_TEST_BINARY", default=str(REPO / "target/debug/onebox"))
+
+
+class Results:
+    """Ordered check results of one suite run."""
+
+    def __init__(self, title: str):
+        self.title = title
+        self.entries: list[dict] = []
+
+    def record(self, name: str, ok: bool, detail: str = "") -> bool:
+        self.entries.append({"name": name, "ok": bool(ok), "detail": detail})
+        line = f"{'PASS' if ok else 'FAIL'} {name}" + (f": {detail}" if detail else "")
+        print(line, flush=True)
+        return bool(ok)
+
+    def skip(self, name: str, reason: str) -> None:
+        """A skipped check; a failure under ``ONEBOX_TEST_REQUIRE_FULL=1``."""
+        if REQUIRE_FULL:
+            self.record(name, False, f"skipped under ONEBOX_TEST_REQUIRE_FULL=1: {reason}")
+            return
+        self.entries.append({"name": name, "ok": True, "skipped": True, "detail": reason})
+        print(f"SKIP {name}: {reason}", flush=True)
+
+    def attempt(self, name: str, action) -> bool:
+        """Run ``action()``; any exception is a failure of ``name``."""
+        try:
+            action()
+        except Exception as error:  # noqa: BLE001 - every error fails this check
+            return self.record(name, False, describe(error))
+        return self.record(name, True)
+
+    @property
+    def failures(self) -> int:
+        return sum(not entry["ok"] for entry in self.entries)
+
+    @property
+    def skipped(self) -> int:
+        return sum(bool(entry.get("skipped")) for entry in self.entries)
+
+    def finish(self, report: Path | None = None, **extra) -> int:
+        """Print the summary, write the report and return the exit status."""
+        checks = len(self.entries) - self.skipped
+        print(f"{self.title}: {checks} checks, {self.failures} failures, "
+              f"{self.skipped} skipped", flush=True)
+        if report:
+            write_json(report, {"schema": 1, "suite": self.title, "total": checks,
+                                "failures": self.failures, "skipped": self.skipped,
+                                **extra, "results": self.entries})
+        return int(self.failures > 0 or not self.entries)
+
+
+def describe(error: BaseException) -> str:
+    text = str(error) or type(error).__name__
+    return text if isinstance(error, AssertionError) else f"{type(error).__name__}: {text}"
+
+
+class Workspace:
+    """``umask 077`` and a private temporary root, removed unless ``KEEP=1``."""
+
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+        self.root: Path | None = None
+
+    def __enter__(self) -> Path:
+        os.umask(0o077)
+        self.root = Path(tempfile.mkdtemp(prefix=self.prefix))
+        return self.root
+
+    def __exit__(self, *_):
+        if self.root is None:
+            return
+        if os.environ.get("KEEP") == "1":
+            print(f"Preserved fixture directory: {self.root}", flush=True)
+        else:
+            shutil.rmtree(self.root, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Commands and files
+
+
+class CommandFailed(AssertionError):
+    """A checked command exited non-zero."""
+
+
+@dataclasses.dataclass
+class Completed:
+    argv: list[str]
+    code: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.code == 0
+
+
+def run(argv, *, env=None, timeout: float = 30, check: bool = True,
+        input: bytes | None = None, cwd=None) -> Completed:
+    """Run a command with captured, UTF-8 decoded output (stdin closed or ``input``)."""
+    args = [str(a) for a in argv]
+    result = subprocess.run(args, env=env, cwd=cwd, capture_output=True, timeout=timeout,
+                            input=input, stdin=None if input is not None else subprocess.DEVNULL)
+    done = Completed(args, result.returncode, result.stdout.decode(errors="replace"),
+                     result.stderr.decode(errors="replace"))
+    if check and not done.ok:
+        raise CommandFailed(f"{Path(args[0]).name} {' '.join(args[1:3])} failed ({done.code}): "
+                            f"{done.stderr[-3000:]}{done.stdout[-1000:]}")
+    return done
+
+
+def write_json(path: Path, value, mode: int = 0o600) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    path.chmod(mode)
+
+
+# ---------------------------------------------------------------------------
+# Ports
+
+
+def ephemeral_range() -> tuple[int, int]:
+    try:
+        low, high = map(int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
+        return low, high
+    except (OSError, ValueError):
+        return 32768, 60999
+
+
+class Ports:
+    """Loopback ports free for TCP and UDP, never in the ephemeral range.
+
+    Outgoing connections take source ports from the ephemeral range; a
+    listener allocated there could be taken by a core's own connection
+    between allocation and bind.
+    """
+
+    def __init__(self, low: int = 10240):
+        start, end = ephemeral_range()
+        self.used: set[int] = set()
+        self.candidates = [p for p in range(low, 65536) if not start <= p <= end]
+        random.SystemRandom().shuffle(self.candidates)
+
+    def get(self) -> int:
+        while self.candidates:
+            port = self.candidates.pop()
+            if port not in self.used and self.bindable(port):
+                self.used.add(port)
+                return port
+        raise AssertionError("no non-ephemeral loopback ports are free")
+
+    @staticmethod
+    def bindable(port: int) -> bool:
+        try:
+            with socket.socket() as tcp, socket.socket(type=socket.SOCK_DGRAM) as udp:
+                tcp.bind((LOOPBACK, port))
+                udp.bind((LOOPBACK, port))
+        except OSError:
+            return False
+        return True
+
+
+# ---------------------------------------------------------------------------
+# PKI
+
+
+@dataclasses.dataclass(frozen=True)
+class CertPair:
+    cert: Path
+    key: Path
+
+
+class Pki:
+    """Throw-away P-256 certificates valid for two days (generated per run)."""
+
+    def __init__(self, directory: Path, ca_name: str = "Onebox isolated E2E CA"):
+        self.dir = directory
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.ca = CertPair(self.dir / "ca.pem", self.dir / "ca.key")
+        self._ec_key(self.ca.key)
+        run(["openssl", "req", "-new", "-x509", "-sha256", "-days", "2", "-key", self.ca.key,
+             "-out", self.ca.cert, "-subj", f"/CN={ca_name}",
+             "-addext", "basicConstraints=critical,CA:TRUE"])
+        self.bundle = self.dir / "bundle.pem"
+        bundle = self.ca.cert.read_bytes()
+        system = Path("/etc/ssl/certs/ca-certificates.crt")
+        if system.is_file():
+            bundle += b"\n" + system.read_bytes()
+        self.bundle.write_bytes(bundle)
+
+    @staticmethod
+    def _ec_key(path: Path) -> None:
+        run(["openssl", "ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", path])
+
+    def leaf(self, name: str) -> CertPair:
+        """A CA-signed server certificate for DNS name ``name``."""
+        pair = CertPair(self.dir / f"{name}.pem", self.dir / f"{name}.key")
+        csr, ext = self.dir / f"{name}.csr", self.dir / f"{name}.ext"
+        self._ec_key(pair.key)
+        run(["openssl", "req", "-new", "-key", pair.key, "-out", csr, "-subj", f"/CN={name}"])
+        ext.write_text(f"subjectAltName=DNS:{name}\nextendedKeyUsage=serverAuth\n")
+        run(["openssl", "x509", "-req", "-sha256", "-days", "2", "-in", csr, "-CA", self.ca.cert,
+             "-CAkey", self.ca.key, "-CAcreateserial", "-extfile", ext, "-out", pair.cert])
+        return pair
+
+    def self_signed(self, name: str, stem: str = "self") -> CertPair:
+        """A self-signed certificate for ``name`` (what Onebox's self-signed mode deploys)."""
+        pair = CertPair(self.dir / f"{stem}.pem", self.dir / f"{stem}.key")
+        run(["openssl", "req", "-new", "-x509", "-newkey", "ec", "-pkeyopt",
+             "ec_paramgen_curve:P-256", "-nodes", "-days", "2", "-keyout", pair.key,
+             "-out", pair.cert, "-subj", f"/CN={name}", "-addext", f"subjectAltName=DNS:{name}"])
+        return pair
+
+
+# ---------------------------------------------------------------------------
+# Fixture servers
+
+
+def _marker_handler(marker: bytes):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self):  # noqa: N802 - http.server API
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(marker)))
+            self.end_headers()
+            with contextlib.suppress(OSError):
+                self.wfile.write(marker)
+
+        def log_message(self, *_):
+            pass
+
+    return Handler
+
+
+class _HttpServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer.server_bind does a reverse DNS lookup (getfqdn), which
+        # can stall for seconds on hosts without working DNS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class _TlsServer(_HttpServer):
+    tls: ssl.SSLContext
+
+    def finish_request(self, request, client_address):
+        # REALITY legitimately leaves target handshakes incomplete: handshake
+        # in each worker thread with a deadline, never in the accept loop.
+        request.settimeout(8)
+        try:
+            with self.tls.wrap_socket(request, server_side=True) as encrypted:
+                self.RequestHandlerClass(encrypted, client_address, self)
+        except (OSError, ssl.SSLError):
+            pass
+
+
+class MarkerFixtures:
+    """HTTP, TLS 1.3 (ALPN h2/http1.1) and UDP echo servers on loopback.
+
+    HTTP and TLS answer every GET with :attr:`marker`; the UDP server echoes
+    each datagram. ``tls_pair`` is the certificate the TLS server presents.
+    """
+
+    def __init__(self, ports: Ports, tls_pair: CertPair, prefix: str = "onebox-e2e-"):
+        self.marker = (prefix + secrets.token_hex(24)).encode()
+        self.http_port, self.tls_port, self.udp_port = ports.get(), ports.get(), ports.get()
+        self.closed = threading.Event()
+        self.servers: list[_HttpServer] = []
+        self.threads: list[threading.Thread] = []
+        handler = _marker_handler(self.marker)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.minimum_version = ssl.TLSVersion.TLSv1_3
+        tls.set_alpn_protocols(["h2", "http/1.1"])
+        tls.load_cert_chain(tls_pair.cert, tls_pair.key)
+        plain = _HttpServer((LOOPBACK, self.http_port), handler)
+        encrypted = _TlsServer((LOOPBACK, self.tls_port), handler)
+        encrypted.tls = tls
+        for server in (plain, encrypted):
+            self.servers.append(server)
+            self._thread(server.serve_forever, poll_interval=0.05)
+        self.udp = socket.socket(type=socket.SOCK_DGRAM)
+        self.udp.bind((LOOPBACK, self.udp_port))
+        self.udp.settimeout(0.1)
+        self._thread(self._echo)
+
+    def _thread(self, target, **kwargs):
+        thread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
+        thread.start()
+        self.threads.append(thread)
+
+    def _echo(self):
+        while not self.closed.is_set():
+            try:
+                data, peer = self.udp.recvfrom(65535)
+                self.udp.sendto(data, peer)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+
+    def close(self):
+        self.closed.set()
+        self.udp.close()
+        for server in self.servers:
+            server.shutdown()
+            server.server_close()
+        for thread in self.threads:
+            thread.join(timeout=2)
+
+
+def dns_answer(message: bytes, records: dict[str, str]) -> tuple[bytes | None, tuple[str, int] | None]:
+    """Answer one DNS query from ``records`` (lower-case name → IPv4).
+
+    Returns ``(response, (name, qtype))``; ``(None, None)`` for anything that
+    is not a single uncompressed question. Unknown names get NXDOMAIN, known
+    names with another type an empty NOERROR answer.
+    """
+    try:
+        if len(message) < 12 or struct.unpack("!H", message[4:6])[0] != 1:
+            return None, None
+        offset, labels = 12, []
+        while message[offset]:
+            size = message[offset]
+            if size > 63:
+                return None, None
+            labels.append(message[offset + 1:offset + 1 + size].decode("ascii"))
+            offset += 1 + size
+        offset += 1
+        qtype, qclass = struct.unpack("!HH", message[offset:offset + 4])
+        offset += 4
+    except (IndexError, UnicodeError, struct.error):
+        return None, None
+    name = ".".join(labels).lower()
+    answer = b""
+    if name in records and qtype == 1 and qclass == 1:
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 0, 4) + socket.inet_aton(records[name])
+    flags = 0x8180 if name in records else 0x8183
+    header = message[:2] + struct.pack("!HHHHH", flags, 1, int(bool(answer)), 0, 0)
+    return header + message[12:offset] + answer, (name, qtype)
+
+
+class DnsFixture:
+    """Authoritative UDP DNS on loopback; records every query it answers."""
+
+    def __init__(self, port: int, records: dict[str, str]):
+        self.port = port
+        self.records = {name.lower(): ip for name, ip in records.items()}
+        self.socket = socket.socket(type=socket.SOCK_DGRAM)
+        self.socket.bind((LOOPBACK, port))
+        self.socket.settimeout(0.1)
+        self.closed = threading.Event()
+        self.lock = threading.Lock()
+        self.queries: list[tuple[str, int]] = []
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while not self.closed.is_set():
+            try:
+                message, peer = self.socket.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            response, query = dns_answer(message, self.records)
+            if response is None:
+                continue
+            with self.lock:
+                self.queries.append(query)
+            with contextlib.suppress(OSError):
+                self.socket.sendto(response, peer)
+
+    def queried(self, name: str, qtype: int = 1) -> bool:
+        with self.lock:
+            return (name.lower(), qtype) in self.queries
+
+    def reset(self):
+        with self.lock:
+            self.queries.clear()
+
+    def close(self):
+        self.closed.set()
+        self.socket.close()
+        self.thread.join(timeout=1)
+
+
+# ---------------------------------------------------------------------------
+# Processes
+
+
+class Process:
+    """A child in a new session; :meth:`close` terminates its process group.
+
+    Output goes to ``<directory>/<name>.log`` (shown by :meth:`tail` in
+    failure details).
+    """
+
+    def __init__(self, argv, directory: Path, env, name: str = "process"):
+        self.log_path = directory / f"{name}.log"
+        self.log = self.log_path.open("wb")
+        try:
+            self.child = subprocess.Popen([str(a) for a in argv], cwd=directory, env=env,
+                                          stdin=subprocess.DEVNULL, stdout=self.log,
+                                          stderr=self.log, start_new_session=True)
+        except Exception:
+            self.log.close()
+            raise
+
+    def alive(self) -> bool:
+        return self.child.poll() is None
+
+    def wait_tcp(self, port: int, timeout: float = 8, host: str = LOOPBACK) -> None:
+        """Wait until ``host:port`` accepts TCP; the child must stay alive."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.alive():
+                raise AssertionError("process exited during startup: " + self.tail())
+            try:
+                with socket.create_connection((host, port), timeout=0.1):
+                    return
+            except OSError:
+                time.sleep(0.03)
+        raise AssertionError(f"process did not open {host}:{port}: " + self.tail())
+
+    def wait_file(self, path: Path, content: str, timeout: float = 8) -> None:
+        """Wait until ``path`` holds exactly ``content`` (a readiness marker)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.alive():
+                raise AssertionError("process exited before finishing startup: " + self.tail())
+            with contextlib.suppress(OSError):
+                if path.is_file() and path.read_text() == content:
+                    return
+            time.sleep(0.01)
+        raise AssertionError("process did not finish startup: " + self.tail())
+
+    def stay_alive(self, seconds: float) -> None:
+        """Startup check for UDP-only listeners: still running after ``seconds``."""
+        time.sleep(seconds)
+        if not self.alive():
+            raise AssertionError("process exited during startup: " + self.tail())
+
+    def tail(self, size: int = 3000) -> str:
+        with contextlib.suppress(ValueError):
+            self.log.flush()
+        return self.log_path.read_text(errors="replace")[-size:]
+
+    def close(self) -> None:
+        # Only a live leader is signalled: after it has been reaped its PID
+        # (and so the process-group ID) may belong to an unrelated session.
+        if self.child.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.child.pid, signal.SIGTERM)
+            try:
+                self.child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.child.pid, signal.SIGKILL)
+                self.child.wait(timeout=3)
+        self.log.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+# ---------------------------------------------------------------------------
+# SOCKS5 and marker requests
+
+
+def recv_exact(sock: socket.socket, count: int) -> bytes:
+    data = bytearray()
+    while len(data) < count:
+        block = sock.recv(count - len(data))
+        if not block:
+            raise OSError("premature EOF")
+        data.extend(block)
+    return bytes(data)
+
+
+def socks_address(host: str) -> bytes:
+    """SOCKS5 ATYP + address: IPv4, IPv6 or a domain name."""
+    for family, atyp in ((socket.AF_INET, 1), (socket.AF_INET6, 4)):
+        with contextlib.suppress(OSError):
+            return bytes([atyp]) + socket.inet_pton(family, host)
+    name = host.encode("ascii")
+    if not 0 < len(name) < 256:
+        raise ValueError(f"invalid SOCKS host name: {host!r}")
+    return b"\x03" + bytes([len(name)]) + name
+
+
+def _read_socks_address(sock: socket.socket, atyp: int) -> str:
+    if atyp == 1:
+        return socket.inet_ntop(socket.AF_INET, recv_exact(sock, 4))
+    if atyp == 4:
+        return socket.inet_ntop(socket.AF_INET6, recv_exact(sock, 16))
+    if atyp == 3:
+        return recv_exact(sock, recv_exact(sock, 1)[0]).decode("ascii")
+    raise OSError("invalid SOCKS address type")
+
+
+SOCKS_CONNECT, SOCKS_UDP_ASSOCIATE = 1, 3
+
+
+def socks_open(proxy_port: int, command: int, host: str, port: int,
+               timeout: float = 5) -> tuple[socket.socket, str, int]:
+    """No-auth SOCKS5 handshake + command; returns (stream, bound host, bound port)."""
+    stream = socket.create_connection((LOOPBACK, proxy_port), timeout=timeout)
+    try:
+        stream.sendall(b"\x05\x01\x00")
+        if recv_exact(stream, 2) != b"\x05\x00":
+            raise OSError("SOCKS authentication failed")
+        stream.sendall(bytes([5, command, 0]) + socks_address(host) + struct.pack("!H", port))
+        reply = recv_exact(stream, 4)
+        if reply[:3] != b"\x05\x00\x00":
+            raise OSError(f"SOCKS command rejected (reply {reply[1]})")
+        bound = _read_socks_address(stream, reply[3])
+        bound_port = struct.unpack("!H", recv_exact(stream, 2))[0]
+        return stream, bound, bound_port
+    except BaseException:
+        stream.close()
+        raise
+
+
+def read_marker(stream, host: str, marker: bytes) -> None:
+    """One HTTP/1.1 GET over ``stream``; expects 200 and exactly ``marker``."""
+    stream.sendall(f"GET / HTTP/1.1\r\nHost: {host}\r\nUser-Agent: onebox-e2e/3\r\n"
+                   "Accept: */*\r\nConnection: close\r\n\r\n".encode())
+    response = http.client.HTTPResponse(stream)
+    response.begin()
+    body = response.read(len(marker) + 1)
+    if response.status != 200 or body != marker:
+        raise AssertionError(f"HTTP marker mismatch (status={response.status})")
+
+
+def socks_http_marker(proxy_port: int, host: str, port: int, marker: bytes,
+                      timeout: float = 10) -> None:
+    """CONNECT ``host:port`` through the proxy, then :func:`read_marker`."""
+    stream, _, _ = socks_open(proxy_port, SOCKS_CONNECT, host, port, timeout)
+    with stream:
+        read_marker(stream, f"{host}:{port}", marker)
+
+
+def socks_udp_echo(proxy_port: int, ip: str, port: int, marker: bytes,
+                   attempts: int = 3, wait: float = 2) -> None:
+    """UDP ASSOCIATE, then a datagram to ``ip:port`` whose echo must come back."""
+    stream, relay, relay_port = socks_open(proxy_port, SOCKS_UDP_ASSOCIATE, "0.0.0.0", 0)
+    with stream:
+        if relay in ("0.0.0.0", "::"):
+            relay = LOOPBACK
+        family = socket.AF_INET6 if ":" in relay else socket.AF_INET
+        payload = marker + secrets.token_bytes(16)
+        header = b"\x00\x00\x00" + socks_address(ip) + struct.pack("!H", port)
+        with socket.socket(family, socket.SOCK_DGRAM) as datagram:
+            datagram.settimeout(wait)
+            for _ in range(attempts):
+                datagram.sendto(header + payload, (relay, relay_port))
+                try:
+                    reply, _ = datagram.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                if reply[:3] == b"\x00\x00\x00" and reply.endswith(payload):
+                    return
+        raise AssertionError("no matching SOCKS UDP echo")
+
+
+def tls_marker(port: int, server_name: str | None, marker: bytes, timeout: float = 3) -> None:
+    """Direct TLS 1.3 to loopback ``port`` with SNI ``server_name`` (None: no SNI).
+
+    The peer is deliberately not verified: negative SNI checks must fail at
+    the server under test, never at local certificate validation.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.set_alpn_protocols(["http/1.1"])
+    with socket.create_connection((LOOPBACK, port), timeout=timeout) as raw:
+        with context.wrap_socket(raw, server_hostname=server_name) as stream:
+            read_marker(stream, server_name or "no-sni.test", marker)
+
+
+def reached(action) -> tuple[bool, str]:
+    """Run a traffic ``action``; (True, "") on success, (False, reason) on a network failure."""
+    try:
+        action()
+    except (OSError, AssertionError, http.client.HTTPException) as error:
+        return False, describe(error)
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Onebox layout
+
+
+# Every Onebox path variable (src/paths.rs) except ONEBOX_SYSTEM_ROOT, which
+# would hide the real /proc and /sys; suites that need it pass it in `extra`.
+PATH_VARIABLES = {
+    "ONEBOX_DIR": "etc/onebox",
+    "ONEBOX_BIN_DIR": "opt/onebox/bin",
+    "ONEBOX_LOG_DIR": "var/log/onebox",
+    "ONEBOX_RUN_DIR": "run/onebox",
+    "ONEBOX_SITE_ROOT": "var/lib/onebox-site",
+    "ONEBOX_SYSTEMD_DIR": "etc/systemd/system",
+    "ONEBOX_INITD_DIR": "etc/init.d",
+    "ONEBOX_EXE": "usr/local/bin/onebox",
+    "ONEBOX_FRPS_DIR": "etc/onebox-frp",
+    "ONEBOX_FRPS_BIN_DIR": "opt/onebox-frp",
+    "ONEBOX_FRPS_WEB_VAR": "var/lib/onebox-frp",
+    "ONEBOX_FRPS_LOG_DIR": "var/log/onebox-frp",
+    "ONEBOX_FRPS_RUN_DIR": "run/onebox-frp",
+    "ONEBOX_BBR_DIR": "var/lib/onebox-bbr",
+    "ONEBOX_BBR_CONF": "etc/sysctl.d/99-onebox-bbr.conf",
+}
+
+# Host variables that would change what the program does.
+_LEAKY = ("GH_PROXY", "BASH_ENV", "ENV")
+
+
+def clean_env(**extra: str) -> dict[str, str]:
+    """``os.environ`` without ``ONEBOX_*`` / proxy-mirror variables, plus ``NO_COLOR=1``."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("ONEBOX_") and k not in _LEAKY}
+    env["NO_COLOR"] = "1"
+    env.update(extra)
+    return env
+
+
+class Layout:
+    """An isolated Onebox installation layout under ``root``.
+
+    Directories are created lazily by the program, except ``ONEBOX_DIR`` and
+    its ``tls`` directory, which the fixture fills.
+    """
+
+    def __init__(self, root: Path, base_env: dict[str, str] | None = None):
+        self.root = root
+        self.paths = {name: root / rel for name, rel in PATH_VARIABLES.items()}
+        self.etc = self.paths["ONEBOX_DIR"]
+        self.tls = self.etc / "tls"
+        self.state_path = self.etc / "state.json"
+        self.base_env = dict(base_env) if base_env is not None else clean_env()
+        self.tls.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def env(self, **extra: str) -> dict[str, str]:
+        env = dict(self.base_env)
+        env.update({name: str(path) for name, path in self.paths.items()})
+        env.update(extra)
+        return env
+
+    def install_proxy_cert(self, pair: CertPair) -> CertPair:
+        """Deploy ``pair`` where Onebox keeps the proxy certificate."""
+        deployed = CertPair(self.tls / "cert.pem", self.tls / "key.pem")
+        shutil.copyfile(pair.cert, deployed.cert)
+        shutil.copyfile(pair.key, deployed.key)
+        deployed.cert.chmod(0o644)
+        deployed.key.chmod(0o600)
+        return deployed
+
+    def write_v2_state(self, values: dict[str, str]) -> None:
+        """A v2 ``{"values": {KEY: "string"}}`` state (migrated by every command)."""
+        if any(not isinstance(v, str) for v in values.values()):
+            raise TypeError("v2 state values must be strings")
+        write_json(self.state_path, {"values": values})
+
+    def write_state(self, config: dict) -> None:
+        """A v3 schema-3 ``state.json``."""
+        if config.get("schema") != 3:
+            raise ValueError("v3 state needs schema 3")
+        write_json(self.state_path, config)
+
+    def read_state(self) -> dict:
+        return json.loads(self.state_path.read_text())
+
+
+def run_onebox(binary: str, env: dict[str, str], *args: str, check: bool = True,
+               timeout: float = 30, input: bytes | None = None) -> Completed:
+    """Run ``onebox ARGS`` with ``env`` (normally :meth:`Layout.env`)."""
+    return run([binary, *args], env=env, check=check, timeout=timeout, input=input)
+
+
+def onebox_json(binary: str, env: dict[str, str], *args: str):
+    """Run ``onebox ARGS`` and parse its stdout as JSON."""
+    out = run_onebox(binary, env, *args).stdout
+    try:
+        return json.loads(out)
+    except ValueError as error:
+        raise AssertionError(f"onebox {' '.join(args)}: stdout is not JSON: {error}") from error
+
+
+def onebox_yaml(binary: str, env: dict[str, str], *args: str):
+    """Run ``onebox ARGS`` and parse its stdout with :func:`load_yaml`."""
+    out = run_onebox(binary, env, *args).stdout
+    try:
+        return load_yaml(out)
+    except YamlError as error:
+        raise AssertionError(f"onebox {' '.join(args)}: stdout is not the expected YAML: {error}") from error
+
+
+def x25519_pair(xray: str, env=None) -> tuple[str, str]:
+    """(private, public) REALITY keys from ``xray x25519`` (old and new label styles)."""
+    text = run([xray, "x25519"], env=env).stdout
+    pairs = {name.strip().lower(): value.strip()
+             for name, value in (line.split(":", 1) for line in text.splitlines() if ":" in line)}
+    private = next((v for k, v in pairs.items() if "private" in k), None)
+    public = next((v for k, v in pairs.items() if "public" in k), None)
+    if not private or not public:
+        raise AssertionError(f"unexpected xray x25519 output: {text!r}")
+    return private, public
+
+
+def random_ss_key(size: int = 16) -> str:
+    """Base64 key for Shadowsocks 2022 / ShadowTLS (``size`` bytes)."""
+    return base64.b64encode(secrets.token_bytes(size)).decode()
+
+
+# ---------------------------------------------------------------------------
+# YAML subset reader
+
+
+class YamlError(ValueError):
+    """The text is not in the YAML subset the v3 mihomo renderer emits."""
+
+
+def load_yaml(text: str):
+    """Parse the block-style YAML subset of ``src/render/yaml.rs``.
+
+    Accepted: two-space block mappings and sequences (a collection inside a
+    sequence starts on the dash line), plain keys ``[A-Za-z_][A-Za-z0-9_.-]*``
+    or JSON-quoted keys, JSON double-quoted strings, integers / floats,
+    ``true``/``false``/``null``, ``[]`` and ``{}``. Anything else (plain
+    string scalars, flow collections, tabs, comments, anchors, duplicate keys,
+    odd indentation, a missing final newline) is rejected, so the reader can
+    only accept output whose meaning is unambiguous to any YAML parser.
+    """
+    if not text.endswith("\n") or text.endswith("\n\n"):
+        raise YamlError("document must end with exactly one newline")
+    lines = []
+    for number, raw in enumerate(text[:-1].split("\n"), 1):
+        if "\t" in raw or raw != raw.rstrip(" ") or not raw.strip():
+            raise YamlError(f"line {number}: tab, trailing space or blank line")
+        stripped = raw.lstrip(" ")
+        indent = len(raw) - len(stripped)
+        if indent % 2:
+            raise YamlError(f"line {number}: odd indentation")
+        lines.append([indent, stripped, number])
+    if len(lines) == 1 and not _is_entry(lines[0][1]) and not lines[0][1].startswith("- "):
+        return _scalar(lines[0][1], lines[0][2])
+    reader = _YamlLines(lines)
+    value = reader.block(0)
+    if reader.pos != len(lines):
+        raise YamlError(f"line {lines[reader.pos][2]}: unexpected indentation")
+    return value
+
+
+class _YamlLines:
+    def __init__(self, lines):
+        self.lines = lines
+        self.pos = 0
+
+    def peek(self):
+        return self.lines[self.pos] if self.pos < len(self.lines) else None
+
+    def block(self, indent):
+        line = self.peek()
+        if line is None or line[0] != indent:
+            raise YamlError(f"expected a block at indentation {indent}")
+        return self.sequence(indent) if line[1].startswith("- ") else self.mapping(indent)
+
+    def sequence(self, indent):
+        items = []
+        while (line := self.peek()) and line[0] == indent and line[1].startswith("- "):
+            content = line[1][2:]
+            if content.startswith("- ") or _is_entry(content):
+                # The nested collection starts on the dash line: re-read
+                # that line as if it were indented past the dash.
+                self.lines[self.pos] = [indent + 2, content, line[2]]
+                items.append(self.block(indent + 2))
+            else:
+                items.append(_scalar(content, line[2]))
+                self.pos += 1
+        return items
+
+    def mapping(self, indent):
+        result = {}
+        while (line := self.peek()) and line[0] == indent and not line[1].startswith("- "):
+            key, rest = _split_key(line[1], line[2])
+            if key in result:
+                raise YamlError(f"line {line[2]}: duplicate key {key!r}")
+            self.pos += 1
+            if rest == "":
+                child = self.peek()
+                if child is None or child[0] != indent + 2:
+                    raise YamlError(f"line {line[2]}: missing block for {key!r}")
+                result[key] = self.block(indent + 2)
+            elif rest.startswith(" ") and not rest.startswith("  "):
+                result[key] = _scalar(rest[1:], line[2])
+            else:
+                raise YamlError(f"line {line[2]}: expected one space after the colon")
+        return result
+
+
+_PLAIN_KEY_FIRST = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+_PLAIN_KEY_REST = _PLAIN_KEY_FIRST | set("0123456789.-")
+_YAML11_WORDS = {"y", "n", "yes", "no", "on", "off", "true", "false", "null", "~", "<<", "="}
+
+
+def _is_entry(text: str) -> bool:
+    try:
+        _split_key(text, 0)
+    except YamlError:
+        return False
+    return True
+
+
+def _quoted_end(text: str) -> int | None:
+    escaped = False
+    for index, char in enumerate(text[1:], 1):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            return index + 1
+    return None
+
+
+def _split_key(text: str, number: int) -> tuple[str, str]:
+    if text.startswith('"'):
+        end = _quoted_end(text)
+        if end is None or text[end:end + 1] != ":":
+            raise YamlError(f"line {number}: not a mapping entry")
+        return _json_string(text[:end], number), text[end + 1:]
+    key, colon, rest = text.partition(":")
+    plain = (key and key[0] in _PLAIN_KEY_FIRST and set(key) <= _PLAIN_KEY_REST
+             and key.lower() not in _YAML11_WORDS)
+    if not colon or not plain:
+        raise YamlError(f"line {number}: not a mapping entry")
+    return key, rest
+
+
+def _json_string(text: str, number: int) -> str:
+    try:
+        value = json.loads(text)
+    except ValueError as error:
+        raise YamlError(f"line {number}: invalid quoted string: {error}") from error
+    if not isinstance(value, str):
+        raise YamlError(f"line {number}: expected a string")
+    return value
+
+
+def _scalar(text: str, number: int):
+    fixed = {"null": None, "true": True, "false": False}
+    if text in fixed:
+        return fixed[text]
+    if text == "[]":
+        return []
+    if text == "{}":
+        return {}
+    if text.startswith('"'):
+        if _quoted_end(text) != len(text):
+            raise YamlError(f"line {number}: text after a quoted string")
+        return _json_string(text, number)
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    raise YamlError(f"line {number}: plain scalar {text!r} is never emitted")
+
+
+# ---------------------------------------------------------------------------
+# Self-tests (python3 tests/e2e/_harness.py)
+
+
+class YamlReaderTests(unittest.TestCase):
+    def test_documents_round_trip(self):
+        cases = [
+            ("a: 1\n", {"a": 1}),
+            ("- 1\n- \"x\"\n", [1, "x"]),
+            ("proxies:\n  - name: \"n\"\n    port: 443\n    tls: true\n    alpn:\n      - \"h2\"\n"
+             "rules:\n  - \"MATCH,n\"\n",
+             {"proxies": [{"name": "n", "port": 443, "tls": True, "alpn": ["h2"]}],
+              "rules": ["MATCH,n"]}),
+            ("- - 1\n  - 2\n- {}\n- []\n", [[1, 2], {}, []]),
+            ("\"yes\": null\n\"a b\": -1.5\n", {"yes": None, "a b": -1.5}),
+            ("k: \"\\u0007\\\"q\\\\\"\n", {"k": "\u0007\"q\\"}),
+            ("\"x\"\n", "x"),
+            ("ws-opts:\n  headers:\n    Host: \"h.test\"\n", {"ws-opts": {"headers": {"Host": "h.test"}}}),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(load_yaml(text), expected)
+
+    def test_rejects_ambiguous_or_malformed_text(self):
+        bad = [
+            "a: 1",                 # no final newline
+            "a: 1\n\n",             # blank line
+            "a: plain\n",           # plain string scalar
+            "a: yes\n",             # YAML 1.1 boolean
+            "yes: 1\n",             # keyword key
+            "a: [1]\n",             # flow sequence
+            "a: 1\na: 2\n",         # duplicate key
+            "a:\n   b: 1\n",        # odd indentation
+            "a:\n    b: 1\n",       # skipped level
+            "a:  1\n",              # two spaces
+            "a: 1 # c\n",           # comment
+            "\ta: 1\n",             # tab
+            "a: \"x\" y\n",         # text after string
+            "a:\n",                 # missing block
+            "- 1\nb: 2\n",          # mixed collection kinds
+            "a: 1 \n",              # trailing space
+        ]
+        for text in bad:
+            with self.subTest(text=text), self.assertRaises(YamlError):
+                load_yaml(text)
+
+
+class SocksAndDnsTests(unittest.TestCase):
+    def test_socks_addresses(self):
+        self.assertEqual(socks_address("127.0.0.1"), b"\x01\x7f\x00\x00\x01")
+        self.assertEqual(socks_address("::1"), b"\x04" + b"\x00" * 15 + b"\x01")
+        self.assertEqual(socks_address("a.test"), b"\x03\x06a.test")
+        with self.assertRaises(ValueError):
+            socks_address("x" * 256)
+
+    @staticmethod
+    def query(name: str, qtype: int = 1) -> bytes:
+        labels = b"".join(bytes([len(p)]) + p.encode() for p in name.split("."))
+        return b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + b"\x00" + struct.pack("!HH", qtype, 1)
+
+    def test_dns_answers(self):
+        records = {"a.test": "192.0.2.1"}
+        response, query = dns_answer(self.query("A.test"), records)
+        self.assertEqual(query, ("a.test", 1))
+        self.assertEqual(response[:2], b"\x12\x34")
+        self.assertEqual(struct.unpack("!H", response[2:4])[0], 0x8180)
+        self.assertTrue(response.endswith(socket.inet_aton("192.0.2.1")))
+        response, query = dns_answer(self.query("b.test"), records)
+        self.assertEqual(struct.unpack("!H", response[2:4])[0], 0x8183)
+        self.assertEqual(struct.unpack("!H", response[6:8])[0], 0)
+        response, query = dns_answer(self.query("a.test", 28), records)
+        self.assertEqual((struct.unpack("!H", response[6:8])[0], query), (0, ("a.test", 28)))
+        self.assertEqual(dns_answer(b"\x00" * 5, records), (None, None))
+
+    def test_ports_avoid_ephemeral_range(self):
+        low, high = ephemeral_range()
+        ports = Ports()
+        values = {ports.get() for _ in range(5)}
+        self.assertEqual(len(values), 5)
+        self.assertTrue(all(not low <= p <= high and p >= 10240 for p in values))
+
+
+class ToolContractTests(unittest.TestCase):
+    def test_set_but_unusable_variable_is_fatal(self):
+        with unittest.mock.patch.dict(os.environ, {"ONEBOX_TEST_X": "/nonexistent/x"}):
+            with self.assertRaises(SystemExit):
+                tool("ONEBOX_TEST_X")
+
+    def test_unset_variable(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ONEBOX_TEST_X", None)
+            if REQUIRE_FULL:
+                with self.assertRaises(Unavailable):
+                    tool("ONEBOX_TEST_X", path_names=("sh",))
+            else:
+                self.assertTrue(tool("ONEBOX_TEST_X", path_names=("sh",)).endswith("sh"))
+                with self.assertRaises(Unavailable):
+                    tool("ONEBOX_TEST_X", path_names=("onebox-no-such-tool",))
+
+    def test_clean_env_drops_onebox_variables(self):
+        with unittest.mock.patch.dict(os.environ, {"ONEBOX_DIR": "/etc/x", "GH_PROXY": "p"}):
+            env = clean_env(A="1")
+        self.assertNotIn("ONEBOX_DIR", env)
+        self.assertNotIn("GH_PROXY", env)
+        self.assertEqual((env["NO_COLOR"], env["A"]), ("1", "1"))
+
+
+if __name__ == "__main__":
+    sys.exit(unittest.main())
