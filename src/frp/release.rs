@@ -142,14 +142,17 @@ pub fn prepare(
         (Some(asset), None) => asset,
         _ => bail!("FRP 安装包缺失或重复"),
     };
-    ensure!(
-        asset.size > 0 && asset.size < PACKAGE_MAX,
-        "FRP 包大小无效"
-    );
-    sweep_stale(stage_parent, &format!("onebox-{STAGE_LABEL}-"), Duration::ZERO)?;
+    ensure!(asset.size > 0 && asset.size < PACKAGE_MAX, "FRP 包大小无效");
+    sweep_stale(
+        stage_parent,
+        &format!("onebox-{STAGE_LABEL}-"),
+        Duration::ZERO,
+    )?;
     let stage = TempDir::new_in(stage_parent, STAGE_LABEL)?;
     let package = stage.join(&name);
-    download_asset_with(ctx, env, REPO, &release, asset, &package, &|n| n == CHECKSUMS)?;
+    download_asset_with(ctx, env, REPO, &release, asset, &package, &|n| {
+        n == CHECKSUMS
+    })?;
     let binary = stage.join("frps");
     extract_tar_gz(&package, "frps", &binary, PACKAGE_MAX)?;
     fs::remove_file(&package).map_err(|e| Error::io(&package, e))?;

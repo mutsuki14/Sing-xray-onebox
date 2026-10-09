@@ -52,8 +52,14 @@ impl Fixture {
 
 #[test]
 fn plans() {
-    assert_eq!(plan("latest", Some("0.71.0")), BinaryPlan::Fetch(Which::Latest));
-    assert_eq!(plan("0.71.0", Some("0.71.0")), BinaryPlan::Keep("0.71.0".into()));
+    assert_eq!(
+        plan("latest", Some("0.71.0")),
+        BinaryPlan::Fetch(Which::Latest)
+    );
+    assert_eq!(
+        plan("0.71.0", Some("0.71.0")),
+        BinaryPlan::Keep("0.71.0".into())
+    );
     assert_eq!(
         plan("0.72.0", Some("0.71.0")),
         BinaryPlan::Fetch(Which::Tag("v0.72.0".into()))
@@ -138,14 +144,28 @@ fn release_rules() {
         body: String::new(),
         assets: vec![],
     };
-    assert_eq!(check_release(&release("v0.71.0", false), "latest").unwrap(), "0.71.0");
+    assert_eq!(
+        check_release(&release("v0.71.0", false), "latest").unwrap(),
+        "0.71.0"
+    );
     for (r, requested, message) in [
         (release("v0.71.0", true), "latest", "拒绝非稳定 FRP Release"),
         (release("0.71.0", false), "latest", "FRP Release 标签无效"),
-        (release("v0.70.0", false), "latest", "FRP 版本须为 0.71.0 或更新的稳定版本"),
-        (release("v0.72.0", false), "0.71.0", "FRP Release 标签与请求不符"),
+        (
+            release("v0.70.0", false),
+            "latest",
+            "FRP 版本须为 0.71.0 或更新的稳定版本",
+        ),
+        (
+            release("v0.72.0", false),
+            "0.71.0",
+            "FRP Release 标签与请求不符",
+        ),
     ] {
-        assert_eq!(check_release(&r, requested).unwrap_err().to_string(), message);
+        assert_eq!(
+            check_release(&r, requested).unwrap_err().to_string(),
+            message
+        );
     }
 }
 
@@ -177,7 +197,13 @@ fn bad_packages_are_refused() {
     serve(&exec, release_routes("0.71.0", false));
     let mut ctx = f.ctx.clone();
     ctx.exec = exec;
-    let err = prepare(&ctx, &no_env, "0.71.0", &f.installed(), &f.dir.join("stage"));
+    let err = prepare(
+        &ctx,
+        &no_env,
+        "0.71.0",
+        &f.installed(),
+        &f.dir.join("stage"),
+    );
     assert_eq!(err.unwrap_err().to_string(), "FRP 不支持当前 CPU 架构");
 }
 
