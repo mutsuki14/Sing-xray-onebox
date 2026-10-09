@@ -93,11 +93,13 @@ fn restore_command(ctx: &Ctx, m: &Matches) -> Result<()> {
 /// The node and self-update journals under the node lock, then an FRP
 /// transaction under the FRP lock (`FRP 存在未完成事务，请先执行 onebox
 /// recover`). FRP is recovered even when the node recovery failed; the
-/// first error is returned.
+/// first error is returned. A self-update journal that cannot be read only
+/// counts as pending here: `recover_all` reports it after it recovered the
+/// node journal, so neither that recovery nor FRP's is skipped.
 fn recover_command(ctx: &Ctx, _m: &Matches) -> Result<()> {
     let (program, node) = {
         let lock = apply::node_lock(ctx)?;
-        let program = program_journal::load(&ctx.paths)?.is_some();
+        let program = !matches!(program_journal::load(&ctx.paths), Ok(None));
         let node = apply::recover::recover_all(ctx, &lock);
         // Work directories a killed self-update left before its journal existed.
         crate::update::sweep_orphans(&ctx.paths, &lock);
@@ -217,6 +219,30 @@ mod tests {
         assert!(exec.calls().is_empty());
         assert!(ui.prompts().is_empty());
         assert!(restorable(&ctx).unwrap().is_empty());
+    }
+
+    /// An unreadable self-update journal is reported, but only after the
+    /// node journal and the FRP transaction were recovered.
+    #[test]
+    fn recover_does_not_stop_at_an_unreadable_self_update_journal() {
+        use crate::apply::{journal as node_journal, transaction};
+        use crate::frp::journal as frp_journal;
+        let dir = TempDir::new("backup-cli-recover-program").unwrap();
+        let (ctx, _, _) = Ctx::test(dir.path());
+        crate::frp::runtime::mkdirs(&ctx.paths).unwrap();
+        let mut frp =
+            frp_journal::create(&ctx.paths, "配置", frp_journal::Before::default(), &[]).unwrap();
+        frp.set_phase(&ctx.paths, frp_journal::Phase::Committed)
+            .unwrap();
+        let mut node =
+            transaction::begin(&ctx, "修改", None, transaction::RuntimeState::default()).unwrap();
+        node.set_phase(&ctx.paths, node_journal::Phase::Committed)
+            .unwrap();
+        std::fs::write(ctx.paths.self_update_journal(), b"{not json").unwrap();
+        let err = recover_command(&ctx, &matches(&[])).unwrap_err();
+        assert!(err.to_string().contains("自更新恢复记录无效"), "{err}");
+        assert!(node_journal::load(&ctx.paths).unwrap().is_none());
+        assert!(!frp_journal::exists(&ctx.paths));
     }
 
     /// `recover` also clears an FRP transaction (`FRP 存在未完成事务，请先
