@@ -60,6 +60,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     service::HOP_CLEAR,
     client::RENDER,
     // wave C modules: subscription, frps, update, update-script, update-check, update-channel, doctor, support, backup, backups, restore, recover
+    // …and, with the backup module, set UNINSTALL_BACKUP (below) to crate::backup::create_locked.
 ];
 
 const VERSION: CommandSpec = CommandSpec::new("version", Group::Maintain, "显示程序版本")
@@ -72,19 +73,21 @@ const HELP: CommandSpec = CommandSpec::new("help", Group::Maintain, "显示帮�
     .root(Root::NotRequired)
     .handler(help_command);
 
-/// The backup `uninstall` takes under the node lock (G11). Wave C wires
-/// `crate::backup::create_locked` here; until then uninstall refuses to
-/// remove anything without a backup.
+/// The backup `uninstall` takes under the node lock (G11). The second
+/// wave-C integration point (see the marked list above): set it to
+/// `crate::backup::create_locked`; until then uninstall refuses to remove
+/// anything without a backup. A test fails once the backup module provides
+/// `create_locked` while this is still unwired.
 pub const UNINSTALL_BACKUP: uninstall::BackupHook = backup_not_wired;
+
+const BACKUP_NOT_WIRED: &str = "备份模块尚未接入，无法在卸载前保存快照；已中止卸载";
 
 fn backup_not_wired(
     _ctx: &Ctx,
     _lock: &crate::sys::lock::FileLock,
     _label: &str,
 ) -> Result<String> {
-    Err(Error::msg(
-        "备份模块尚未接入，无法在卸载前保存快照；已中止卸载",
-    ))
+    Err(Error::msg(BACKUP_NOT_WIRED))
 }
 
 /// Whether the resolved command needs root for these matches.
