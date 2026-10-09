@@ -236,7 +236,7 @@ impl Checker<'_> {
             },
             timeout_secs: self.opts.common.timeout,
             ca: self.opts.common.ca.as_deref(),
-            limit: COMPARED_BYTES,
+            range: COMPARED_BYTES,
             upload: 0,
         };
         measure(self.ctx, &req, self.cancel)
@@ -250,7 +250,7 @@ impl Checker<'_> {
             route: Route::Proxy(core.endpoint()),
             timeout_secs: self.opts.common.timeout,
             ca: self.opts.common.ca.as_deref(),
-            limit: 0,
+            range: 0,
             upload: 0,
         };
         Ok(safe_measure(self.ctx, &req, self.cancel).ok())

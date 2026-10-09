@@ -4,20 +4,24 @@
 //! (`socks5h`); this module builds its argv (spec D §4.1), feeds it the
 //! body sink and parses its `--write-out` record (D §3.4, §4.2).
 //!
-//! The body cap is explicit: with a limit, curl writes the body into a pipe
-//! whose reader stops at the cap and closes its end; curl then fails the
-//! next write with CURLE_WRITE_ERROR (23) but still prints its timings, and
-//! exit 23 counts as success ONLY when the reader really stopped at the
-//! cap. Without a limit the body goes to `/dev/null`, so any non-zero exit
-//! is a real failure.
+//! The body cap is explicit: curl writes the body into a pipe of ours
+//! whose reader stops deliberately and closes its end — after `range`
+//! measured bytes (downloads, the REALITY page comparison), or after the
+//! first chunk curl writes (at most 64 KiB, nothing measured) for requests
+//! without a range (health checks, uploads), so a large or endless 2xx body
+//! never runs into `--max-time`. curl then fails its next write with
+//! CURLE_WRITE_ERROR (23) but still prints its timings, and exit 23 counts
+//! as success ONLY when the reader really stopped that way; any other
+//! non-zero exit is a real failure.
 //!
 //! Changes from v2:
 //! - the proxy credential reaches curl as `--config -` on stdin instead of
 //!   a `curl.conf` file (still never on argv);
-//! - the body goes to `--output` (a pipe, or `/dev/null` without a limit)
-//!   instead of curl's stdout, and the cap logic above replaces "exit 23 is
-//!   fine whenever received == limit", which also accepted genuine write
-//!   errors of health checks (D-8.1#4);
+//! - the body goes to `--output` (our pipe) instead of curl's stdout, and
+//!   the deliberate-stop rule above replaces "exit 23 is fine whenever
+//!   received == limit", which also accepted genuine write errors of health
+//!   checks (D-8.1#4); like v2, a request without a range does not measure
+//!   the body (`received_bytes` 0, hash of nothing);
 //! - the statistics come from curl's captured stderr (bounded) instead of
 //!   an unbounded file read (D-8.1#25);
 //! - a failed request names curl's exit code.
@@ -58,6 +62,9 @@ const POLL: Duration = Duration::from_millis(50);
 const MAX_HEADER_BYTES: u64 = 1024 * 1024;
 const PAYLOAD_BLOCK: usize = 64 * 1024;
 const READ_CHUNK: usize = 64 * 1024;
+/// The most a request without a range reads (one chunk) before it closes
+/// the sink.
+pub const DISCARD_CAP: usize = READ_CHUNK;
 /// Error key of a failed sample in reports (v2).
 pub const REQUEST_FAILED: &str = "request_failed";
 
@@ -79,9 +86,10 @@ pub struct HttpRequest<'a> {
     /// `--connect-timeout` and `--max-time`, seconds.
     pub timeout_secs: u64,
     pub ca: Option<&'a Path>,
-    /// Read at most this many body bytes (requested with `--range`);
-    /// 0 discards the body (health checks).
-    pub limit: u64,
+    /// Measure the first `range` body bytes (requested with `--range`);
+    /// 0 = no range: the body is not measured and the sink closes after
+    /// the first chunk (health checks, uploads).
+    pub range: u64,
     /// POST this many random bytes; 0 sends a GET.
     pub upload: u64,
 }
@@ -168,8 +176,8 @@ pub fn curl_command(req: &HttpRequest, files: &CurlFiles) -> Result<Cmd> {
             .arg("--connect-to")
             .arg(connect_to(req.url, host, port)?);
     }
-    if req.limit > 0 {
-        cmd = cmd.arg("--range").arg(format!("0-{}", req.limit - 1));
+    if req.range > 0 {
+        cmd = cmd.arg("--range").arg(format!("0-{}", req.range - 1));
     }
     if let Some(payload) = files.payload.filter(|_| req.upload > 0) {
         cmd = cmd
@@ -257,10 +265,12 @@ fn parse_record(record: &str) -> Option<CurlStats> {
 /// What the body sink read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BodyRead {
+    /// Measured bytes (0 for a request without a range).
     pub received: u64,
     pub sha256: String,
-    /// The reader stopped because it reached the limit (and closed its
-    /// end, so curl may fail its next write with exit 23).
+    /// The reader stopped deliberately — at the range, or after the first
+    /// chunk of an unmeasured body — and closed its end, so curl may fail
+    /// its next write with exit 23.
     pub capped: bool,
 }
 
@@ -297,8 +307,28 @@ pub fn read_capped(mut reader: impl Read, limit: u64) -> io::Result<BodyRead> {
     })
 }
 
+/// Read the first chunk curl writes (at most [`DISCARD_CAP`] bytes) without
+/// measuring it, then stop: the body of a request without a range.
+/// `capped` is set when a chunk arrived (curl may then hit the closed end);
+/// end of file before any byte (no body) leaves it unset.
+pub fn discard_first_chunk(mut reader: impl Read) -> io::Result<BodyRead> {
+    let mut chunk = vec![0u8; DISCARD_CAP];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(n) => {
+                return Ok(BodyRead {
+                    capped: n > 0,
+                    ..BodyRead::empty()
+                })
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// The explicit cap rule: exit 0 is success; exit 23 only when the sink
-/// closed at the cap; anything else failed.
+/// stopped deliberately (see [`BodyRead::capped`]); anything else failed.
 pub fn check_exit(code: i32, body: &BodyRead) -> Result<()> {
     match code {
         0 => Ok(()),
@@ -350,7 +380,7 @@ pub fn measure(ctx: &Ctx, req: &HttpRequest, cancel: &CancelToken) -> Result<Htt
     };
     let headers = work.join("headers");
     // Declared before the run so it outlives the child (see `BodySink`).
-    let sink = BodySink::open(req.limit)?;
+    let sink = BodySink::open(req.range)?;
     let cmd = curl_command(
         req,
         &CurlFiles {
@@ -418,36 +448,40 @@ fn write_payload(path: &Path, bytes: u64) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-/// Where curl writes the body.
-///
-/// With a limit: an anonymous pipe that curl opens by its procfs name
-/// (`/proc/<our pid>/fd/<write end>`; our descriptors are close-on-exec,
-/// so nothing is inherited). A thread reads at most `limit` bytes. Our own
-/// write end stays open until curl is gone, so the reader cannot see a
-/// premature end of file, and is dropped by [`BodySink::finish`], which
-/// gives the reader its end of file. Invariant: the child must be reaped
+/// Where curl writes the body: an anonymous pipe that curl opens by its
+/// procfs name (`/proc/<our pid>/fd/<write end>`; our descriptors are
+/// close-on-exec, so nothing is inherited). A thread reads at most `range`
+/// bytes, or one unmeasured chunk without a range, then closes the read
+/// end. Our own write end stays open until curl is gone, so the reader
+/// cannot see a premature end of file (and curl's open of the write end,
+/// which needs a reader, never blocks: the reader closes only after curl
+/// wrote); [`BodySink::finish`] drops it, which gives a reader still
+/// waiting (no body) its end of file. Invariant: the child must be reaped
 /// before the sink is finished or dropped (else the join would wait for
 /// curl), which `measure` guarantees by declaring the sink first.
-enum BodySink {
-    Discard,
-    Pipe {
-        target: String,
-        writer: Option<PipeWriter>,
-        reader: Option<JoinHandle<io::Result<BodyRead>>>,
-    },
+///
+/// `/dev/null` is not an option: curl would download a large or endless
+/// body until `--max-time` and fail (D-8.1#4).
+struct BodySink {
+    target: String,
+    writer: Option<PipeWriter>,
+    reader: Option<JoinHandle<io::Result<BodyRead>>>,
 }
 
-const DISCARD: &str = "/dev/null";
-
 impl BodySink {
-    fn open(limit: u64) -> Result<BodySink> {
-        if limit == 0 {
-            return Ok(BodySink::Discard);
-        }
+    fn open(range: u64) -> Result<BodySink> {
         let (reader, writer): (PipeReader, PipeWriter) = io::pipe()?;
         let target = format!("/proc/{}/fd/{}", std::process::id(), writer.as_raw_fd());
-        let reader = std::thread::spawn(move || read_capped(reader, limit));
-        Ok(BodySink::Pipe {
+        // The OS may refuse a thread (pids limit): fail this measurement
+        // only, never panic.
+        let reader = std::thread::Builder::new()
+            .name("onebox-http-body".into())
+            .spawn(move || match range {
+                0 => discard_first_chunk(reader),
+                limit => read_capped(reader, limit),
+            })
+            .map_err(|e| Error::msg(format!("无法创建 HTTP 读取线程: {e}")))?;
+        Ok(BodySink {
             target,
             writer: Some(writer),
             reader: Some(reader),
@@ -455,10 +489,7 @@ impl BodySink {
     }
 
     fn target(&self) -> &str {
-        match self {
-            BodySink::Discard => DISCARD,
-            BodySink::Pipe { target, .. } => target,
-        }
+        &self.target
     }
 
     fn finish(mut self) -> Result<BodyRead> {
@@ -467,11 +498,8 @@ impl BodySink {
 
     /// Drop our write end and collect the reader (once).
     fn close(&mut self) -> Option<Result<BodyRead>> {
-        let BodySink::Pipe { writer, reader, .. } = self else {
-            return None;
-        };
-        drop(writer.take());
-        let handle = reader.take()?;
+        drop(self.writer.take());
+        let handle = self.reader.take()?;
         Some(match handle.join() {
             Ok(Ok(body)) => Ok(body),
             Ok(Err(e)) => Err(Error::from(e).wrap("HTTP 响应读取失败")),

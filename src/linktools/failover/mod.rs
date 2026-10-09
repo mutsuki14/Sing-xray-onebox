@@ -84,7 +84,7 @@ pub fn failover(
             route: Route::Proxy(&endpoint),
             timeout_secs: opts.common.timeout,
             ca: opts.common.ca.as_deref(),
-            limit: 0,
+            range: 0,
             upload: 0,
         };
         safe_measure(ctx, &req, cancel).ok()

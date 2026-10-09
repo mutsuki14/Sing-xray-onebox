@@ -51,16 +51,80 @@ fn real_curl_caps_bodies_and_reports_status() {
         route: Route::Direct { connect_to: None },
         timeout_secs: 3,
         ca: None,
-        limit: 1024,
+        range: 1024,
         upload: 0,
     };
     let cancel = CancelToken::manual();
     let capped = measure(&ctx, &req, &cancel).unwrap();
     assert_eq!((capped.ok, capped.received_bytes), (true, 1024));
     assert_eq!(capped.body_sha256, sha256_hex(&[b'x'; 1024]));
-    let health = measure(&ctx, &HttpRequest { limit: 0, ..req }, &cancel).unwrap();
+    let health = measure(&ctx, &HttpRequest { range: 0, ..req }, &cancel).unwrap();
     assert_eq!((health.ok, health.status), (false, 503));
     worker.join().unwrap();
+}
+
+/// A 2xx health response with a huge or endless body ends right after
+/// the first chunk (v2 closed the pipe at once; `/dev/null` would have
+/// downloaded until `--max-time` and failed).
+#[test]
+fn real_curl_health_checks_do_not_download_the_body() {
+    if !have("curl") {
+        return;
+    }
+    let (_dir, ctx) = real_ctx();
+    let head = "HTTP/1.1 200 OK\r\nContent-Length: 10485760\r\nConnection: close\r\n\r\n";
+    let (port, worker) = serve(vec![(head.into(), 10 * 1024 * 1024)]);
+    let u = local_url(port, "/");
+    let req = HttpRequest {
+        url: &u,
+        route: Route::Direct { connect_to: None },
+        timeout_secs: 2,
+        ca: None,
+        range: 0,
+        upload: 0,
+    };
+    let started = Instant::now();
+    let r = measure(&ctx, &req, &CancelToken::manual()).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!((r.ok, r.status, r.received_bytes), (true, 200, 0));
+    worker.join().unwrap();
+
+    // An endless trickle (a streaming endpoint): 1 KiB every 20 ms.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let trickle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut raw = [0; 4096];
+        let _ = stream.read(&mut raw);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            if stream.write_all(&[b'y'; 1024]).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("curl kept reading the endless body");
+    });
+    let u = local_url(port, "/stream");
+    let started = Instant::now();
+    let r = measure(
+        &ctx,
+        &HttpRequest { url: &u, ..req },
+        &CancelToken::manual(),
+    )
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(r.ok);
+    trickle.join().unwrap();
 }
 
 #[test]
@@ -89,7 +153,7 @@ fn real_curl_obeys_the_total_deadline_for_slow_headers() {
         route: Route::Direct { connect_to: None },
         timeout_secs: 1,
         ca: None,
-        limit: 0,
+        range: 0,
         upload: 0,
     };
     let started = Instant::now();
@@ -129,7 +193,7 @@ fn real_curl_uploads_the_exact_size() {
         route: Route::Direct { connect_to: None },
         timeout_secs: 3,
         ca: None,
-        limit: 0,
+        range: 0,
         upload: 4096,
     };
     let r = measure(&ctx, &req, &CancelToken::manual()).unwrap();
@@ -227,7 +291,7 @@ fn real_curl_logs_in_to_the_proxy_from_stdin() {
         route: Route::Proxy(&ep),
         timeout_secs: 3,
         ca: None,
-        limit: 1024,
+        range: 1024,
         upload: 0,
     };
     let r = measure(&ctx, &req, &CancelToken::manual()).unwrap();

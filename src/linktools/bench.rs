@@ -233,13 +233,13 @@ struct Prober<'a> {
 }
 
 impl Prober<'_> {
-    fn request(&self, via: &SocksEndpoint, url: &TestUrl, limit: u64, upload: u64) -> Measurement {
+    fn request(&self, via: &SocksEndpoint, url: &TestUrl, range: u64, upload: u64) -> Measurement {
         let req = HttpRequest {
             url,
             route: Route::Proxy(via),
             timeout_secs: self.opts.common.timeout,
             ca: self.opts.common.ca.as_deref(),
-            limit,
+            range,
             upload,
         };
         safe_measure(self.ctx, &req, self.cancel)
@@ -305,14 +305,14 @@ fn transfers(
     ];
     let mut done = BTreeMap::new();
     let mut all_loaded = Vec::new();
-    for (name, url, limit, upload) in plan {
+    for (name, url, range, upload) in plan {
         if probe.cancel.is_cancelled() {
             break;
         }
         let Some(url) = url else {
             continue;
         };
-        let (measurement, loaded) = under_load(probe, core.endpoint(), url, limit, upload)?;
+        let (measurement, loaded) = under_load(probe, core.endpoint(), url, range, upload)?;
         let result = match &measurement {
             Measurement::Done(r) => TransferResult::Done(r.into()),
             Measurement::Failed(detail) => TransferResult::Failed(Failure::new(detail)),
@@ -330,17 +330,27 @@ fn transfers(
 }
 
 /// Run one transfer on a helper thread while sampling health latency
-/// (at most `samples × 2` samples, 100 ms apart).
+/// (at most `samples × 2` samples, 100 ms apart). A helper the OS refuses
+/// (pids limit) fails this transfer with the cause instead of panicking.
 fn under_load(
     probe: &Prober,
     via: &SocksEndpoint,
     url: &TestUrl,
-    limit: u64,
+    range: u64,
     upload: u64,
 ) -> Result<(Measurement, Vec<f64>)> {
     let budget = probe.opts.samples * 2;
     std::thread::scope(|scope| {
-        let task = scope.spawn(|| probe.request(via, url, limit, upload));
+        let spawned = std::thread::Builder::new()
+            .name("onebox-bench-transfer".into())
+            .spawn_scoped(scope, || probe.request(via, url, range, upload));
+        let task = match spawned {
+            Ok(task) => task,
+            Err(e) => {
+                let detail = format!("无法创建吞吐测试线程: {e}");
+                return Ok((Measurement::Failed(detail), Vec::new()));
+            }
+        };
         let mut loaded = Vec::new();
         while !task.is_finished() && loaded.len() < budget && !probe.cancel.is_cancelled() {
             if let Some(ttfb) = probe.health(via).ok_ttfb() {

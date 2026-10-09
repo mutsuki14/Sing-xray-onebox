@@ -31,10 +31,8 @@ fn s_client(cert: &str, alpn: Option<&str>) -> Output {
 /// Write `body` into the sink curl was given (our own pipe), as curl would.
 fn write_body(cmd: &Cmd, body: &[u8]) {
     let path = arg_after(&cmd.args, "--output").unwrap();
-    if path != "/dev/null" {
-        let mut sink = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        sink.write_all(body).unwrap();
-    }
+    let mut sink = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    sink.write_all(body).unwrap();
 }
 
 /// How the scripted node and reference behave.

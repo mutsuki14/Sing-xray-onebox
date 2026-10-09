@@ -57,7 +57,7 @@ fn proxied_requests_keep_the_credential_off_argv() {
         route: Route::Proxy(&ep),
         timeout_secs: 8,
         ca: None,
-        limit: 1024,
+        range: 1024,
         upload: 0,
     };
     let cmd = curl_command(&req, &files("/proc/1/fd/5", None)).unwrap();
@@ -93,10 +93,10 @@ fn direct_requests_pin_the_target_and_ignore_proxy_env() {
         },
         timeout_secs: 3,
         ca: Some(Path::new("/etc/ca.pem")),
-        limit: 0,
+        range: 0,
         upload: 0,
     };
-    let cmd = curl_command(&req, &files(DISCARD, None)).unwrap();
+    let cmd = curl_command(&req, &files("/proc/1/fd/6", None)).unwrap();
     let mut expected = base_args();
     expected[8] = "3";
     expected[10] = "3";
@@ -110,7 +110,7 @@ fn direct_requests_pin_the_target_and_ignore_proxy_env() {
         "--connect-to",
         "www.example.com:443:[2001:db8::1]:8443",
         "--output",
-        "/dev/null",
+        "/proc/1/fd/6",
         "--url",
         "https://www.example.com/",
     ]);
@@ -123,7 +123,7 @@ fn direct_requests_pin_the_target_and_ignore_proxy_env() {
             },
             ..req
         };
-        let err = curl_command(&req, &files(DISCARD, None)).unwrap_err();
+        let err = curl_command(&req, &files("/proc/1/fd/6", None)).unwrap_err();
         assert_eq!(err.to_string(), "直连目标地址无效", "{bad:?}");
     }
 }
@@ -136,10 +136,10 @@ fn uploads_post_the_payload_file() {
         route: Route::Direct { connect_to: None },
         timeout_secs: 8,
         ca: None,
-        limit: 0,
+        range: 0,
         upload: 4096,
     };
-    let cmd = curl_command(&req, &files(DISCARD, Some(Path::new("/w/payload")))).unwrap();
+    let cmd = curl_command(&req, &files("/proc/1/fd/6", Some(Path::new("/w/payload")))).unwrap();
     let tail: Vec<&str> = cmd.args.iter().skip(25).map(String::as_str).collect();
     assert_eq!(
         tail,
@@ -153,7 +153,7 @@ fn uploads_post_the_payload_file() {
             "--data-binary",
             "@/w/payload",
             "--output",
-            "/dev/null",
+            "/proc/1/fd/6",
             "--url",
             "http://[::1]:8080/upload"
         ]
@@ -210,6 +210,23 @@ fn the_reader_stops_exactly_at_the_cap() {
         let expected = sha256_hex(&data[..received as usize]);
         assert_eq!(body.sha256, expected);
     }
+}
+
+#[test]
+fn unmeasured_bodies_stop_after_the_first_chunk() {
+    let data = vec![b'x'; 200_000];
+    let mut reader = Cursor::new(&data);
+    let body = discard_first_chunk(&mut reader).unwrap();
+    assert_eq!(
+        body,
+        BodyRead {
+            capped: true,
+            ..BodyRead::empty()
+        }
+    );
+    assert_eq!(reader.position(), DISCARD_CAP as u64, "one chunk at most");
+    let none = discard_first_chunk(Cursor::new(b"")).unwrap();
+    assert_eq!(none, BodyRead::empty(), "no body: not stopped early");
 }
 
 #[test]
@@ -336,7 +353,7 @@ fn scripted_measurements() {
         route: Route::Proxy(&ep),
         timeout_secs: 2,
         ca: None,
-        limit: 65536,
+        range: 65536,
         upload: 0,
     };
     let r = measure(&ctx, &req, &cancel).unwrap();
@@ -372,6 +389,79 @@ fn scripted_measurements() {
     assert!(!m.ok() && m.ok_ttfb().is_none());
 }
 
+/// Write `body` into the pipe curl was given, as curl would.
+fn write_body(cmd: &Cmd, body: &[u8]) {
+    let path = arg_after(&cmd.args, "--output").unwrap();
+    let mut sink = OpenOptions::new().write(true).open(path).unwrap();
+    sink.write_all(body).unwrap();
+}
+
+/// Health checks (no range) read through a pipe too: exit 23 after the
+/// sink stopped is a success, exit 23 without that is curl's failure.
+#[test]
+fn unmeasured_bodies_end_with_a_deliberate_stop() {
+    let (_dir, ctx, exec) = fake_ctx();
+    exec.on_fn(
+        |cmd| cmd.args.last().is_some_and(|u| u.ends_with("/big")),
+        |cmd| {
+            assert!(arg_after(&cmd.args, "--range").is_none());
+            write_body(cmd, b"first chunk of a large body");
+            Ok(Output {
+                code: CURL_WRITE_ERROR,
+                stdout: String::new(),
+                stderr: curl_stats(200, 0.1, 0.2, 0.3, 0),
+            })
+        },
+    )
+    .on_fn(
+        |cmd| cmd.args.last().is_some_and(|u| u.ends_with("/broken")),
+        |_| {
+            Ok(Output {
+                code: CURL_WRITE_ERROR,
+                stdout: String::new(),
+                stderr: curl_stats(200, 0.1, 0.2, 0.3, 0),
+            })
+        },
+    );
+    let ep = endpoint();
+    let big = url("https://h/big");
+    let req = HttpRequest {
+        url: &big,
+        route: Route::Proxy(&ep),
+        timeout_secs: 2,
+        ca: None,
+        range: 0,
+        upload: 0,
+    };
+    let r = measure(&ctx, &req, &CancelToken::manual()).unwrap();
+    assert!(r.ok && r.status == 200);
+    assert_eq!(
+        (r.received_bytes, r.download_mbps),
+        (0, 0.0),
+        "not measured"
+    );
+    assert_eq!(r.body_sha256, sha256_hex(b""));
+    let output = arg_after(&exec.calls()[0].args, "--output")
+        .unwrap()
+        .to_owned();
+    assert!(output.starts_with("/proc/"), "{output}");
+
+    let broken = url("https://h/broken");
+    let err = measure(
+        &ctx,
+        &HttpRequest {
+            url: &broken,
+            ..req
+        },
+        &CancelToken::manual(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "HTTP 请求失败（连接、TLS 或超时，curl 退出码 23）"
+    );
+}
+
 #[test]
 fn uploads_write_a_private_payload_of_the_requested_size() {
     let (_dir, ctx, exec) = fake_ctx();
@@ -397,7 +487,7 @@ fn uploads_write_a_private_payload_of_the_requested_size() {
         route: Route::Direct { connect_to: None },
         timeout_secs: 2,
         ca: None,
-        limit: 0,
+        range: 0,
         upload: 100_000,
     };
     let r = measure(&ctx, &req, &CancelToken::manual()).unwrap();
@@ -417,7 +507,7 @@ fn a_hanging_curl_is_killed_on_cancellation() {
         route: Route::Direct { connect_to: None },
         timeout_secs: 60,
         ca: None,
-        limit: 1024,
+        range: 1024,
         upload: 0,
     };
     let started = Instant::now();
