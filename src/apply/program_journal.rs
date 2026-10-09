@@ -16,10 +16,12 @@
 //! Recovery (G §5.2): verify the lock; nothing to do under a lock inherited
 //! from the updating parent; validate everything before changing anything;
 //! `committed` only cleans up; otherwise mark `recovering`, stop the node
-//! services, clear the proxy firewall rules and hops, put the old manager
-//! back, restore the configuration snapshot, let the restored manager
-//! `regen` under our lock, remove the journal, and report exit code 75 when
-//! this process is not the restored binary.
+//! services, clear the hops and the proxy firewall rules (any rule left
+//! behind stops the recovery there, so the pre-update ledgers are never
+//! restored over a live rule), put the old manager back, restore the
+//! configuration snapshot, let the restored manager `regen` under our lock,
+//! remove the journal, and report exit code 75 when this process is not the
+//! restored binary.
 //!
 //! Changes from v2:
 //! - v3 writes `version: 2` (same fields): version-1 journals were written
@@ -33,6 +35,8 @@
 //!   versions would have failed the upgrade);
 //! - a snapshot without an old manager is refused before anything changes
 //!   (v2 restored the snapshot first, then failed);
+//! - every hop and proxy rule is attempted before a leftover stops the
+//!   recovery (v2 stopped at the first hop it could not remove);
 //! - files are hashed while streaming (v2 read up to 128 MiB into memory);
 //! - the restored manager's `regen` output streams to the terminal and the
 //!   completion notice goes to stderr;
@@ -79,6 +83,8 @@ pub const RECOVERED: &str = "已恢复中断前的管理程序与配置";
 pub const STALE_PROCESS: &str =
     "自更新恢复已完成；当前进程仍是被替换版本，请重新执行命令以使用恢复后的程序";
 const INVALID: &str = "自更新恢复记录无效";
+/// Recovery stopped because owned network rules could not be removed (v2).
+pub const RULES_LEFT: &str = "部分规则未清理，已保留台账";
 /// The running process image (follows the kernel's magic link, so it is the
 /// mapped binary even after the file was replaced).
 const RUNNING_IMAGE: &str = "/proc/self/exe";
@@ -372,11 +378,23 @@ fn stop_services(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// The proxy firewall rules and the hop redirects (v2 `clear_rules`);
-/// rules that cannot be removed now stay recorded and were warned about.
+/// The hop redirects, then the proxy firewall rules (v2 `clear_rules`:
+/// both attempted, in this order). Any rule left behind fails the recovery
+/// before anything is restored: restoring the snapshot would put back the
+/// pre-update ledgers and orphan the rule (an open port or a UDP redirect
+/// no later clear could find), so the journal stays `recovering` for a
+/// retry.
 fn clear_network(ctx: &Ctx) -> Result<()> {
-    firewall::clear_owner(ctx, "proxy")?;
-    hop::clear(ctx)?;
+    let mut failed = Vec::new();
+    match hop::clear(ctx) {
+        Ok(report) => failed.extend(report.failed),
+        Err(e) => failed.push(e.to_string()),
+    }
+    match firewall::clear_owner(ctx, "proxy") {
+        Ok(report) => failed.extend(report.failed),
+        Err(e) => failed.push(e.to_string()),
+    }
+    ensure!(failed.is_empty(), "{RULES_LEFT}: {}", failed.join("; "));
     Ok(())
 }
 

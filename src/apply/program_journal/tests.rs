@@ -249,8 +249,14 @@ fn uninstalled_host_recovers_the_program_only() {
     assert!(!work.exists() && !journal_path(fx.paths()).exists());
 }
 
-#[test]
-fn services_stop_in_v2_order_and_network_rules_are_cleared_first() {
+const PROXY_LEDGER: &[u8] = br#"{"rules":[{"backend":"iptables","port":443,"udp":false,"token":"onebox-proxy-0123456789abcdef"}]}"#;
+const HOP_LEDGER: &[u8] = br#"[{"backend":"iptables","start":30000,"end":30100,"target":443,"token":"onebox-hop-0123456789abcdef"}]"#;
+/// The rules the child regen created (after the snapshot was taken).
+const NEW_PROXY_LEDGER: &[u8] = br#"{"rules":[{"backend":"iptables","port":80,"udp":false,"token":"onebox-proxy-fedcba9876543210"}]}"#;
+const NEW_HOP_LEDGER: &[u8] = br#"[{"backend":"iptables","start":40000,"end":40100,"target":443,"token":"onebox-hop-fedcba9876543210"}]"#;
+
+/// systemd with three node units, and the two v2 ledgers.
+fn network_fixture() -> Fixture {
     let fx = Fixture::new(true);
     let paths = fx.paths().clone();
     mkdir(&paths.system("/run/systemd/system"), 0o755);
@@ -261,26 +267,29 @@ fn services_stop_in_v2_order_and_network_rules_are_cleared_first() {
             b"[Unit]",
         );
     }
-    file(
-        &paths.root.join("firewall-v2.json"),
-        0o600,
-        br#"{"rules":[{"backend":"iptables","port":443,"udp":false,"token":"onebox-proxy-0123456789abcdef"}]}"#,
-    );
-    file(
-        &paths.root.join("hop-v2.json"),
-        0o600,
-        br#"[{"backend":"iptables","start":30000,"end":30100,"target":443,"token":"onebox-hop-0123456789abcdef"}]"#,
-    );
+    file(&paths.root.join("firewall-v2.json"), 0o600, PROXY_LEDGER);
+    file(&paths.root.join("hop-v2.json"), 0o600, HOP_LEDGER);
     fx.exec
         .provide("iptables")
-        .on("systemctl", &["stop"], Output::success(""))
-        .on_fn(
-            |c| {
-                c.program == "iptables"
-                    && (c.args.contains(&"-C".into()) || c.args.contains(&"-D".into()))
-            },
-            |_| Ok(Output::success("")),
-        );
+        .on("systemctl", &["stop"], Output::success(""));
+    fx
+}
+
+fn is_iptables(c: &Cmd, op: &str) -> bool {
+    c.program == "iptables" && c.args.iter().any(|a| a == op)
+}
+
+fn ledger(paths: &Paths, name: &str) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(paths.root.join(name)).unwrap()).unwrap()
+}
+
+#[test]
+fn services_stop_in_v2_order_and_network_rules_are_cleared_first() {
+    let fx = network_fixture();
+    fx.exec.on_fn(
+        |c| is_iptables(c, "-C") || is_iptables(c, "-D"),
+        |_| Ok(Output::success("")),
+    );
     let (_, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
     fx.replace_and_regenerate();
     assert_eq!(exit_code(fx.recover()), 75);
@@ -307,7 +316,73 @@ fn services_stop_in_v2_order_and_network_rules_are_cleared_first() {
         .iter()
         .any(|c| c.contains("onebox-hop-0123456789abcdef")));
     assert!(position("systemctl stop onebox-subscription") < position(" -D "));
+    // v2 order: the hops first, then the proxy rules.
+    assert!(position("onebox-hop-0123456789abcdef") < position("onebox-proxy-0123456789abcdef"));
     assert!(position(" -D ") < position(" regen"));
+}
+
+#[test]
+fn a_rule_left_behind_stops_the_recovery_before_anything_is_restored() {
+    let fx = network_fixture();
+    let deletes_work = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let works = deletes_work.clone();
+    fx.exec
+        .on_fn(|c| is_iptables(c, "-C"), |_| Ok(Output::success("")))
+        .on_fn(
+            |c| is_iptables(c, "-D"),
+            move |_| {
+                Ok(if works.load(std::sync::atomic::Ordering::SeqCst) {
+                    Output::success("")
+                } else {
+                    Output::failure(4, "Another app is currently holding the xtables lock")
+                })
+            },
+        );
+    let (_, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
+    fx.replace_and_regenerate();
+    // The child regen replaced the rules (a new token each).
+    let paths = fx.paths().clone();
+    file(
+        &paths.root.join("firewall-v2.json"),
+        0o600,
+        NEW_PROXY_LEDGER,
+    );
+    file(&paths.root.join("hop-v2.json"), 0o600, NEW_HOP_LEDGER);
+    let err = fx.recover().unwrap_err().to_string();
+    assert!(err.starts_with(&format!("{RULES_LEFT}: ")), "{err}");
+    assert!(
+        err.contains("40000-40100/udp") && err.contains(" 80/tcp"),
+        "{err}"
+    );
+    // Nothing was restored: the new manager, its state and its ledgers
+    // (whose rules are still live) stay; the record waits for a retry.
+    assert_eq!(fs::read(&paths.executable).unwrap(), NEW);
+    assert_eq!(fs::read(paths.state()).unwrap(), b"new-state");
+    let new_proxy: serde_json::Value = serde_json::from_slice(NEW_PROXY_LEDGER).unwrap();
+    let new_hop: serde_json::Value = serde_json::from_slice(NEW_HOP_LEDGER).unwrap();
+    assert_eq!(ledger(&paths, "firewall-v2.json"), new_proxy);
+    assert_eq!(ledger(&paths, "hop-v2.json"), new_hop);
+    assert_eq!(
+        load(&paths).unwrap().unwrap().phase,
+        ProgramPhase::Recovering
+    );
+    assert!(work.exists());
+    assert!(fx.regens().is_empty());
+    // Both kinds were attempted (v2 gave up at the first hop).
+    let history = fx.exec.history();
+    assert!(history
+        .iter()
+        .any(|c| c.contains(" -D ") && c.contains("onebox-hop-fedcba9876543210")));
+    assert!(history
+        .iter()
+        .any(|c| c.contains(" -D ") && c.contains("onebox-proxy-fedcba9876543210")));
+    // Once the rules can be removed, the retry restores everything.
+    deletes_work.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(exit_code(fx.recover()), 75);
+    fx.assert_restored(&work);
+    assert_eq!(fx.regens().len(), 1);
+    let old_proxy: serde_json::Value = serde_json::from_slice(PROXY_LEDGER).unwrap();
+    assert_eq!(ledger(&paths, "firewall-v2.json"), old_proxy);
 }
 
 #[test]
