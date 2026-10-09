@@ -51,7 +51,7 @@ mod transaction;
 pub use crate::host::service::Scope;
 pub use line::line;
 pub use scheduler::{ensure_scheduler, ensure_scheduler_as, scheduler_active, NOT_RUNNING};
-pub use transaction::{restore, snapshot, CronSnapshot};
+pub use transaction::{check_snapshot, restore, snapshot, CronSnapshot};
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
@@ -370,6 +370,23 @@ impl Crontab {
     pub fn remove(&mut self, tag: &Tag) -> bool {
         let before = self.lines.len();
         self.lines.retain(|l| l.tag.as_ref() != Some(tag));
+        self.lines.len() != before
+    }
+
+    /// Remove the lines of `scope` written in v3's own form
+    /// (` # onebox:{tag}`) and keep those older versions wrote: run before a
+    /// restored 2.x manager regenerates, which does not recognize v3 lines
+    /// and would neither remove nor replace them. Returns whether a line
+    /// was removed.
+    pub fn remove_v3_lines(&mut self, scope: Scope) -> bool {
+        let ownership = &self.ownership;
+        let before = self.lines.len();
+        self.lines.retain(|l| {
+            !matches!(
+                ownership.classify_form(&l.text),
+                Some((tag, Form::V3)) if scope.covers(&tag)
+            )
+        });
         self.lines.len() != before
     }
 

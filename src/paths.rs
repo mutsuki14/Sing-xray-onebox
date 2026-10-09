@@ -249,6 +249,18 @@ mod tests {
         for (got, want) in derived {
             assert_eq!(got, PathBuf::from(want));
         }
+        assert_eq!(
+            p.subscription_acme(),
+            PathBuf::from("/var/lib/onebox-subscription-acme")
+        );
+        let custom = Paths::from_lookup(|k| {
+            (k == "ONEBOX_SITE_ROOT").then(|| PathBuf::from("/srv/www/site"))
+        })
+        .unwrap();
+        assert_eq!(
+            custom.subscription_acme(),
+            PathBuf::from("/srv/www/onebox-subscription-acme")
+        );
         assert_eq!(p.service_env().len(), 13);
         assert_eq!(
             p.system("/etc/os-release"),

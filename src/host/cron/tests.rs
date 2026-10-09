@@ -190,6 +190,34 @@ fn remove_and_remove_scope() {
 }
 
 #[test]
+fn remove_v3_lines_keeps_older_forms_and_other_scopes() {
+    let text = format!(
+        "a\n{V1_BOOT}\n{}\n{}\n{}\n{}\n{}\n{}\nb # onebox:renew\n",
+        lines::renew(),
+        lines::boot("onebox-xray"),
+        lines::v2_cert("proxy"),
+        lines::v2_boot("onebox-xray"),
+        lines::frp_renew(),
+        lines::RETIRED,
+    );
+    let mut t = tab(&text);
+    assert!(t.remove_v3_lines(Scope::Node));
+    assert_eq!(
+        t.text(),
+        format!(
+            "a\n{V1_BOOT}\n{}\n{}\n{}\n{}\n",
+            lines::v2_cert("proxy"),
+            lines::v2_boot("onebox-xray"),
+            lines::frp_renew(),
+            lines::RETIRED,
+        )
+    );
+    assert!(!t.remove_v3_lines(Scope::Node));
+    assert!(t.remove_v3_lines(Scope::Frp));
+    assert!(!t.text().contains(" # onebox:"));
+}
+
+#[test]
 fn listing_tells_no_crontab_from_failures() {
     let ok = |code: i32, stdout: &str, stderr: &str| Output {
         code,

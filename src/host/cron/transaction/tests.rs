@@ -57,6 +57,34 @@ fn every_written_form_is_restorable() {
 }
 
 #[test]
+fn check_snapshot_accepts_what_restore_accepts() {
+    let paths = default_paths();
+    let node = [
+        lines::renew(),
+        lines::boot("onebox-xray"),
+        lines::v2_cert("proxy"),
+        lines::v2_boot("onebox-xray"),
+        V1_BOOT.to_owned(),
+        lines::RETIRED.to_owned(),
+    ];
+    check_snapshot(&paths, &snap(&node), Scope::Node).unwrap();
+    let frp = [lines::frp_renew(), lines::v2_frp(false)];
+    check_snapshot(&paths, &snap(&frp), Scope::Frp).unwrap();
+    let err = check_snapshot(&paths, &snap(&frp), Scope::Node).unwrap_err();
+    assert_eq!(err.to_string(), NOT_OWNED);
+    // Whatever a crontab snapshots passes, anchors included.
+    let text = format!("a\n{}\nb\n{}\n", node.join("\n"), frp.join("\n"));
+    let taken = tab(&text).snapshot(Scope::Node);
+    assert!(taken.anchors.is_some());
+    check_snapshot(&paths, &taken, Scope::Node).unwrap();
+    // The v2 autostart shape names the managed executable.
+    let mut other = default_paths();
+    other.executable = "/opt/other/onebox".into();
+    let err = check_snapshot(&other, &snap(&[lines::v2_boot("onebox-xray")]), Scope::Node);
+    assert_eq!(err.unwrap_err().to_string(), UNKNOWN_SHAPE);
+}
+
+#[test]
 fn journal_lines_must_have_an_exact_known_shape() {
     let o = Ownership::of(&default_paths());
     let renew = lines::renew();
@@ -89,11 +117,18 @@ fn journal_lines_must_have_an_exact_known_shape() {
             .is_some_and(|(tag, form)| o.restorable(text, &tag, form));
         assert!(!accepted, "{text}");
     }
-    // Restore refuses them before changing anything.
+    // Restore refuses them before changing anything, and so does the pure
+    // check (no crontab needed).
     let mut t = tab(&format!("a\n{renew}\n"));
     for text in &bad[..3] {
         let err = t.restore(&snap(std::slice::from_ref(text)), Scope::Node);
         assert_eq!(err.unwrap_err().to_string(), UNKNOWN_SHAPE, "{text}");
+        let pure = check_snapshot(
+            &default_paths(),
+            &snap(std::slice::from_ref(text)),
+            Scope::Node,
+        );
+        assert_eq!(pure.unwrap_err().to_string(), UNKNOWN_SHAPE, "{text}");
     }
     assert_eq!(t.text(), format!("a\n{renew}\n"));
 }
@@ -208,6 +243,12 @@ fn restore_refuses_foreign_or_out_of_scope_lines_and_bad_anchors() {
             .restore(&snap(std::slice::from_ref(&bad)), Scope::Node)
             .unwrap_err();
         assert_eq!(err.to_string(), NOT_OWNED, "{bad:?}");
+        let pure = check_snapshot(
+            &default_paths(),
+            &snap(std::slice::from_ref(&bad)),
+            Scope::Node,
+        );
+        assert_eq!(pure.unwrap_err().to_string(), NOT_OWNED, "{bad:?}");
     }
     let boot = lines::boot("onebox-xray");
     for (lines, anchors) in [
@@ -222,6 +263,8 @@ fn restore_refuses_foreign_or_out_of_scope_lines_and_bad_anchors() {
         };
         let err = t.restore(&bad, Scope::Node).unwrap_err();
         assert_eq!(err.to_string(), BAD_ANCHORS, "{anchors:?}");
+        let pure = check_snapshot(&default_paths(), &bad, Scope::Node).unwrap_err();
+        assert_eq!(pure.to_string(), BAD_ANCHORS, "{anchors:?}");
     }
     assert_eq!(t.text(), format!("a\n{renew}\n"));
     t.restore(&snap(&[]), Scope::Node).unwrap();
