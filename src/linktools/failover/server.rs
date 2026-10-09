@@ -214,6 +214,9 @@ pub fn serve(
     emit: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<()> {
     let port = svc.listener.local_addr()?.port();
+    // The acceptor polls the token between accepts (also for a listener
+    // that was not made by `bind`).
+    svc.listener.set_nonblocking(true)?;
     let active = Active::default();
     let slots = Slots::new(svc.max_clients);
     let failure = Mutex::new(None);
