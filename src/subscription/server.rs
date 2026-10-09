@@ -15,13 +15,19 @@
 //!
 //! The worker is read-only: it never writes configuration, and reads
 //! devices and the snapshot per request (`http`). Connections go to a
-//! bounded pool (4 threads, 16 queued); when the queue is full a new
-//! connection is closed at once. Nothing is logged per request (tokens are
-//! in URLs).
+//! bounded pool, stamped with their accept time: behind nginx (unix
+//! socket) 4 threads and 16 queued, as in v2; on TCP, where clients
+//! connect directly, 16 threads and 64 queued. When the queue is full a
+//! new connection is closed at once. Every exchange has whole-phase
+//! deadlines counted from `accept` ([`http::Limits`]), so slow clients
+//! release their thread within seconds and stale queued connections are
+//! dropped without waiting. Nothing is logged per request (tokens are in
+//! URLs).
 //!
-//! Changes from v2: TCP listener in ip mode (no nginx); failed `accept`
-//! calls back off instead of spinning; the socket group comes from the
-//! nginx worker account Onebox renders into its configs.
+//! Changes from v2: TCP listener in ip mode (no nginx); deadlines per
+//! exchange instead of per read; failed `accept` calls back off instead of
+//! spinning; the socket group comes from the nginx worker account Onebox
+//! renders into its configs.
 
 use super::http::{self, Conn, Limits};
 use crate::ctx::Ctx;
@@ -40,7 +46,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const ALREADY_RUNNING: &str = "订阅服务已在运行";
 pub const SOCKET_OCCUPIED: &str = "订阅 socket 路径被其他文件占用";
@@ -229,6 +235,7 @@ pub struct PoolSize {
 }
 
 impl Default for PoolSize {
+    /// v2's pool, for the unix socket: nginx forwards complete requests.
     fn default() -> Self {
         PoolSize {
             workers: 4,
@@ -237,15 +244,34 @@ impl Default for PoolSize {
     }
 }
 
+impl PoolSize {
+    /// The pool for `listener`: on TCP clients connect directly, so more
+    /// threads keep a few slow ones from occupying all of them until their
+    /// deadlines expire.
+    pub fn for_listener(listener: Listener) -> PoolSize {
+        match listener {
+            Listener::Tcp { .. } => PoolSize {
+                workers: 16,
+                queue: 64,
+            },
+            Listener::Unix => PoolSize::default(),
+        }
+    }
+}
+
+/// A queued connection and when it was accepted (its deadlines count from
+/// then).
+type Accepted = (Box<dyn Conn>, Instant);
+
 /// A fixed set of threads serving queued connections. Idle threads block
 /// on the queue; nothing polls.
 pub struct Pool {
-    tx: SyncSender<Box<dyn Conn>>,
+    tx: SyncSender<Accepted>,
 }
 
 impl Pool {
     pub fn start(paths: &Paths, size: PoolSize, limits: Limits) -> Result<Pool> {
-        let (tx, rx) = sync_channel::<Box<dyn Conn>>(size.queue);
+        let (tx, rx) = sync_channel::<Accepted>(size.queue);
         let rx = Arc::new(Mutex::new(rx));
         for index in 0..size.workers.max(1) {
             let (rx, paths) = (Arc::clone(&rx), paths.clone());
@@ -257,22 +283,22 @@ impl Pool {
         Ok(Pool { tx })
     }
 
-    /// Queue a connection; `false` when the queue is full (the connection
-    /// is dropped, i.e. closed without a response).
+    /// Queue a connection accepted just now; `false` when the queue is
+    /// full (the connection is dropped, i.e. closed without a response).
     pub fn submit(&self, conn: Box<dyn Conn>) -> bool {
-        match self.tx.try_send(conn) {
+        match self.tx.try_send((conn, Instant::now())) {
             Ok(()) => true,
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
         }
     }
 }
 
-fn work(rx: &Mutex<Receiver<Box<dyn Conn>>>, paths: &Paths, limits: Limits) {
+fn work(rx: &Mutex<Receiver<Accepted>>, paths: &Paths, limits: Limits) {
     loop {
         // The lock is held only while waiting for the next connection.
         let next = rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
         match next {
-            Ok(mut conn) => http::handle(conn.as_mut(), paths, limits),
+            Ok((mut conn, accepted)) => http::handle(conn.as_mut(), paths, limits, accepted),
             Err(_) => return,
         }
     }
@@ -294,11 +320,16 @@ pub fn accept_loop(acceptor: &dyn Acceptor, pool: &Pool) -> ! {
 
 /// Serve `acceptors` forever (one accept thread each; the last runs on
 /// the calling thread).
-pub fn run(paths: &Paths, mut acceptors: Vec<Box<dyn Acceptor>>, size: PoolSize) -> Result<()> {
+pub fn run(
+    paths: &Paths,
+    mut acceptors: Vec<Box<dyn Acceptor>>,
+    size: PoolSize,
+    limits: Limits,
+) -> Result<()> {
     let last = acceptors
         .pop()
         .ok_or_else(|| Error::msg("订阅服务没有可用的监听"))?;
-    let pool = Arc::new(Pool::start(paths, size, Limits::default())?);
+    let pool = Arc::new(Pool::start(paths, size, limits)?);
     for acceptor in acceptors {
         let pool = Arc::clone(&pool);
         std::thread::Builder::new()
@@ -324,7 +355,8 @@ pub fn serve(ctx: &Ctx) -> Result<()> {
         }
     };
     crate::ui::out::info(format!("订阅服务已启动（{listener}）"));
-    run(&ctx.paths, acceptors, PoolSize::default())
+    let size = PoolSize::for_listener(listener);
+    run(&ctx.paths, acceptors, size, Limits::default())
 }
 
 #[cfg(test)]

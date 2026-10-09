@@ -8,6 +8,7 @@ use crate::sys::exec::Output;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::MetadataExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
 fn listener_follows_the_mode() {
@@ -197,21 +198,28 @@ fn run_serves_connections_from_every_acceptor() {
     let paths = node.ctx.paths.clone();
     std::thread::spawn(move || {
         let acceptors: Vec<Box<dyn Acceptor>> = vec![Box::new(first), Box::new(second)];
-        run(&paths, acceptors, PoolSize::default())
+        run(&paths, acceptors, PoolSize::default(), Limits::default())
     });
     for port in ports {
         let ok = get(port, &format!("/sub/{TOKEN}/singbox"));
         assert!(ok.starts_with("HTTP/1.1 200 OK\r\n") && ok.ends_with("{\"v\":1}\n"));
         assert!(get(port, "/").starts_with("HTTP/1.1 404 Not Found\r\n"));
     }
-    assert!(run(&node.ctx.paths, Vec::new(), PoolSize::default()).is_err());
+    assert!(run(
+        &node.ctx.paths,
+        Vec::new(),
+        PoolSize::default(),
+        Limits::default()
+    )
+    .is_err());
 }
 
 #[test]
 fn a_full_queue_drops_new_connections() {
     let node = Node::new("sub-srv-pool");
     let limits = Limits {
-        io_timeout: Duration::from_secs(2),
+        head: Duration::from_secs(2),
+        write: Duration::from_secs(2),
         linger: Duration::from_millis(10),
     };
     let size = PoolSize {
@@ -252,4 +260,56 @@ fn serve_in_ip_mode_listens_on_tcp() {
     assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"), "{ok}");
     DeviceStore::write(&node.ctx.paths, &[]).unwrap();
     assert!(get(port, &format!("/sub/{TOKEN}/singbox")).starts_with("HTTP/1.1 404"));
+}
+
+#[test]
+fn pool_sizes_follow_the_listener() {
+    assert_eq!(PoolSize::for_listener(Listener::Unix), PoolSize::default());
+    let tcp = PoolSize::for_listener(Listener::Tcp { port: 8448 });
+    assert!(tcp.workers > PoolSize::default().workers && tcp.queue >= tcp.workers);
+}
+
+/// Connect and send one byte every `every` until `stop` (or the worker
+/// closes the connection).
+fn drip(port: u16, every: Duration, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+            return;
+        };
+        while !stop.load(Ordering::Relaxed) && stream.write_all(b"G").is_ok() {
+            std::thread::sleep(every);
+        }
+    })
+}
+
+#[test]
+fn dripping_clients_cannot_starve_the_pool() {
+    let node = Node::new("sub-srv-drip");
+    serve_files(&node);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let size = PoolSize::default();
+    let limits = Limits {
+        head: Duration::from_millis(800),
+        ..Limits::default()
+    };
+    let paths = node.ctx.paths.clone();
+    std::thread::spawn(move || run(&paths, vec![Box::new(listener)], size, limits));
+    // As many dripping clients as there are threads: each sends a byte
+    // every 200 ms, well within any per-read timeout, and never finishes
+    // its head.
+    let stop = Arc::new(AtomicBool::new(false));
+    let drippers: Vec<_> = (0..size.workers)
+        .map(|_| drip(port, Duration::from_millis(200), Arc::clone(&stop)))
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let start = std::time::Instant::now();
+    let ok = get(port, &format!("/sub/{TOKEN}/singbox"));
+    let took = start.elapsed();
+    stop.store(true, Ordering::Relaxed);
+    assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"), "{ok}");
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    for dripper in drippers {
+        dripper.join().unwrap();
+    }
 }

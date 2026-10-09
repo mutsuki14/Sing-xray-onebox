@@ -4,7 +4,7 @@ use crate::subscription::snapshot::{self, Published};
 use crate::subscription::testing::{device, Node, TOKEN};
 use std::io::Cursor;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::sync::Mutex;
 
 /// A connection over in-memory buffers.
 struct Memory {
@@ -41,7 +41,10 @@ impl Write for Memory {
 }
 
 impl Conn for Memory {
-    fn set_timeouts(&self, _timeout: Duration) -> io::Result<()> {
+    fn set_read_wait(&self, _wait: Duration) -> io::Result<()> {
+        Ok(())
+    }
+    fn set_write_wait(&self, _wait: Duration) -> io::Result<()> {
         Ok(())
     }
     fn shutdown_write(&self) -> io::Result<()> {
@@ -49,13 +52,93 @@ impl Conn for Memory {
     }
 }
 
-/// A reader that fails (a timed-out read).
+/// A connection whose reads fail (a timed-out read).
 struct TimedOut;
 
 impl Read for TimedOut {
     fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
         Err(io::Error::new(ErrorKind::WouldBlock, "timed out"))
     }
+}
+
+impl Write for TimedOut {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Conn for TimedOut {
+    fn set_read_wait(&self, _wait: Duration) -> io::Result<()> {
+        Ok(())
+    }
+    fn set_write_wait(&self, _wait: Duration) -> io::Result<()> {
+        Ok(())
+    }
+    fn shutdown_write(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A client that sends `prefix` at once, then one byte per `delay`
+/// forever, and records the read waits it was given.
+struct Drip {
+    prefix: Cursor<Vec<u8>>,
+    delay: Duration,
+    waits: Mutex<Vec<Duration>>,
+    output: Vec<u8>,
+}
+
+impl Drip {
+    fn new(prefix: &[u8], delay: Duration) -> Drip {
+        Drip {
+            prefix: Cursor::new(prefix.to_vec()),
+            delay,
+            waits: Mutex::new(Vec::new()),
+            output: Vec::new(),
+        }
+    }
+}
+
+impl Read for Drip {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.prefix.read(buf)?;
+        if n > 0 {
+            return Ok(n);
+        }
+        std::thread::sleep(self.delay);
+        buf[0] = b'a';
+        Ok(1)
+    }
+}
+
+impl Write for Drip {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.output.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Conn for Drip {
+    fn set_read_wait(&self, wait: Duration) -> io::Result<()> {
+        self.waits.lock().unwrap().push(wait);
+        Ok(())
+    }
+    fn set_write_wait(&self, _wait: Duration) -> io::Result<()> {
+        Ok(())
+    }
+    fn shutdown_write(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A deadline far enough away not to matter.
+fn later() -> Instant {
+    Instant::now() + Duration::from_secs(60)
 }
 
 fn request(method: &str, path: &str) -> Head {
@@ -130,7 +213,7 @@ fn heads_up_to_8_kib_are_read_in_any_chunking() {
     let small = b"GET /sub/a HTTP/1.1\r\nHost: x\r\n\r\n";
     for chunk in [1, 7, 1024] {
         assert_eq!(
-            read_head(&mut Memory::new(small, chunk)),
+            read_head(&mut Memory::new(small, chunk), later()),
             request("GET", "/sub/a")
         );
     }
@@ -142,27 +225,27 @@ fn heads_up_to_8_kib_are_read_in_any_chunking() {
     near.extend_from_slice(&[b'z'; 100]);
     assert_eq!(near[..8190].len(), 8190);
     assert_eq!(
-        read_head(&mut Memory::new(&near, 1024)),
+        read_head(&mut Memory::new(&near, 1024), later()),
         request("GET", "/")
     );
     let mut huge = b"GET / HTTP/1.1\r\nX-Pad: ".to_vec();
     huge.resize(9000, b'a');
     assert_eq!(
-        read_head(&mut Memory::new(&huge, 1024)),
+        read_head(&mut Memory::new(&huge, 1024), later()),
         Head::Bad { head: false }
     );
     let mut huge_head = b"HEAD / HTTP/1.1\r\nX-Pad: ".to_vec();
     huge_head.resize(9000, b'a');
     assert_eq!(
-        read_head(&mut Memory::new(&huge_head, 4096)),
+        read_head(&mut Memory::new(&huge_head, 4096), later()),
         Head::Bad { head: true }
     );
     assert_eq!(
-        read_head(&mut Memory::new(b"GET / HTTP/1.1\r\n", 64)),
+        read_head(&mut Memory::new(b"GET / HTTP/1.1\r\n", 64), later()),
         Head::Closed,
         "EOF before the end of the head"
     );
-    assert_eq!(read_head(&mut TimedOut), Head::Closed);
+    assert_eq!(read_head(&mut TimedOut, later()), Head::Closed);
 }
 
 #[test]
@@ -269,20 +352,20 @@ fn handle_writes_one_response_and_survives_trailing_input() {
     snapshot::write(paths, &published(&[("base64", "bGlua3M=\n")])).unwrap();
     let get = format!("GET /sub/{TOKEN}/base64 HTTP/1.1\r\nHost: x\r\n\r\n");
     let mut conn = Memory::new(get.as_bytes(), 1024);
-    handle(&mut conn, paths, Limits::default());
+    handle(&mut conn, paths, Limits::default(), Instant::now());
     let text = String::from_utf8(conn.output).unwrap();
     assert!(text.starts_with("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"));
     assert!(text.ends_with("\r\n\r\nbGlua3M=\n"));
 
     let post = b"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
     let mut conn = Memory::new(post, 1024);
-    handle(&mut conn, paths, Limits::default());
+    handle(&mut conn, paths, Limits::default(), Instant::now());
     assert!(String::from_utf8(conn.output)
         .unwrap()
         .starts_with("HTTP/1.1 405"));
 
     let mut silent = Memory::new(b"GET / HT", 1024);
-    handle(&mut silent, paths, Limits::default());
+    handle(&mut silent, paths, Limits::default(), Instant::now());
     assert!(silent.output.is_empty(), "incomplete heads get no answer");
 }
 
@@ -295,7 +378,7 @@ fn handle_over_a_real_socket_pair() {
     let (mut client, server) = UnixStream::pair().unwrap();
     let worker = std::thread::spawn(move || {
         let mut server = server;
-        handle(&mut server, &paths, Limits::default());
+        handle(&mut server, &paths, Limits::default(), Instant::now());
     });
     client
         .write_all(format!("HEAD /sub/{TOKEN}/xray HTTP/1.0\r\n\r\n").as_bytes())
@@ -306,4 +389,99 @@ fn handle_over_a_real_socket_pair() {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("Content-Length: 3\r\n"));
     assert!(response.ends_with("\r\n\r\n"), "HEAD has no body");
+}
+
+#[test]
+fn a_dripping_head_is_cut_at_its_deadline() {
+    // One byte every 20 ms never completes a head; per-read timeouts alone
+    // would keep this connection for 8192 bytes.
+    let mut conn = Drip::new(b"GET /sub/", Duration::from_millis(20));
+    let start = Instant::now();
+    let head = read_head(&mut conn, start + Duration::from_millis(200));
+    let took = start.elapsed();
+    assert_eq!(head, Head::Closed);
+    assert!(took < Duration::from_millis(600), "{took:?}");
+    let waits = conn.waits.lock().unwrap().clone();
+    assert!(waits.len() > 2);
+    assert!(
+        waits.iter().all(|w| *w <= Duration::from_millis(200)),
+        "no read may wait past the deadline: {waits:?}"
+    );
+    assert!(waits.windows(2).all(|w| w[1] <= w[0]), "{waits:?}");
+}
+
+#[test]
+fn a_head_queued_past_its_deadline_is_still_read_once() {
+    let full = b"GET /sub/a HTTP/1.1\r\nHost: x\r\n\r\n";
+    let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        read_head(&mut Memory::new(full, MAX_HEAD_BYTES), past),
+        request("GET", "/sub/a"),
+        "everything buffered is taken by the one read"
+    );
+    let mut partial = Drip::new(b"GET /sub/a HTTP/1.1\r\n", Duration::from_millis(1));
+    assert_eq!(read_head(&mut partial, past), Head::Closed);
+    assert_eq!(partial.waits.lock().unwrap().len(), 1, "no second read");
+}
+
+#[test]
+fn draining_after_the_response_is_bounded_in_total() {
+    let node = Node::new("sub-http-linger");
+    let paths = &node.ctx.paths;
+    // The head is answered (404), then the client keeps sending one byte
+    // every 100 ms: the drain stops at the linger limit, not after 16
+    // reads (1.6 s).
+    let mut conn = Drip::new(b"GET / HTTP/1.1\r\n\r\n", Duration::from_millis(100));
+    let limits = Limits {
+        linger: Duration::from_millis(200),
+        ..Limits::default()
+    };
+    let start = Instant::now();
+    handle(&mut conn, paths, limits, start);
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    assert!(String::from_utf8(conn.output)
+        .unwrap()
+        .starts_with("HTTP/1.1 404 Not Found\r\n"));
+}
+
+#[test]
+fn a_slow_reader_cannot_hold_the_response_write() {
+    let node = Node::new("sub-http-slow-read");
+    let paths = node.ctx.paths.clone();
+    DeviceStore::write(&paths, &[device("00000000000000aa", "a", TOKEN)]).unwrap();
+    let big = "x".repeat(4 * 1024 * 1024);
+    snapshot::write(&paths, &published(&[("singbox", big.as_str())])).unwrap();
+    let (mut client, server) = UnixStream::pair().unwrap();
+    client
+        .write_all(format!("GET /sub/{TOKEN}/singbox HTTP/1.1\r\n\r\n").as_bytes())
+        .unwrap();
+    let limits = Limits {
+        write: Duration::from_millis(300),
+        linger: Duration::from_millis(10),
+        ..Limits::default()
+    };
+    let worker = std::thread::spawn(move || {
+        let mut server = server;
+        let start = Instant::now();
+        handle(&mut server, &paths, limits, start);
+        start.elapsed()
+    });
+    // Read 1 KiB every 50 ms: each read makes room, so a per-write
+    // timeout would never fire (4 MiB would take minutes).
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = [0u8; 1024];
+    let mut received = 0;
+    while !worker.is_finished() {
+        match client.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => received += n,
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let took = worker.join().unwrap();
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(received < big.len(), "the worker gave up early");
 }

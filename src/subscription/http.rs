@@ -13,25 +13,40 @@
 //!   strings, trailing slashes, percent-encoding, missing snapshot).
 //!
 //! HEAD gets GET's headers (same `Content-Length`) without a body. A
-//! connection closed or timed out before the head is complete gets no
-//! response.
+//! connection closed, failed or out of time before the head is complete
+//! gets no response.
+//!
+//! Time limits ([`Limits`]) cover whole phases, not single reads or
+//! writes: in ip mode the worker faces the internet without nginx, and a
+//! per-syscall timeout would let a client sending one byte every few
+//! seconds (or reading the body that slowly) hold a pool thread for hours.
+//! The head must be complete a fixed time after the connection was
+//! accepted (time spent queued counts, so connections that went stale in
+//! the queue are dropped at once), the response must be written within
+//! its own deadline, and the drain after it is bounded in total time.
+//! Every read or write waits at most for the time left.
 //!
 //! Changes from v2: the head is parsed with httparse as it arrives, so a
 //! complete head is never refused because the read that completed it
-//! crossed 8 KiB (G-8.1#15); after the response the write side is shut
-//! down and leftover input drained briefly, so a client still sending
-//! (a body) receives the response instead of a TCP reset.
+//! crossed 8 KiB (G-8.1#15); deadlines per phase instead of 3 s per
+//! read/write; after the response the write side is shut down and leftover
+//! input drained briefly, so a client still sending (a body) receives the
+//! response instead of a TCP reset.
 
 use super::devices;
 use super::snapshot;
 use crate::domain::protocol::ClientFormat;
 use crate::paths::Paths;
 use std::io::{self, ErrorKind, Read, Write};
+use std::time::{Duration, Instant};
 
 /// Largest request head (v2 limit).
 pub const MAX_HEAD_BYTES: usize = 8192;
-const READ_CHUNK: usize = 1024;
 const MAX_HEADERS: usize = 64;
+/// Bytes handed to one `write` of the response.
+const WRITE_CHUNK: usize = 64 * 1024;
+/// Shortest wait given to a read or write (socket timeouts cannot be 0).
+const MIN_WAIT: Duration = Duration::from_millis(1);
 const PLAIN: &str = "text/plain; charset=utf-8";
 
 /// A complete response (head + optional body).
@@ -110,13 +125,26 @@ pub enum Head {
     },
 }
 
-/// Read and parse one request head from `stream`.
-pub fn read_head<R: Read + ?Sized>(stream: &mut R) -> Head {
-    let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
-    let mut chunk = [0u8; READ_CHUNK];
+/// Read and parse one request head; [`Head::Closed`] unless it is
+/// complete by `deadline`. Each read waits at most for the time left. One
+/// read is always attempted, and it takes everything buffered (up to the
+/// 8 KiB limit), so a client whose connection waited in the queue past the
+/// deadline is still served when its head has arrived in full.
+pub fn read_head(conn: &mut dyn Conn, deadline: Instant) -> Head {
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let mut chunk = [0u8; MAX_HEAD_BYTES];
+    let mut attempted = false;
     loop {
-        let room = (MAX_HEAD_BYTES - buf.len()).min(READ_CHUNK);
-        let n = match stream.read(&mut chunk[..room]) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if attempted && left.is_zero() {
+            return Head::Closed;
+        }
+        attempted = true;
+        if conn.set_read_wait(left.max(MIN_WAIT)).is_err() {
+            return Head::Closed;
+        }
+        let room = MAX_HEAD_BYTES - buf.len();
+        let n = match conn.read(&mut chunk[..room]) {
             Ok(0) => return Head::Closed,
             Ok(n) => n,
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -205,16 +233,20 @@ pub fn respond(paths: &Paths, head: &Head) -> Option<Response> {
 /// A connection the worker serves: a stream plus the socket operations
 /// around one exchange.
 pub trait Conn: Read + Write + Send {
-    /// Read/write timeouts (3 s in production).
-    fn set_timeouts(&self, timeout: std::time::Duration) -> io::Result<()>;
+    /// How long each following read may block (`wait` is never zero).
+    fn set_read_wait(&self, wait: Duration) -> io::Result<()>;
+    /// How long each following write may block (`wait` is never zero).
+    fn set_write_wait(&self, wait: Duration) -> io::Result<()>;
     /// Half-close after the response.
     fn shutdown_write(&self) -> io::Result<()>;
 }
 
 impl Conn for std::net::TcpStream {
-    fn set_timeouts(&self, timeout: std::time::Duration) -> io::Result<()> {
-        self.set_read_timeout(Some(timeout))?;
-        self.set_write_timeout(Some(timeout))
+    fn set_read_wait(&self, wait: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(wait))
+    }
+    fn set_write_wait(&self, wait: Duration) -> io::Result<()> {
+        self.set_write_timeout(Some(wait))
     }
     fn shutdown_write(&self) -> io::Result<()> {
         self.shutdown(std::net::Shutdown::Write)
@@ -222,59 +254,91 @@ impl Conn for std::net::TcpStream {
 }
 
 impl Conn for std::os::unix::net::UnixStream {
-    fn set_timeouts(&self, timeout: std::time::Duration) -> io::Result<()> {
-        self.set_read_timeout(Some(timeout))?;
-        self.set_write_timeout(Some(timeout))
+    fn set_read_wait(&self, wait: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(wait))
+    }
+    fn set_write_wait(&self, wait: Duration) -> io::Result<()> {
+        self.set_write_timeout(Some(wait))
     }
     fn shutdown_write(&self) -> io::Result<()> {
         self.shutdown(std::net::Shutdown::Write)
     }
 }
 
-/// Exchange limits.
+/// Time limits of one exchange (module docs), each for a whole phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    pub io_timeout: std::time::Duration,
-    /// How long to drain input after the response.
-    pub linger: std::time::Duration,
+    /// The request head must be complete this long after `accept`.
+    pub head: Duration,
+    /// The response must be written within this long.
+    pub write: Duration,
+    /// How long to drain input after the response, in total.
+    pub linger: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            io_timeout: std::time::Duration::from_secs(3),
-            linger: std::time::Duration::from_millis(200),
+            head: Duration::from_secs(5),
+            write: Duration::from_secs(20),
+            linger: Duration::from_millis(200),
         }
     }
 }
 
-/// Serve one connection; I/O errors end it silently (nothing to report to).
-pub fn handle(conn: &mut dyn Conn, paths: &Paths, limits: Limits) {
-    if conn.set_timeouts(limits.io_timeout).is_err() {
-        return;
-    }
-    let head = read_head(conn);
+/// `from + span`, saturating instead of overflowing.
+fn deadline(from: Instant, span: Duration) -> Instant {
+    from.checked_add(span).unwrap_or(from)
+}
+
+/// Serve one connection accepted at `accepted`; I/O errors and expired
+/// deadlines end it silently (nothing to report to).
+pub fn handle(conn: &mut dyn Conn, paths: &Paths, limits: Limits, accepted: Instant) {
+    let head = read_head(conn, deadline(accepted, limits.head));
     let Some(response) = respond(paths, &head) else {
         return;
     };
-    if conn
-        .write_all(&response.to_bytes())
-        .and_then(|()| conn.flush())
-        .is_err()
-    {
+    let by = deadline(Instant::now(), limits.write);
+    if write_by(conn, &response.to_bytes(), by).is_err() {
         return;
     }
     linger(conn, limits.linger);
 }
 
-/// Half-close and discard what the client still sends (bounded in time
-/// and size) so closing does not reset the connection under the response.
-fn linger(conn: &mut dyn Conn, limit: std::time::Duration) {
-    if conn.shutdown_write().is_err() || conn.set_timeouts(limit).is_err() {
+/// Write all of `bytes` before `deadline`, in chunks; each write blocks at
+/// most for the time left, so a client reading slowly cannot stretch it.
+pub fn write_by(conn: &mut dyn Conn, bytes: &[u8], deadline: Instant) -> io::Result<()> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ErrorKind::TimedOut.into());
+        }
+        conn.set_write_wait(left.max(MIN_WAIT))?;
+        let end = rest.len().min(WRITE_CHUNK);
+        match conn.write(&rest[..end]) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => rest = &rest[n..],
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    conn.flush()
+}
+
+/// Half-close and discard what the client still sends for at most `limit`
+/// in total, so closing does not reset the connection under the response.
+fn linger(conn: &mut dyn Conn, limit: Duration) {
+    if conn.shutdown_write().is_err() {
         return;
     }
+    let until = deadline(Instant::now(), limit);
     let mut sink = [0u8; 4096];
-    for _ in 0..16 {
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() || conn.set_read_wait(left).is_err() {
+            return;
+        }
         match conn.read(&mut sink) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
