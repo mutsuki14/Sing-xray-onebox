@@ -11,6 +11,11 @@
 //! The journal lives outside the trees it snapshots, so uninstalling or
 //! restoring `FRP_ROOT` never touches it.
 //!
+//! A finished journal is renamed to a staging name before its tree is
+//! deleted ([`remove`]), so a crash during the cleanup never leaves a
+//! journal directory without `journal.json`; one left by an earlier
+//! version is removed by the next recovery ([`discard_orphan`]).
+//!
 //! Changes from v2: v2 kept a backup directory with a random name only
 //! for the lifetime of the process (a crash left it behind and nothing
 //! used it); the snapshot's targets are recorded and validated against the
@@ -24,6 +29,7 @@ use crate::paths::Paths;
 use crate::sys::fs::{
     atomic_write, ensure_dir, fsync_dir, read_bounded, remove_tree_if_exists, sweep_stale,
 };
+use crate::ui::out;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
@@ -31,9 +37,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const VERSION: u8 = 1;
-/// Staging directories (`.onebox-frp-journal-{hex}`) left by a crash are
-/// removed.
-const STAGE_PREFIX: &str = ".onebox-frp-journal-";
+/// Staging directories (`.onebox-frp-journal-{hex}`) of a [`create`] or a
+/// [`remove`] interrupted by a crash are swept by the next [`create`].
+pub const STAGE_PREFIX: &str = ".onebox-frp-journal-";
 pub const JOURNAL_FILE: &str = "journal.json";
 pub const FILES_DIR: &str = "files";
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -358,14 +364,62 @@ fn ensure_dir_exists(parent: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Remove the journal directory (after commit or rollback).
+/// Remove the journal directory (after commit or rollback) and make the
+/// removal durable. The directory is first renamed to a staging name
+/// (`.onebox-frp-journal-{hex}`) and the rename made durable; only then is
+/// its tree deleted (a failure there only warns). A crash or error during
+/// the deletion thus leaves a staging leftover, swept under the FRP lock by
+/// the next [`create`] — never a journal directory whose `journal.json` is
+/// gone while part of its snapshot remains, which no recovery could load
+/// (deleting the tree in place often removes `journal.json` first).
 pub fn remove(paths: &Paths) -> Result<()> {
     let dir = dir(paths);
-    remove_tree_if_exists(&dir)?;
-    if let Some(parent) = dir.parent() {
-        fsync_dir(parent).map_err(|e| Error::io(parent, e))?;
+    match fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::io(&dir, e)),
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+            bail!("FRP 事务目录无效: {}", dir.display())
+        }
+        Ok(_) => {}
+    }
+    let parent = dir
+        .parent()
+        .ok_or_else(|| Error::msg("FRP 事务目录无父目录"))?;
+    let stage = parent.join(format!("{STAGE_PREFIX}{}", crate::sys::rand::hex(8)?));
+    fs::rename(&dir, &stage).map_err(|e| Error::io(&dir, e))?;
+    fsync_dir(parent).map_err(|e| Error::io(parent, e))?;
+    if let Err(e) = remove_tree_if_exists(&stage) {
+        out::warn(format!(
+            "FRP 事务已结束，但删除其目录失败（下次 FRP 操作时自动清理）: {}",
+            e.report_text()
+        ));
     }
     Ok(())
+}
+
+/// Remove a journal directory that has no `journal.json` and say whether
+/// there was one. A journal is published by renaming a complete staging
+/// directory and `journal.json` is only ever replaced atomically, so this
+/// is the leftover of a cleanup interrupted after the journal had finished
+/// (earlier versions deleted the directory in place, `journal.json` often
+/// first). Left alone it would make every FRP operation, `onebox recover`
+/// and the nightly renewal refuse with "FRP 事务日志不完整". The caller
+/// holds the FRP lock.
+pub fn discard_orphan(paths: &Paths) -> Result<bool> {
+    let dir = dir(paths);
+    match fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+        // Missing: nothing to do; anything else is refused by `load`.
+        _ => return Ok(false),
+    }
+    let file = dir.join(JOURNAL_FILE);
+    match fs::symlink_metadata(&file) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(&file, e)),
+        Ok(_) => return Ok(false),
+    }
+    remove(paths)?;
+    Ok(true)
 }
 
 #[cfg(test)]

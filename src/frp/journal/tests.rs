@@ -152,3 +152,80 @@ fn phases() {
     assert!(!Phase::WriteCron.is_finished() && !Phase::HealthCheck.is_finished());
     assert!(!Phase::Other("x".into()).is_finished());
 }
+
+/// The `.onebox-frp-journal-*` staging directories next to the lock.
+fn stages(paths: &Paths) -> Vec<PathBuf> {
+    let parent = dir(paths).parent().unwrap().to_path_buf();
+    fs::read_dir(&parent)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(STAGE_PREFIX))
+        .map(|e| e.path())
+        .collect()
+}
+
+#[test]
+fn remove_is_idempotent_and_refuses_a_foreign_journal_path() {
+    let f = fixture();
+    remove(&f.paths).unwrap();
+    create(&f.paths, "x", before(), &targets(&f.paths)).unwrap();
+    remove(&f.paths).unwrap();
+    remove(&f.paths).unwrap();
+    assert!(!exists(&f.paths));
+    assert!(stages(&f.paths).is_empty());
+    // A symlink or a plain file is not a journal: left alone.
+    let other = f.paths.root.join("elsewhere");
+    fs::create_dir_all(&other).unwrap();
+    std::os::unix::fs::symlink(&other, dir(&f.paths)).unwrap();
+    let err = remove(&f.paths).unwrap_err().to_string();
+    assert!(err.starts_with("FRP 事务目录无效"), "{err}");
+    assert!(!discard_orphan(&f.paths).unwrap());
+    assert!(other.is_dir());
+    fs::remove_file(dir(&f.paths)).unwrap();
+    fs::write(dir(&f.paths), "x").unwrap();
+    assert!(remove(&f.paths).is_err());
+    assert!(!discard_orphan(&f.paths).unwrap());
+    assert!(dir(&f.paths).is_file());
+}
+
+#[test]
+fn a_cleanup_interrupted_after_the_rename_leaves_only_a_stage() {
+    // remove() renames the journal away before deleting its tree: a crash
+    // during the deletion leaves a partial staging directory, which is no
+    // journal at all and is swept by the next create.
+    let f = fixture();
+    let mut journal = create(&f.paths, "x", before(), &targets(&f.paths)).unwrap();
+    journal.set_phase(&f.paths, Phase::Committed).unwrap();
+    let stage = dir(&f.paths)
+        .parent()
+        .unwrap()
+        .join(format!("{STAGE_PREFIX}0123456789abcdef"));
+    fs::rename(dir(&f.paths), &stage).unwrap();
+    fs::remove_file(stage.join(JOURNAL_FILE)).unwrap();
+    assert!(!exists(&f.paths));
+    assert!(load(&f.paths).unwrap().is_none());
+    assert_eq!(notice(&f.paths), None);
+    assert!(!discard_orphan(&f.paths).unwrap());
+    assert_eq!(stages(&f.paths), [stage.clone()]);
+    create(&f.paths, "y", before(), &targets(&f.paths)).unwrap();
+    assert!(!stage.exists());
+    assert!(stages(&f.paths).is_empty());
+}
+
+#[test]
+fn only_a_journal_directory_without_its_journal_is_discarded() {
+    let f = fixture();
+    assert!(!discard_orphan(&f.paths).unwrap(), "no journal");
+    create(&f.paths, "x", before(), &targets(&f.paths)).unwrap();
+    assert!(!discard_orphan(&f.paths).unwrap(), "a complete journal");
+    assert!(load(&f.paths).unwrap().is_some());
+    // An in-place deletion that died after removing journal.json.
+    fs::remove_file(dir(&f.paths).join(JOURNAL_FILE)).unwrap();
+    assert!(files_dir(&f.paths).is_dir());
+    let err = load(&f.paths).unwrap_err().to_string();
+    assert!(err.starts_with("FRP 事务日志不完整"), "{err}");
+    assert!(discard_orphan(&f.paths).unwrap());
+    assert!(!exists(&f.paths));
+    assert!(stages(&f.paths).is_empty());
+    assert!(!discard_orphan(&f.paths).unwrap());
+}
