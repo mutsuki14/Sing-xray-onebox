@@ -20,6 +20,11 @@
 //! | `subscription` → `ROOT/subscription` | replaced | removed (no device survives) |
 //! | `client` | never restored: clients are regenerated | — |
 //!
+//! In every component the [`ignored`] entries are neither copied nor
+//! replaced nor removed: pid and log files, nested backups, acme.sh code
+//! and the subscription worker's `listener.json` (runtime state that
+//! describes the running worker, not the configuration).
+//!
 //! Changes from v2:
 //! - the 64 MiB budget counts `state.json` too (E-8.1#19);
 //! - hard links, symlinks and special files are refused when backing up
@@ -29,7 +34,9 @@
 //! - `state.json` is no longer polluted with internal keys (E-8.1#18);
 //! - only the site root (outside `ROOT`, possibly holding an
 //!   administrator's site) needs the ownership marker to be overwritten;
-//!   `ROOT/site` belongs to Onebox anyway (v2 refused it without a marker).
+//!   `ROOT/site` belongs to Onebox anyway (v2 refused it without a marker);
+//! - the listener record is new in v3 and never part of a backup (a copy an
+//!   earlier v3 backup holds is not restored).
 
 use crate::ctx::Ctx;
 use crate::domain::config::{Device, NodeConfig};
@@ -127,7 +134,8 @@ pub fn id_valid(id: &str) -> bool {
 }
 
 /// Never backed up, restored over or removed (v2 `ignored`): user backups,
-/// content backups, pid and log files, and acme.sh code.
+/// content backups, pid and log files, acme.sh code, and the subscription
+/// worker's listener record.
 pub fn ignored(path: &Path) -> bool {
     let name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
     let always = matches!(
@@ -136,7 +144,21 @@ pub fn ignored(path: &Path) -> bool {
     );
     let acme_code = path.components().any(|c| c.as_os_str() == "acme")
         && (name.ends_with(".sh") || matches!(name, "dnsapi" | "deploy" | "notify" | ".git"));
-    always || acme_code
+    always || acme_code || is_listener_record(path)
+}
+
+/// `subscription/listener.json` (`subscription::server::listener_file`):
+/// which listener the *running* worker uses, so runtime state like a pid
+/// file. Restoring a backup's copy over it made publish-subscription
+/// believe the worker already listened where the backup's configuration
+/// wants and skip the restart, so a backup taken before a subscription
+/// port or mode change could not be restored while the worker ran.
+fn is_listener_record(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("listener.json"))
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|dir| dir == "subscription")
 }
 
 /// What a copy may still add.

@@ -40,9 +40,18 @@ fn the_skip_rule_keeps_acme_code_logs_and_nested_backups_out() {
         ("site/index.sha256", false),
         ("client/run.sh", false),
         ("backups", true),
+        // The running worker's listener record is runtime state; an
+        // administrator's file of that name elsewhere is content.
+        ("subscription/listener.json", true),
+        ("/etc/onebox/backups/1-a/subscription/listener.json", true),
+        ("subscription/devices.json", false),
+        ("public/listener.json", false),
+        ("listener.json", false),
     ] {
         assert_eq!(ignored(Path::new(path)), skipped, "{path}");
     }
+    let paths = Paths::isolated(Path::new("/x"));
+    assert!(ignored(&crate::subscription::server::listener_file(&paths)));
 }
 
 #[test]

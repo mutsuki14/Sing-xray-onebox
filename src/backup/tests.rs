@@ -241,6 +241,44 @@ fn a_backup_round_trips_through_a_restore() {
 }
 
 #[test]
+fn the_running_workers_listener_record_is_never_backed_up_or_restored() {
+    use crate::subscription::server::listener_file;
+    let host = Host::new();
+    host.install(two_cores());
+    let record = listener_file(host.paths());
+    let subscription = host.paths().subscription();
+    file(&record, 0o600, br#"{"tcp":{"port":8001}}"#);
+    file(&subscription.join("devices.json"), 0o600, b"[]");
+    let id = create(&host, "before port change");
+    let dir = host.paths().backups().join(&id);
+    assert!(dir.join("subscription/devices.json").is_file());
+    assert!(!dir.join("subscription/listener.json").exists());
+    // The worker moved meanwhile; the restore keeps its record, so
+    // publish-subscription sees the listener change and restarts it.
+    file(&record, 0o600, br#"{"tcp":{"port":8002}}"#);
+    restore(&host, &id).unwrap();
+    assert_eq!(fs::read(&record).unwrap(), br#"{"tcp":{"port":8002}}"#);
+    assert_eq!(fs::read(subscription.join("devices.json")).unwrap(), b"[]");
+
+    // A backup an earlier version wrote with the record inside, and one
+    // without a subscription directory: the live record stays either way.
+    let state = fs::read(host.paths().state()).unwrap();
+    write_backup(
+        &host,
+        "1791000000-aaaaaaaa",
+        1_791_000_000,
+        &state,
+        &[("subscription/listener.json", b"{\"unix\":null}")],
+    );
+    restore(&host, "1791000000-aaaaaaaa").unwrap();
+    assert_eq!(fs::read(&record).unwrap(), br#"{"tcp":{"port":8002}}"#);
+    write_backup(&host, "1791000001-bbbbbbbb", 1_791_000_001, &state, &[]);
+    restore(&host, "1791000001-bbbbbbbb").unwrap();
+    assert_eq!(fs::read(&record).unwrap(), br#"{"tcp":{"port":8002}}"#);
+    assert!(!subscription.join("devices.json").exists());
+}
+
+#[test]
 fn a_failed_restore_puts_everything_back() {
     let host = Host::new();
     host.install(two_cores());
