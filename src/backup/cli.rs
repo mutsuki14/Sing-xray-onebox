@@ -94,6 +94,8 @@ fn recover_command(ctx: &Ctx, _m: &Matches) -> Result<()> {
     let lock = apply::node_lock(ctx)?;
     let program = program_journal::load(&ctx.paths)?.is_some();
     let outcome = apply::recover::recover_all(ctx, &lock)?;
+    // Work directories a killed self-update left before its journal existed.
+    crate::update::sweep_orphans(&ctx.paths, &lock);
     if outcome == apply::recover::Recovery::Nothing && !program {
         out::ok("没有需要恢复的事务");
     }

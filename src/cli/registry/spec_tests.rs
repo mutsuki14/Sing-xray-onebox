@@ -255,46 +255,54 @@ fn global_help_snapshot() {
       不带参数运行 onebox 打开交互菜单
 
 节点:
-  install        安装节点（交互向导，或 -y 无人值守）
-  plan           只读安装预演（不写文件、不联网、不申请证书）
-  add            添加协议（自动分配端口，需要时准备证书）
-  del            删除协议（至少保留一个）
-  port           修改协议端口
-  addr           修改客户端连接地址与节点名称
-  sni            更换 REALITY / ShadowTLS 伪装目标（凭据不变）
-  reset          重置全部 UUID、密码与密钥（客户端需重新导入）
-  tune           Hysteria2 与资源调优（默认只预览）
+  install         安装节点（交互向导，或 -y 无人值守）
+  plan            只读安装预演（不写文件、不联网、不申请证书）
+  add             添加协议（自动分配端口，需要时准备证书）
+  del             删除协议（至少保留一个）
+  port            修改协议端口
+  addr            修改客户端连接地址与节点名称
+  sni             更换 REALITY / ShadowTLS 伪装目标（凭据不变）
+  reset           重置全部 UUID、密码与密钥（客户端需重新导入）
+  tune            Hysteria2 与资源调优（默认只预览）
 
 客户端:
-  info           节点信息、凭据与导出方式
-  client         导出客户端配置到标准输出（另见 qr）
-  qr             在终端显示分享链接二维码
+  info            节点信息、凭据与导出方式
+  client          导出客户端配置到标准输出（另见 qr）
+  qr              在终端显示分享链接二维码
 
 服务:
-  status         代理内核运行状态
-  start          启动代理内核
-  stop           停止代理内核
-  restart        重启代理内核
-  log            代理内核日志（最近 200 行）
-  service        单独控制某个 Onebox 服务
+  status          代理内核运行状态
+  start           启动代理内核
+  stop            停止代理内核
+  restart         重启代理内核
+  log             代理内核日志（最近 200 行）
+  service         单独控制某个 Onebox 服务
 
 功能:
-  site           自有域名 REALITY 网站
-  cert           代理、网站与订阅证书
-  bbr            TCP BBR 与 BBRv3 内核
+  site            自有域名 REALITY 网站
+  cert            代理、网站与订阅证书
+  bbr             TCP BBR 与 BBRv3 内核
 
 诊断:
-  probe          导出、查看或合并链路测试用的探测配置
-  bench          经临时客户端内核测试真实链路的延迟、吞吐与资源占用
-  failover       本机 SOCKS5 故障切换（TCP CONNECT；既有连接不迁移；Ctrl+C 结束）
-  reality-check  检查 REALITY 回落与参考站点的一致性及错误 short ID 的拒绝
+  probe           导出、查看或合并链路测试用的探测配置
+  bench           经临时客户端内核测试真实链路的延迟、吞吐与资源占用
+  failover        本机 SOCKS5 故障切换（TCP CONNECT；既有连接不迁移；Ctrl+C 结束）
+  reality-check   检查 REALITY 回落与参考站点的一致性及错误 short ID 的拒绝
 
 维护:
-  regen          按当前状态重新生成并应用全部配置（凭据不变；也用于从 v2 迁移）
-  renew          检查并续期全部证书（计划任务每天执行 renew --cron）
-  uninstall      卸载代理节点（保留网站内容、快照与 FRP）
-  version        显示程序版本
-  help           显示帮助
+  regen           按当前状态重新生成并应用全部配置（凭据不变；也用于从 v2 迁移）
+  renew           检查并续期全部证书（计划任务每天执行 renew --cron）
+  backup          备份当前配置
+  backups         列出备份
+  restore         恢复备份
+  recover         回滚中断的配置事务与自更新
+  update          更新正在使用的内核
+  update-script   更新 Onebox 程序
+  update-check    检查程序更新（不下载、不替换）
+  update-channel  查看或设置程序更新渠道
+  uninstall       卸载代理节点（保留网站内容、快照与 FRP）
+  version         显示程序版本
+  help            显示帮助
 
 通用选项: -y/--yes 无人值守（使用默认值并自动确认）  -h/--help 显示帮助
 查看命令说明: onebox help 命令，或 onebox 命令 --help",
@@ -365,12 +373,4 @@ fn dispatch_applies_the_root_policy() {
     );
     let err = dispatch(COMMANDS, &bench.ctx, &["probe"], false).unwrap_err();
     assert_eq!(err.to_string(), crate::linktools::cli::PROBE_USAGE);
-}
-
-#[test]
-fn uninstall_backup_is_not_wired_yet() {
-    let bench = Bench::new();
-    let lock = crate::sys::lock::FileLock::acquire(&bench.ctx.paths.lock(), "busy").unwrap();
-    let err = UNINSTALL_BACKUP(&bench.ctx, &lock, "before-uninstall").unwrap_err();
-    assert!(err.to_string().starts_with("备份模块尚未接入"));
 }

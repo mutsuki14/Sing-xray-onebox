@@ -84,7 +84,7 @@ impl Error {
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Exit { code, .. } => *code,
-            Error::Context { source, .. } if source.is_cancelled() => EXIT_CANCELLED,
+            Error::Context { source, .. } => source.exit_code(),
             Error::Cancelled => EXIT_CANCELLED,
             _ => EXIT_ERROR,
         }

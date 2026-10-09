@@ -87,7 +87,15 @@ fn service_changes_take_the_scope_lock() {
     assert_eq!(bench.notes(), ["[完成] onebox-site 已启动"]);
     assert!(bench.ctx.paths.lock().exists());
     // A concurrent configuration change holds the node lock.
-    let held = FileLock::acquire(&bench.ctx.paths.lock(), BUSY_MESSAGE).unwrap();
+    // Wait briefly: a process forked by a concurrent test may hold a
+    // duplicate of the descriptor until it execs.
+    let held = FileLock::acquire_waiting(
+        &bench.ctx.paths.lock(),
+        BUSY_MESSAGE,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(20),
+    )
+    .unwrap();
     let err = service(&bench.session(), "onebox-site", Action::Stop).unwrap_err();
     assert_eq!(err.to_string(), BUSY_MESSAGE);
     // onebox-network takes the node lock itself: started without it.

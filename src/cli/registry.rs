@@ -51,6 +51,14 @@ pub static COMMANDS: &[CommandSpec] = &[
     // 维护
     node::REGEN,
     cert::RENEW,
+    crate::backup::cli::BACKUP,
+    crate::backup::cli::BACKUPS,
+    crate::backup::cli::RESTORE,
+    crate::backup::cli::RECOVER,
+    crate::update::cli::UPDATE,
+    crate::update::cli::UPDATE_SCRIPT,
+    crate::update::cli::UPDATE_CHECK,
+    crate::update::cli::UPDATE_CHANNEL,
     uninstall::UNINSTALL,
     VERSION,
     HELP,
@@ -59,8 +67,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     service::NET_APPLY,
     service::HOP_CLEAR,
     client::RENDER,
-    // wave C modules: subscription, frps, update, update-script, update-check, update-channel, doctor, support, backup, backups, restore, recover
-    // …and, with the backup module, set UNINSTALL_BACKUP (below) to crate::backup::create_locked.
+    // wave C modules: subscription, frps, doctor, support
 ];
 
 const VERSION: CommandSpec = CommandSpec::new("version", Group::Maintain, "显示程序版本")
@@ -73,22 +80,8 @@ const HELP: CommandSpec = CommandSpec::new("help", Group::Maintain, "显示帮�
     .root(Root::NotRequired)
     .handler(help_command);
 
-/// The backup `uninstall` takes under the node lock (G11). The second
-/// wave-C integration point (see the marked list above): set it to
-/// `crate::backup::create_locked`; until then uninstall refuses to remove
-/// anything without a backup. A test fails once the backup module provides
-/// `create_locked` while this is still unwired.
-pub const UNINSTALL_BACKUP: uninstall::BackupHook = backup_not_wired;
-
-const BACKUP_NOT_WIRED: &str = "备份模块尚未接入，无法在卸载前保存快照；已中止卸载";
-
-fn backup_not_wired(
-    _ctx: &Ctx,
-    _lock: &crate::sys::lock::FileLock,
-    _label: &str,
-) -> Result<String> {
-    Err(Error::msg(BACKUP_NOT_WIRED))
-}
+/// The backup `uninstall` takes under the node lock (G11).
+pub const UNINSTALL_BACKUP: uninstall::BackupHook = crate::backup::create_locked;
 
 /// Whether the resolved command needs root for these matches.
 pub fn requires_root(spec: &CommandSpec, matches: &Matches) -> bool {

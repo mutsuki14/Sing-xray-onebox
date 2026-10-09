@@ -82,37 +82,20 @@ fn root_policy_variants() {
     }
 }
 
-/// The uninstall backup hook is the second wave-C integration point: once
-/// the backup module provides `create_locked`, the hook must use it (it
-/// still refuses here, so uninstall would stay broken without this test).
+/// Uninstall takes its safety backup through the real backup module.
 #[test]
-fn uninstall_backup_hook_follows_the_backup_module() {
-    fn sources(path: &std::path::Path, out: &mut String) {
-        if path.is_dir() {
-            for entry in std::fs::read_dir(path).unwrap().flatten() {
-                sources(&entry.path(), out);
-            }
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push_str(&std::fs::read_to_string(path).unwrap_or_default());
+fn uninstall_backup_hook_is_the_backup_module() {
+    let hook: crate::cli::commands::uninstall::BackupHook = crate::backup::create_locked;
+    assert_eq!(UNINSTALL_BACKUP as usize, hook as usize);
+}
+
+/// Every top-level name (and alias) is registered exactly once.
+#[test]
+fn command_names_are_unique() {
+    let mut seen = std::collections::BTreeSet::new();
+    for spec in COMMANDS {
+        for name in std::iter::once(&spec.name).chain(spec.aliases.iter()) {
+            assert!(seen.insert(*name), "duplicate command name {name}");
         }
     }
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut backup = String::new();
-    sources(&src.join("backup.rs"), &mut backup);
-    sources(&src.join("backup"), &mut backup);
-    let provided = backup.contains("fn create_locked");
-    let dir = crate::sys::fs::TempDir::new("registry-backup-hook").unwrap();
-    let (ctx, _, _) = Ctx::test(dir.path());
-    std::fs::create_dir_all(&ctx.paths.root).unwrap();
-    let lock = crate::sys::lock::FileLock::acquire(&ctx.paths.lock(), "busy").unwrap();
-    // In the isolated context a wired hook fails or succeeds, but never
-    // with the placeholder's refusal.
-    let unwired = matches!(
-        UNINSTALL_BACKUP(&ctx, &lock, "before-uninstall"),
-        Err(e) if e.to_string() == BACKUP_NOT_WIRED
-    );
-    assert!(
-        !(provided && unwired),
-        "crate::backup::create_locked exists: set cli::registry::UNINSTALL_BACKUP to it"
-    );
 }
