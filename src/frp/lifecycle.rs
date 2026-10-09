@@ -31,7 +31,12 @@
 //!   certificate directory and its ACME account are kept for a switch back);
 //! - a failed website renewal no longer rolls back the control
 //!   certificate or restarts the services: the deployed pair is untouched
-//!   by a failed renewal, and the failure is reported after the commit;
+//!   by a failed renewal, and the failure is reported after the commit. A
+//!   new pair the web nginx could not load (`nginx -t` or its restart
+//!   failed) still rolls the whole renewal back, as in v2, so the next run
+//!   retries instead of finding the pair not due;
+//! - `renew --cron` prints nothing unless a certificate changed or
+//!   something failed (v2 printed its summary line every night);
 //! - manual renewals renew the website certificate even when not due
 //!   (scheduled ones only when due), and custom website certificates are
 //!   redeployed when their source files changed;
@@ -47,7 +52,7 @@ use super::model::{self, FrpState, WebSettings, WebTls, NOT_INSTALLED};
 use super::preflight::{check_dns, check_paths, check_ports};
 use super::release::{self, Staged};
 use super::render::{server_toml, NginxPhase};
-use super::runtime::{mkdirs, Runtime, BUSY};
+use super::runtime::{leftovers_only, mkdirs, Leftovers, Runtime, BUSY, FIREWALL_OWNER};
 use super::txn::{self, recover_locked, Recovery, Txn};
 use crate::cert::hooks::{renew_dir_with, web_spec};
 use crate::cert::{CertDir, CfCredentials, Challenge, Trust};
@@ -67,6 +72,8 @@ use std::time::Duration;
 
 const DEPLOYED: &str =
     "FRP 已部署。请运行 onebox frps client 导出客户端配置；网站 DNS 与云防火墙仍需由您配置。";
+/// The closing line of a renewal (v2 text).
+const RENEWED: &str = "FRP 证书检查完成，私有 CA 保持不变。";
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a scheduled renewal waits for another FRP operation.
 pub const CRON_LOCK_WAIT: Duration = Duration::from_secs(600);
@@ -84,7 +91,8 @@ pub struct Change {
     /// For the journal and messages (`安装`, `更新`, …).
     pub reason: &'static str,
     /// Do nothing when the result would equal the installed deployment
-    /// (`update` to the running version).
+    /// (`update` to the version of the installed `frps` binary, the stored
+    /// state otherwise unchanged).
     pub skip_unchanged: bool,
     /// The installed state the change was built from.
     pub expected: Expected,
@@ -264,7 +272,7 @@ fn deploy(
         services.remove(FRP_WEB)?;
     }
     txn.phase(Phase::ApplyNetwork)?;
-    firewall::reconcile_owner(rt.ctx, "frp", &state.firewall_ports())?;
+    firewall::reconcile_owner(rt.ctx, FIREWALL_OWNER, &state.firewall_ports())?;
     if let Some(web) = state.web().cloned() {
         txn.phase(Phase::ApplyWebsite)?;
         website(rt, state, &web, change.cloudflare.as_ref())?;
@@ -359,22 +367,42 @@ fn website(
     services.enable(FRP_WEB)
 }
 
-/// Check (and when due renew) the control and website certificates.
-/// `scheduled` = run by cron: website certificates only when due.
-pub fn renew(rt: &Runtime, lock: &FileLock, scheduled: bool) -> Result<()> {
+/// Check (and when due renew) the control and website certificates;
+/// returns whether one of them changed. `scheduled` = run by cron: website
+/// certificates only when due, and silent unless a certificate changed or
+/// something failed.
+pub fn renew(rt: &Runtime, lock: &FileLock, scheduled: bool) -> Result<bool> {
     check_paths(rt.paths())?;
     recover_locked(rt, lock)?;
     let state = installed_state(rt)?;
     let _signals = SignalScope::install()?;
     let targets = [rt.paths().frp_root.clone()];
-    let web_failure = Txn::run(rt, lock, "续期", &targets, |txn| {
+    let renewed = Txn::run(rt, lock, "续期", &targets, |txn| {
         renew_in(rt, lock, txn, &state, scheduled)
     })?;
-    if let Some(e) = web_failure {
+    if let Some(e) = renewed.web_failure {
         return Err(e.wrap("FRP 网站证书续期失败"));
     }
-    out::ok("FRP 证书检查完成，私有 CA 保持不变。");
-    Ok(())
+    if announced(scheduled, renewed.changed) {
+        out::ok(RENEWED);
+    }
+    Ok(renewed.changed)
+}
+
+/// Whether a committed renewal prints its closing line: always when run by
+/// hand, from cron only when a certificate changed (its log stays empty on
+/// the other nights; failures are errors either way).
+fn announced(scheduled: bool, changed: bool) -> bool {
+    !scheduled || changed
+}
+
+/// What a committed renewal did.
+struct Renewed {
+    /// The control or the website certificate changed.
+    changed: bool,
+    /// The website renewal failed with the deployed pair untouched
+    /// (reported after the commit).
+    web_failure: Option<Error>,
 }
 
 /// The renewal inside its transaction; a website renewal failure is
@@ -385,43 +413,68 @@ fn renew_in(
     txn: &mut Txn,
     state: &FrpState,
     scheduled: bool,
-) -> Result<Option<Error>> {
+) -> Result<Renewed> {
     let services = rt.services();
     txn.phase(Phase::RenewCertificates)?;
-    let changed = control_cert(rt.ctx, &rt.paths().frp_root, &state.domain)?;
+    let control = control_cert(rt.ctx, &rt.paths().frp_root, &state.domain)?;
     signal::check()?;
-    let web_failure = match state.web() {
-        Some(web) => renew_website(rt, state, web, scheduled).err(),
-        None => None,
+    let (website, web_failure) = match state.web() {
+        Some(web) => match renew_website(rt, state, web, scheduled)? {
+            Ok(changed) => (changed, None),
+            Err(e) => (false, Some(e)),
+        },
+        None => (false, None),
     };
-    if changed && services.running(FRPS) {
+    if control && services.running(FRPS) {
         rt.restart(lock, FRPS)?;
         rt.health(state, false)?;
     }
     txn.phase(Phase::WriteCron)?;
     rt.rewrite_cron(state)?;
-    Ok(web_failure)
+    Ok(Renewed {
+        changed: control || website,
+        web_failure,
+    })
 }
 
-fn renew_website(rt: &Runtime, state: &FrpState, web: &WebSettings, scheduled: bool) -> Result<()> {
+/// Renew the website certificate; the inner value is whether the deployed
+/// pair changed. A failed renewal leaves that pair untouched and is the
+/// inner error (the rest of the renewal commits). A new pair nginx could
+/// not be made to serve (`nginx -t` or the restart failed) is the outer
+/// error, which rolls the whole renewal back, `web-tls` included:
+/// committed, the running nginx would keep the old certificate while every
+/// later scheduled run finds the deployed pair not due.
+fn renew_website(
+    rt: &Runtime,
+    state: &FrpState,
+    web: &WebSettings,
+    scheduled: bool,
+) -> Result<Result<bool>> {
     let services = rt.services();
     if web.tls == WebTls::Http01 && !services.running(FRP_WEB) {
         out::info("FRP 网站已停止，本次跳过需要 HTTP 入口的续期。");
-        return Ok(());
+        return Ok(Ok(false));
     }
     let dir = rt.paths().frp_root.join("web-tls");
-    let issued = CertDir::new(&dir).metadata()?.is_some();
-    ensure!(
-        issued,
-        "旧版网站证书需先运行 onebox frps configure 迁移为原生证书管理"
-    );
-    if renew_dir_with(&rt.cert_engine(), &dir, !scheduled, None)? {
-        rt.write_web_config(state, NginxPhase::Full)?;
-        if services.running(FRP_WEB) {
-            services.restart(FRP_WEB)?;
-        }
+    let renewed = CertDir::new(&dir).metadata().and_then(|issued| {
+        ensure!(
+            issued.is_some(),
+            "旧版网站证书需先运行 onebox frps configure 迁移为原生证书管理"
+        );
+        renew_dir_with(&rt.cert_engine(), &dir, !scheduled, None)
+    });
+    if renewed.as_ref().is_ok_and(|changed| *changed) {
+        rt.write_web_config(state, NginxPhase::Full)
+            .and_then(|()| {
+                if services.running(FRP_WEB) {
+                    services.restart(FRP_WEB)
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|e| e.wrap("FRP 网站证书已续期，但网站服务未能加载新证书"))?;
     }
-    Ok(())
+    Ok(renewed)
 }
 
 /// Start, stop or restart the FRP services (no transaction, H §5.8).
@@ -439,7 +492,7 @@ pub fn service(rt: &Runtime, lock: &FileLock, action: ServiceAction) -> Result<(
             // A layout v2 never started: adopt it with this version's units.
             services.write_all(&rt.defs(&state, None)?)?;
         }
-        firewall::reconcile_owner(rt.ctx, "frp", &state.firewall_ports())?;
+        firewall::reconcile_owner(rt.ctx, FIREWALL_OWNER, &state.firewall_ports())?;
         if state.is_web() {
             services.start(FRP_WEB)?;
         }
@@ -455,30 +508,37 @@ pub fn service(rt: &Runtime, lock: &FileLock, action: ServiceAction) -> Result<(
 }
 
 /// Remove FRP completely: services, firewall rules, cron lines and the
-/// three trees (transactional), then the logs and runtime records.
+/// three trees (transactional), then the logs and runtime records. Rules
+/// the firewall refused to remove keep their ledger in an otherwise empty
+/// `FRP_ROOT` and fail the command after everything else is gone; running
+/// it again retries them ([`leftovers_only`]).
 pub fn uninstall(rt: &Runtime, lock: &FileLock) -> Result<()> {
     let paths = rt.paths();
     check_paths(paths)?;
     recover_locked(rt, lock)?;
+    if leftovers_only(paths) {
+        return clear_leftovers(rt);
+    }
     ensure!(model::installed(paths), "{NOT_INSTALLED}");
     let _signals = SignalScope::install()?;
-    Txn::run(rt, lock, "卸载", &journal::targets(paths), |txn| {
+    let left = Txn::run(rt, lock, "卸载", &journal::targets(paths), |txn| {
         teardown(rt, txn)
     })?;
     for dir in [&paths.frp_run, &paths.frp_log] {
         remove_tree_if_exists(dir)?;
     }
+    ensure!(left.is_empty(), "{}", rules_left(rt, &left));
     out::ok("FRP 已卸载，代理与自建站保留。");
     Ok(())
 }
 
-fn teardown(rt: &Runtime, txn: &mut Txn) -> Result<()> {
+fn teardown(rt: &Runtime, txn: &mut Txn) -> Result<Leftovers> {
     let paths = rt.paths();
     let services = rt.services();
     txn.phase(Phase::Teardown)?;
     services.stop(FRP_WEB)?;
     services.stop(FRPS)?;
-    firewall::clear_owner(rt.ctx, "frp")?;
+    let left = rt.clear_firewall()?;
     if cron::available(rt.ctx) {
         Crontab::edit(rt.ctx, |tab| Ok(tab.remove_scope(Scope::Frp)))?;
     }
@@ -487,7 +547,28 @@ fn teardown(rt: &Runtime, txn: &mut Txn) -> Result<()> {
     for dir in [&paths.frp_root, &paths.frp_bin, &paths.frp_web] {
         remove_tree_if_exists(dir)?;
     }
-    signal::check()
+    rt.keep_leftovers(&left)?;
+    signal::check()?;
+    Ok(left)
+}
+
+/// The error of an uninstall whose firewall rules were not all removed.
+fn rules_left(rt: &Runtime, left: &Leftovers) -> String {
+    format!(
+        "FRP 已卸载，但以下防火墙规则未能删除: {}；记录保留于 {}，修复防火墙后再次执行 onebox frps uninstall",
+        left.messages.join("；"),
+        firewall::ledger_path(rt.paths(), FIREWALL_OWNER).display()
+    )
+}
+
+/// Retry the rules an earlier uninstall could not remove; `FRP_ROOT` goes
+/// once none is left.
+fn clear_leftovers(rt: &Runtime) -> Result<()> {
+    let left = rt.clear_firewall()?;
+    ensure!(left.is_empty(), "{}", rules_left(rt, &left));
+    remove_tree_if_exists(&rt.paths().frp_root)?;
+    out::ok("FRP 遗留的防火墙规则已删除");
+    Ok(())
 }
 
 /// `frps net-apply` (the `onebox-frps` pre-start hook): open the FRP
@@ -514,7 +595,7 @@ pub fn net_apply(ctx: &Ctx) -> Result<()> {
         }
     };
     let state = model::load(paths)?.ok_or_else(|| Error::msg(NOT_INSTALLED))?;
-    firewall::reconcile_owner(ctx, "frp", &state.firewall_ports()).map(drop)
+    firewall::reconcile_owner(ctx, FIREWALL_OWNER, &state.firewall_ports()).map(drop)
 }
 
 /// Roll back an interrupted FRP transaction (`onebox recover`, after the

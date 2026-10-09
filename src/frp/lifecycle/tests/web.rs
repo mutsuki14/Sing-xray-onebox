@@ -213,3 +213,48 @@ fn a_failed_website_renewal_commits_the_control_certificate() {
         deployed
     );
 }
+
+#[test]
+fn a_renewed_pair_nginx_cannot_load_rolls_the_renewal_back() {
+    let Some(h) = FakeHost::with_real_openssl() else {
+        return;
+    };
+    let script = install_http01(&h);
+    let paths = &h.ctx.paths;
+    let rt = h.runtime();
+    let lock = rt.lock().unwrap();
+    let cert = paths.frp_root.join("web-tls/cert.pem");
+    let deployed = fs::read(&cert).unwrap();
+    let metadata = fs::read(paths.frp_root.join("web-tls/certificate.json")).unwrap();
+    script.lock().unwrap().issue = Some(h.public_pair("renewed", &["app.example.com"]));
+    // acme.sh deploys a new pair, then nginx does not restart.
+    h.break_unit(FRP_WEB, true);
+    let err = renew(&rt, &lock, false).unwrap_err().to_string();
+    assert!(
+        err.starts_with("FRP 网站证书已续期，但网站服务未能加载新证书: "),
+        "{err}"
+    );
+    // The old pair (and its metadata) is back: committed, the next
+    // scheduled run would find the new pair not due while nginx served
+    // the old one from memory.
+    assert_eq!(fs::read(&cert).unwrap(), deployed);
+    assert_eq!(
+        fs::read(paths.frp_root.join("web-tls/certificate.json")).unwrap(),
+        metadata
+    );
+    assert!(!journal::exists(paths));
+    // Once nginx works again the renewal is simply retried.
+    h.break_unit(FRP_WEB, false);
+    rt.services().start(FRP_WEB).unwrap();
+    h.clear_history();
+    assert!(renew(&rt, &lock, false).unwrap());
+    assert_eq!(
+        web_steps(&h),
+        [
+            "acme.sh renew",
+            "nginx -t full",
+            "systemctl restart onebox-frp-web"
+        ]
+    );
+    assert_ne!(fs::read(&cert).unwrap(), deployed);
+}

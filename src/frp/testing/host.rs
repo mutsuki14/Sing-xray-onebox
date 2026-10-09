@@ -11,8 +11,9 @@ use super::fakes::{
 use super::{openssl, release_routes};
 use crate::cert::testing::{test_release, TestCa, FAKE_ACME, FAKE_DNS_CF};
 use crate::ctx::Ctx;
-use crate::frp::runtime::{Health, Runtime};
+use crate::frp::runtime::{Health, Runtime, FIREWALL_OWNER};
 use crate::host::fetch::testing::{serve, Reply};
+use crate::host::firewall::{ledger_path, Ledger};
 use crate::host::init::InitSystem;
 use crate::host::supervisor::{Supervisor, Timing};
 use crate::sys::exec::{Cmd, Exec, FakeExec, Output, SystemExec};
@@ -37,6 +38,9 @@ pub struct FakeHost {
     pub healthy: Arc<AtomicBool>,
     /// iptables accepts rule changes while this is true.
     pub firewall_ok: Arc<AtomicBool>,
+    /// While false, iptables rules exist (`-C`) and their removal (`-D`)
+    /// fails; while true, they read as already gone.
+    pub firewall_removals_ok: Arc<AtomicBool>,
     /// `nginx.conf` as each `nginx -t` saw it, in order.
     pub nginx_tests: Arc<Mutex<Vec<String>>>,
     /// The CA the real openssl trusts as its public store.
@@ -100,6 +104,7 @@ impl FakeHost {
             crontab: Default::default(),
             healthy: Arc::new(AtomicBool::new(true)),
             firewall_ok: Arc::new(AtomicBool::new(true)),
+            firewall_removals_ok: Arc::new(AtomicBool::new(true)),
             nginx_tests: Default::default(),
             ca,
         };
@@ -240,16 +245,29 @@ impl FakeHost {
             &["-w", "5", "-S", "INPUT"],
             Output::success("-P INPUT ACCEPT\n"),
         );
+        // Rules read as absent (removing one is a no-op) unless removals
+        // are refused: then they read as present and `-D` fails.
+        let removals_ok = self.firewall_removals_ok.clone();
         self.exec.on_fn(
             |c| c.program == "iptables" && c.args.iter().any(|a| a == "-C"),
-            |_| Ok(Output::failure(1, "")),
+            move |_| {
+                Ok(if removals_ok.load(Ordering::SeqCst) {
+                    Output::failure(1, "")
+                } else {
+                    Output::success("")
+                })
+            },
         );
         let firewall_ok = self.firewall_ok.clone();
+        let removals_ok = self.firewall_removals_ok.clone();
         self.exec.on_fn(
             |c| c.program == "iptables",
             move |c| {
-                let change = c.args.iter().any(|a| a == "-I" || a == "-D");
-                Ok(if change && !firewall_ok.load(Ordering::SeqCst) {
+                let removal = c.args.iter().any(|a| a == "-D");
+                let change = removal || c.args.iter().any(|a| a == "-I");
+                let refused = (change && !firewall_ok.load(Ordering::SeqCst))
+                    || (removal && !removals_ok.load(Ordering::SeqCst));
+                Ok(if refused {
                     Output::failure(4, "iptables: Resource temporarily unavailable.")
                 } else {
                     Output::success("")
@@ -333,6 +351,21 @@ impl FakeHost {
 
     pub fn set_firewall_ok(&self, ok: bool) {
         self.firewall_ok.store(ok, Ordering::SeqCst);
+    }
+
+    pub fn set_firewall_removals_ok(&self, ok: bool) {
+        self.firewall_removals_ok.store(ok, Ordering::SeqCst);
+    }
+
+    /// The ports of the `frp` firewall ledger, in order.
+    pub fn frp_ledger_ports(&self) -> Vec<u16> {
+        let path = ledger_path(&self.ctx.paths, FIREWALL_OWNER);
+        Ledger::load(&path, FIREWALL_OWNER)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.rule.start)
+            .collect()
     }
 
     pub fn set_healthy(&self, healthy: bool) {

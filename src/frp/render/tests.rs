@@ -234,7 +234,7 @@ fn summaries() {
         "FRP web / v0.71.0\n控制入口: frp.example.com:7000（TLS + 私有 CA + token）\n\
 控制域名 A / AAAA 应直接指向 VPS，关闭 CDN 代理。凭据不在此处显示。\n\
 应用入口: https://app.example.com/\n内部转发: 127.0.0.1:7080；证书方式: http\n\
-HTTP-01 申请和自动续期需要持续开放公网 TCP 80。\n保留端口: 7000-7000/both\n\
+HTTP-01 申请和自动续期需要持续开放公网 TCP 80。\n保留端口: 7000-7000/tcp\n\
 保留端口: 7080-7080/tcp\n保留端口: 443-443/tcp\n保留端口: 80-80/tcp"
     );
     let mut state = wildcard();
@@ -247,7 +247,7 @@ HTTP-01 申请和自动续期需要持续开放公网 TCP 80。\n保留端口: 7
         "FRP web / v0.71.0\n控制入口: frp.example.com:7000（TLS + 私有 CA + token）\n\
 控制域名 A / AAAA 应直接指向 VPS，关闭 CDN 代理。凭据不在此处显示。\n\
 应用入口: https://www.apps.example.com:8443/\n内部转发: 127.0.0.1:7080；证书方式: cf\n\
-添加泛域名解析 *.apps.example.com，客户端 subdomain = www\n保留端口: 7000-7000/both\n\
+添加泛域名解析 *.apps.example.com，客户端 subdomain = www\n保留端口: 7000-7000/tcp\n\
 保留端口: 7080-7080/tcp\n保留端口: 8443-8443/tcp"
     );
     let mut tcp = tcp();

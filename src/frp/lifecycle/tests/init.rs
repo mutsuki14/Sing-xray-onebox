@@ -6,7 +6,7 @@ use super::{change, install_tcp};
 use crate::cert::cloudflare::CfCredentials;
 use crate::cert::testing::{fake_acme, AcmeScript};
 use crate::frp::journal;
-use crate::frp::lifecycle::{apply, net_apply, service, uninstall, Change, ServiceAction};
+use crate::frp::lifecycle::{apply, net_apply, renew, service, uninstall, Change, ServiceAction};
 use crate::frp::model::{self, WebTls};
 use crate::frp::testing::{tcp_state, web_state, FakeHost};
 use crate::host::init::InitSystem;
@@ -182,4 +182,33 @@ fn without_an_init_system_web_mode_has_a_boot_line_per_service() {
         "{}",
         h.crontab()
     );
+}
+
+/// v2's FRP boot line (any init system).
+const V2_BOOT: &str = "@reboot env ONEBOX_DIR='/etc/onebox' '/usr/local/bin/onebox' frps start >>'/var/log/onebox-frp/boot.log' 2>&1 # onebox-frps-boot\n";
+
+#[test]
+fn without_an_init_system_renew_keeps_the_autostart_choice() {
+    // (autostart before the renewal, v2 boot line present, autostart after)
+    let cases = [
+        ("enabled stays enabled", true, false, true),
+        ("disabled stays disabled", false, false, false),
+        ("v2's frps start line is converted", false, true, true),
+    ];
+    for (name, enabled, v2_line, want) in cases {
+        let h = FakeHost::with_init(InitSystem::None);
+        install_tcp(&h);
+        let rt = h.runtime();
+        if !enabled {
+            // `onebox service onebox-frps disable`
+            rt.services().disable(FRPS).unwrap();
+            assert!(!h.enabled(FRPS), "{name}");
+        }
+        if v2_line {
+            h.set_crontab(&format!("{}{V2_BOOT}", h.crontab()));
+        }
+        renew(&rt, &rt.lock().unwrap(), true).unwrap();
+        assert_eq!(h.enabled(FRPS), want, "{name}: {}", h.crontab());
+        assert!(!h.crontab().contains("onebox-frps-boot"), "{name}");
+    }
 }

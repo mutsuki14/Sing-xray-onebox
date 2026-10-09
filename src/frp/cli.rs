@@ -17,7 +17,8 @@
 //!   `[错误] …`, a cancelled one `[提示] 操作已取消`, and the menu stays
 //!   (v2 printed the bare error); Ctrl+D at the menu prompt itself exits
 //!   with 130 (ARCH G5); root is checked before an item asks anything;
-//! - `update` to the version already running changes nothing;
+//! - `update` to the installed version (what `frps -v` of the installed
+//!   binary reports, with the stored state unchanged) changes nothing;
 //! - a change is refused when another FRP operation replaced the state
 //!   while this one waited at its confirmation (no lost token rotation);
 //! - new `rotate-ca` replaces a private CA that is about to expire (v2 had
@@ -29,7 +30,7 @@ use super::journal;
 use super::lifecycle::{self, Change, Expected, ServiceAction, CRON_LOCK_WAIT};
 use super::model::{self, FrpState, WebTls};
 use super::render::summary;
-use super::runtime::Runtime;
+use super::runtime::{leftovers_only, Runtime};
 use super::wizard;
 use crate::cert::cloudflare::{self, CfCredentials};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
@@ -306,7 +307,7 @@ impl Session<'_> {
                 } else {
                     self.rt.lock()?
                 };
-                lifecycle::renew(&self.rt, &lock, cron)
+                lifecycle::renew(&self.rt, &lock, cron).map(drop)
             }
             Action::RotateToken => self.rotate(
                 CONFIRM_ROTATE,
@@ -474,8 +475,9 @@ impl Session<'_> {
     }
 
     fn uninstall(&self) -> Result<()> {
+        let paths = &self.ctx().paths;
         ensure!(
-            model::installed(&self.ctx().paths),
+            model::installed(paths) || leftovers_only(paths),
             "{}",
             model::NOT_INSTALLED
         );

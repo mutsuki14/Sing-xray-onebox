@@ -20,9 +20,11 @@
 //!   to `Mode::Tcp`, so web mode neither reserves nor opens one. Its frps
 //!   `allowPorts` ([`PortLayout::allow_ports`], which the renderer must
 //!   emit in both modes: an empty `allowPorts` allows every port) is the
-//!   bind port alone, which frps holds itself and which is reserved for
-//!   UDP too, so clients cannot open TCP/UDP proxies (v2 let them bind
-//!   127.0.0.1:20000–20100 there, inside the node's fallback port pool).
+//!   bind port alone, whose TCP side frps holds itself, so clients cannot
+//!   open TCP proxies and at most a loopback UDP proxy on that one port
+//!   (v2 let them bind 127.0.0.1:20000–20100 there, inside the node's
+//!   fallback port pool). The bind port stays reserved for TCP only, as
+//!   in v2, so node configurations v2 accepted keep validating.
 //!   Reading a v2 web state drops its range; [`V2Config::from_state`]
 //!   writes v2's default;
 //! - new domains must be DNS names (H-8.1#15: frpc cannot verify a

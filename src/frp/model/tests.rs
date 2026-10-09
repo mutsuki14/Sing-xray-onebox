@@ -531,7 +531,7 @@ fn reservations_per_mode() {
     assert_eq!(
         spans(&web.reservations()),
         [
-            (7000, 7000, Transport::Both),
+            (7000, 7000, Transport::Tcp),
             (7080, 7080, Transport::Tcp),
             (443, 443, Transport::Tcp),
             (80, 80, Transport::Tcp)
@@ -582,12 +582,17 @@ fn allow_ports_are_never_empty() {
     let mut moved = web.clone();
     moved.bind_port = 7443;
     assert_eq!(moved.allow_ports(), [(7443, 7443)]);
-    // Its UDP side is reserved, so no node listener can share it.
+    // Only its TCP side is reserved (as in v2): a node UDP listener may
+    // share it, a TCP one may not.
     let cfg = config(&[(Protocol::Hysteria2, 7443, Core::Singbox)]);
+    PortPlan::of(&cfg, &moved.reservations())
+        .validate()
+        .unwrap();
+    let cfg = config(&[(Protocol::Trojan, 7443, Core::Singbox)]);
     let err = PortPlan::of(&cfg, &moved.reservations())
         .validate()
         .unwrap_err();
-    assert_eq!(err.to_string(), "端口 7443/udp 已保留给 FRP");
+    assert_eq!(err.to_string(), "端口 7443/tcp 已保留给 FRP");
     let layout = PortLayout::Tcp {
         bind_port: 7000,
         range: PortRange {
@@ -617,6 +622,47 @@ fn reservations_from_disk() {
     write(&legacy_state_path(paths), &v1_state_conf());
     fs::remove_file(state_path(paths)).unwrap();
     assert_eq!(reservations(paths).unwrap().len(), 2);
+}
+
+#[test]
+fn v2_web_state_keeps_node_udp_on_the_bind_port() {
+    // v2 reserved the web-mode bind port for TCP only (H §1.2): a node
+    // whose Hysteria2 hop range or UDP inbound covers it must still pass
+    // port planning after the upgrade (the `regen` apply included).
+    let l = layout();
+    let paths = &l.paths;
+    installed_with(paths, &state_path(paths), &v2_web_json());
+    let reserved = reservations(paths).unwrap();
+    let mut hopped = config(&[(Protocol::Hysteria2, 8443, Core::Singbox)]);
+    hopped.hy2.hop = Some(PortRange {
+        start: 5000,
+        end: 9000,
+    });
+    let cases = [
+        ("hop range covering 7000", hopped, None),
+        (
+            "Hysteria2 on 7000",
+            config(&[(Protocol::Hysteria2, 7000, Core::Singbox)]),
+            None,
+        ),
+        (
+            "TUIC on 7000",
+            config(&[(Protocol::Tuic, 7000, Core::Singbox)]),
+            None,
+        ),
+        (
+            "TCP inbound on 7000",
+            config(&[(Protocol::Trojan, 7000, Core::Singbox)]),
+            Some("端口 7000/tcp 已保留给 FRP"),
+        ),
+    ];
+    for (name, cfg, want) in cases {
+        let got = PortPlan::of(&cfg, &reserved)
+            .validate()
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(got.as_deref(), want, "{name}");
+    }
 }
 
 #[test]
@@ -692,7 +738,7 @@ fn ip_literal_domains_v2_accepted_stay_readable() {
     assert_eq!(
         spans(&reservations(paths).unwrap()),
         [
-            (7000, 7000, Transport::Both),
+            (7000, 7000, Transport::Tcp),
             (7080, 7080, Transport::Tcp),
             (443, 443, Transport::Tcp),
             (80, 80, Transport::Tcp)

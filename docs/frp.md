@@ -97,7 +97,7 @@ frpc -c frpc.toml
 | frpc ↔ frps 控制连接 | 私有 CA（EC P-256，3650 天）签发的服务端证书（397 天） | 剩余不足 30 天、控制域名变化或与私钥不匹配时重新签发。每日 03:17 的计划任务和手动 `onebox frps renew` 会检查，只有证书变化且 frps 正在运行时才重启 frps；安装、配置、更新和轮换时也会检查，这些操作本身就会重启 frps |
 | 浏览器访问的网站 | Let's Encrypt（`http` / `cf`）或自备证书（`custom`） | 每日 03:17 检查，剩余不足 30 天时续期；证书更新后重写配置，`onebox-frp-web` 正在运行时重启它。HTTP-01 需保持 80 可达，网站服务停止时本次跳过 |
 
-两类证书由同一条计划任务 `onebox frps renew --cron` 处理。手动执行 `onebox frps renew` 时会**强制**续期网站证书（不论是否到期，注意 Let's Encrypt 的频率限制）。网站证书续期失败不影响控制证书，原证书保持不变，命令以错误结束。
+两类证书由同一条计划任务 `onebox frps renew --cron` 处理；计划任务只在证书有变化或出错时输出，`renew.log` 平时不增长。手动执行 `onebox frps renew` 时会**强制**续期网站证书（不论是否到期，注意 Let's Encrypt 的频率限制）。网站证书续期失败不影响控制证书，原证书保持不变，命令以错误结束。新证书已部署但网站服务未能加载（nginx 配置测试或重启失败）时，本次续期整体回滚（与 v2 相同），下次计划任务会重新续期，不会出现磁盘上是新证书、nginx 仍在使用旧证书的情况。
 
 自备网站证书不会自动申请：在原路径替换证书文件后，每日检查（或 `onebox frps renew`）会部署新文件并重启网站服务；证书路径变化时执行 `onebox frps configure --tls custom --cert 文件 --key 文件`。泛域名的自备证书需同时覆盖根域和 `*.根域`。
 
@@ -159,11 +159,11 @@ onebox frps --help
   17 3 * * * mkdir -p '/var/log/onebox-frp' 2>/dev/null; PATH=… env ONEBOX_…='…' '/usr/local/bin/onebox' frps renew --cron >>'/var/log/onebox-frp/renew.log' 2>&1 # onebox:frp-renew
   ```
 
-  没有 init 系统时还会为 `onebox-frps`（网站模式另加 `onebox-frp-web`）各写一行 `@reboot … service 服务名 start`（标记 `# onebox:boot:服务名`）。v2 的 `# onebox-frps-renew` 与 `# onebox-frps-boot` 行在升级后第一次 FRP 变更或夜间续期时被替换；systemd / OpenRC 下不再需要 `@reboot` 行（服务已设为开机自启）。
+  没有 init 系统时还会为 `onebox-frps`（网站模式另加 `onebox-frp-web`）各写一行 `@reboot … service 服务名 start`（标记 `# onebox:boot:服务名`）。这些行就是开机自启的开关：安装、配置等变更会启用两个服务，续期只改写已有的行，用 `onebox service 服务名 disable` 关闭的自启不会被续期恢复。v2 的 `# onebox-frps-renew` 与 `# onebox-frps-boot` 行在升级后第一次 FRP 变更或夜间续期时被替换；systemd / OpenRC 下不再需要 `@reboot` 行（服务已设为开机自启）。
 
 ## 卸载与文件位置
 
-`onebox frps uninstall` 停止并删除 `onebox-frps`、`onebox-frp-web` 服务，清除 FRP 的防火墙规则和计划任务，删除 `/etc/onebox-frp`（状态、私有 CA、证书、Cloudflare 凭据）、`/opt/onebox-frp`、`/var/lib/onebox-frp`、`/var/log/onebox-frp` 和 `/run/onebox-frp`。代理节点、自建网站、nginx 软件包和 `onebox` 程序保留；已导出的客户端配置随之失效。
+`onebox frps uninstall` 停止并删除 `onebox-frps`、`onebox-frp-web` 服务，清除 FRP 的防火墙规则和计划任务，删除 `/etc/onebox-frp`（状态、私有 CA、证书、Cloudflare 凭据）、`/opt/onebox-frp`、`/var/lib/onebox-frp`、`/var/log/onebox-frp` 和 `/run/onebox-frp`。代理节点、自建网站、nginx 软件包和 `onebox` 程序保留；已导出的客户端配置随之失效。防火墙拒绝删除某条规则时（例如 ufw 已停用），其余内容照常删除，`/etc/onebox-frp` 只保留 `.managed` 和这些规则的记录 `firewall-v2.json`，命令列出规则并以错误结束；修复防火墙后再次执行 `onebox frps uninstall` 会重试删除。回滚时未能删除的规则同样保留记录，并列在未完成的步骤中。
 
 `onebox uninstall`（卸载代理节点）保留 FRP；节点快照 `onebox backup` 不包含 FRP。`onebox doctor` 会检查 FRP 的事务、程序版本、服务、私有 CA、控制证书、网站证书和续期任务。
 
