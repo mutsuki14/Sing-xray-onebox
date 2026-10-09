@@ -29,6 +29,43 @@ pub struct CommandFault {
 
 pub type Faults = Arc<Mutex<Vec<CommandFault>>>;
 
+/// For each probed needle, whether INT, TERM and HUP were all blocked in
+/// the calling thread each time a command containing it ran (the command
+/// itself runs as usual).
+pub type MaskProbes = Arc<Mutex<Vec<(String, Vec<bool>)>>>;
+
+/// Whether INT, TERM and HUP are all blocked in the calling thread.
+pub fn cancel_signals_blocked() -> bool {
+    // SAFETY: queries this thread's mask into a zeroed sigset.
+    unsafe {
+        let mut current: libc::sigset_t = std::mem::zeroed();
+        libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut current);
+        [libc::SIGINT, libc::SIGTERM, libc::SIGHUP]
+            .iter()
+            .all(|s| libc::sigismember(&current, *s) == 1)
+    }
+}
+
+/// A rule that never matches: it only records the signal mask of probed
+/// commands (installed before every other rule).
+pub(super) fn probe_rule(exec: &FakeExec) -> MaskProbes {
+    let probes: MaskProbes = Arc::default();
+    let shared = probes.clone();
+    exec.on_fn(
+        move |cmd| {
+            let line = cmd.display();
+            for (needle, seen) in lock(&shared).iter_mut() {
+                if line.contains(needle.as_str()) {
+                    seen.push(cancel_signals_blocked());
+                }
+            }
+            false
+        },
+        |cmd| Ok(Output::failure(127, format!("probe: {}", cmd.display()))),
+    );
+    probes
+}
+
 /// The first rule: commands containing an injected needle fail (one-shot
 /// faults are consumed by their first match).
 pub(super) fn fault_rule(exec: &FakeExec) -> Faults {

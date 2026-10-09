@@ -125,6 +125,51 @@ fn hand_edited_onebox_crontab_lines_never_make_a_failed_apply_unrecoverable() {
     assert_no_journal(&host);
 }
 
+/// A second Ctrl+C or SIGTERM must not abort a rollback half-way (every
+/// unit stopped and disabled): the rollback runs with INT/TERM/HUP blocked,
+/// so no new signal is forwarded to its service-manager commands, while
+/// the forward stages stay cancellable.
+#[test]
+fn rollbacks_run_with_cancellation_signals_blocked() {
+    use crate::apply::harness::cancel_signals_blocked;
+    let host = installed_host();
+    let before = host.world();
+    // Run by the forward path (configure-services) and by rollback-files.
+    host.probe_signal_mask("systemctl daemon-reload");
+    host.probe_signal_mask("systemctl stop onebox-sing-box");
+    host.features
+        .inject(Fault::Fail(Checkpoint::Stage(Phase::StartCores)));
+    let text = err_text(&host.apply(big_change(&host)).unwrap_err());
+    assert!(text.starts_with("配置未应用，已恢复原状态"), "{text}");
+    let reloads = host.masks_seen("systemctl daemon-reload");
+    assert_eq!(reloads.first(), Some(&false), "{reloads:?}");
+    assert_eq!(reloads.last(), Some(&true), "{reloads:?}");
+    let stops = host.masks_seen("systemctl stop onebox-sing-box");
+    assert!(stops.contains(&true), "rollback-stop: {stops:?}");
+    assert!(!cancel_signals_blocked(), "the mask is restored");
+    assert_eq!(before.diff(&host.world()), Vec::<String>::new());
+    // The same in a recovery of a crashed apply.
+    host.features.clear();
+    host.features
+        .inject(Fault::Crash(Checkpoint::Stage(Phase::StartCores)));
+    let req = big_change(&host);
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.apply(req)));
+    assert!(crashed.is_err());
+    host.features.clear();
+    host.probe_signal_mask("systemctl start onebox-xray");
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::RolledBack
+    );
+    let starts = host.masks_seen("systemctl start onebox-xray");
+    assert!(
+        !starts.is_empty() && starts.iter().all(|b| *b),
+        "{starts:?}"
+    );
+    assert!(!cancel_signals_blocked());
+    assert_eq!(before.diff(&host.world()), Vec::<String>::new());
+}
+
 #[test]
 fn a_firewall_rule_the_rollback_cannot_remove_is_kept_recorded_and_retried() {
     let host = installed_host();

@@ -37,8 +37,10 @@ pub const NEW_IPS: &str = r#"[{"addr_info":[{"local":"203.0.113.10"},{"local":"1
 
 mod commands;
 
-use commands::{fake_cores, fake_ip, fake_iptables, fake_systemd, fault_rule};
-pub use commands::{CommandFault, Crashing, Faults, Unit, Units};
+pub use commands::{
+    cancel_signals_blocked, CommandFault, Crashing, Faults, MaskProbes, Unit, Units,
+};
+use commands::{fake_cores, fake_ip, fake_iptables, fake_systemd, fault_rule, probe_rule};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -270,6 +272,7 @@ pub struct Host {
     pub units: Units,
     pub crashing: Crashing,
     pub faults: Faults,
+    pub masks: MaskProbes,
     pub cron: CronState,
     pub iptables: Arc<Mutex<BTreeSet<String>>>,
     pub ips: Arc<Mutex<String>>,
@@ -308,6 +311,7 @@ impl Host {
                 fs::create_dir_all(d).unwrap();
             }
         }
+        let masks = probe_rule(&exec);
         let faults = fault_rule(&exec);
         let (units, crashing) = fake_systemd(&exec);
         let cron = fake_crontab(&exec, None);
@@ -329,6 +333,7 @@ impl Host {
             units,
             crashing,
             faults,
+            masks,
             cron,
             iptables,
             ips,
@@ -369,6 +374,23 @@ impl Host {
             once,
             interrupt: false,
         });
+    }
+
+    /// Record, for every command whose line contains `needle`, whether the
+    /// cancellation signals were blocked when it ran (see [`masks_seen`]).
+    ///
+    /// [`masks_seen`]: Host::masks_seen
+    pub fn probe_signal_mask(&self, needle: &str) {
+        lock(&self.masks).push((needle.to_owned(), Vec::new()));
+    }
+
+    /// What [`probe_signal_mask`](Host::probe_signal_mask) saw for `needle`.
+    pub fn masks_seen(&self, needle: &str) -> Vec<bool> {
+        lock(&self.masks)
+            .iter()
+            .find(|(n, _)| n == needle)
+            .map(|(_, seen)| seen.clone())
+            .unwrap_or_default()
     }
 
     /// Make `unit` exit right after every start (see [`Crashing`]).

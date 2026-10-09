@@ -37,6 +37,8 @@
 //!   files restored; only re-applying its network rules is skipped, with a
 //!   warning (same for a v2 old state that cannot be migrated, and for an
 //!   old state.json the apply could not read);
+//! - INT/TERM/HUP are blocked for the whole rollback, so a second Ctrl+C
+//!   or SIGTERM cannot abort it half-way through `rollback-stop`;
 //! - under a lock inherited from a self-update parent, `onebox-subscription`
 //!   is not started: the parent restores its own manager and starts it (G6);
 //! - one canonical service order everywhere (B-9.1#24).
@@ -55,6 +57,7 @@ use crate::state::v2::{self as statev2, DeployedCerts};
 use crate::sys::fs::read_bounded;
 use crate::sys::lock::FileLock;
 use crate::sys::rand::OsRandom;
+use crate::sys::signal::BlockSignals;
 use crate::ui::out;
 use serde_json::Value;
 use std::time::Duration;
@@ -88,7 +91,15 @@ const SETTLE: Duration = if cfg!(test) {
 
 /// Roll `journal` back; on success the journal is gone. `lock` tells
 /// whether this process is a self-update child (G6).
+///
+/// INT/TERM/HUP are blocked while it runs (as for FRP's rollback and the
+/// sysctl transaction): an impatient second Ctrl+C or a second SIGTERM
+/// would otherwise be forwarded to the service-manager command running at
+/// that moment, fail it and abort the rollback half-way — with every unit,
+/// `onebox-network` included, stopped and disabled. What arrives meanwhile
+/// is delivered once the rollback is over (the apply then ends cancelled).
 pub fn rollback(ctx: &Ctx, lock: &FileLock, journal: &mut Journal) -> Result<()> {
+    let _blocked = BlockSignals::new();
     let paths = &ctx.paths;
     journal.validate_files(paths)?;
     let reapply = old_rules_config(paths, journal);
