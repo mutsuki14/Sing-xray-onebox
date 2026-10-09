@@ -14,7 +14,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::render::tls::TlsMaterial;
 use crate::sys::exec::{Cmd, Output};
-use crate::sys::fs::read_bounded;
+use crate::sys::fs::read_bounded_following;
 use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -170,9 +170,10 @@ pub const ENCRYPTED_KEY: &str = "私钥已加密，请提供未加密的私钥";
 const KEY_MAX_BYTES: u64 = 1024 * 1024;
 
 /// PKCS#8 `ENCRYPTED PRIVATE KEY` or a traditional key with
-/// `Proc-Type: 4,ENCRYPTED`.
+/// `Proc-Type: 4,ENCRYPTED`. Read through symlinks, as openssl reads it
+/// (a custom key may be certbot's `live/…/privkey.pem` link).
 fn encrypted_key(key: &Path) -> bool {
-    read_bounded(key, KEY_MAX_BYTES).is_ok_and(|bytes| {
+    read_bounded_following(key, KEY_MAX_BYTES).is_ok_and(|bytes| {
         String::from_utf8_lossy(&bytes).lines().any(|line| {
             let line = line.trim();
             line == "-----BEGIN ENCRYPTED PRIVATE KEY-----" || line == "Proc-Type: 4,ENCRYPTED"

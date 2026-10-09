@@ -88,9 +88,12 @@ fn encrypted_keys_are_refused_without_prompting() {
         "-----BEGIN EC PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,00\n\nAA\n         -----END EC PRIVATE KEY-----\n",
     )
     .unwrap();
-    for key in [&pkcs8, &traditional] {
+    // A key behind a symlink (certbot's live/…/privkey.pem) is seen too.
+    let linked = dir.join("privkey.pem");
+    std::os::unix::fs::symlink("pkcs8.pem", &linked).unwrap();
+    for key in [&pkcs8, &traditional, &linked] {
         let err = key_pubkey(&ctx, key).unwrap_err();
-        assert_eq!(err.to_string(), ENCRYPTED_KEY);
+        assert_eq!(err.to_string(), ENCRYPTED_KEY, "{}", key.display());
     }
     assert!(exec.history().is_empty(), "openssl never asked");
 }

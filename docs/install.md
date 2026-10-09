@@ -160,7 +160,7 @@ onebox cert renew proxy                          # 立即续期代理证书（�
 - 续期不执行完整配置事务，只重启受影响且正在运行的服务：代理证书 → 代理内核（sing-box / Xray）；网站证书（也是 `site` 模式订阅使用的证书）→ `onebox-site`；独立 HTTPS 订阅证书 → `onebox-subscription-web`。例外：代理证书的身份变化时——客户端固定的证书指纹改变（如自签证书重新生成、私有 CA 签发的自备证书更换），或证书是否公有可信发生变化——程序用当前配置执行一次完整配置事务，重新发布客户端配置和订阅，此时客户端需要重新导入或刷新订阅。
 - 手动执行 `onebox renew`、`onebox cert renew`、`onebox site renew` 或 `onebox subscription renew` 时，所选的 Let's Encrypt 证书不论是否到期都会续期，请勿频繁执行。续期与其他修改共用一把锁，计划任务遇到其他操作时最多等待 10 分钟；取得锁后先完成或回滚遗留的未完成配置事务（同 `onebox recover`），再检查证书。
 - 面向浏览器的网站和 HTTPS 订阅必须使用公有可信证书，不能自签。
-- 更新了自备证书的源文件后，可等待计划任务，或立即执行 `onebox cert renew proxy`（网站用 `onebox site renew`）重新部署。
+- 更新了自备证书的源文件后，可等待计划任务，或立即执行 `onebox cert renew proxy`（网站用 `onebox site renew`）重新部署。`--cert` / `--key` 可以是符号链接，如 certbot 的 `/etc/letsencrypt/live/域名/fullchain.pem` 与 `privkey.pem`：certbot 续期后链接指向新文件，计划任务同样重新部署。
 
 v2 的每次证书续期都会执行完整配置事务并重启全部内核，且使用三条计划任务；v3 合并为一条 `renew --cron`，并且只重启受影响的服务。
 

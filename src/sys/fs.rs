@@ -189,12 +189,20 @@ fn invalid_file(path: &Path) -> Error {
 
 /// Open a regular file for reading without following a final symlink.
 fn open_regular(path: &Path) -> Result<(File, fs::Metadata)> {
+    open_regular_with(path, false)
+}
+
+/// Open a regular file for reading; a final symlink is refused unless
+/// `follow`. Only the opened file's type counts (`fstat`), and
+/// `O_NONBLOCK` keeps the open itself from blocking on a FIFO.
+fn open_regular_with(path: &Path, follow: bool) -> Result<(File, fs::Metadata)> {
+    let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .custom_flags(nofollow | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
         .map_err(|e| match e.raw_os_error() {
-            Some(libc::ELOOP) => symlink_error(path),
+            Some(libc::ELOOP) if !follow => symlink_error(path),
             _ => Error::io(path, e),
         })?;
     let meta = file.metadata().map_err(|e| Error::io(path, e))?;
@@ -206,7 +214,19 @@ fn open_regular(path: &Path) -> Result<(File, fs::Metadata)> {
 
 /// Read a regular, non-symlink file of at most `max` bytes.
 pub fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>> {
-    let (file, meta) = open_regular(path)?;
+    read_opened(path, open_regular(path)?, max)
+}
+
+/// [`read_bounded`] that follows symlinks, for files the user named rather
+/// than Onebox-owned ones (custom certificate sources: certbot's `live/`
+/// names are links into `archive/`). The file finally opened must still be
+/// a regular file of at most `max` bytes.
+pub fn read_bounded_following(path: &Path, max: u64) -> Result<Vec<u8>> {
+    read_opened(path, open_regular_with(path, true)?, max)
+}
+
+/// The bounded read of [`read_bounded`] and [`read_bounded_following`].
+fn read_opened(path: &Path, (file, meta): (File, fs::Metadata), max: u64) -> Result<Vec<u8>> {
     if meta.len() > max {
         return Err(invalid_file(path));
     }

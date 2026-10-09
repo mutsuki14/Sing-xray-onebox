@@ -35,7 +35,7 @@ use crate::error::Result;
 use crate::host::init::{self, InitSystem};
 use crate::host::os::{process_env, EnvLookup};
 use crate::host::service::Services;
-use crate::sys::fs::read_bounded;
+use crate::sys::fs::{read_bounded, read_bounded_following};
 use crate::sys::time::now;
 use crate::ui::out;
 use std::path::Path;
@@ -261,14 +261,15 @@ impl<'a> Engine<'a> {
         Err(missing_file(missing))
     }
 
-    /// Readable custom sources that would deploy different bytes.
+    /// Readable custom sources that would deploy different bytes (sources
+    /// read through symlinks, as `install_pair` reads them).
     fn custom_changed(&self, dir: &CertDir, cert: &Path, key: &Path) -> bool {
         let Ok(chain) = deployable_chain(self.ctx, cert, key) else {
             return false;
         };
         let deployed = read_bounded(&dir.cert(), PEM_MAX_BYTES).ok();
         let key_now = read_bounded(&dir.key(), PEM_MAX_BYTES).ok();
-        let key_new = read_bounded(key, PEM_MAX_BYTES).ok();
+        let key_new = read_bounded_following(key, PEM_MAX_BYTES).ok();
         deployed.as_deref() != Some(chain.as_bytes()) || key_now != key_new
     }
 
