@@ -195,3 +195,30 @@ pub fn update_cores(
     require_root()?;
     Updater::system(ctx).update_cores(which, version, force)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_are_found_through_context() {
+        let stale = || Error::exit(75, "stale");
+        let wrapped = Error::Context {
+            message: "外层".into(),
+            source: Box::new(Error::Context {
+                message: "内层".into(),
+                source: Box::new(stale()),
+            }),
+        };
+        assert_eq!(exit_within(&wrapped), Some(75));
+        assert_eq!(exit_within(&stale()), Some(75));
+        assert_eq!(exit_within(&Error::msg("x").wrap("y")), None);
+        let unwrapped = unwrap_exit(wrapped);
+        assert!(matches!(unwrapped, Error::Exit { code: 75, .. }));
+        assert_eq!(unwrapped.exit_code(), 75);
+        // Anything else keeps its chain.
+        let plain = unwrap_exit(Error::msg("内层").wrap("外层"));
+        assert_eq!(plain.to_string(), "外层: 内层");
+        assert!(unwrap_exit(Error::Cancelled.wrap("取消")).is_cancelled());
+    }
+}

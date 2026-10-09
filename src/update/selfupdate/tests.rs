@@ -471,6 +471,24 @@ fn testing_channel_follows_the_testing_tag() {
 }
 
 #[test]
+fn a_testing_build_installs_once_its_probed_version_passes() {
+    // No tag to compare with: the probed version must be a supported 3.x,
+    // not older than the installed manager.
+    let fx = Fx::new(true, Some("3.0.1"));
+    let rel = Rel::testing("3.0.2");
+    fx.serve(&rel);
+    assert_done(fx.run(Some(Channel::Testing), false));
+    assert_eq!(fx.phases(), [Prepared, Replacing, Replaced, Committed]);
+    assert_eq!(fx.exe(), rel.binary);
+    assert_eq!(fx.regens().len(), 1);
+    assert_eq!(fx.curl_urls(), [rel.api_url(), rel.asset_url()]);
+    assert!(fx.work_dirs().is_empty());
+    // The same build is "already current" the next time.
+    fx.run(Some(Channel::Testing), false).unwrap();
+    assert_eq!(fx.phases().len(), 4, "no second replacement");
+}
+
+#[test]
 fn channel_mismatches_are_refused() {
     let cases = [
         Rel {
@@ -697,6 +715,48 @@ fn orphaned_work_dirs_are_swept_but_never_a_journaled_one() {
 }
 
 #[test]
+fn the_public_sweep_keeps_what_a_journal_or_an_updater_may_need() {
+    let _signals = signal::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = Fx::new(true, Some("3.0.0"));
+    let parent = fx.paths().executable.parent().unwrap().to_path_buf();
+    let orphan = parent.join(format!("{WORK_PREFIX}{}", "b".repeat(24)));
+    write(&orphan.join(CONFIG_DIR).join("state.json"), 0o600, b"{}");
+    let lock = FileLock::acquire(&fx.paths().lock(), BUSY_MESSAGE).unwrap();
+
+    // An unreadable journal: keep everything for a manual look.
+    write(&journal_path(fx.paths()), 0o600, b"{oops");
+    crate::update::sweep_orphans(fx.paths(), &lock);
+    assert!(orphan.exists());
+    // A readable journal (referring to another directory): kept too.
+    let record = ProgramJournal::new(
+        format!("{WORK_PREFIX}{}", "c".repeat(24)),
+        None,
+        sha256_hex(b"x"),
+        None,
+    );
+    journal::write(fx.paths(), &record).unwrap();
+    crate::update::sweep_orphans(fx.paths(), &lock);
+    assert!(orphan.exists());
+    fs::remove_file(journal_path(fx.paths())).unwrap();
+    // An updater holds the update lock: it may be using the directory.
+    let update = FileLock::acquire(&fx.paths().update_lock(), "x").unwrap();
+    crate::update::sweep_orphans(fx.paths(), &lock);
+    assert!(orphan.exists());
+    drop(update);
+    // A lock that is not the node lock proves nothing.
+    let other = FileLock::acquire(&fx.paths().root.join("other.lock"), "x").unwrap();
+    crate::update::sweep_orphans(fx.paths(), &other);
+    assert!(orphan.exists());
+    // Otherwise the orphan goes.
+    crate::update::sweep_orphans(fx.paths(), &lock);
+    assert!(!orphan.exists());
+    assert!(
+        !busy(&fx.paths().update_lock()),
+        "the update lock is released"
+    );
+}
+
+#[test]
 fn asset_verification_uses_the_api_digest_or_the_direct_checksum_file() {
     struct Case {
         digest: Digest,
@@ -779,6 +839,97 @@ fn wrong_sizes_and_non_programs_are_refused() {
         assert!(err.contains(part), "{err}");
         fx.assert_untouched(&program("3.0.0\n"));
     }
+}
+
+#[test]
+fn a_successful_regen_repeats_the_childs_output_and_warnings() {
+    let fx = Fx::new(true, Some("3.0.0"));
+    *fx.regen_reply.lock().unwrap() = Output {
+        code: 0,
+        stdout: "节点信息已更新\n".into(),
+        stderr: "[1/14] 准备…\n[警告] 证书将在 5 天后过期\n\u{1b}[33m[警告]\u{1b}[0m 已取消固定\n[完成] 重新生成配置完成\n"
+            .into(),
+    };
+    fx.serve(&Rel::stable("3.0.1"));
+    assert_done(fx.run(None, false));
+    assert_eq!(fx.warnings.all(), ["证书将在 5 天后过期", "已取消固定"]);
+}
+
+// ---- signals ---------------------------------------------------------------
+
+#[test]
+fn ctrl_c_during_the_regen_reports_the_recovery_and_exits_130() {
+    // The child (same process group) dies of the Ctrl+C; the parent has
+    // the signal blocked until the recovery is done, then records it
+    // instead of dying before it reported anything.
+    let mut fx = Fx::new(true, Some("3.0.0"));
+    fx.engine = FakeEngine::new(Recover::ProgramJournalCurrent);
+    *fx.regen_signal.lock().unwrap() = Some(libc::SIGINT);
+    *fx.regen_reply.lock().unwrap() = Output::failure(130, "");
+    fx.serve(&Rel::stable("3.0.1"));
+    let err = fx.run(None, false).unwrap_err();
+    assert_eq!(err.exit_code(), 130);
+    assert_eq!(
+        err.report_text(),
+        "更新失败，已恢复原程序: 新版本重新生成配置失败（退出码 130）"
+    );
+    assert_eq!(fx.exe(), program("3.0.0\n"));
+    assert_eq!(fx.state(), fx.old_state);
+    assert!(!journal_path(fx.paths()).exists());
+    assert!(fx.work_dirs().is_empty());
+
+    // A failed recovery is still explained (and its work dir named).
+    let mut fx = Fx::new(true, Some("3.0.0"));
+    fx.engine = FakeEngine::new(Recover::FailWithJournal("恢复失败"));
+    *fx.regen_signal.lock().unwrap() = Some(libc::SIGINT);
+    fx.fail_regen("");
+    fx.serve(&Rel::stable("3.0.1"));
+    let err = fx.run(None, false).unwrap_err();
+    let work = fx.work_dirs();
+    assert_eq!(work.len(), 1);
+    assert_eq!(err.exit_code(), 130);
+    assert_eq!(
+        err.report_text(),
+        format!(
+            "更新失败: {REGEN_FAILED}；恢复需要重试: 恢复失败；备份: {}",
+            work[0].display()
+        )
+    );
+    assert_eq!(fx.warnings.all(), [retention_notice(&work[0])]);
+
+    // A stale process keeps exit code 75: it must end either way.
+    let mut fx = Fx::new(true, Some("3.0.0"));
+    fx.engine = FakeEngine::new(Recover::ProgramJournal);
+    *fx.regen_signal.lock().unwrap() = Some(libc::SIGTERM);
+    fx.fail_regen("");
+    fx.serve(&Rel::stable("3.0.1"));
+    let result = fx.run(None, false);
+    assert_eq!(exit_code(&result), Some(EXIT_STALE_PROCESS));
+}
+
+#[test]
+fn a_signal_to_the_parent_alone_does_not_undo_a_finished_update() {
+    // `kill -TERM <updater>` while the child regenerates successfully.
+    let fx = Fx::new(true, Some("3.0.0"));
+    *fx.regen_signal.lock().unwrap() = Some(libc::SIGTERM);
+    let rel = Rel::stable("3.0.1");
+    fx.serve(&rel);
+    assert_done(fx.run(None, false));
+    assert_eq!(fx.exe(), rel.binary);
+}
+
+#[test]
+fn a_signal_before_the_journal_cancels_and_cleans_up() {
+    // Arrives while the download is probed; the snapshot is taken, but the
+    // journal is never written and the work dir (keys!) is removed.
+    let fx = Fx::new(true, Some("3.0.0"));
+    *fx.probe_signal.lock().unwrap() = Some(libc::SIGINT);
+    fx.serve(&Rel::stable("3.0.1"));
+    let err = fx.run(None, false).unwrap_err();
+    assert!(err.is_cancelled());
+    assert_eq!(err.exit_code(), 130);
+    assert_eq!(err.report_text(), "操作被信号 2 中断");
+    fx.assert_untouched(&program("3.0.0\n"));
 }
 
 // ---- failures after the journal was written -----------------------------
@@ -948,6 +1099,17 @@ fn failure_messages() {
         let err = failure(Error::msg("坏了"), recovery, work);
         assert_eq!((err.exit_code(), err.to_string().as_str()), (code, text));
     }
+    // A recovery that reports exit 75 inside context still succeeded.
+    let wrapped = Error::Context {
+        message: "恢复失败".into(),
+        source: Box::new(Error::exit(75, journal::STALE_PROCESS)),
+    };
+    let err = failure(Error::msg("坏了"), Some(Err(wrapped)), work);
+    assert_eq!(err.exit_code(), 75);
+    assert_eq!(
+        err.to_string(),
+        "更新失败，已恢复原程序: 坏了；请重新执行命令以使用恢复后的程序"
+    );
     assert_eq!(
         retention_notice(work),
         "更新工作目录保留供恢复: /usr/local/bin/.onebox-update-0123"
@@ -970,4 +1132,21 @@ fn child_output_joins_what_the_child_said() {
         Some("只有错误")
     );
     assert_eq!(child_output(&Output::failure(1, " \n")), None);
+}
+
+#[test]
+fn child_report_keeps_stdout_and_warning_lines() {
+    let output = Output {
+        code: 0,
+        stdout: "\n节点 203.0.113.10\n".into(),
+        stderr: "[提示] x\n  [警告] 端口\t8443 未开放\n\u{1b}[33m[警告]\u{1b}[0m 已取消固定\n[警告]\n[错误]不是警告\n".into(),
+    };
+    assert_eq!(
+        child_report(&output),
+        ChildReport {
+            stdout: "节点 203.0.113.10".into(),
+            warnings: vec!["端口8443 未开放".into(), "已取消固定".into()],
+        }
+    );
+    assert_eq!(child_report(&Output::success("")), ChildReport::default());
 }
