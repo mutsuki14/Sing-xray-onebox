@@ -8,7 +8,7 @@ Onebox 用一条命令在 Linux VPS 上部署 VLESS-Reality、XHTTP、Hysteria2�
 
 - **协议组合**：6 个预设或自定义组合；sing-box 与 Xray 可单独或同时承载。
 - **客户端输出**：sing-box（TUN / 仅代理端口）、mihomo（含 proxy-provider）、Xray 完整配置，分享链接、Base64、终端二维码。
-- **证书**：自签（客户端固定指纹）、Let's Encrypt（HTTP-01 或 Cloudflare DNS）、自备证书，自动续期。
+- **证书**：自签（客户端固定指纹）、Let's Encrypt（HTTP-01 或 Cloudflare DNS）、自备证书；每日自动续期，只重启受影响的服务（详见 [install.md](docs/install.md#证书)）。
 - **自有域名网站**：用自己的域名作为 REALITY 目标，自动建站、申请证书，支持模板与内容导入。
 - **远程订阅**：IP 直连 HTTP 或域名 HTTPS，按设备创建、撤销、重置链接。
 - **FRP 服务端**：HTTPS 网站转发或 TCP/UDP 端口转发，一键导出 frpc 配置。
