@@ -33,8 +33,10 @@
 //! starts once; #14 a cleanup failure never fails a successful change;
 //! #15 new names must be DNS domains; #16 precise messages; #17 the cron
 //! daemon is checked before anything changes; G24 transactions are
-//! journaled and recovered after a crash; G25 FRP cron lines are rewritten
-//! in v3 form.
+//! journaled and recovered after a crash, rollbacks converge (a service or
+//! firewall step that keeps failing is reported, never leaves FRP locked
+//! behind a journal) and a change built from a state another operation
+//! replaced is refused; G25 FRP cron lines are rewritten in v3 form.
 
 pub mod ca;
 pub mod checks;
