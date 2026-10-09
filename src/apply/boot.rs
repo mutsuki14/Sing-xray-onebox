@@ -28,7 +28,12 @@ pub const REFRESH_REASON: &str = "更新本机地址";
 /// [`crate::apply::boot`] with explicit feature hooks.
 pub fn boot_with(ctx: &Ctx, features: &dyn Features) -> Result<()> {
     let lock = FileLock::acquire_or_inherit(&ctx.paths.lock(), BUSY_MESSAGE)?;
-    recover::recover_all(ctx, &lock)?;
+    boot_locked(ctx, &lock, features)
+}
+
+/// [`boot_with`] under a lock the caller holds.
+pub fn boot_locked(ctx: &Ctx, lock: &FileLock, features: &dyn Features) -> Result<()> {
+    recover::recover_all(ctx, lock)?;
     let loaded = StateStore::load_required(ctx)?;
     if loaded.config.routing.block_private {
         let current = net::own_global_cidrs(ctx)?;
@@ -36,7 +41,7 @@ pub fn boot_with(ctx: &Ctx, features: &dyn Features) -> Result<()> {
             let mut config = loaded.config.clone();
             config.routing.own_cidrs = current;
             let req = ApplyRequest::from_loaded(&loaded, config, REFRESH_REASON);
-            return engine::apply_with(ctx, &lock, req, features);
+            return engine::apply_with(ctx, lock, req, features);
         }
     }
     network::apply_rules(ctx, &loaded.config)
