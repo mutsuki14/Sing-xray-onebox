@@ -15,10 +15,10 @@
 //! and lock problems are errors.
 
 use crate::ctx::Ctx;
+use crate::domain::config::{SubscriptionMode, WebCert};
 use crate::domain::defaults::HTTP_PORT;
 use crate::domain::ports::{proxy_http01_responder, PortPlan};
 use crate::domain::protocol::{Protocol, Transport};
-use crate::domain::config::{SubscriptionMode, WebCert};
 use crate::domain::NodeConfig;
 use crate::error::Result;
 use crate::host::firewall::{self, ledger_path, Entry, Ledger};
@@ -52,9 +52,7 @@ fn apply_hops(ctx: &Ctx, cfg: &NodeConfig) -> Result<()> {
 /// standalone subscription's port-80 server): the temporary `acme` owner
 /// opens it while certificates are prepared (v2 `acme_http`).
 pub fn needs_http01_port80(cfg: &NodeConfig) -> bool {
-    let site = cfg
-        .site_active()
-        .is_some_and(|s| s.cert == WebCert::Http01);
+    let site = cfg.site_active().is_some_and(|s| s.cert == WebCert::Http01);
     let subscription = cfg.subscription.as_ref().is_some_and(|s| {
         matches!(
             s.mode,
@@ -154,7 +152,11 @@ mod tests {
         }
         assert!(!needs_http01_port80(&cf_site));
         let mut sub = base();
-        sub.subscription = Some(standalone_subscription("sub.example.com", 8448, WebCert::Http01));
+        sub.subscription = Some(standalone_subscription(
+            "sub.example.com",
+            8448,
+            WebCert::Http01,
+        ));
         assert!(needs_http01_port80(&sub));
         sub.subscription = Some(standalone_subscription(
             "sub.example.com",

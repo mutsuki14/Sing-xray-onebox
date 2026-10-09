@@ -20,7 +20,10 @@ fn a_first_install_commits_every_part_of_the_generation() {
     assert_eq!(fs::read(&paths.executable).unwrap(), MANAGER);
     for core in Core::ALL {
         let config = fs::read_to_string(paths.core_config(core)).unwrap();
-        assert!(config.contains("203.0.113.10/32"), "{core:?}: own address blocked");
+        assert!(
+            config.contains("203.0.113.10/32"),
+            "{core:?}: own address blocked"
+        );
         let unit = paths.systemd.join(format!("{}.service", core.service()));
         assert!(unit.is_file(), "{}", unit.display());
         assert_eq!(
@@ -80,9 +83,15 @@ fn stages_persist_their_phase_before_acting_and_report_progress_in_order() {
     let host = Host::new();
     host.install(two_cores());
     // A crash right after each stage leaves the journal in that stage.
-    for phase in [Phase::PrepareCores, Phase::ApplyNetwork, Phase::PublishClients] {
+    for phase in [
+        Phase::PrepareCores,
+        Phase::ApplyNetwork,
+        Phase::PublishClients,
+    ] {
         host.features
-            .inject(super::super::harness::Fault::Crash(Checkpoint::Stage(phase.clone())));
+            .inject(super::super::harness::Fault::Crash(Checkpoint::Stage(
+                phase.clone(),
+            )));
         let req = host.change(singbox_only(), "修改");
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.apply(req)));
         assert!(crashed.is_err());
@@ -90,7 +99,10 @@ fn stages_persist_their_phase_before_acting_and_report_progress_in_order() {
         assert_eq!(journal.phase(), &phase);
         assert_eq!(journal.reason(), Some("修改"));
         host.features.clear();
-        assert_eq!(recover_all(&host.ctx, &host.lock).unwrap(), Recovery::RolledBack);
+        assert_eq!(
+            recover_all(&host.ctx, &host.lock).unwrap(),
+            Recovery::RolledBack
+        );
     }
     assert_invariants(&host);
 }
@@ -112,7 +124,10 @@ fn replacement_cores_are_swapped_in_and_their_versions_recorded() {
     let bin = host.paths().core_bin(Core::Singbox);
     assert_eq!(fs::read(&bin).unwrap(), b"\x7fELF sing-box 1.14.3");
     use std::os::unix::fs::PermissionsExt;
-    assert_eq!(fs::metadata(&bin).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(
+        fs::metadata(&bin).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
     // The first rule still answers `version` (rules match in order); the
     // replacement itself is what this test checks.
     assert_ne!(fs::read(&bin).unwrap(), SING_BOX);

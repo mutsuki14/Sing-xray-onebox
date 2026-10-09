@@ -2,10 +2,10 @@
 
 use super::Run;
 use crate::apply::network;
+use crate::domain::config::SubscriptionMode;
 use crate::domain::defaults::HTTP_PORT;
 use crate::domain::ports::PortPlan;
 use crate::domain::protocol::Core;
-use crate::domain::config::SubscriptionMode;
 use crate::domain::NodeConfig;
 use crate::error::{Context, Error, Result};
 use crate::host::cores;
@@ -201,12 +201,20 @@ mod tests {
         ]);
         let site = with_site(reality.clone(), "example.com", false);
         let mut sub = reality.clone();
-        sub.subscription = Some(standalone_subscription("s.example.com", 8448, WebCert::Http01));
+        sub.subscription = Some(standalone_subscription(
+            "s.example.com",
+            8448,
+            WebCert::Http01,
+        ));
         let plain = fixtures::config(&[(Protocol::VlessReality, 443, Core::Singbox)]);
         let cases: [(&NodeConfig, &NodeConfig, &[&str]); 5] = [
             (&reality, &plain, &[svc::XRAY]),
             (&site, &plain, &[svc::SITE, svc::XRAY]),
-            (&site, &with_site(plain.clone(), "example.com", false), &[svc::XRAY]),
+            (
+                &site,
+                &with_site(plain.clone(), "example.com", false),
+                &[svc::XRAY],
+            ),
             (&sub, &plain, &[svc::SUBSCRIPTION_WEB, svc::XRAY]),
             (&plain, &site, &[]),
         ];

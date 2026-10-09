@@ -34,24 +34,21 @@ pub const BACKUPS: CommandSpec = CommandSpec::new("backups", Group::Maintain, "�
 
 pub const RESTORE: CommandSpec = CommandSpec::new("restore", Group::Maintain, "恢复备份")
     .usage(&["restore [备份ID|latest]"])
-    .args(&[ArgSpec::optional("备份ID", "要恢复的备份（默认 latest，即最新备份）")])
+    .args(&[ArgSpec::optional(
+        "备份ID",
+        "要恢复的备份（默认 latest，即最新备份）",
+    )])
     .handler(restore_command);
 
-pub const RECOVER: CommandSpec = CommandSpec::new(
-    "recover",
-    Group::Maintain,
-    "回滚中断的配置事务与自更新",
-)
-.handler(recover_command);
+pub const RECOVER: CommandSpec =
+    CommandSpec::new("recover", Group::Maintain, "回滚中断的配置事务与自更新")
+        .handler(recover_command);
 
 /// The boot oneshot's entry (`onebox-network` runs `onebox net-apply`).
-pub const NET_APPLY: CommandSpec = CommandSpec::new(
-    "net-apply",
-    Group::Hidden,
-    "开机恢复防火墙与端口跳跃规则",
-)
-.aliases(&["hop-apply", "boot"])
-.handler(net_apply_command);
+pub const NET_APPLY: CommandSpec =
+    CommandSpec::new("net-apply", Group::Hidden, "开机恢复防火墙与端口跳跃规则")
+        .aliases(&["hop-apply", "boot"])
+        .handler(net_apply_command);
 
 /// Every command of this module, for the registry.
 pub const COMMANDS: [CommandSpec; 5] = [BACKUP, BACKUPS, RESTORE, RECOVER, NET_APPLY];

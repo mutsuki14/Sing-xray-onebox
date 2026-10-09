@@ -41,9 +41,20 @@ fn crash_journals_at_every_phase_are_recovered_idempotently() {
             Recovery::RolledBack,
             "{point:?}"
         );
-        assert_eq!(before.diff(&host.world()), Vec::<String>::new(), "{point:?}");
-        assert_eq!(recover_all(&host.ctx, &host.lock).unwrap(), Recovery::Nothing);
-        assert_eq!(before.diff(&host.world()), Vec::<String>::new(), "{point:?}");
+        assert_eq!(
+            before.diff(&host.world()),
+            Vec::<String>::new(),
+            "{point:?}"
+        );
+        assert_eq!(
+            recover_all(&host.ctx, &host.lock).unwrap(),
+            Recovery::Nothing
+        );
+        assert_eq!(
+            before.diff(&host.world()),
+            Vec::<String>::new(),
+            "{point:?}"
+        );
         assert_invariants(&host);
     }
 }
@@ -75,7 +86,10 @@ fn a_journal_committed_before_the_crash_is_only_cleaned_up() {
         &Phase::Committed
     );
     host.exec.clear_history();
-    assert_eq!(recover_all(&host.ctx, &host.lock).unwrap(), Recovery::Finished);
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::Finished
+    );
     assert!(host.history().is_empty(), "{:?}", host.history());
     assert_eq!(host.installed().inbounds, singbox_only().inbounds);
     assert_no_journal(&host);
@@ -167,9 +181,17 @@ fn a_journal_written_by_v2_is_rolled_back_with_its_migrated_old_state() {
     // What the interrupted v2 apply had done already.
     file(&paths.state(), 0o600, b"{\"values\":{}}");
     file(&paths.clients().join("links.txt"), 0o644, b"new links");
-    file(&paths.core_config(crate::domain::protocol::Core::Xray), 0o600, b"{}");
+    file(
+        &paths.core_config(crate::domain::protocol::Core::Xray),
+        0o600,
+        b"{}",
+    );
     fs::remove_file(paths.tls().join("cert.pem")).unwrap();
-    file(&paths.systemd.join("onebox-sing-box.service"), 0o644, b"[Unit]");
+    file(
+        &paths.systemd.join("onebox-sing-box.service"),
+        0o644,
+        b"[Unit]",
+    );
     host.set_crontab("0 1 * * * /usr/bin/true\n");
     assert_eq!(
         recover_all(&host.ctx, &host.lock).unwrap(),
@@ -177,33 +199,51 @@ fn a_journal_written_by_v2_is_rolled_back_with_its_migrated_old_state() {
     );
     // Files are v2's again, byte for byte (the ledgers were rebuilt).
     let after = host.world();
-    let ledgers = ["etc/firewall-v2.json", "etc/hop-v2.json", "etc/.transaction"];
+    let ledgers = [
+        "etc/firewall-v2.json",
+        "etc/hop-v2.json",
+        "etc/.transaction",
+    ];
     assert_eq!(
-        before.clone().without(&ledgers).file_diff(&after.clone().without(&ledgers)),
+        before
+            .clone()
+            .without(&ledgers)
+            .file_diff(&after.clone().without(&ledgers)),
         Vec::<String>::new()
     );
     // The old state's rules and hops came back (migrated from v2 values).
     let rules = &after.iptables;
-    assert!(rules.iter().any(|r| r.contains("filter INPUT -p tcp --dport 443 ")), "{rules:?}");
     assert!(
         rules
             .iter()
-            .any(|r| r.starts_with("nat PREROUTING -p udp --dport 30000:30100 ")
-                && r.ends_with("--to-ports 443")),
+            .any(|r| r.contains("filter INPUT -p tcp --dport 443 ")),
+        "{rules:?}"
+    );
+    assert!(
+        rules.iter().any(
+            |r| r.starts_with("nat PREROUTING -p udp --dport 30000:30100 ")
+                && r.ends_with("--to-ports 443")
+        ),
         "{rules:?}"
     );
     // Services and the crontab as journaled: the v2 line returns, the
     // foreign line stays; legacy units are only enabled, never started.
-    assert_eq!(host.unit(svc::SING_BOX).active, true);
+    assert!(host.unit(svc::SING_BOX).active);
     assert!(host.unit("onebox-net").enabled);
     let history = host.history();
-    assert!(!history.iter().any(|h| h.contains("start onebox-net")), "{history:?}");
+    assert!(
+        !history.iter().any(|h| h.contains("start onebox-net")),
+        "{history:?}"
+    );
     assert_eq!(
         host.crontab(),
         format!("0 1 * * * /usr/bin/true\n{}\n", v2_cert_line(&paths))
     );
     assert_no_journal(&host);
-    assert_eq!(recover_all(&host.ctx, &host.lock).unwrap(), Recovery::Nothing);
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::Nothing
+    );
     assert_invariants(&host);
 }
 
@@ -215,16 +255,23 @@ fn inherited_lock_recovery_child() {
         return;
     };
     let dir = TempDir::new("unused").unwrap();
-    let host = Host::with_paths(dir, crate::paths::Paths::isolated(std::path::Path::new(&root)));
+    let host = Host::with_paths(
+        dir,
+        crate::paths::Paths::isolated(std::path::Path::new(&root)),
+    );
     assert!(host.lock.is_inherited());
     let outcome = recover_all(&host.ctx, &host.lock).unwrap();
     assert_eq!(outcome, Recovery::RolledBack);
     let history = host.history();
     assert!(
-        !history.iter().any(|h| h.contains("start onebox-subscription")),
+        !history
+            .iter()
+            .any(|h| h.contains("start onebox-subscription")),
         "{history:?}"
     );
-    assert!(history.iter().any(|h| h == "systemctl start onebox-sing-box"));
+    assert!(history
+        .iter()
+        .any(|h| h == "systemctl start onebox-sing-box"));
     println!("inherited recovery done");
 }
 
@@ -269,7 +316,11 @@ fn an_inherited_lock_skips_the_parents_records() {
         )
         .unwrap();
     assert!(out.ok(), "{}\n{}", out.stdout, out.stderr);
-    assert!(out.stdout.contains("inherited recovery done"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("inherited recovery done"),
+        "{}",
+        out.stdout
+    );
     assert_no_journal(&host);
     assert_eq!(fs::read(&record).unwrap(), b"not for the child");
 }

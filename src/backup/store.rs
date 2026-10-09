@@ -109,7 +109,10 @@ fn unix_prefix(id: &str) -> Option<u64> {
 pub fn v1_created(id: &str) -> Option<u64> {
     let stamp = id.split_once('-')?.0;
     let (date, time) = stamp.strip_suffix('Z')?.split_once('T')?;
-    if date.len() != 8 || time.len() != 6 || !(date.to_owned() + time).bytes().all(|b| b.is_ascii_digit()) {
+    if date.len() != 8
+        || time.len() != 6
+        || !(date.to_owned() + time).bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     let num = |s: &str| s.parse::<u32>().ok();
@@ -178,7 +181,13 @@ pub fn create_kept(ctx: &Ctx, lock: &FileLock, label: &str, keep: Option<&str>) 
 }
 
 /// Fill the staging directory: state, components, manifest.
-fn write_backup(paths: &Paths, stage: &Path, state: &[u8], label: &str, created: u64) -> Result<()> {
+fn write_backup(
+    paths: &Paths,
+    stage: &Path,
+    state: &[u8],
+    label: &str,
+    created: u64,
+) -> Result<()> {
     ensure_dir(stage, 0o700)?;
     let mut budget = Budget::BACKUP;
     budget.take(state.len() as u64)?;

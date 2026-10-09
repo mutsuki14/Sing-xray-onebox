@@ -430,7 +430,10 @@ impl World {
             out.push(format!("cron {:?} != {:?}", self.cron, other.cron));
         }
         if self.iptables != other.iptables {
-            out.push(format!("iptables {:?} != {:?}", self.iptables, other.iptables));
+            out.push(format!(
+                "iptables {:?} != {:?}",
+                self.iptables, other.iptables
+            ));
         }
         out
     }
@@ -458,7 +461,11 @@ fn walk(root: &Path, path: &Path, out: &mut BTreeMap<String, (u32, Option<Vec<u8
         .collect();
     entries.sort();
     for entry in entries {
-        let rel = entry.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let rel = entry
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         if rel == "run" || rel == "system" || rel.ends_with(".lock") {
             continue;
         }
@@ -512,9 +519,13 @@ fn fault_rule(exec: &FakeExec) -> Faults {
     faults
 }
 
-/// `systemctl` over an in-memory unit table.
+/// `systemctl` over an in-memory unit table (a cron daemon runs).
 fn fake_systemd(exec: &FakeExec) -> Units {
-    let units: Units = Arc::default();
+    let running = Unit {
+        active: true,
+        enabled: true,
+    };
+    let units: Units = Arc::new(Mutex::new(BTreeMap::from([("cron".to_owned(), running)])));
     let shared = units.clone();
     exec.on_fn(
         |cmd| cmd.program == "systemctl",
@@ -626,7 +637,11 @@ fn fake_cores(exec: &FakeExec, paths: &Paths, seed: bool) {
         &["version"],
         Output::success("Xray 26.3.27 (Xray, Penetrates Everything.) 0 (go1.24 linux/amd64)\n"),
     )
-    .on("xray", &["run", "-test"], Output::success("Configuration OK."));
+    .on(
+        "xray",
+        &["run", "-test"],
+        Output::success("Configuration OK."),
+    );
 }
 
 /// A REALITY node on sing-box plus Shadowsocks on Xray (both cores, no

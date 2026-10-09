@@ -27,7 +27,10 @@ fn a_failure_at_every_stage_and_at_the_final_save_restores_the_old_generation() 
         assert_no_journal(&host);
         // Recovery afterwards has nothing to do and changes nothing.
         host.features.clear();
-        assert_eq!(recover_all(&host.ctx, &host.lock).unwrap(), Recovery::Nothing);
+        assert_eq!(
+            recover_all(&host.ctx, &host.lock).unwrap(),
+            Recovery::Nothing
+        );
         assert_eq!(before.diff(&host.world()), Vec::<String>::new());
         assert_invariants(&host);
     }
@@ -36,11 +39,23 @@ fn a_failure_at_every_stage_and_at_the_final_save_restores_the_old_generation() 
     let before = host.world();
     host.apply(big_change(&host)).unwrap();
     let changed = before.diff(&host.world());
-    for path in ["etc/state.json", "etc/xray.json", "onebox", "bin/sing-box", "etc/client/probe.json"] {
+    for path in [
+        "etc/state.json",
+        "etc/xray.json",
+        "onebox",
+        "bin/sing-box",
+        "etc/client/probe.json",
+    ] {
         assert!(changed.iter().any(|c| c == path), "{path}: {changed:?}");
     }
-    assert!(changed.iter().any(|c| c.starts_with("units ")), "{changed:?}");
-    assert!(changed.iter().any(|c| c.starts_with("iptables ")), "{changed:?}");
+    assert!(
+        changed.iter().any(|c| c.starts_with("units ")),
+        "{changed:?}"
+    );
+    assert!(
+        changed.iter().any(|c| c.starts_with("iptables ")),
+        "{changed:?}"
+    );
 }
 
 #[test]
@@ -87,7 +102,10 @@ fn a_rollback_that_cannot_stop_keeps_the_journal_for_recover() {
         "{text}"
     );
     assert!(
-        text.ends_with(&format!("；事务日志保留于 {}，请执行 recover", dir.display())),
+        text.ends_with(&format!(
+            "；事务日志保留于 {}，请执行 recover",
+            dir.display()
+        )),
         "{text}"
     );
     let journal = journal::load(host.paths()).unwrap().unwrap();
@@ -118,11 +136,15 @@ fn a_failed_recovery_names_the_kept_journal() {
     let err = recover_all(&host.ctx, &host.lock).unwrap_err().to_string();
     let dir = journal::dir(host.paths()).display().to_string();
     assert!(
-        err.starts_with(&format!("未完成事务恢复失败；日志保留于 {dir}: 停用 onebox-network")),
+        err.starts_with(&format!(
+            "未完成事务恢复失败；日志保留于 {dir}: 停用 onebox-network"
+        )),
         "{err}"
     );
     // A new apply refuses to start over the pending journal the same way.
-    let err = host.apply(host.change(two_cores(), "再次修改")).unwrap_err();
+    let err = host
+        .apply(host.change(two_cores(), "再次修改"))
+        .unwrap_err();
     assert!(err.to_string().starts_with("未完成事务恢复失败"), "{err}");
 }
 
@@ -159,7 +181,10 @@ fn a_signal_cancels_at_the_next_stage_and_keeps_exit_code_130() {
         format!("配置未应用，已恢复原状态: 操作被信号 {} 中断", libc::SIGINT)
     );
     // Cancelled before stop-old-services acted.
-    let stopped = host.history().iter().any(|h| h == "systemctl stop onebox-xray");
+    let stopped = host
+        .history()
+        .iter()
+        .any(|h| h == "systemctl stop onebox-xray");
     assert!(stopped, "rollback-stop stops the cores");
     assert_eq!(signal::pending(), None, "the consumed signal is cleared");
     assert_eq!(before.diff(&host.world()), Vec::<String>::new());
@@ -189,14 +214,18 @@ fn a_failure_after_the_commit_point_is_not_rolled_back() {
         .inject(Fault::Fail(Checkpoint::Stage(Phase::Finalize)));
     let text = err_text(&host.apply(host.change(singbox_only(), "修改")).unwrap_err());
     assert!(
-        text.starts_with("配置已提交，但事务清理失败: 注入故障") && text.ends_with("；请执行 recover 清理"),
+        text.starts_with("配置已提交，但事务清理失败: 注入故障")
+            && text.ends_with("；请执行 recover 清理"),
         "{text}"
     );
     assert_eq!(host.installed().inbounds, singbox_only().inbounds);
     let journal = journal::load(host.paths()).unwrap().unwrap();
     assert_eq!(journal.phase(), &Phase::Committed);
     host.features.clear();
-    assert_eq!(recover_all(&host.ctx, &host.lock).unwrap(), Recovery::Finished);
+    assert_eq!(
+        recover_all(&host.ctx, &host.lock).unwrap(),
+        Recovery::Finished
+    );
     assert_no_journal(&host);
     assert_eq!(host.installed().inbounds, singbox_only().inbounds);
 }

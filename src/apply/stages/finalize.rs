@@ -79,7 +79,9 @@ pub fn apply_cron(ctx: &Ctx, cfg: &NodeConfig, init: InitSystem) -> Result<()> {
     };
     Crontab::edit(ctx, |tab| {
         match &renew {
-            Some(line) => tab.replace(&Tag::renew(), std::slice::from_ref(line)).map(drop)?,
+            Some(line) => tab
+                .replace(&Tag::renew(), std::slice::from_ref(line))
+                .map(drop)?,
             None => drop(tab.remove(&Tag::renew())),
         }
         tab.remove(&Tag::legacy_boot());
