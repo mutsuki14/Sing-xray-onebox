@@ -192,9 +192,8 @@ fn custom_pairs_follow_their_sources() {
     // Refreshed sources are due and redeployed by a renewal.
     f.ca.leaf(&src, &["a.example.com"], 90, false);
     assert!(engine.due(&dir, &custom).unwrap());
-    assert!(engine
-        .renew(&dir, &custom, RenewKind::Scheduled, None)
-        .unwrap());
+    let renewed = engine.renew(&dir, &custom, RenewKind::Scheduled, None);
+    assert_eq!(renewed.unwrap(), Renewal::Changed);
     assert!(!engine.due(&dir, &custom).unwrap());
     // A vanished source is not due (no nightly failure), but an apply
     // that needs it fails.
@@ -208,7 +207,221 @@ fn custom_pairs_follow_their_sources() {
     );
     assert!(!engine.due(&dir, &gone).unwrap());
     let err = engine.ensure(&dir, &gone, false, None).unwrap_err();
-    assert_eq!(err.to_string(), "证书或私钥文件不存在");
+    assert_eq!(
+        err.to_string(),
+        "证书或私钥文件不存在: /nonexistent/cert.pem"
+    );
+}
+
+#[test]
+fn deleted_custom_sources_keep_the_deployed_pair() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("engine-custom-gone");
+    let engine = engine(&f.ctx, InitSystem::None);
+    let src = f.dir.join("src");
+    let (chain, key) = f.ca.leaf(&src, &["a.example.com"], 90, false);
+    let dir = CertDir::proxy(&f.ctx.paths);
+    let custom = spec(
+        &["a.example.com"],
+        Source::Custom {
+            cert: chain.clone(),
+            key: key.clone(),
+        },
+        Trust::Pinned,
+    );
+    assert!(engine.ensure(&dir, &custom, false, None).unwrap());
+    let deployed = pin(&dir);
+    // The user removes the source once Onebox holds a copy: applies (and
+    // forced renewals) keep the deployed pair.
+    std::fs::remove_file(&chain).unwrap();
+    assert!(!engine.ensure(&dir, &custom, false, None).unwrap());
+    let m = dir.metadata().unwrap().unwrap();
+    assert_eq!(m.last_error, None);
+    assert_eq!(
+        engine
+            .renew(&dir, &custom, RenewKind::Forced, None)
+            .unwrap(),
+        Renewal::Unchanged
+    );
+    assert_eq!(pin(&dir), deployed);
+    // Other names, or a deployed pair that no longer validates, fail and
+    // name the missing file.
+    let renamed = spec(
+        &["b.example.com"],
+        Source::Custom {
+            cert: chain.clone(),
+            key: key.clone(),
+        },
+        Trust::Pinned,
+    );
+    let err = engine.ensure(&dir, &renamed, false, None).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("证书或私钥文件不存在: {}", chain.display())
+    );
+    std::fs::write(dir.cert(), "broken").unwrap();
+    let err = engine.ensure(&dir, &custom, false, None).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("证书或私钥文件不存在: {}", chain.display())
+    );
+    // A missing key is named too; other recorded sources are not "the same".
+    let (chain2, key2) =
+        f.ca.leaf(&f.dir.join("src2"), &["a.example.com"], 90, false);
+    let fresh = spec(
+        &["a.example.com"],
+        Source::Custom {
+            cert: chain2,
+            key: key2.clone(),
+        },
+        Trust::Pinned,
+    );
+    assert!(engine.ensure(&dir, &fresh, false, None).unwrap());
+    std::fs::remove_file(&key2).unwrap();
+    let moved = spec(
+        &["a.example.com"],
+        Source::Custom {
+            cert: f.dir.join("src2/chain.pem"),
+            key: f.dir.join("elsewhere/key.pem"),
+        },
+        Trust::Pinned,
+    );
+    let err = engine.ensure(&dir, &moved, false, None).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "证书或私钥文件不存在: {}",
+            f.dir.join("elsewhere/key.pem").display()
+        )
+    );
+}
+
+/// Put `(chain, key)` where acme.sh keeps the pair of `primary`.
+fn hold(dir: &CertDir, primary: &str, pair: &(PathBuf, PathBuf)) {
+    let (cert, key) = acme::issued_pair(dir, primary);
+    std::fs::copy(&pair.0, cert).unwrap();
+    std::fs::copy(&pair.1, key).unwrap();
+}
+
+fn deploy(dir: &CertDir, pair: &(PathBuf, PathBuf)) {
+    std::fs::copy(&pair.0, dir.cert()).unwrap();
+    std::fs::copy(&pair.1, dir.key()).unwrap();
+}
+
+#[test]
+fn not_due_renewals_deploy_what_acme_sh_holds() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("engine-not-due");
+    serve_release(&f.fake);
+    let engine = engine(&f.ctx, InitSystem::None);
+    let names = ["a.example.com"];
+    let first = f.ca.leaf(&f.dir.join("first"), &names, 90, false);
+    let script = fake_acme(
+        &f.fake,
+        AcmeScript {
+            issue: Some(first),
+            ..AcmeScript::default()
+        },
+    );
+    let dir = CertDir::site(&f.ctx.paths);
+    let http = spec(
+        &names,
+        Source::Acme(Challenge::Webroot(f.ctx.paths.site_root.clone())),
+        Trust::Public,
+    );
+    assert!(engine.ensure(&dir, &http, false, None).unwrap());
+
+    // acme.sh renewed (exit 0) but the deployment failed afterwards: the
+    // deployed pair is due, acme.sh holds a newer one and now says "not
+    // due" (exit 2). The newer pair is deployed.
+    let short = f.ca.leaf(&f.dir.join("short"), &names, 10, false);
+    let newer = f.ca.leaf(&f.dir.join("newer"), &names, 90, false);
+    deploy(&dir, &short);
+    hold(&dir, "a.example.com", &newer);
+    {
+        let mut s = script.lock().unwrap();
+        s.code = 2;
+        s.issue = None;
+    }
+    assert!(engine.due(&dir, &http).unwrap());
+    let outcome = engine.renew(&dir, &http, RenewKind::Scheduled, None);
+    assert_eq!(outcome.unwrap(), Renewal::Changed);
+    assert_eq!(pin(&dir), TlsMaterial::load(&newer.0).unwrap().pin());
+    let call = acme_calls(&f.fake).pop().unwrap();
+    assert!(call.args.contains(&"--renew".into()) && !call.args.contains(&"--force".into()));
+    // The same through an apply (1–30 days left).
+    deploy(&dir, &short);
+    assert!(engine.ensure(&dir, &http, false, None).unwrap());
+    assert_eq!(pin(&dir), TlsMaterial::load(&newer.0).unwrap().pin());
+    let succeeded = dir.metadata().unwrap().unwrap().last_success;
+    assert!(succeeded > 0);
+    // Nothing newer held while the deployed pair is still due: deferred,
+    // not a success (the success time stays, the deferral is recorded).
+    deploy(&dir, &short);
+    hold(&dir, "a.example.com", &short);
+    let mut m = dir.metadata().unwrap().unwrap();
+    m.last_success = 1;
+    dir.save_metadata(&m).unwrap();
+    let outcome = engine.renew(&dir, &http, RenewKind::Scheduled, None);
+    assert_eq!(outcome.unwrap(), Renewal::Deferred);
+    let m = dir.metadata().unwrap().unwrap();
+    assert_eq!(m.last_success, 1);
+    assert_eq!(m.last_error.as_deref(), Some(RENEW_DEFERRED));
+    assert!(!engine.ensure(&dir, &http, false, None).unwrap());
+    assert_eq!(dir.metadata().unwrap().unwrap().last_success, 1);
+    // A pair acme.sh holds that no longer validates is a failure, not
+    // "unchanged".
+    std::fs::write(acme::issued_pair(&dir, "a.example.com").0, "garbage").unwrap();
+    assert!(engine
+        .renew(&dir, &http, RenewKind::Scheduled, None)
+        .is_err());
+    // Forced renewals never accept exit 2.
+    assert!(engine.renew(&dir, &http, RenewKind::Forced, None).is_err());
+}
+
+#[test]
+fn will_contact_acme_follows_the_ensure_rules() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("engine-will-contact");
+    let engine = engine(&f.ctx, InitSystem::None);
+    let names = ["a.example.com"];
+    let dir = CertDir::site(&f.ctx.paths);
+    let webroot = f.ctx.paths.site_root.clone();
+    let http = spec(
+        &names,
+        Source::Acme(Challenge::Webroot(webroot.clone())),
+        Trust::Public,
+    );
+    let dns = spec(&names, Source::Acme(Challenge::Cloudflare), Trust::Public);
+    assert!(
+        engine.will_contact_acme(&dir, &http, false),
+        "nothing deployed"
+    );
+    dir.ensure().unwrap();
+    deploy(&dir, &f.ca.leaf(&f.dir.join("valid"), &names, 90, false));
+    assert!(
+        !engine.will_contact_acme(&dir, &http, false),
+        "valid, no metadata"
+    );
+    assert!(engine.will_contact_acme(&dir, &http, true), "forced");
+    // Metadata of another method: the engine issues anew.
+    let mut cf_meta = Metadata::attempt(&dns, None, 1);
+    cf_meta.last_success = 1;
+    dir.save_metadata(&cf_meta).unwrap();
+    assert!(engine.will_contact_acme(&dir, &http, false));
+    assert!(!engine.will_contact_acme(&dir, &dns, false));
+    // Due within 30 days: a renewal.
+    deploy(&dir, &f.ca.leaf(&f.dir.join("short"), &names, 10, false));
+    assert!(engine.will_contact_acme(&dir, &dns, false));
+    // Self-signed and custom certificates never contact acme.sh.
+    let own = spec(&names, Source::SelfSigned, Trust::Pinned);
+    assert!(!engine.will_contact_acme(&dir, &own, true));
 }
 
 #[test]
@@ -249,7 +462,8 @@ fn cloudflare_needs_credentials_and_persists_them() {
     let call = acme_calls(&f.fake).pop().unwrap();
     assert!(call.env.contains(&("CF_Token".into(), "cf-token".into())));
     // A later forced renewal (cron, FRP) finds the stored credentials.
-    assert!(!engine.renew(&dir, &dns, RenewKind::Forced, None).unwrap());
+    let renewed = engine.renew(&dir, &dns, RenewKind::Forced, None).unwrap();
+    assert_eq!(renewed, Renewal::Unchanged);
     let stored = std::fs::read_to_string(cloudflare::store_path(dir.path())).unwrap();
     assert_eq!(stored, r#"{"CF_Token":"cf-token"}"#);
     let metadata = std::fs::read_to_string(dir.metadata_file()).unwrap();

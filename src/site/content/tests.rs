@@ -67,7 +67,7 @@ fn prepare_creates_owned_directories_and_refuses_foreign_content() {
 }
 
 #[test]
-fn default_homepage_follows_settings_until_edited() {
+fn default_homepage_is_written_only_when_absent() {
     let s = site();
     let store = ContentStore::new(&s.paths);
     store.prepare().unwrap();
@@ -76,15 +76,35 @@ fn default_homepage_follows_settings_until_edited() {
     assert_eq!(mode(store.index()), 0o644);
     assert!(store.is_generated().unwrap());
     assert!(!store.ensure_default("<p>v1</p>").unwrap());
-    assert!(
-        store.ensure_default("<p>v2</p>").unwrap(),
-        "untouched generated page re-rendered"
-    );
-    assert_eq!(read(store.index()), "<p>v2</p>");
+    // Other settings do not touch an existing page (a publish does).
+    assert!(!store.ensure_default("<p>v2</p>").unwrap());
+    assert_eq!(read(store.index()), "<p>v1</p>");
+    assert!(store.is_generated().unwrap());
     fs::write(store.index(), "hand edited").unwrap();
     assert!(!store.is_generated().unwrap());
     assert!(!store.ensure_default("<p>v3</p>").unwrap());
     assert_eq!(read(store.index()), "hand edited");
+    fs::remove_file(store.index()).unwrap();
+    assert!(store.ensure_default("<p>v4</p>").unwrap());
+    assert_eq!(read(store.index()), "<p>v4</p>");
+}
+
+#[test]
+fn restored_template_pages_survive_later_applies() {
+    let s = site();
+    let store = ContentStore::new(&s.paths);
+    store.prepare().unwrap();
+    // `site template docs --title A`, then `site template profile --title B`
+    // (backs up the docs/A page), then `site restore latest`.
+    store.publish_template("docs A").unwrap();
+    store.publish_template("profile B").unwrap();
+    store.restore("latest").unwrap();
+    assert_eq!(read(store.index()), "docs A");
+    assert!(store.is_generated().unwrap());
+    // The next unrelated apply still renders profile/B from the settings.
+    assert!(!store.ensure_default("profile B").unwrap());
+    assert_eq!(read(store.index()), "docs A");
+    assert!(store.is_generated().unwrap());
 }
 
 #[test]

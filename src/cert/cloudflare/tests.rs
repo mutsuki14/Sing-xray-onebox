@@ -145,6 +145,45 @@ fn resolve_prefers_given_credentials_and_persists_them() {
 }
 
 #[test]
+fn resolve_lays_given_credentials_over_the_stored_ones() {
+    let dir = TempDir::new("cf-merge").unwrap();
+    let (ctx, _, _) = Ctx::test(dir.path());
+    let site = ctx.paths.site();
+    std::fs::create_dir_all(site.join("acme")).unwrap();
+    std::fs::write(
+        store_path(&site),
+        r#"{"CF_Account_ID":"0123456789abcdef0123456789abcdef","CF_Token":"old","CF_Zone_ID":"zone1"}"#,
+    )
+    .unwrap();
+    std::fs::write(site.join("acme/account.conf"), "SAVED_CF_Email='a@b.c'\n").unwrap();
+    let given = CfCredentials::token("new", None).unwrap();
+    let used = resolve(&ctx, &site, Some(&given), &no_env).unwrap();
+    assert_eq!(used.get("CF_Token"), Some("new"));
+    assert_eq!(used.get("CF_Zone_ID"), Some("zone1"));
+    assert_eq!(
+        used.get("CF_Account_ID"),
+        Some("0123456789abcdef0123456789abcdef")
+    );
+    assert_eq!(used.get("CF_Email"), Some("a@b.c"));
+    let stored = std::fs::read_to_string(store_path(&site)).unwrap();
+    assert_eq!(
+        stored,
+        r#"{"CF_Account_ID":"0123456789abcdef0123456789abcdef","CF_Email":"a@b.c","CF_Token":"new","CF_Zone_ID":"zone1"}"#
+    );
+    // A given account ID replaces the stored one; incomplete given values
+    // are ignored in favour of what is stored.
+    let other = CfCredentials::token("new", Some("ffffffffffffffffffffffffffffffff")).unwrap();
+    let used = resolve(&ctx, &site, Some(&other), &no_env).unwrap();
+    assert_eq!(
+        used.get("CF_Account_ID"),
+        Some("ffffffffffffffffffffffffffffffff")
+    );
+    let incomplete = CfCredentials::default();
+    let used = resolve(&ctx, &site, Some(&incomplete), &no_env).unwrap();
+    assert_eq!(used.get("CF_Token"), Some("new"));
+}
+
+#[test]
 fn prompt_asks_for_a_secret_token_and_an_optional_account() {
     let ui = ScriptedPrompter::new(["", "tok", "nothex", ""]);
     let creds = prompt(&ui).unwrap();

@@ -14,8 +14,15 @@
 //! interruption is rolled back with everything else.
 //!
 //! `index.sha256` holds the SHA-256 of a generated `index.html`; while it
-//! matches, the homepage counts as generated (it may be re-rendered and
-//! `site title` may change it); imports remove it.
+//! matches, the homepage counts as generated (`site title` may replace it);
+//! imports remove it. An existing `index.html` is only ever replaced by an
+//! explicit publish: the default homepage is written only when there is
+//! none (v2, user edits survive `regen`), and title / template / theme /
+//! description changes reach the page through `SiteContent::Template`,
+//! which the CLI sets with them (v2 published the page in the same apply).
+//! The settings are therefore never compared with the page: a restored
+//! backup stays as it was even though the configuration names other
+//! settings.
 //!
 //! Changes from v2:
 //! - only the 10 newest content backups are kept (v2 never pruned,
@@ -26,8 +33,6 @@
 //!   an import (v2 dropped nested `.well-known` directories, F-8.1#19);
 //! - imports from inside the private configuration tree (`ROOT`, FRP root)
 //!   are refused, not only from `/etc` itself;
-//! - an untouched generated homepage follows title/template/theme changes
-//!   on the next apply (v2 wrote it only when absent);
 //! - error messages name the offending path.
 
 use crate::error::{Error, Result};
@@ -149,18 +154,17 @@ impl<'a> ContentStore<'a> {
         Ok(String::from_utf8_lossy(&saved).trim() == sha256_hex(&index))
     }
 
-    /// Write the homepage `html` when there is none, or when the current
-    /// one is an untouched generated page that differs. Returns whether it
-    /// was written.
+    /// Write the homepage `html` (marked generated) when there is no
+    /// `index.html` at all; an existing page is left alone whatever it is
+    /// (module docs). Returns whether it was written.
     pub fn ensure_default(&self, html: &str) -> Result<bool> {
         let index = self.index();
-        let write = !index.exists()
-            || (self.is_generated()? && read_bounded(&index, INDEX_MAX)? != html.as_bytes());
-        if write {
-            atomic_write(&index, html.as_bytes(), 0o644)?;
-            self.write_hash(html.as_bytes())?;
+        if fs::symlink_metadata(&index).is_ok() {
+            return Ok(false);
         }
-        Ok(write)
+        atomic_write(&index, html.as_bytes(), 0o644)?;
+        self.write_hash(html.as_bytes())?;
+        Ok(true)
     }
 
     fn write_hash(&self, index: &[u8]) -> Result<()> {

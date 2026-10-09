@@ -179,6 +179,12 @@ pub fn lookup(ctx: &Ctx, dir: &Path) -> Result<Option<CfCredentials>> {
 
 /// [`lookup`] with an injected environment.
 pub fn lookup_with(ctx: &Ctx, dir: &Path, env: EnvLookup) -> Result<Option<CfCredentials>> {
+    let merged = merged_with(ctx, dir, env)?;
+    Ok(merged.is_complete().then_some(merged))
+}
+
+/// Everything stored and in the environment for `dir`, complete or not.
+fn merged_with(ctx: &Ctx, dir: &Path, env: EnvLookup) -> Result<CfCredentials> {
     let mut merged = CfCredentials::default();
     for conf in account_files(ctx, dir, env) {
         if let Ok(bytes) = read_bounded(&conf, FILE_MAX) {
@@ -201,7 +207,7 @@ pub fn lookup_with(ctx: &Ctx, dir: &Path, env: EnvLookup) -> Result<Option<CfCre
         .filter_map(|k| env(k).map(|v| (k.to_string(), v)))
         .collect();
     merged.absorb(from_env, valid_value);
-    Ok(merged.is_complete().then_some(merged))
+    Ok(merged)
 }
 
 /// `account.conf` files in merge order (earliest first).
@@ -253,19 +259,24 @@ pub fn persist(dir: &Path, credentials: &CfCredentials) -> Result<()> {
     atomic_write(&store_path(dir), &credentials.to_json()?, 0o600)
 }
 
-/// The credentials an issuance for `dir` uses: `given` (resolved by the
-/// CLI), else the stored/environment ones; persisted either way so later
-/// scheduled renewals find them. Never prompts.
+/// The credentials an issuance for `dir` uses: the stored and environment
+/// ones with `given` (resolved by the CLI, when complete) laid over them —
+/// so a stored `CF_Zone_ID` or `CF_Account_ID` survives a new token (v2
+/// merged the same way) — persisted so later scheduled renewals find them.
+/// Never prompts.
 pub fn resolve(
     ctx: &Ctx,
     dir: &Path,
     given: Option<&CfCredentials>,
     env: EnvLookup,
 ) -> Result<CfCredentials> {
-    let credentials = match given {
-        Some(c) if c.is_complete() => c.clone(),
-        _ => lookup_with(ctx, dir, env)?.ok_or_else(|| Error::msg(MISSING))?,
-    };
+    let mut credentials = merged_with(ctx, dir, env)?;
+    if let Some(given) = given.filter(|c| c.is_complete()) {
+        credentials.absorb(given.values.clone(), valid_value);
+    }
+    if !credentials.is_complete() {
+        return Err(Error::msg(MISSING));
+    }
     persist(dir, &credentials)?;
     Ok(credentials)
 }

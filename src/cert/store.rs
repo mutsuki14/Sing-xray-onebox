@@ -194,8 +194,8 @@ impl Metadata {
 /// The chain to deploy from a source pair: every `CERTIFICATE` block of
 /// `cert`, the block matching `key` first (found by public key).
 pub fn deployable_chain(ctx: &Ctx, cert: &Path, key: &Path) -> Result<String> {
-    if !cert.is_file() || !key.is_file() {
-        return Err(Error::msg("证书或私钥文件不存在"));
+    if let Some(missing) = [cert, key].into_iter().find(|p| !p.is_file()) {
+        return Err(openssl::missing_file(missing));
     }
     let text = String::from_utf8(read_bounded(cert, PEM_MAX_BYTES)?)
         .map_err(|_| Error::msg("证书文件不是有效的 PEM 文本"))?;

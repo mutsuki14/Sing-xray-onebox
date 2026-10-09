@@ -191,6 +191,33 @@ fn metadata_describes_its_own_renewal() {
         source(m(MethodId::Standalone, Option::None)).unwrap().0,
         Source::Acme(Challenge::Responder(dir.responder_webroot()))
     );
+    // v2 recorded the site root for standalone certificates: tokens go
+    // there only while Onebox owns it, else into the directory's own root.
+    let tmp = crate::sys::fs::TempDir::new("hooks-standalone").unwrap();
+    let local = CertDir::new(tmp.join("tls"));
+    let site_root = tmp.join("onebox-site");
+    std::fs::create_dir_all(&site_root).unwrap();
+    let standalone = |webroot: &Path| {
+        let meta = Metadata {
+            webroot: Some(webroot.to_path_buf()),
+            ..m(MethodId::Standalone, Option::None)
+        };
+        spec_from_metadata(&local, &meta).unwrap().source
+    };
+    assert_eq!(
+        standalone(&site_root),
+        Source::Acme(Challenge::Responder(local.responder_webroot()))
+    );
+    std::fs::write(site_root.join(".onebox-site-owned"), "onebox\n").unwrap();
+    assert_eq!(
+        standalone(&site_root),
+        Source::Acme(Challenge::Responder(site_root.clone()))
+    );
+    let inside = local.path().join("acme/http01");
+    assert_eq!(
+        standalone(&inside),
+        Source::Acme(Challenge::Responder(inside.clone()))
+    );
     assert_eq!(
         source(m(MethodId::Cloudflare, Option::None)).unwrap().0,
         Source::Acme(Challenge::Cloudflare)
@@ -276,7 +303,10 @@ fn web_certificates_must_be_publicly_trusted() {
         cert: &web,
         webroot: Some(f.ctx.paths.site_root.clone()),
     };
-    assert!(!web_cert_ready(&f.ctx, &target));
+    assert!(
+        !web_needs_acme_with(&engine, &target, true),
+        "custom certificates never run acme.sh"
+    );
     let err = prepare_web_with(&engine, target.clone(), false, Option::None).unwrap_err();
     assert!(err.to_string().starts_with(PUBLIC_REQUIRED), "{err}");
     // FRP accepts a private certificate (v2 parity).
@@ -301,7 +331,13 @@ fn web_certificates_must_be_publicly_trusted() {
         ..target
     };
     assert!(prepare_web_with(&engine, target.clone(), false, Option::None).unwrap());
-    assert!(web_cert_ready(&f.ctx, &target));
+    // Publicly valid, but recorded as custom: an HTTP-01 target is issued
+    // anew, so acme.sh runs (and the site must answer on port 80).
+    let http = WebCertTarget {
+        cert: &WebCert::Http01,
+        ..target.clone()
+    };
+    assert!(web_needs_acme_with(&engine, &http, false));
     let status = status(&f.ctx, &f.ctx.paths.site()).unwrap().unwrap();
     assert_eq!(status.metadata.unwrap().method, MethodId::Custom);
     assert_eq!(

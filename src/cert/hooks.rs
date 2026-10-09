@@ -15,18 +15,18 @@
 //! self-signed or private-CA pair get an explicit message; the proxy's
 //! public trust is recorded on the configuration the apply saves.
 
-use super::engine::{Engine, RenewKind};
+use super::engine::{Engine, RenewKind, Renewal, RENEW_DEFERRED};
 use super::method::{CertSpec, Challenge, MethodId, Source};
 use super::openssl::{self, Trust};
 use super::store::{self, CertDir, CertStatus, Metadata};
 use super::{CfCredentials, PUBLIC_REQUIRED};
 use crate::ctx::Ctx;
 use crate::domain::config::{AcmeMethod, NodeConfig, ProxyCertMode, SubscriptionMode, WebCert};
-use crate::domain::defaults::RENEWAL_WINDOW_SECS;
 use crate::domain::ports::{proxy_http01_responder, Http01Responder};
 use crate::error::{Error, Result};
 use crate::host::service::{SITE, SUBSCRIPTION_WEB};
 use crate::paths::Paths;
+use crate::ui::out;
 use std::path::{Path, PathBuf};
 
 /// A public web endpoint's certificate (site, standalone subscription).
@@ -147,14 +147,22 @@ pub fn served_by(engine: &Engine, service: &str, webroot: &Path, dir: &CertDir) 
     if engine.services().running(service) {
         return Challenge::Webroot(webroot.to_path_buf());
     }
-    let owned = OWNED_WEBROOT_MARKERS
-        .iter()
-        .any(|m| webroot.join(m).is_file());
-    Challenge::Responder(if owned {
+    Challenge::Responder(responder_webroot(webroot, dir))
+}
+
+/// The webroot the built-in responder may serve: `webroot` when Onebox owns
+/// it (an ownership marker, or inside the certificate directory), else the
+/// directory's own `acme/http01`.
+fn responder_webroot(webroot: &Path, dir: &CertDir) -> PathBuf {
+    let owned = webroot.starts_with(dir.path())
+        || OWNED_WEBROOT_MARKERS
+            .iter()
+            .any(|m| webroot.join(m).is_file());
+    if owned {
         webroot.to_path_buf()
     } else {
         dir.responder_webroot()
-    })
+    }
 }
 
 /// A web endpoint's spec: `http01` answers HTTP-01 challenges, custom pairs
@@ -209,12 +217,18 @@ pub fn prepare_web_with(
     force_renew: bool,
     cf: Option<&CfCredentials>,
 ) -> Result<bool> {
-    let dir = CertDir::new(&target.dir);
-    let http01 = http01_challenge(&dir, target.webroot.as_deref());
-    let spec = web_spec(&target.domains, target.cert, http01, Trust::Public);
+    let (dir, spec) = web_target_spec(&target);
     engine
         .ensure(&dir, &spec, force_renew, cf)
         .map_err(|e| explain_untrusted(engine, &spec, e))
+}
+
+/// The directory and spec [`prepare_web`] brings to agreement.
+fn web_target_spec(target: &WebCertTarget) -> (CertDir, CertSpec) {
+    let dir = CertDir::new(&target.dir);
+    let http01 = http01_challenge(&dir, target.webroot.as_deref());
+    let spec = web_spec(&target.domains, target.cert, http01, Trust::Public);
+    (dir, spec)
 }
 
 /// A custom web pair that is fine except for public trust gets the
@@ -232,17 +246,18 @@ fn explain_untrusted(engine: &Engine, spec: &CertSpec, error: Error) -> Error {
     }
 }
 
-/// The deployed web pair of `target` is publicly valid for 30 more days
-/// (no ACME call would be needed): the site starts a bootstrap nginx for
-/// HTTP-01 only when this is false.
-pub fn web_cert_ready(ctx: &Ctx, target: &WebCertTarget) -> bool {
-    store::valid_for(
-        ctx,
-        &CertDir::new(&target.dir),
-        &target.domains,
-        Trust::Public,
-        RENEWAL_WINDOW_SECS,
-    )
+/// Whether [`prepare_web`] for `target` with `force_renew` will run acme.sh
+/// (the engine's own rule, [`Engine::will_contact_acme`]): an HTTP-01
+/// endpoint whose nginx is not running yet starts its port-80 bootstrap
+/// exactly then. Read-only.
+pub fn web_needs_acme(ctx: &Ctx, target: &WebCertTarget, force_renew: bool) -> bool {
+    web_needs_acme_with(&Engine::system(ctx), target, force_renew)
+}
+
+/// [`web_needs_acme`] with an explicit engine.
+pub fn web_needs_acme_with(engine: &Engine, target: &WebCertTarget, force_renew: bool) -> bool {
+    let (dir, spec) = web_target_spec(target);
+    engine.will_contact_acme(&dir, &spec, force_renew)
 }
 
 /// FRP web certificate: issue or deploy for `domains` (≤ 32, wildcards via
@@ -289,7 +304,11 @@ pub fn renew_dir_with(
     } else {
         RenewKind::Scheduled
     };
-    engine.renew(&cert_dir, &spec, kind, cf)
+    let outcome = engine.renew(&cert_dir, &spec, kind, cf)?;
+    if outcome == Renewal::Deferred {
+        out::warn(format!("{}: {RENEW_DEFERRED}", spec.primary()));
+    }
+    Ok(outcome.changed())
 }
 
 /// Read-only preflight (v2 `renewal_due`): whether the certificate
@@ -316,7 +335,12 @@ pub fn spec_from_metadata(dir: &CertDir, m: &Metadata) -> Result<CertSpec> {
             (Source::Acme(Challenge::Webroot(webroot)), Trust::Public)
         }
         MethodId::Standalone => {
-            let webroot = m.webroot.clone().unwrap_or_else(|| dir.responder_webroot());
+            // v2 recorded the site root for every standalone certificate;
+            // tokens go there only while Onebox owns it.
+            let webroot = match &m.webroot {
+                Some(w) => responder_webroot(w, dir),
+                None => dir.responder_webroot(),
+            };
             (Source::Acme(Challenge::Responder(webroot)), Trust::Public)
         }
         MethodId::Cloudflare => (Source::Acme(Challenge::Cloudflare), Trust::Public),

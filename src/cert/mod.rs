@@ -22,7 +22,11 @@
 //! - renewals restart only the affected service and never run a full apply
 //!   (G-8.1#4); the caller applies only when the proxy identity changed;
 //! - custom chains are deployed leaf-first; the proxy pin is the leaf's;
-//! - self-signed and custom-only nodes need no renewal cron (F-8.1#6).
+//! - self-signed-only nodes need no renewal cron (F-8.1#6); custom
+//!   certificates get it so refreshed sources are redeployed (G17);
+//! - acme.sh's "not due" still deploys the pair it holds, and a renewal
+//!   acme.sh defers while the deployed pair expires within 30 days is
+//!   reported, not recorded as a success.
 
 pub mod acme;
 pub mod cloudflare;
@@ -38,10 +42,10 @@ pub mod store;
 pub(crate) mod testing;
 
 pub use cloudflare::CfCredentials;
-pub use engine::{Engine, RenewKind};
+pub use engine::{Engine, RenewKind, Renewal};
 pub use hooks::{
     issue_domains, prepare_proxy, prepare_web, renew_dir, renew_needed, renewal_due, status,
-    web_cert_ready, RenewNeed, WebCertTarget,
+    web_needs_acme, RenewNeed, WebCertTarget,
 };
 pub use method::{CertSpec, Challenge, MethodId, Source};
 pub use openssl::{publicly_trusted, validate_pair, Trust};

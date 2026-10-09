@@ -14,6 +14,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::render::tls::TlsMaterial;
 use crate::sys::exec::{Cmd, Output};
+use crate::sys::fs::read_bounded;
 use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -67,8 +68,8 @@ pub fn validate_pair(ctx: &Ctx, cert: &Path, key: &Path, name: &str, trust: Trus
     if !valid_name(name) {
         return Err(Error::msg("证书域名无效"));
     }
-    if !cert.is_file() || !key.is_file() {
-        return Err(Error::msg("证书或私钥文件不存在"));
+    if let Some(missing) = [cert, key].into_iter().find(|p| !p.is_file()) {
+        return Err(missing_file(missing));
     }
     let cert_s = path_arg(cert);
     let unexpired =
@@ -92,6 +93,11 @@ pub fn validate_pair(ctx: &Ctx, cert: &Path, key: &Path, name: &str, trust: Trus
         }
     }
     Ok(())
+}
+
+/// `证书或私钥文件不存在: PATH`.
+pub fn missing_file(path: &Path) -> Error {
+    Error::msg(format!("证书或私钥文件不存在: {}", path.display()))
 }
 
 fn verify(ctx: &Ctx, cert: &str, name: &str, trust: Trust) -> Result<()> {
@@ -141,12 +147,37 @@ pub fn expires_within(ctx: &Ctx, cert: &Path, secs: u64) -> bool {
 }
 
 /// The public key of a private key file (`openssl pkey -pubout`).
+///
+/// Encrypted keys are refused at once: nginx and the cores could not load
+/// them, and without `-passin` openssl would ask for the passphrase on the
+/// terminal in the middle of an apply (or wait out the timeout under cron).
+/// PEM headers name the usual encrypted forms; the empty `-passin pass:`
+/// makes any other one fail instead of prompting.
 pub fn key_pubkey(ctx: &Ctx, key: &Path) -> Result<String> {
-    let out = ctx.run(&openssl().args(["pkey", "-in", &path_arg(key), "-pubout"]))?;
+    if encrypted_key(key) {
+        return Err(Error::msg(ENCRYPTED_KEY));
+    }
+    let cmd = openssl().args(["pkey", "-in", &path_arg(key), "-passin", "pass:", "-pubout"]);
+    let out = ctx.run(&cmd)?;
     if !out.ok() {
         return Err(Error::msg("私钥无效或无法读取"));
     }
     Ok(out.stdout)
+}
+
+/// Error for a passphrase-protected private key.
+pub const ENCRYPTED_KEY: &str = "私钥已加密，请提供未加密的私钥";
+const KEY_MAX_BYTES: u64 = 1024 * 1024;
+
+/// PKCS#8 `ENCRYPTED PRIVATE KEY` or a traditional key with
+/// `Proc-Type: 4,ENCRYPTED`.
+fn encrypted_key(key: &Path) -> bool {
+    read_bounded(key, KEY_MAX_BYTES).is_ok_and(|bytes| {
+        String::from_utf8_lossy(&bytes).lines().any(|line| {
+            let line = line.trim();
+            line == "-----BEGIN ENCRYPTED PRIVATE KEY-----" || line == "Proc-Type: 4,ENCRYPTED"
+        })
+    })
 }
 
 /// The public key of one PEM certificate block (fed on stdin).

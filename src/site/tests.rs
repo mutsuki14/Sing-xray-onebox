@@ -236,6 +236,56 @@ fn http01_without_a_running_site_starts_a_bootstrap_nginx() {
 }
 
 #[test]
+fn http01_after_another_method_bootstraps_despite_a_valid_pair() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("site-bootstrap-switch");
+    serve_release(&f.fake);
+    let started = host(&f.fake, &f.ctx.paths);
+    let engine = engine(&f.ctx, InitSystem::Systemd);
+    // `site enable --tls cf`, `site disable`, then `site enable` with the
+    // default HTTP-01: a publicly valid pair recorded as Cloudflare stays.
+    let site_dir = CertDir::site(&f.ctx.paths);
+    let old =
+        f.ca.leaf(&f.dir.join("old"), &["www.example.com"], 90, false);
+    crate::cert::store::install_pair(
+        &f.ctx,
+        &site_dir,
+        &old.0,
+        &old.1,
+        &["www.example.com".into()],
+        crate::cert::Trust::Public,
+    )
+    .unwrap();
+    let dns = crate::cert::CertSpec {
+        domains: vec!["www.example.com".into()],
+        source: crate::cert::Source::Acme(crate::cert::Challenge::Cloudflare),
+        trust: crate::cert::Trust::Public,
+    };
+    site_dir
+        .save_metadata(&crate::cert::Metadata::attempt(&dns, None, 1))
+        .unwrap();
+    let issued =
+        f.ca.leaf(&f.dir.join("issued"), &["www.example.com"], 90, false);
+    fake_acme(
+        &f.fake,
+        AcmeScript {
+            issue: Some(issued),
+            ..AcmeScript::default()
+        },
+    );
+    let mut cfg = site_cfg(WebCert::Http01, true, 8443);
+    let done = prepare_with(&engine, &mut cfg, None, false, None).unwrap();
+    assert!(done.bootstrapped && done.cert_changed, "{done:?}");
+    assert!(started.load(Ordering::SeqCst));
+    let call = acme_calls(&f.fake).pop().unwrap();
+    let webroot = f.ctx.paths.site_root.display().to_string();
+    assert!(call.args.contains(&"--issue".into()));
+    assert!(call.args.ends_with(&["--webroot".into(), webroot]));
+}
+
+#[test]
 fn check_then_apply_installs_the_tested_file() {
     if !have_openssl() {
         return;

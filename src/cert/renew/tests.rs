@@ -38,8 +38,8 @@ fn renewal_requires_the_node_lock() {
     let other = FileLock::acquire(&dir.join("other.lock"), BUSY_MESSAGE).unwrap();
     let cfg = config(&[(Protocol::Trojan, 443, Core::Singbox)]);
     let o = opts(CertScopes::ALL, true, false);
-    assert!(renew_all_with(&engine, &other, &cfg, &o).is_err());
-    let report = renew_all_with(&engine, &lock(&ctx), &config(&[]), &o).unwrap();
+    assert!(renew_all_with(&engine, &other, &cfg, &o, None).is_err());
+    let report = renew_all_with(&engine, &lock(&ctx), &config(&[]), &o, None).unwrap();
     assert_eq!(report, RenewReport::default());
 }
 
@@ -58,8 +58,14 @@ fn self_signed_renewal_changes_the_pinned_identity() {
     let held = lock(&f.ctx);
 
     // Fresh: nothing due, nothing restarted, also when not scheduled.
-    let report =
-        renew_all_with(&engine, &held, &cfg, &opts(CertScopes::ALL, false, false)).unwrap();
+    let report = renew_all_with(
+        &engine,
+        &held,
+        &cfg,
+        &opts(CertScopes::ALL, false, false),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.unchanged, [CertScope::Proxy]);
     assert!(report.renewed.is_empty() && !report.proxy_identity_changed);
     assert!(restarts(&f).is_empty());
@@ -70,7 +76,14 @@ fn self_signed_renewal_changes_the_pinned_identity() {
     let (cert, key) = self_signed(&f.dir.join("short"), &["www.bing.com"], 10);
     std::fs::copy(cert, tls.cert()).unwrap();
     std::fs::copy(key, tls.key()).unwrap();
-    let report = renew_all_with(&engine, &held, &cfg, &opts(CertScopes::ALL, true, false)).unwrap();
+    let report = renew_all_with(
+        &engine,
+        &held,
+        &cfg,
+        &opts(CertScopes::ALL, true, false),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.renewed, [CertScope::Proxy]);
     assert!(report.proxy_identity_changed);
     assert!(restarts(&f).is_empty());
@@ -125,6 +138,7 @@ fn acme_renewal_restarts_only_running_cores() {
         &held,
         &cfg,
         &opts(CertScopes::only(CertScope::Proxy), false, true),
+        None,
     )
     .unwrap();
     assert_eq!(report.renewed, [CertScope::Proxy]);
@@ -190,7 +204,14 @@ fn web_targets_renew_independently_and_report_failures() {
     let held = lock(&f.ctx);
     // The site is due (10 days) and served by its running nginx; the
     // subscription has no certificate yet and its acme.sh run fails.
-    let report = renew_all_with(&engine, &held, &cfg, &opts(CertScopes::ALL, true, false)).unwrap();
+    let report = renew_all_with(
+        &engine,
+        &held,
+        &cfg,
+        &opts(CertScopes::ALL, true, false),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.renewed, [CertScope::Site]);
     assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
     assert_eq!(report.failed[0].0, CertScope::Subscription);
@@ -219,6 +240,7 @@ fn web_targets_renew_independently_and_report_failures() {
         &held,
         &cfg,
         &opts(CertScopes::only(CertScope::Subscription), false, false),
+        None,
     )
     .unwrap();
     assert_eq!(report.unchanged, [CertScope::Site]);
@@ -235,6 +257,19 @@ fn identity_change_rules() {
         },
         pinned: false,
     });
+    let custom = |pinned| {
+        let mut cfg = self_cfg.clone();
+        cfg.tls = Some(ProxyTls {
+            mode: crate::domain::config::ProxyCertMode::Custom {
+                domain: "p.example.com".into(),
+                cert: "/c.pem".into(),
+                key: "/k.pem".into(),
+            },
+            pinned,
+        });
+        cfg
+    };
+    let (custom_pinned, custom_public) = (custom(true), custom(false));
     let id = |pin: &str, trusted| Identity {
         pin: Some(pin.into()),
         trusted,
@@ -245,7 +280,17 @@ fn identity_change_rules() {
         (&acme_cfg, id("a", true), id("b", true), false),
         (&acme_cfg, id("a", true), id("b", false), true),
         (&acme_cfg, id("a", false), id("b", false), true),
-        (&acme_cfg, id("a", false), id("a", true), true),
+        // Clients were rendered unpinned and the pair is trusted again.
+        (&acme_cfg, id("a", false), id("a", true), false),
+        // Clients pin a custom leaf whose CA the system store now trusts:
+        // the trust measured before the renewal already says "trusted",
+        // but the stored configuration still pins (full apply needed).
+        (&custom_pinned, id("a", true), id("b", true), true),
+        (&custom_pinned, id("a", false), id("b", false), true),
+        (&custom_pinned, id("a", false), id("a", false), false),
+        (&custom_pinned, id("a", true), id("a", true), true),
+        (&custom_public, id("a", true), id("b", true), false),
+        (&custom_public, id("a", true), id("b", false), true),
     ];
     for (cfg, before, after, changed) in cases {
         assert_eq!(
@@ -254,4 +299,155 @@ fn identity_change_rules() {
             "{before:?} → {after:?}"
         );
     }
+}
+
+/// A node with an ACME Cloudflare proxy certificate and a Cloudflare site.
+fn dns_node() -> NodeConfig {
+    let base = config(&[
+        (Protocol::Trojan, 443, Core::Singbox),
+        (Protocol::VlessReality, 8443, Core::Xray),
+    ]);
+    let mut cfg = with_site(base, "www.example.com", false);
+    cfg.tls = Some(ProxyTls {
+        mode: crate::domain::config::ProxyCertMode::Acme {
+            domain: "proxy.example.com".into(),
+            method: AcmeMethod::Cloudflare,
+        },
+        pinned: false,
+    });
+    if let Some(site) = cfg.site.as_mut() {
+        site.cert = WebCert::Cloudflare;
+    }
+    cfg
+}
+
+fn token_of(cmd: &crate::sys::exec::Cmd) -> Option<String> {
+    cmd.env
+        .iter()
+        .find(|(k, _)| k == "CF_Token")
+        .map(|(_, v)| v.clone())
+}
+
+#[test]
+fn given_credentials_serve_only_targets_without_their_own() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("renew-cf");
+    serve_release(&f.fake);
+    f.fake
+        .on("systemctl", &["is-active"], Output::failure(3, ""))
+        .on("systemctl", &["restart"], Output::success(""));
+    let engine = engine(&f.ctx, InitSystem::Systemd);
+    let pair = f.ca.leaf(
+        &f.dir.join("issued"),
+        &["proxy.example.com", "www.example.com"],
+        90,
+        false,
+    );
+    fake_acme(
+        &f.fake,
+        AcmeScript {
+            issue: Some(pair),
+            ..AcmeScript::default()
+        },
+    );
+    let cfg = dns_node();
+    let proxy = CertDir::proxy(&f.ctx.paths);
+    let site = CertDir::site(&f.ctx.paths);
+    let stored = CfCredentials::token("stored-token", None).unwrap();
+    crate::cert::cloudflare::persist(proxy.path(), &stored).unwrap();
+    let forced = opts(CertScopes::ALL, false, true);
+    assert_eq!(
+        credentials_needed_with(&engine, &cfg, &forced),
+        [CertScope::Site]
+    );
+    // Without credentials the site fails, the proxy renews with its own.
+    let held = lock(&f.ctx);
+    let report = renew_all_with(&engine, &held, &cfg, &forced, None).unwrap();
+    assert_eq!(report.renewed, [CertScope::Proxy]);
+    assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+    assert_eq!(report.failed[0].1, crate::cert::cloudflare::MISSING);
+
+    // Credentials the CLI resolved (prompted) serve the site only.
+    let given = CfCredentials::token("given-token", None).unwrap();
+    let before = acme_calls(&f.fake).len();
+    let report = renew_all_with(&engine, &held, &cfg, &forced, Some(&given)).unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let calls = acme_calls(&f.fake)[before..].to_vec();
+    let tokens: Vec<_> = calls.iter().map(token_of).collect();
+    assert_eq!(
+        tokens,
+        [Some("stored-token".into()), Some("given-token".into())]
+    );
+    // …and are stored for the next scheduled run.
+    let saved = crate::cert::cloudflare::lookup_with(&f.ctx, site.path(), &|_| None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.get("CF_Token"), Some("given-token"));
+    assert!(credentials_needed_with(&engine, &cfg, &forced).is_empty());
+    // Targets that are not due need nothing.
+    let mut bare = cfg.clone();
+    bare.site = None;
+    std::fs::remove_file(crate::cert::cloudflare::store_path(proxy.path())).unwrap();
+    let scheduled = opts(CertScopes::ALL, true, false);
+    assert!(credentials_needed_with(&engine, &bare, &scheduled).is_empty());
+    assert_eq!(
+        credentials_needed_with(&engine, &bare, &forced),
+        [CertScope::Proxy]
+    );
+}
+
+#[test]
+fn deferred_renewals_are_reported_unchanged() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("renew-deferred");
+    serve_release(&f.fake);
+    f.fake
+        .on("systemctl", &["is-active"], Output::success(""))
+        .on("systemctl", &["restart"], Output::success(""));
+    let engine = engine(&f.ctx, InitSystem::Systemd);
+    let short =
+        f.ca.leaf(&f.dir.join("short"), &["www.example.com"], 10, false);
+    let script = fake_acme(
+        &f.fake,
+        AcmeScript {
+            issue: Some(short),
+            ..AcmeScript::default()
+        },
+    );
+    let mut cfg = dns_node();
+    cfg.tls = None;
+    cfg.inbounds
+        .retain(|i| i.protocol == Protocol::VlessReality);
+    let site = CertDir::site(&f.ctx.paths);
+    let creds = CfCredentials::token("tok", None).unwrap();
+    let target = crate::cert::WebCertTarget {
+        dir: site.path().to_path_buf(),
+        domains: vec!["www.example.com".into()],
+        cert: &WebCert::Cloudflare,
+        webroot: None,
+    };
+    // The first issuance deploys the short pair (acme.sh holds the same).
+    crate::cert::hooks::prepare_web_with(&engine, target, false, Some(&creds)).unwrap();
+    script.lock().unwrap().code = 2;
+    let held = lock(&f.ctx);
+    let report = renew_all_with(
+        &engine,
+        &held,
+        &cfg,
+        &opts(CertScopes::ALL, true, false),
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.unchanged, [CertScope::Site]);
+    assert!(report.renewed.is_empty() && report.failed.is_empty());
+    assert!(restarts(&f).is_empty());
+    let m = site.metadata().unwrap().unwrap();
+    assert_eq!(
+        m.last_error.as_deref(),
+        Some(crate::cert::engine::RENEW_DEFERRED)
+    );
 }

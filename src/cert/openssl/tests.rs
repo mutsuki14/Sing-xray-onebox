@@ -1,6 +1,6 @@
 use super::*;
 use crate::cert::testing::{have_openssl, self_signed, Fixture};
-use crate::sys::exec::FakeExec;
+use crate::sys::exec::{Exec, FakeExec};
 
 #[test]
 fn parses_openssl_dates() {
@@ -59,8 +59,89 @@ fn rejects_bad_names_and_missing_files_before_running_openssl() {
     let err = validate_pair(&ctx, &cert, &key, "bad name", Trust::Public).unwrap_err();
     assert_eq!(err.to_string(), "证书域名无效");
     let err = validate_pair(&ctx, &cert, &key, "a.example.com", Trust::Public).unwrap_err();
-    assert_eq!(err.to_string(), "证书或私钥文件不存在");
+    assert_eq!(
+        err.to_string(),
+        format!("证书或私钥文件不存在: {}", cert.display())
+    );
+    std::fs::write(&cert, "c").unwrap();
+    let err = validate_pair(&ctx, &cert, &key, "a.example.com", Trust::Public).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("证书或私钥文件不存在: {}", key.display())
+    );
     assert!(exec.history().is_empty());
+}
+
+#[test]
+fn encrypted_keys_are_refused_without_prompting() {
+    let dir = crate::sys::fs::TempDir::new("cert-encrypted").unwrap();
+    let (ctx, exec, _) = Ctx::test(dir.path());
+    let pkcs8 = dir.join("pkcs8.pem");
+    std::fs::write(
+        &pkcs8,
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIH0\n-----END ENCRYPTED PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    let traditional = dir.join("ec.pem");
+    std::fs::write(
+        &traditional,
+        "-----BEGIN EC PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,00\n\nAA\n         -----END EC PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    for key in [&pkcs8, &traditional] {
+        let err = key_pubkey(&ctx, key).unwrap_err();
+        assert_eq!(err.to_string(), ENCRYPTED_KEY);
+    }
+    assert!(exec.history().is_empty(), "openssl never asked");
+}
+
+#[test]
+fn real_encrypted_keys_fail_at_once() {
+    if !have_openssl() {
+        return;
+    }
+    let f = Fixture::new("cert-encrypted-real");
+    let (chain, key) =
+        f.ca.leaf(&f.dir.join("leaf"), &["a.example.com"], 90, false);
+    let encrypted = f.dir.join("encrypted.pem");
+    let run = |args: &[&str]| {
+        let out = crate::sys::exec::SystemExec
+            .run(&Cmd::new("openssl").args(args.iter().copied()))
+            .unwrap();
+        assert!(out.ok(), "{}", out.stderr);
+    };
+    let (k, e) = (key.to_str().unwrap(), encrypted.to_str().unwrap());
+    run(&[
+        "pkey",
+        "-in",
+        k,
+        "-aes256",
+        "-passout",
+        "pass:secret",
+        "-out",
+        e,
+    ]);
+    let err = validate_pair(&f.ctx, &chain, &encrypted, "a.example.com", Trust::Public);
+    assert_eq!(err.unwrap_err().to_string(), ENCRYPTED_KEY);
+    // A form without a telling header still fails instead of prompting.
+    let der = f.dir.join("encrypted.der");
+    let d = der.to_str().unwrap();
+    run(&[
+        "pkcs8",
+        "-topk8",
+        "-in",
+        k,
+        "-outform",
+        "DER",
+        "-v2",
+        "aes256",
+        "-passout",
+        "pass:secret",
+        "-out",
+        d,
+    ]);
+    let err = key_pubkey(&f.ctx, &der).unwrap_err();
+    assert_eq!(err.to_string(), "私钥无效或无法读取");
 }
 
 #[test]
@@ -80,7 +161,7 @@ fn verify_arguments_match_v2() {
     let expected = [
         format!("openssl x509 -in {c} -noout -checkend 0"),
         format!("openssl x509 -in {c} -pubkey -noout"),
-        format!("openssl pkey -in {k} -pubout"),
+        format!("openssl pkey -in {k} -passin pass: -pubout"),
         format!(
             "openssl verify -purpose sslserver -verify_hostname onebox-cert-check.example.com \
              -partial_chain -trusted {c} {c}"
@@ -88,7 +169,7 @@ fn verify_arguments_match_v2() {
         format!("openssl x509 -in {c} -noout -text"),
         format!("openssl x509 -in {c} -noout -checkend 0"),
         format!("openssl x509 -in {c} -pubkey -noout"),
-        format!("openssl pkey -in {k} -pubout"),
+        format!("openssl pkey -in {k} -passin pass: -pubout"),
         format!("openssl verify -purpose sslserver -verify_ip 203.0.113.5 -untrusted {c} {c}"),
     ];
     assert_eq!(history, expected);

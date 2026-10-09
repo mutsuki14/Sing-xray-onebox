@@ -253,7 +253,10 @@ fn installs_custom_chains_leaf_first() {
         &names,
         Trust::Public,
     );
-    assert_eq!(missing.unwrap_err().to_string(), "证书或私钥文件不存在");
+    assert_eq!(
+        missing.unwrap_err().to_string(),
+        format!("证书或私钥文件不存在: {}", f.dir.join("nope").display())
+    );
 
     let status = status(&f.ctx, &dir).unwrap().unwrap();
     assert!(status.x509.subject.contains("a.example.com"));

@@ -29,7 +29,7 @@ pub mod templates;
 pub use content::{ContentBackup, ContentStore};
 pub use nginx_conf::{quote_path, SiteConf, SitePhase};
 
-use crate::cert::hooks::{prepare_web_with, web_cert_ready};
+use crate::cert::hooks::{prepare_web_with, web_needs_acme_with};
 use crate::cert::{CertDir, CertStatus, CfCredentials, Engine, WebCertTarget};
 use crate::ctx::Ctx;
 use crate::domain::config::{NodeConfig, SiteConfig, WebCert};
@@ -55,7 +55,9 @@ const CONF_MAX: u64 = 1024 * 1024;
 /// A content change requested for this apply (`apply::Intents`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SiteContent {
-    /// Publish the homepage rendered from the site settings.
+    /// Publish the homepage rendered from the site settings. The CLI sets it
+    /// whenever it changes the title, template, theme or description: an
+    /// existing `index.html` is never re-rendered otherwise (v2 parity).
     Template,
     /// Publish a local directory.
     Import(PathBuf),
@@ -276,9 +278,11 @@ pub fn prepare_with(
         cert: &site.cert,
         webroot: Some(paths.site_root.clone()),
     };
+    // Exactly when the engine will run acme.sh (an HTTP-01 issuance or a
+    // forced/due renewal), port 80 must answer before the certificate exists.
     let needs_port80 = site.cert == WebCert::Http01
         && !services.running(SERVICE)
-        && (force_cert || !web_cert_ready(engine.ctx, &target));
+        && web_needs_acme_with(engine, &target, force_cert);
     if needs_port80 {
         bootstrap(engine, cfg)?;
     }
