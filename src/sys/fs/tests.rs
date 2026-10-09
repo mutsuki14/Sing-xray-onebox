@@ -283,6 +283,98 @@ fn tree_copy_refuses_symlinks_and_special_files() {
     assert!(err.to_string().contains("特殊文件"), "{err}");
 }
 
+/// An import source writable by another user: entries are swapped for
+/// symlinks to a private directory while the tree is copied (`skip` runs
+/// just before each child is opened). A swapped directory must not
+/// redirect its remaining children; a swapped entry itself is refused.
+#[test]
+fn tree_copy_is_not_redirected_by_swaps_during_the_copy() {
+    let dir = tmp();
+    let secret = dir.join("secret");
+    fs::create_dir(&secret).unwrap();
+    for name in ["a1", "f"] {
+        fs::write(secret.join(name), b"secret").unwrap();
+    }
+    // (entry whose skip call swaps, path replaced by a symlink, link target)
+    let cases = [
+        ("b/a1", "b", secret.clone(), Ok("public")),
+        ("f", "f", secret.join("f"), Err("不允许符号链接")),
+    ];
+    for (i, (trigger, replaced, target, expected)) in cases.into_iter().enumerate() {
+        let src = dir.join(format!("src{i}"));
+        fs::create_dir_all(src.join("b")).unwrap();
+        fs::write(src.join("b/a0"), b"a0").unwrap();
+        fs::write(src.join("b/a1"), b"public").unwrap();
+        fs::write(src.join("f"), b"public").unwrap();
+        let swapped = std::cell::Cell::new(false);
+        let swap = |p: &Path| {
+            if p == src.join(trigger) && !swapped.replace(true) {
+                fs::rename(src.join(replaced), dir.join(format!("moved{i}"))).unwrap();
+                symlink(&target, src.join(replaced)).unwrap();
+            }
+            false
+        };
+        let dst = dir.join(format!("dst{i}"));
+        let result = copy_tree(&src, &dst, &swap, &CopyLimits::UNLIMITED);
+        assert!(swapped.get(), "{trigger}");
+        match expected {
+            Ok(content) => {
+                result.unwrap();
+                assert_eq!(fs::read(dst.join("b/a0")).unwrap(), b"a0");
+                assert_eq!(fs::read(dst.join(trigger)).unwrap(), content.as_bytes());
+            }
+            Err(text) => {
+                let err = result.unwrap_err().to_string();
+                assert!(err.contains(text), "{trigger}: {err}");
+                assert!(!dst.join(trigger).exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn tree_copy_refuses_hard_links_when_asked() {
+    let dir = tmp();
+    let src = dir.join("src");
+    fs::create_dir(&src).unwrap();
+    fs::write(dir.join("private"), b"key").unwrap();
+    fs::hard_link(dir.join("private"), src.join("linked")).unwrap();
+    let none = |_: &Path| false;
+    let strict = CopyLimits::UNLIMITED.refuse_hard_links();
+    let err = copy_tree(&src, &dir.join("dst"), &none, &strict).unwrap_err();
+    let linked = src.join("linked");
+    assert_eq!(
+        err.to_string(),
+        format!("不允许硬链接: {}", linked.display())
+    );
+    assert!(!dir.join("dst/linked").exists());
+    // Snapshots and backups of Onebox's own trees still copy them.
+    copy_tree(&src, &dir.join("dst2"), &none, &CopyLimits::UNLIMITED).unwrap();
+    assert_eq!(fs::read(dir.join("dst2/linked")).unwrap(), b"key");
+}
+
+#[test]
+fn tree_copy_lists_every_name() {
+    let dir = tmp();
+    let src = dir.join("src");
+    fs::create_dir(&src).unwrap();
+    let odd = std::ffi::OsStr::from_bytes(b"caf\xe9");
+    fs::write(src.join(odd), b"x").unwrap();
+    for n in 0..300 {
+        fs::write(src.join(format!("n{n}")), b"").unwrap();
+    }
+    let file = dir.join("single");
+    fs::write(&file, b"root file").unwrap();
+    let stats = copy_tree(&src, &dir.join("dst"), &|_| false, &CopyLimits::UNLIMITED).unwrap();
+    assert_eq!(stats.entries, 301);
+    assert_eq!(fs::read(dir.join("dst").join(odd)).unwrap(), b"x");
+    assert!(dir.join("dst/n299").is_file());
+    // A plain file as the root is copied too (snapshots of single files).
+    let copied = copy_tree(&file, &dir.join("one"), &|_| false, &CopyLimits::UNLIMITED).unwrap();
+    assert_eq!(copied.bytes, 9);
+    assert_eq!(fs::read(dir.join("one")).unwrap(), b"root file");
+}
+
 /// src/{a (5 bytes), b (2 bytes), d/, d/c (3 bytes)}
 fn sample_tree(dir: &TempDir) -> PathBuf {
     let src = dir.join("src");
@@ -336,12 +428,13 @@ fn file_copy_stops_at_the_limit_while_streaming() {
     let src = dir.join("big");
     fs::write(&src, vec![1u8; 4096]).unwrap();
     let dst = dir.join("out/big");
-    assert_eq!(copy_file_limited(&src, &dst, 0o600, 4095).unwrap(), None);
+    let open = || File::open(&src).unwrap();
+    assert_eq!(copy_file_limited(open(), &dst, 0o600, 4095).unwrap(), None);
     assert!(!dst.exists());
     let leftovers = fs::read_dir(dir.join("out")).unwrap().count();
     assert_eq!(leftovers, 0, "temp file removed");
     assert_eq!(
-        copy_file_limited(&src, &dst, 0o600, 4096).unwrap(),
+        copy_file_limited(open(), &dst, 0o600, 4096).unwrap(),
         Some(4096)
     );
 }
