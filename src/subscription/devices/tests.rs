@@ -107,6 +107,7 @@ fn create_follows_v2_name_rules_and_hashes_the_token() {
     let mut store = DeviceStore {
         devices: Vec::new(),
         source: Source::Empty,
+        endpoint: None,
     };
     let mut rng = Xorshift(7);
     let new = store.create("  手机  ", &mut rng, 42).unwrap();
@@ -165,6 +166,7 @@ fn ids_collide_rarely_but_never_twice() {
     let mut store = DeviceStore {
         devices: vec![device("0000000000000000", "a", TOKEN)],
         source: Source::Devices,
+        endpoint: None,
     };
     let new = store.create("b", &mut Repeating(0), 1).unwrap();
     assert_ne!(new.id, "0000000000000000");
@@ -178,6 +180,7 @@ fn revoke_and_reset_by_exact_id() {
             device("00000000000000bb", "b", TOKEN),
         ],
         source: Source::Devices,
+        endpoint: None,
     };
     let mut rng = SeqRandom(1);
     assert_eq!(
