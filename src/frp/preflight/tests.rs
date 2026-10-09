@@ -210,3 +210,33 @@ fn live_sockets_in_reserved_ports_are_refused() {
         "FRP 端口 20010/udp 已被其他进程占用"
     );
 }
+
+#[test]
+fn connected_udp_client_sockets_do_not_block_the_range() {
+    let dir = TempDir::new("frp-live-udp").unwrap();
+    let state = tcp(
+        "control.example.com",
+        PortRange {
+            start: 40000,
+            end: 40010,
+        },
+    );
+    let root = proc_net(&dir, &[], &[]);
+    let header = "  sl  local_address rem_address   st tx_queue rx_queue\n";
+    // A resolver query from ephemeral port 40005 to 8.8.8.8:53 (state 01,
+    // connected) and a TCP connection in TIME_WAIT on 40006.
+    let udp = format!("{header}   0: 0100007F:9C45 08080808:0035 01 0\n");
+    let tcp_rows = format!("{header}   0: 0100007F:9C46 08080808:01BB 06 0\n");
+    fs::write(root.join("proc/net/udp"), &udp).unwrap();
+    fs::write(root.join("proc/net/tcp"), &tcp_rows).unwrap();
+    check_live_ports(&root, &state).unwrap();
+    // The same port unconnected (a server socket) is busy, IPv6 too.
+    let udp6 = format!(
+        "{header}   0: 00000000000000000000000000000000:9C45 00000000000000000000000000000000:0000 07 0\n"
+    );
+    fs::write(root.join("proc/net/udp6"), udp6).unwrap();
+    assert_eq!(
+        check_live_ports(&root, &state).unwrap_err().to_string(),
+        "FRP 端口 40005/udp 已被其他进程占用"
+    );
+}

@@ -9,7 +9,9 @@
 //!   is the configured one (v2 assumed 8444); the node state is read without
 //!   the node lock, and the node re-checks FRP's reservations under its own
 //!   lock, so a race fails safe;
-//! - live sockets are read from `/proc/net/{tcp,tcp6,udp,udp6}` (no `ss`);
+//! - live sockets are read from `/proc/net/{tcp,tcp6,udp,udp6}` (no `ss`):
+//!   TCP LISTEN and unconnected UDP sockets, as `ss -lntu` listed them
+//!   (connected UDP client sockets on ephemeral ports are not listeners);
 //! - the configured roots may sit below distro symlinks (`/var/run`): only
 //!   their spelling, their nesting and their scope are checked here, the
 //!   snapshot refuses symlinks inside the owned trees;
@@ -219,13 +221,32 @@ fn tables(system_root: &Path, tcp: bool) -> Option<Vec<String>> {
     (!texts.is_empty()).then_some(texts)
 }
 
+/// `/proc/net/udp*` state of an unconnected (bound, listening) socket.
+const UDP_UNCONNECTED: &str = "07";
+
+/// Whether a UDP table holds an unconnected socket bound to `port` (what
+/// `ss -lu` lists). Connected client sockets (state `01`, e.g. a resolver
+/// or NTP query on an ephemeral port) do not serve the port.
+fn udp_bound(table: &str, port: u16) -> bool {
+    table.lines().skip(1).any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let local = fields
+            .get(1)
+            .and_then(|a| a.rsplit_once(':'))
+            .and_then(|(_, hex)| u16::from_str_radix(hex, 16).ok());
+        local == Some(port) && fields.get(3) == Some(&UDP_UNCONNECTED)
+    })
+}
+
 /// No other process listens on a reserved port (run after FRP's own
-/// services stopped). TCP counts LISTEN sockets, UDP any bound socket.
+/// services stopped). TCP counts LISTEN sockets, UDP unconnected bound
+/// sockets (v2 `ss -lntu`).
 pub fn check_live_ports(system_root: &Path, state: &FrpState) -> Result<()> {
     for (tcp, name) in [(true, "tcp"), (false, "udp")] {
         let tables = tables(system_root, tcp);
         let busy = |port: u16| match &tables {
-            Some(texts) => texts.iter().any(|t| table_has_port(t, port, tcp)),
+            Some(texts) if tcp => texts.iter().any(|t| table_has_port(t, port, true)),
+            Some(texts) => texts.iter().any(|t| udp_bound(t, port)),
             None => listening(system_root, port, tcp),
         };
         for r in state.reservations() {
