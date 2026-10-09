@@ -15,7 +15,11 @@
 //! upgrade still finds its own file.
 //!
 //! Device changes run under the node lock and refuse a pending journal
-//! (`存在未完成配置事务，请先执行 recover 后修改订阅设备`); the store is read
+//! (`存在未完成配置事务，请先执行 recover 后修改订阅设备`) and a node whose
+//! `state.json` is still v2's ([`V2_NODE`]: run from the bootstrap script
+//! before the migration, v3 would write a `devices.json` the installed v2
+//! program and its worker never read, and the migration would then
+//! prefer it over later v2 changes); the store is read
 //! after the lock is taken, so a concurrent revoke cannot be overwritten by
 //! an add. Callers load the node configuration before a change (they need
 //! it to print URLs), so a configuration that fails to load changes
@@ -51,6 +55,9 @@ pub const NAME_MAX_BYTES: usize = 80;
 pub const SCHEMA: u32 = 1;
 /// Refusal while a node or self-update journal is pending (v2 text).
 pub const PENDING: &str = "存在未完成配置事务，请先执行 recover 后修改订阅设备";
+/// Refusal while `state.json` is still v2's: the installed v2 program and
+/// its worker read only v2's `settings.json`, which v3 never writes.
+pub const V2_NODE: &str = "节点仍是 v2 状态：请先完成 v3 迁移（v2 执行 onebox update-script，或 sh onebox.sh regen），再修改订阅设备";
 pub const NOT_ENABLED: &str = "请先 subscription enable";
 pub const UNKNOWN_ID: &str = "设备 ID 不存在";
 pub const BAD_NAME: &str = "设备名称应为 1–80 字节且不能含控制字符（一个汉字占 3 字节）";
@@ -294,12 +301,17 @@ pub fn record_endpoint(ctx: &Ctx, lock: &FileLock, endpoint: &str) -> Result<()>
     })
 }
 
-/// The caller holds the node lock and no transaction is pending.
+/// The caller holds the node lock, no transaction is pending, and the node
+/// is no longer a v2 node ([`V2_NODE`]).
 fn guard(ctx: &Ctx, lock: &FileLock) -> Result<()> {
     lock.verify(&ctx.paths.lock())?;
     ensure!(
         !crate::apply::journal::pending(&ctx.paths)?.any(),
         "{PENDING}"
+    );
+    ensure!(
+        !crate::state::StateStore::is_v2_at(&ctx.paths)?,
+        "{V2_NODE}"
     );
     Ok(())
 }
