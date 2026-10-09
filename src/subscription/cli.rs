@@ -362,7 +362,7 @@ pub fn add_device(ctx: &Ctx, name: &str) -> Result<()> {
     let device = devices::add(ctx, &lock, &cfg, name)?;
     let refreshed = refresh_worker(ctx);
     print_device(ctx, &cfg, &device, true)?;
-    refreshed.map_err(stale_after_new_token)
+    refreshed.map_err(|e| stale_after_new_token(e, "新链接可能无法访问"))
 }
 
 /// `subscription revoke ID`.
@@ -386,7 +386,7 @@ pub fn reset_device(ctx: &Ctx, id: &str) -> Result<()> {
     let device = devices::reset(ctx, &lock, id)?;
     let refreshed = refresh_worker(ctx);
     print_device(ctx, &cfg, &device, false)?;
-    refreshed.map_err(stale_after_new_token)
+    refreshed.map_err(|e| stale_after_new_token(e, "新链接可能无法访问，旧链接可能仍然有效"))
 }
 
 /// After a device change (node lock held): restart a running worker that
@@ -399,9 +399,9 @@ fn refresh_worker(ctx: &Ctx) -> Result<()> {
 }
 
 /// The token was printed already; say why its URLs may not work yet.
-fn stale_after_new_token(e: Error) -> Error {
+fn stale_after_new_token(e: Error, effect: &str) -> Error {
     Error::msg(format!(
-        "{STALE_WORKER}: {e}；执行 onebox regen 之前新链接可能无法访问，旧链接可能仍然有效"
+        "{STALE_WORKER}: {e}；执行 onebox regen 之前{effect}"
     ))
 }
 

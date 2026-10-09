@@ -345,6 +345,21 @@ fn a_revocation_the_old_worker_keeps_ignoring_is_an_error() {
         systemd.actions().is_empty(),
         "the old worker was not stopped"
     );
+
+    // add: the token is printed (and saved), then the failure is reported.
+    let err = add_device(ctx, "tablet").unwrap_err().to_string();
+    assert!(
+        err.starts_with(&format!("{STALE_WORKER}: "))
+            && err.ends_with("执行 onebox regen 之前新链接可能无法访问"),
+        "{err}"
+    );
+    let saved = devices::list(&ctx.paths).unwrap();
+    assert_eq!(saved.len(), 1, "the new device is kept");
+    let err = reset_device(ctx, &saved[0].id).unwrap_err().to_string();
+    assert!(
+        err.ends_with("新链接可能无法访问，旧链接可能仍然有效"),
+        "{err}"
+    );
 }
 
 #[test]
