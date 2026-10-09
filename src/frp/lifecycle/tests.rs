@@ -1,5 +1,6 @@
 //! Lifecycle tests on the fake host (systemd, crontab, release, DNS,
-//! nginx and iptables faked; the real openssl creates the private CA).
+//! nginx, iptables and the private CA's openssl faked; the custom
+//! certificate test uses the real openssl).
 
 use super::*;
 use crate::domain::fixtures::config;
@@ -39,7 +40,7 @@ fn curls(h: &FakeHost) -> usize {
 
 #[test]
 fn tcp_install_deploys_everything_and_commits() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let saved = install_tcp(&h);
     let paths = &h.ctx.paths;
     assert_eq!(saved.token.len(), 64);
@@ -87,7 +88,7 @@ fn tcp_install_deploys_everything_and_commits() {
 
 #[test]
 fn a_failed_fresh_install_leaves_nothing_behind() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     h.set_healthy(false);
     let mut state = tcp_state();
     state.token.clear();
@@ -111,7 +112,7 @@ fn a_failed_fresh_install_leaves_nothing_behind() {
 
 #[test]
 fn a_failed_change_restores_token_binary_and_private_ca() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let before = install_tcp(&h);
     let paths = &h.ctx.paths;
     let ca_key = fs::read(paths.frp_root.join("ca-key.pem")).unwrap();
@@ -141,7 +142,7 @@ fn a_failed_change_restores_token_binary_and_private_ca() {
 
 #[test]
 fn a_failing_service_start_rolls_back_and_restarts_the_old_one() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let before = install_tcp(&h);
     h.break_unit(FRPS, true);
     let mut next = before.clone();
@@ -163,7 +164,7 @@ fn a_failing_service_start_rolls_back_and_restarts_the_old_one() {
 
 #[test]
 fn rotate_ca_replaces_the_private_ca_and_keeps_the_token() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let before = install_tcp(&h);
     let files = ControlFiles::new(&h.ctx.paths.frp_root);
     let old_ca = fs::read(files.ca()).unwrap();
@@ -183,7 +184,7 @@ fn rotate_ca_replaces_the_private_ca_and_keeps_the_token() {
 
 #[test]
 fn configure_with_the_installed_version_needs_no_network() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let mut state = install_tcp(&h);
     h.exec.clear_history();
     state.bind_port = 7001;
@@ -194,7 +195,7 @@ fn configure_with_the_installed_version_needs_no_network() {
 
 #[test]
 fn update_to_the_running_version_changes_nothing() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let state = install_tcp(&h);
     h.exec.clear_history();
     let mut latest = state.clone();
@@ -212,7 +213,7 @@ fn update_to_the_running_version_changes_nothing() {
 
 #[test]
 fn crashed_transactions_block_net_apply_until_recovered() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let original = install_tcp(&h);
     let rt = h.runtime();
     let paths = &h.ctx.paths;
@@ -250,7 +251,7 @@ fn crashed_transactions_block_net_apply_until_recovered() {
 
 #[test]
 fn every_mutation_recovers_first() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let original = install_tcp(&h);
     let rt = h.runtime();
     let paths = &h.ctx.paths;
@@ -269,7 +270,7 @@ fn every_mutation_recovers_first() {
 
 #[test]
 fn renew_restarts_frps_only_when_the_control_certificate_changed() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     install_tcp(&h);
     let rt = h.runtime();
     let lock = rt.lock().unwrap();
@@ -289,7 +290,7 @@ fn renew_restarts_frps_only_when_the_control_certificate_changed() {
 
 #[test]
 fn service_control() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     install_tcp(&h);
     let rt = h.runtime();
     let lock = rt.lock().unwrap();
@@ -304,7 +305,7 @@ fn service_control() {
 
 #[test]
 fn uninstall_removes_everything_but_foreign_cron_lines() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     h.set_crontab("0 1 * * * /usr/bin/true\n");
     install_tcp(&h);
     let rt = h.runtime();
@@ -332,7 +333,7 @@ fn uninstall_removes_everything_but_foreign_cron_lines() {
 
 #[test]
 fn v2_cron_lines_are_rewritten_in_place() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     h.set_crontab(
         "MAILTO=root\n\
          17 3 * * * env ONEBOX_DIR='/etc/onebox' '/usr/local/bin/onebox' frps renew --cron >>'/var/log/onebox-frp/renew.log' 2>&1 # onebox-frps-renew\n\
@@ -350,7 +351,7 @@ fn v2_cron_lines_are_rewritten_in_place() {
 
 #[test]
 fn unmanaged_directories_and_units_are_never_adopted() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let paths = &h.ctx.paths;
     fs::create_dir_all(&paths.frp_root).unwrap();
     let err = apply(&h.runtime(), tcp_state(), change("安装")).unwrap_err();
@@ -372,7 +373,7 @@ fn unmanaged_directories_and_units_are_never_adopted() {
 
 #[test]
 fn node_port_conflicts_roll_back() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let node = config(&[(Protocol::Hysteria2, 20005, Core::Singbox)]);
     StateStore::save(&h.ctx, &node).unwrap();
     let err = apply(&h.runtime(), tcp_state(), change("安装")).unwrap_err();
@@ -416,7 +417,9 @@ fn custom_pair(h: &FakeHost) -> (String, String) {
 
 #[test]
 fn web_mode_with_a_custom_certificate_then_back_to_tcp() {
-    let Some(h) = FakeHost::new() else { return };
+    let Some(h) = FakeHost::with_real_openssl() else {
+        return;
+    };
     let (cert, key) = custom_pair(&h);
     let mut state = web_state(WebTls::Custom { cert, key });
     state.token.clear();

@@ -23,7 +23,7 @@ fn messages_keep_cancellations() {
 
 #[test]
 fn adoption_needs_markers_and_specs() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let rt = h.runtime();
     let paths = rt.paths();
     refuse_adoption(&rt).unwrap();
@@ -49,7 +49,7 @@ fn adoption_needs_markers_and_specs() {
 
 #[test]
 fn rollback_removes_created_trees_with_their_skipped_files() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let rt = h.runtime();
     let lock = rt.lock().unwrap();
     let paths = rt.paths();
@@ -69,7 +69,7 @@ fn rollback_removes_created_trees_with_their_skipped_files() {
 
 #[test]
 fn rollback_restores_cron_lines_and_services() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let rt = h.runtime();
     let paths = rt.paths();
     crate::frp::runtime::mkdirs(paths).unwrap();
@@ -103,7 +103,7 @@ fn rollback_restores_cron_lines_and_services() {
 
 #[test]
 fn a_corrupt_snapshot_is_left_for_recover() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let rt = h.runtime();
     let paths = rt.paths();
     crate::frp::runtime::mkdirs(paths).unwrap();
@@ -127,7 +127,7 @@ fn a_corrupt_snapshot_is_left_for_recover() {
 
 #[test]
 fn finished_journals_are_only_cleaned_up() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let rt = h.runtime();
     let paths = rt.paths();
     let lock = rt.lock().unwrap();

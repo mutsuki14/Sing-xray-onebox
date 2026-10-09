@@ -174,7 +174,7 @@ fn install(flags: Flags) -> Action {
 
 #[test]
 fn previews_and_declined_confirmations_change_nothing() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let s = session(&h, false);
     s.run(Action::Info).unwrap();
     s.run(Action::Configure {
@@ -193,7 +193,7 @@ fn previews_and_declined_confirmations_change_nothing() {
 
 #[test]
 fn unattended_install_update_and_uninstall() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     h.ui.set_assume_yes(true);
     let s = session(&h, true);
     s.run(install(tcp_flags())).unwrap();
@@ -234,7 +234,7 @@ fn cf_flags() -> Flags {
 
 #[test]
 fn cloudflare_credentials_are_never_written_before_the_transaction() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     // Unattended without credentials: refused before anything is written
     // (v2 created FRP_ROOT here and then refused every install, H-8.1#1).
     h.ui.set_assume_yes(true);
@@ -259,7 +259,7 @@ fn cloudflare_credentials_are_never_written_before_the_transaction() {
 
 #[test]
 fn root_is_required_for_changes() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let s = session(&h, false);
     for action in [
         Action::Service(ServiceAction::Start),
@@ -274,7 +274,7 @@ fn root_is_required_for_changes() {
 
 #[test]
 fn menu_items_stay_in_the_menu() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     // 2 = status; 4 = start (refused without root); 3 = export (not
     // installed); then back.
     h.ui.extend(["2", "4", "3", "0"]);
@@ -296,7 +296,7 @@ fn menu_items_stay_in_the_menu() {
 
 #[test]
 fn the_menu_runs_the_wizard_and_survives_its_cancellation() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     // 1 = configure → wizard: mode tcp, then `q` cancels; 0 = back.
     h.ui.extend(["1", "2", "q", "0"]);
     session(&h, true).run(Action::Menu).unwrap();

@@ -1,6 +1,8 @@
 //! Shared fixtures of the FRP unit tests: sample states, a fake frp
-//! release (API document and package served through the fake curl) and a
-//! tar.gz builder.
+//! release (API document and package served through the fake curl), a
+//! tar.gz builder and a fake host for the lifecycle.
+
+mod openssl;
 
 use super::model::{AppDomain, BindAddr, FrpState, Mode, WebSettings, WebTls};
 use super::runtime::{Health, Runtime};
@@ -162,7 +164,8 @@ pub fn frps_versions(
 
 /// A fake host for lifecycle tests: systemd with tracked unit states, a
 /// crontab, the frp release, DNS pointing at the host, a fake nginx and
-/// iptables, and the real openssl for the private CA.
+/// iptables, and a fake openssl for the private CA (the real one on
+/// request, for certificates the cert engine has to read).
 pub struct FakeHost {
     pub dir: TempDir,
     pub ctx: Ctx,
@@ -188,11 +191,16 @@ fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl FakeHost {
-    /// `None` when the real openssl is missing.
-    pub fn new() -> Option<FakeHost> {
-        if !crate::cert::testing::have_openssl() {
-            return None;
-        }
+    pub fn new() -> FakeHost {
+        FakeHost::build(false)
+    }
+
+    /// With the real openssl; `None` when it is missing.
+    pub fn with_real_openssl() -> Option<FakeHost> {
+        crate::cert::testing::have_openssl().then(|| FakeHost::build(true))
+    }
+
+    fn build(real_openssl: bool) -> FakeHost {
         let dir = TempDir::new("frp-host").unwrap();
         let (ctx, exec, ui) = Ctx::test(dir.path());
         let host = FakeHost {
@@ -205,8 +213,8 @@ impl FakeHost {
             healthy: Arc::new(AtomicBool::new(true)),
         };
         host.proc_net();
-        host.script();
-        Some(host)
+        host.script(real_openssl);
+        host
     }
 
     /// Empty socket tables: no port is in use.
@@ -218,7 +226,7 @@ impl FakeHost {
         }
     }
 
-    fn script(&self) {
+    fn script(&self, real_openssl: bool) {
         let exec = &self.exec;
         for program in ["curl", "openssl", "ip", "crontab", "nginx", "iptables"] {
             exec.provide(program);
@@ -245,7 +253,11 @@ impl FakeHost {
                 })
             },
         );
-        exec.on_fn(|c| c.program == "openssl", |c| SystemExec.run(c));
+        if real_openssl {
+            exec.on_fn(|c| c.program == "openssl", |c| SystemExec.run(c));
+        } else {
+            exec.on_fn(|c| c.program == "openssl", |c| Ok(openssl::run(&c.args)));
+        }
         exec.on_fn(
             |c| c.program.ends_with("/frps"),
             |c| Ok(fake_frps_cmd(&c.program, &c.args)),

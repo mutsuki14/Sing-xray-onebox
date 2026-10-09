@@ -9,13 +9,13 @@ fn statuses(checks: &[Check]) -> Vec<(String, CheckStatus)> {
 
 #[test]
 fn nothing_to_check_without_frp() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     assert!(checks_with(&h.runtime()).is_empty());
 }
 
 #[test]
 fn a_healthy_installation_passes() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let rt = h.runtime();
     let mut state = tcp_state();
     state.token.clear();
@@ -54,7 +54,7 @@ fn a_healthy_installation_passes() {
 
 #[test]
 fn a_broken_state_fails() {
-    let Some(h) = FakeHost::new() else { return };
+    let h = FakeHost::new();
     let paths = &h.ctx.paths;
     crate::frp::runtime::mkdirs(paths).unwrap();
     std::fs::write(paths.frp_root.join("state.json"), "{").unwrap();
