@@ -22,7 +22,7 @@
 | `*.apps.example.com` | 网站模式，泛域名（如 `home.apps.example.com`） | 本机公网 A / AAAA |
 
 - 安装时会解析控制域名和应用域名（泛域名用一个随机子域名检查），所有 A / AAAA 都必须指向本机；残留旧 IP、错误 AAAA 或 CDN 代理地址都会导致检查失败。Cloudflare 记录请设为**仅 DNS**。
-- 域名必须是 DNS 名称，不能是 IP 地址。v2 允许 IP：这类旧配置在 v3 中仍可使用，但每次运行都会提示，修改时需改为域名。
+- 域名必须是 DNS 名称，不能是 IP 地址。v2 曾允许 IP：这类旧配置升级后原样保留，但每个 FRP 命令都会提示（作为控制域名时 frpc 无法校验服务端证书），修改该项时必须改为域名。
 - 云安全组放行控制端口，以及网站模式的 HTTPS（和 HTTP 跳转）端口，或 TCP 模式的整个转发范围（TCP 与 UDP）。本机防火墙由 Onebox 自动放行。
 - 安装会检查代理节点（含网站、订阅、Hysteria2 跳跃范围和 HTTP-01 的 80 端口）以及其他进程占用的端口，冲突时停止，不接管已有服务。80 / 443 已被占用时，可改用 `--https-port 8443 --tls cf --redirect-port 0`，访问地址为 `https://app.example.com:8443/`。HTTP-01 必须使用并持续开放 TCP 80。
 - 缺少的 curl、openssl、iproute2、cron 会自动安装；网站模式还需要 nginx：未安装时自动安装发行版的 nginx 包，并停用只提供默认欢迎页的系统 nginx 服务，FRP 只使用自己的 `onebox-frp-web` 实例。
@@ -142,7 +142,7 @@ onebox frps --help
 | `--allow-ports 20000-20100` | TCP 模式的转发范围（最多 1000 个端口） |
 | `--tls http\|cf\|custom` | 网站证书方式，默认 `http`；不影响控制连接的私有 CA |
 | `--cert 文件 --key 文件` | 自备网站证书完整链与未加密私钥（相对路径按当前目录解析） |
-| `--version 0.71.0\|latest` | frp 版本，最低 `0.71.0`，默认 `0.71.0` |
+| `--version 0.71.0\|latest` | frp 版本，最低 `0.71.0`；新安装默认 `0.71.0`，已安装时保持当前版本 |
 | `--dry-run` | 只预览，不联网、不修改 |
 
 ## 事务、恢复与计划任务
