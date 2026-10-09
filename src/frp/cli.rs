@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::host::init::InitSystem;
 use crate::host::os::ROOT_REQUIRED;
 use crate::host::service::{Services, FRPS, FRP_WEB};
-use crate::ui::{out, BACK};
+use crate::ui::out;
 use std::path::{Path, PathBuf};
 
 /// v2's `frps help` text (H §2.3).
@@ -511,108 +511,9 @@ impl Session<'_> {
         }
         Ok(())
     }
-
-    /// The interactive menu (G41; module docs for the rules).
-    fn menu(&self) -> Result<()> {
-        let items: Vec<String> = MENU.iter().map(|(_, label)| label.to_string()).collect();
-        loop {
-            let title = format!("FRP 服务端\n{}", self.headline());
-            let Some(choice) = self.ctx().ui.select(&title, &items, BACK, true)? else {
-                return Ok(());
-            };
-            let Some((item, _)) = MENU.get(choice) else {
-                continue;
-            };
-            let action = item.action();
-            let outcome = if action.requires_root() && !self.is_root {
-                Err(Error::msg(ROOT_REQUIRED))
-            } else {
-                self.run(action)
-            };
-            match outcome {
-                Ok(()) => {}
-                Err(e) if e.is_cancelled() => out::info("操作已取消"),
-                Err(e) => out::error(e),
-            }
-        }
-    }
-
-    /// `web · frp.example.com:7000 · frps 运行中` (or why there is none).
-    fn headline(&self) -> String {
-        let paths = &self.ctx().paths;
-        if !model::installed(paths) {
-            return "未安装".to_owned();
-        }
-        match model::load(paths) {
-            Ok(Some(state)) => {
-                let mode = if state.is_web() { "web" } else { "tcp" };
-                let running = if self.rt.services().running(FRPS) {
-                    "运行中"
-                } else {
-                    "已停止"
-                };
-                format!(
-                    "{mode} · {}:{} · frps {running}",
-                    state.domain, state.bind_port
-                )
-            }
-            Ok(None) => "未安装".to_owned(),
-            Err(e) => format!("状态无法读取: {e}"),
-        }
-    }
 }
 
-/// One menu entry (v2 order).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MenuItem {
-    Configure,
-    Info,
-    Client,
-    Start,
-    Stop,
-    Restart,
-    Update,
-    Renew,
-    RotateToken,
-    Log,
-    Uninstall,
-}
-
-impl MenuItem {
-    fn action(self) -> Action {
-        match self {
-            MenuItem::Configure => Action::Configure {
-                flags: Flags::default(),
-                dry_run: false,
-                plan: false,
-            },
-            MenuItem::Info => Action::Info,
-            MenuItem::Client => Action::Client(ExportRequest::default()),
-            MenuItem::Start => Action::Service(ServiceAction::Start),
-            MenuItem::Stop => Action::Service(ServiceAction::Stop),
-            MenuItem::Restart => Action::Service(ServiceAction::Restart),
-            MenuItem::Update => Action::Update(None),
-            MenuItem::Renew => Action::Renew { cron: false },
-            MenuItem::RotateToken => Action::RotateToken,
-            MenuItem::Log => Action::Log,
-            MenuItem::Uninstall => Action::Uninstall,
-        }
-    }
-}
-
-const MENU: [(MenuItem, &str); 11] = [
-    (MenuItem::Configure, "安装/配置"),
-    (MenuItem::Info, "状态"),
-    (MenuItem::Client, "导出客户端"),
-    (MenuItem::Start, "启动"),
-    (MenuItem::Stop, "停止"),
-    (MenuItem::Restart, "重启"),
-    (MenuItem::Update, "更新"),
-    (MenuItem::Renew, "续期"),
-    (MenuItem::RotateToken, "轮换 token"),
-    (MenuItem::Log, "日志"),
-    (MenuItem::Uninstall, "卸载"),
-];
+mod menu;
 
 #[cfg(test)]
 mod tests;
