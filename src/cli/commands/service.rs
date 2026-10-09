@@ -30,7 +30,6 @@ use crate::host::service::{validate_name, Scope, ServiceDef, ServiceKind, Servic
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
 
-const FRP_BUSY: &str = "另一个 FRP 操作正在进行；稍后重试";
 const START_WAIT: Duration = Duration::from_secs(300);
 const LOG_LINES: usize = 200;
 
@@ -166,7 +165,8 @@ fn lock(session: &Session, scope: Scope, action: Action) -> Result<FileLock> {
     let path = scope.lock_path(&session.ctx.paths);
     let busy = match scope {
         Scope::Node => BUSY_MESSAGE,
-        Scope::Frp => FRP_BUSY,
+        // The FRP module's wording, whoever holds its lock.
+        Scope::Frp => crate::frp::runtime::BUSY,
     };
     match FileLock::acquire(&path, busy) {
         Err(Error::Busy(_)) if action == Action::Start => {

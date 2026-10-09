@@ -123,6 +123,25 @@ fn service_changes_take_the_scope_lock() {
 }
 
 #[test]
+fn frp_service_changes_say_the_frp_busy_message() {
+    let bench = Bench::new();
+    let held = FileLock::acquire_waiting(
+        &bench.ctx.paths.frp_lock(),
+        crate::frp::runtime::BUSY,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(20),
+    )
+    .unwrap();
+    let err = service(&bench.session(), "onebox-frps", Action::Stop).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        crate::frp::runtime::BUSY,
+        "one wording for the FRP lock"
+    );
+    drop(held);
+}
+
+#[test]
 fn proxy_cores() {
     let bench = Bench::installed(&config(&[(VlessReality, 443, XR), (Tuic, 443, SB)]));
     bench.live.set_running("onebox-xray");
