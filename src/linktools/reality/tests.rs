@@ -268,7 +268,7 @@ fn only_reality_entries_are_checked_and_cancellation_wins() {
     let dir = TempDir::new("linktools-test").unwrap();
     let (ctx, _, _) = Ctx::test(dir.path());
     let opts = RealityOptions {
-        scope: Scope::ServerLocal,
+        scope: Some(Scope::ServerLocal),
         ..RealityOptions::default()
     };
     let cancel = CancelToken::manual();
@@ -288,6 +288,50 @@ fn only_reality_entries_are_checked_and_cancellation_wins() {
     assert_eq!(
         (exit.exit_code(), exit.report_text(), exit.is_cancelled()),
         (130, "REALITY 检查已取消".to_string(), true)
+    );
+}
+
+/// Options a menu builds directly (`RealityOptions::default()`, no
+/// bundle) check the installed node over loopback and say so.
+#[test]
+fn a_run_without_a_bundle_is_server_local() {
+    let _signals = crate::sys::signal::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = TempDir::new("linktools-test").unwrap();
+    let (ctx, exec, _) = Ctx::test(dir.path());
+    let cfg = crate::domain::fixtures::config(&[(
+        crate::domain::protocol::Protocol::VlessReality,
+        443,
+        Core::Singbox,
+    )]);
+    crate::state::StateStore::save_to(&ctx.paths, &cfg).unwrap();
+    let output = dir.join("reality.json");
+    let opts = RealityOptions {
+        output: Some(output.clone()),
+        ..RealityOptions::default()
+    };
+    // Nothing is scripted, so every probe fails; the report is still saved.
+    let err = run(&ctx, &opts).unwrap_err();
+    assert_eq!(err.to_string(), "REALITY 检查失败，详见 JSON 报告");
+    let report: Value = serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
+    assert_eq!(report["scope"], "server-local");
+    assert_eq!(report["entries"][0]["id"], "vless-reality");
+    let probed = exec
+        .calls()
+        .iter()
+        .find(|c| c.program == "openssl")
+        .and_then(|c| arg_after(&c.args, "-connect").map(str::to_owned));
+    assert_eq!(probed.as_deref(), Some("127.0.0.1:443"), "loopback");
+
+    let forced = RealityOptions {
+        scope: Some(Scope::CurrentMachineToServer),
+        ..opts
+    };
+    let err = run(&ctx, &forced).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "省略探测配置时只能执行本机回环检查（--scope server-local）"
     );
 }
 

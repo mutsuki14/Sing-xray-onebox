@@ -10,7 +10,9 @@
 //! - an invalid `--scope` value says so (v2: `未知或不适用的参数: --scope`,
 //!   D-8.1#14), and `--scope current-machine-to-server` without a bundle is
 //!   rejected instead of being silently replaced by `server-local`
-//!   (D-8.1#15);
+//!   (D-8.1#15); the rule lives in [`RealityOptions::scope`], which
+//!   `reality::run` applies too, so options a menu builds directly cannot
+//!   label a loopback check `current-machine-to-server`;
 //! - `--output` must not exist AND its directory must exist, so the save
 //!   after a long run cannot fail on a typo (D-8.1#7);
 //! - `--ca` must name an existing regular file (v2 passed anything to curl
@@ -153,19 +155,27 @@ impl Scope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RealityOptions {
     pub common: Common,
     pub output: Option<PathBuf>,
-    pub scope: Scope,
+    /// `--scope`; `None` derives it from the input (see
+    /// [`RealityOptions::scope`]).
+    pub scope: Option<Scope>,
 }
 
-impl Default for RealityOptions {
-    fn default() -> RealityOptions {
-        RealityOptions {
-            common: Common::default(),
-            output: None,
-            scope: Scope::CurrentMachineToServer,
+impl RealityOptions {
+    /// The report scope. With a bundle: the explicit choice, else
+    /// `current-machine-to-server`. Without one the installed node is
+    /// checked over loopback, so only `server-local` is possible and an
+    /// explicit `current-machine-to-server` is an error.
+    pub fn scope(&self) -> Result<Scope> {
+        match (&self.common.bundle, self.scope) {
+            (Some(_), scope) => Ok(scope.unwrap_or(Scope::CurrentMachineToServer)),
+            (None, None | Some(Scope::ServerLocal)) => Ok(Scope::ServerLocal),
+            (None, Some(Scope::CurrentMachineToServer)) => {
+                bail!("省略探测配置时只能执行本机回环检查（--scope server-local）")
+            }
         }
     }
 }
@@ -269,18 +279,16 @@ impl FailoverOptions {
 impl RealityOptions {
     pub fn from_matches(m: &Matches) -> Result<RealityOptions> {
         let common = Common::from_matches(m)?;
-        let explicit = m.value(SCOPE).map(Scope::parse).transpose()?;
-        let scope = match (&common.bundle, explicit) {
-            (Some(_), scope) => scope.unwrap_or(Scope::CurrentMachineToServer),
-            (None, None | Some(Scope::ServerLocal)) => Scope::ServerLocal,
-            (None, Some(Scope::CurrentMachineToServer)) => {
-                bail!("省略探测配置时只能执行本机回环检查（--scope server-local）")
-            }
-        };
-        Ok(RealityOptions {
+        let scope = m.value(SCOPE).map(Scope::parse).transpose()?;
+        let opts = RealityOptions {
             common,
-            output: output(m)?,
+            output: None,
             scope,
+        };
+        opts.scope()?;
+        Ok(RealityOptions {
+            output: output(m)?,
+            ..opts
         })
     }
 }

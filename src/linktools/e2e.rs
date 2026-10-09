@@ -315,7 +315,7 @@ fn reality_check(w: &World) {
     let opts = RealityOptions {
         common: w.common(None),
         output: Some(output.clone()),
-        scope: Scope::CurrentMachineToServer,
+        scope: Some(Scope::CurrentMachineToServer),
     };
     // Warnings only (the s_server status page is dynamic) or a clean pass.
     match super::reality::run(&w.ctx, &opts) {

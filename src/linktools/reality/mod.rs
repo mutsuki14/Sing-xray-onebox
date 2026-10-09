@@ -17,7 +17,8 @@
 //! - the real causes of a failed block are listed in a new `errors` key
 //!   (absent when empty, D-8.1#8);
 //! - Ctrl+C before the first REALITY entry exits 130 (D-8.1#17); the scope
-//!   rules are in `options` (D-8.1#14/#15).
+//!   rules are in `options` (D-8.1#14/#15) and are applied here too: a
+//!   check without a bundle always reports `server-local`.
 
 pub mod tls;
 
@@ -77,6 +78,7 @@ impl RealityRow {
 
 /// `onebox reality-check`.
 pub fn run(ctx: &Ctx, opts: &RealityOptions) -> Result<()> {
+    opts.scope()?;
     let bundle = match opts.common.bundle.as_deref() {
         Some(path) => bundle::load(path)?,
         None => {
@@ -162,7 +164,7 @@ impl Checker<'_> {
             failed: rows.iter().any(RealityRow::failed),
             warned: rows.iter().any(|r| !r.warnings.is_empty()),
         };
-        let scope = self.opts.scope.id();
+        let scope = self.opts.scope()?.id();
         Ok((Report::new(scope, REALITY_NOTE, rows, cancelled), outcome))
     }
 

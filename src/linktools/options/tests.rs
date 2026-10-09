@@ -45,8 +45,8 @@ fn defaults_are_v2s() {
         (2080, 15, 3, 3, 60)
     );
     let reality = RealityOptions::from_matches(&matches(&["p"], &[])).unwrap();
-    assert_eq!(reality.scope, Scope::CurrentMachineToServer);
-    assert_eq!(reality.scope.id(), "current-machine-to-server");
+    assert_eq!(reality.scope().unwrap(), Scope::CurrentMachineToServer);
+    assert_eq!(reality.scope().unwrap().id(), "current-machine-to-server");
 }
 
 #[test]
@@ -145,17 +145,23 @@ fn scope_rules() {
         RealityOptions::from_matches(&matches(positionals, &[(SCOPE, scope)]))
     };
     assert_eq!(
-        with(&["b"], "server-local").unwrap().scope,
+        with(&["b"], "server-local").unwrap().scope().unwrap(),
         Scope::ServerLocal
     );
     assert_eq!(
-        with(&["b"], "current-machine-to-server").unwrap().scope,
+        with(&["b"], "current-machine-to-server")
+            .unwrap()
+            .scope()
+            .unwrap(),
         Scope::CurrentMachineToServer
     );
-    assert_eq!(with(&[], "server-local").unwrap().scope, Scope::ServerLocal);
+    assert_eq!(
+        with(&[], "server-local").unwrap().scope().unwrap(),
+        Scope::ServerLocal
+    );
     let local = RealityOptions::from_matches(&matches(&[], &[])).unwrap();
     assert_eq!(
-        (local.scope, local.common.bundle),
+        (local.scope().unwrap(), local.common.bundle),
         (Scope::ServerLocal, None)
     );
     assert_eq!(
@@ -168,6 +174,14 @@ fn scope_rules() {
         with(&["b"], "anywhere").unwrap_err().to_string(),
         "--scope 只能是 server-local 或 current-machine-to-server"
     );
+    // Options built directly (menus) follow the same rule.
+    let direct = RealityOptions::default();
+    assert_eq!(direct.scope().unwrap(), Scope::ServerLocal, "no bundle");
+    let forced = RealityOptions {
+        scope: Some(Scope::CurrentMachineToServer),
+        ..RealityOptions::default()
+    };
+    assert!(forced.scope().is_err());
 }
 
 #[test]
