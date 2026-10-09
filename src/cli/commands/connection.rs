@@ -5,7 +5,9 @@
 //! `--addr`/`--name` and `sni` only the handshake options (v2 accepted
 //! every option, e.g. `addr --port`, bypassing the port checks); a new
 //! address is checked and the other address family comes from fresh
-//! detection, never from the old state; the interactive ShadowTLS change
+//! detection, never from the old state, while keeping the address keeps the
+//! stored families and WARP flags (v2 re-detected even then, so a failed
+//! lookup dropped IPv6 and restarted the node); the interactive ShadowTLS change
 //! also resets an explicit handshake target; `sni` without options under
 //! `-y`, or answers that change nothing, apply nothing.
 
@@ -69,12 +71,7 @@ pub fn plan_addr(session: &Session, args: &AddrArgs) -> Result<Option<ApplyReque
     let ui = session.ui();
     let asked = args.addr.is_none() && args.name.is_none() && ui.interactive();
     let (addr, name) = if asked {
-        let check = |answer: &str| -> Result<String> {
-            if answer.is_empty() {
-                return Ok(String::new());
-            }
-            opt::host(answer).map(|h| h.to_string())
-        };
+        let check = |answer: &str| opt::host(answer).map(|h| h.to_string());
         let addr = ui.input_with("连接 IP 或域名", &cfg.server.addr.to_string(), &check)?;
         let name = ui.input_with("节点名称", &cfg.node_name, &|name: &str| {
             if crate::domain::validate::valid_label(name) {
@@ -85,30 +82,24 @@ pub fn plan_addr(session: &Session, args: &AddrArgs) -> Result<Option<ApplyReque
                 ))
             }
         })?;
-        let addr = (!addr.is_empty()).then(|| opt::host(&addr)).transpose()?;
-        (addr, Some(name))
+        (Some(opt::host(&addr)?), Some(name))
     } else {
         (args.addr.clone(), args.name.clone())
     };
-    // A new address takes the other family from fresh detection.
-    let next = if addr.is_some() {
-        let detected = Detected::detect(session);
-        let host = match addr {
-            Some(host) => host,
-            None => detected
-                .default_host()
-                .ok_or_else(|| Error::msg("无法检测公网地址，请使用 --addr 指定"))?,
-        };
-        plan::set_address(cfg, host, name.as_deref(), detected.ipv4, detected.ipv6)?
-    } else {
-        let server = &cfg.server;
-        plan::set_address(
+    // Only a changed address takes the families from fresh detection.
+    let server = &cfg.server;
+    let next = match addr.filter(|host| *host != server.addr) {
+        Some(host) => {
+            let detected = Detected::detect(session);
+            plan::set_address(cfg, host, name.as_deref(), detected.ipv4, detected.ipv6)?
+        }
+        None => plan::set_address(
             cfg,
             server.addr.clone(),
             name.as_deref(),
             server.ipv4,
             server.ipv6,
-        )?
+        )?,
     };
     if next == *cfg {
         session.info("配置未变化");

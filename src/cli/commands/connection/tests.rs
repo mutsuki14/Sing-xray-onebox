@@ -66,6 +66,34 @@ fn interactive_address_reasks_invalid_answers() {
     );
 }
 
+/// Enter twice keeps everything: no detection, no apply — a failed IPv6
+/// lookup must not drop the stored family and restart the node.
+#[test]
+fn keeping_the_address_keeps_the_stored_families() {
+    let mut cfg = config(&[(VlessReality, 443, XR)]);
+    cfg.server.ipv6 = Some("2001:db8::99".parse().unwrap());
+    cfg.server.ipv6_warp = true;
+    let mut bench = Bench::installed(&cfg);
+    // Detection would fail for both families.
+    bench.live.ipv4 = None;
+    bench.live.ipv6_addr = None;
+    bench.answers(&["", ""]);
+    assert!(plan_addr(&bench.session(), &AddrArgs::default())
+        .unwrap()
+        .is_none());
+    assert_eq!(bench.notes(), ["[提示] 配置未变化"]);
+    // The same address on the command line, with a new name: only the name.
+    bench.unattended();
+    let req = plan_addr(&bench.session(), &args(Some("203.0.113.10"), Some("hk-1")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(req.config.node_name, "hk-1");
+    assert_eq!(
+        req.config.server, cfg.server,
+        "families and WARP flags kept"
+    );
+}
+
 #[test]
 fn sni_requires_reality_or_shadowtls() {
     let bench = Bench::installed(&config(&[(Trojan, 443, SB)]));
