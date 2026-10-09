@@ -327,7 +327,12 @@ mod tests {
     #[test]
     fn report_routes_each_kind_to_its_stream() {
         let cases: [(Error, i32, &str, &str); 6] = [
-            (Error::exit(0, "程序已更新到 3.0.1"), 0, "程序已更新到 3.0.1\n", ""),
+            (
+                Error::exit(0, "程序已更新到 3.0.1"),
+                0,
+                "程序已更新到 3.0.1\n",
+                "",
+            ),
             (Error::exit(0, ""), 0, "", ""),
             (Error::Cancelled, 130, "", "[错误] 输入结束，操作已取消\n"),
             (
@@ -342,7 +347,12 @@ mod tests {
                 "",
                 "[错误] 测试已取消\n",
             ),
-            (Error::msg("未知命令: nope"), 1, "", "[错误] 未知命令: nope\n"),
+            (
+                Error::msg("未知命令: nope"),
+                1,
+                "",
+                "[错误] 未知命令: nope\n",
+            ),
         ];
         for (error, code, out, err) in cases {
             let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
@@ -359,8 +369,14 @@ mod tests {
         for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::Other] {
             let cases = [
                 (Error::exit(0, "程序已更新到 3.0.1"), 0),
-                (Error::exit(EXIT_STALE_PROCESS, "旧进程"), EXIT_STALE_PROCESS),
-                (Error::exit(EXIT_WARNINGS, "检查完成，有警告"), EXIT_WARNINGS),
+                (
+                    Error::exit(EXIT_STALE_PROCESS, "旧进程"),
+                    EXIT_STALE_PROCESS,
+                ),
+                (
+                    Error::exit(EXIT_WARNINGS, "检查完成，有警告"),
+                    EXIT_WARNINGS,
+                ),
                 (Error::Cancelled, EXIT_CANCELLED),
                 (Error::msg("未知命令: nope"), EXIT_ERROR),
             ];
