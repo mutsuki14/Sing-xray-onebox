@@ -44,7 +44,8 @@ pub enum Cron {
 }
 
 pub struct Node {
-    pub dir: TempDir,
+    /// Keeps the layout alive.
+    _dir: TempDir,
     pub ctx: Ctx,
     pub fake: Arc<FakeExec>,
     pub cfg: NodeConfig,
@@ -120,7 +121,7 @@ impl Node {
             write(&site::conf_file(paths), "events {}\n", 0o600);
         }
         Node {
-            dir,
+            _dir: dir,
             ctx,
             fake,
             cfg,

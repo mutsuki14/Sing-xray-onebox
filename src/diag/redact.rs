@@ -61,7 +61,7 @@ impl Redactor {
             return;
         }
         self.known.push((value.to_owned(), placeholder));
-        self.known.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        self.known.sort_by_key(|(v, _)| std::cmp::Reverse(v.len()));
     }
 
     fn add_host(&mut self, host: &Host) {
