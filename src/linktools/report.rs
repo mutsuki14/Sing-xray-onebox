@@ -8,10 +8,14 @@
 //!   unless the run was cancelled or failed anyway (then it is printed
 //!   and the run's own code wins);
 //! - cancellation is checked before "no REALITY entries", so Ctrl+C
-//!   before the first entry is 130, not 1 (D-8.1#17).
+//!   before the first entry is 130, not 1 (D-8.1#17);
+//! - a cancelled run is `Error::Cancelled` wrapped in the tool's message:
+//!   exit 130 and `[错误] 测试已取消` from `main` as before, and
+//!   `is_cancelled()` is true, so a menu returns to its submenu instead of
+//!   treating the code as process-ending (ratified decision G5).
 
 use super::bundle::{json_text, write_private};
-use crate::error::{Error, Result, EXIT_CANCELLED, EXIT_WARNINGS};
+use crate::error::{Error, Result, EXIT_WARNINGS};
 use crate::ui::out;
 use serde::Serialize;
 use std::path::Path;
@@ -92,8 +96,9 @@ pub struct Outcome {
     pub warned: bool,
 }
 
-/// The exit of a run: 130 cancelled, 1 failed (or report not saved),
-/// 2 warnings only (`reality-check`), else success.
+/// The exit of a run: 130 cancelled (a wrapped `Error::Cancelled`), 1
+/// failed (or report not saved), 2 warnings only (`reality-check`), else
+/// success.
 pub fn conclude(tool: Tool, outcome: Outcome, published: Result<()>) -> Result<()> {
     if let Err(e) = published {
         if !(outcome.cancelled || outcome.failed) {
@@ -102,7 +107,7 @@ pub fn conclude(tool: Tool, outcome: Outcome, published: Result<()>) -> Result<(
         out::error(e);
     }
     if outcome.cancelled {
-        return Err(Error::exit(EXIT_CANCELLED, tool.cancelled()));
+        return Err(Error::Cancelled.wrap(tool.cancelled()));
     }
     if outcome.failed {
         return Err(Error::msg(tool.failed()));
@@ -181,11 +186,36 @@ mod tests {
         publish("{}\n", None).unwrap();
     }
 
+    /// Exit code and the text `main` prints.
     fn code(result: Result<()>) -> (i32, String) {
         match result {
             Ok(()) => (0, String::new()),
-            Err(e) => (e.exit_code(), e.to_string()),
+            Err(e) => (e.exit_code(), e.report_text()),
         }
+    }
+
+    #[test]
+    fn cancelled_runs_are_cancellations_for_main_and_menus() {
+        for tool in [Tool::Bench, Tool::Reality] {
+            let outcome = Outcome {
+                cancelled: true,
+                failed: true,
+                warned: true,
+            };
+            let err = conclude(tool, outcome, Ok(())).unwrap_err();
+            assert!(err.is_cancelled(), "{tool:?}");
+            assert_eq!(err.exit_code(), 130);
+            assert_eq!(err.report_text(), tool.cancelled());
+        }
+        let failed = conclude(
+            Tool::Bench,
+            Outcome {
+                failed: true,
+                ..Outcome::default()
+            },
+            Ok(()),
+        );
+        assert!(!failed.unwrap_err().is_cancelled());
     }
 
     #[test]

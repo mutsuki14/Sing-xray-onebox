@@ -3,6 +3,13 @@
 //! Exit codes: 0 success, 1 error, 2 warnings-only result, 75 self-update
 //! recovery finished in a stale process, 130 cancelled. Cancellation keeps
 //! code 130 even when wrapped in context (v2 turned it into 1 inside applies).
+//!
+//! What [`report`] prints (stderr unless noted): `Exit{0}` → its message on
+//! stdout; a bare `Cancelled` (EOF at a prompt) → `[错误] 输入结束，操作已取消`;
+//! a wrapped cancellation → `[错误] {context}` without the generic
+//! `: 操作已取消` tail (e.g. `[错误] 测试已取消`); `Exit{2}` (a warnings-only
+//! result such as `reality-check`'s) → `[警告] {message}`; anything else →
+//! `[错误] {error}`.
 
 use std::fmt;
 use std::io;
@@ -80,6 +87,20 @@ impl Error {
             Error::Context { source, .. } if source.is_cancelled() => EXIT_CANCELLED,
             Error::Cancelled => EXIT_CANCELLED,
             _ => EXIT_ERROR,
+        }
+    }
+
+    /// The text `main` prints after its `[错误]` prefix: the `Display` text,
+    /// except that a wrapped cancellation ends with its innermost context
+    /// instead of the generic `操作已取消` (`测试已取消`, not
+    /// `测试已取消: 操作已取消`).
+    pub fn report_text(&self) -> String {
+        match self {
+            Error::Context { message, source } if source.is_cancelled() => match **source {
+                Error::Cancelled => message.clone(),
+                _ => format!("{message}: {}", source.report_text()),
+            },
+            other => other.to_string(),
         }
     }
 
@@ -225,7 +246,7 @@ pub fn report(error: &Error) -> i32 {
             code: EXIT_WARNINGS,
             message,
         } => eprintln!("[警告] {message}"),
-        _ => eprintln!("[错误] {error}"),
+        _ => eprintln!("[错误] {}", error.report_text()),
     }
     code
 }
@@ -252,6 +273,26 @@ mod tests {
     fn context_formats_chain() {
         let r: Result<()> = Err(Error::msg("内层")).context("外层");
         assert_eq!(r.unwrap_err().to_string(), "外层: 内层");
+    }
+
+    #[test]
+    fn wrapped_cancellations_report_their_context() {
+        let e = Error::Cancelled.wrap("测试已取消");
+        assert!(e.is_cancelled());
+        assert_eq!(e.exit_code(), EXIT_CANCELLED);
+        assert_eq!(e.to_string(), "测试已取消: 操作已取消");
+        assert_eq!(e.report_text(), "测试已取消");
+        let nested = Error::Cancelled
+            .wrap("操作被信号 2 中断")
+            .wrap("配置未应用，已恢复原状态");
+        assert_eq!(
+            nested.report_text(),
+            "配置未应用，已恢复原状态: 操作被信号 2 中断"
+        );
+        assert_eq!(Error::Cancelled.report_text(), "操作已取消");
+        let plain = Error::msg("内层").wrap("外层");
+        assert_eq!(plain.report_text(), "外层: 内层");
+        assert_eq!(report(&e), EXIT_CANCELLED);
     }
 
     #[test]

@@ -286,8 +286,8 @@ fn only_reality_entries_are_checked_and_cancellation_wins() {
     assert_eq!(report.scope, "server-local");
     let exit = conclude(Tool::Reality, outcome, Ok(())).unwrap_err();
     assert_eq!(
-        (exit.exit_code(), exit.to_string()),
-        (130, "REALITY 检查已取消".to_string())
+        (exit.exit_code(), exit.report_text(), exit.is_cancelled()),
+        (130, "REALITY 检查已取消".to_string(), true)
     );
 }
 

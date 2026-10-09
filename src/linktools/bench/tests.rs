@@ -188,8 +188,8 @@ fn cancellation_stops_between_entries_and_reports_it() {
     assert_eq!(launcher.launched().len(), 1);
     let exit = conclude(Tool::Bench, outcome, Ok(())).unwrap_err();
     assert_eq!(
-        (exit.exit_code(), exit.to_string()),
-        (130, "测试已取消".to_string())
+        (exit.exit_code(), exit.report_text(), exit.is_cancelled()),
+        (130, "测试已取消".to_string(), true)
     );
 
     let cancel = CancelToken::manual();
