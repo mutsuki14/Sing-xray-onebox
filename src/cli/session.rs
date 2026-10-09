@@ -14,7 +14,10 @@
 //!   under `-y`.
 //!
 //! Changes from v2: reading the state as a non-root user explains that root
-//! is needed instead of showing a raw permission error.
+//! is needed instead of showing a raw permission error; a self-update child
+//! (the `regen` v2.0.1's `update-script` runs) repeats its warnings — the
+//! once-only migration notes among them — on stdout, the only output that
+//! parent shows.
 
 use crate::apply::{self, ApplyRequest};
 use crate::cert::cloudflare;
@@ -178,6 +181,9 @@ pub struct Session<'a> {
     pub is_root: bool,
     printer: &'a dyn Printer,
     warned: AtomicBool,
+    /// Warnings are repeated on stdout (a self-update child, see
+    /// [`Session::echoing_warnings`]).
+    echo_warnings: bool,
 }
 
 impl<'a> Session<'a> {
@@ -194,12 +200,24 @@ impl<'a> Session<'a> {
             is_root,
             printer: &StdPrinter,
             warned: AtomicBool::new(false),
+            echo_warnings: false,
         }
     }
 
     /// The same session printing through `printer` (tests).
     pub fn with_printer(mut self, printer: &'a dyn Printer) -> Session<'a> {
         self.printer = printer;
+        self
+    }
+
+    /// The same session repeating every warning on stdout as `[警告] …`.
+    /// For a self-update child (a parent offered its lock): v2.0.1's
+    /// `update-script` shows only the child's stdout, so the once-only
+    /// migration notes on stderr would never reach the user. A v3 parent
+    /// collects the stderr copies and drops these lines from the stdout it
+    /// shows (`update::selfupdate::child_report`).
+    pub fn echoing_warnings(mut self, echo: bool) -> Session<'a> {
+        self.echo_warnings = echo;
         self
     }
 
@@ -217,7 +235,12 @@ impl<'a> Session<'a> {
     }
 
     pub fn warn(&self, text: impl std::fmt::Display) {
-        self.printer.status(Level::Warn, &text.to_string());
+        let text = text.to_string();
+        self.printer.status(Level::Warn, &text);
+        if self.echo_warnings {
+            // Best effort: a parent that went away is not this command's error.
+            let _ = self.data(&format!("{} {text}", Level::Warn.tag()));
+        }
     }
 
     pub fn error(&self, text: impl std::fmt::Display) {
@@ -320,10 +343,13 @@ fn explain_permission(e: Error) -> Error {
     }
 }
 
-/// Run `f` with the production session.
+/// Run `f` with the production session. In a self-update child (a parent
+/// offered its lock; read before the lock is adopted, which consumes the
+/// offer) warnings are repeated on stdout.
 pub fn with_system<T>(ctx: &Ctx, f: impl FnOnce(&Session) -> Result<T>) -> Result<T> {
     let live = SystemLive { ctx };
-    let session = Session::new(ctx, &SystemEngine, &live, crate::sys::process::is_root());
+    let session = Session::new(ctx, &SystemEngine, &live, crate::sys::process::is_root())
+        .echoing_warnings(crate::sys::lock::inherited_lock_offered());
     f(&session)
 }
 

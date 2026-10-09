@@ -82,6 +82,31 @@ fn v2_state_is_migrated_in_memory_and_carries_devices() {
     assert!(!bench.ctx.paths.state_v2_backup().exists());
 }
 
+/// The `regen` child of v2.0.1's `update-script` shows only stdout: the
+/// once-only migration notes are repeated there, as `[警告] …`.
+#[test]
+fn a_self_update_child_repeats_migration_warnings_on_stdout() {
+    let mut state: serde_json::Value =
+        serde_json::from_slice(crate::apply::testing::V2_STATE).unwrap();
+    state["values"]["PASSWORD"] = "".into();
+    let bench = Bench::new();
+    let bytes = serde_json::to_vec(&state).unwrap();
+    crate::apply::testing::file(&bench.ctx.paths.state(), 0o600, &bytes);
+    // A normal command: stderr only.
+    bench.session().load().unwrap();
+    assert_eq!(bench.output(), "");
+    let warnings = bench.notes();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.starts_with("[警告] v2 状态缺少 PASSWORD")),
+        "{warnings:?}"
+    );
+    // A self-update child: the same lines on stdout too.
+    bench.session().echoing_warnings(true).load().unwrap();
+    assert_eq!(bench.output(), warnings.join("\n"));
+}
+
 #[test]
 fn cloudflare_credentials_are_resolved_before_apply() {
     let bench = Bench::installed(&trojan_cf());
