@@ -11,12 +11,15 @@ use super::*;
 use crate::domain::protocol::Transport;
 use crate::domain::validate::{check_subscription_ip, valid_text};
 
-/// `site enable DOMAIN [--tls http|cf|custom]`: the site becomes the REALITY
-/// target with the HTTPS entrance on (v2 behavior).
+/// `site enable DOMAIN [--tls http|cf|custom] [--site-https on|off]`: the
+/// site becomes the REALITY target with the HTTPS entrance `https_entry`
+/// (v2 always opened it). The ports are validated with that entrance, so
+/// keeping it closed works while TCP 443 is taken by another listener.
 pub fn enable_site(
     cfg: &NodeConfig,
     domain: &str,
     cert: WebCert,
+    https_entry: bool,
     env: &PlanEnv,
 ) -> Result<NodeConfig> {
     ensure!(
@@ -26,7 +29,7 @@ pub fn enable_site(
     let request = OwnSite {
         domain: domain.to_owned(),
         title: None,
-        https_entry: true,
+        https_entry,
         cert,
     };
     super::set_reality_target(cfg, &RealityChoice::OwnSite(request), env)

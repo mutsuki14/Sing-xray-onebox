@@ -10,7 +10,7 @@ use crate::cli::commands::site::{self, PageEdit, SiteAction};
 use crate::cli::commands::uninstall;
 use crate::cli::options as opt;
 use crate::cli::registry;
-use crate::cli::wizard::steps::{ask_domain, site_cert};
+use crate::cli::wizard::steps::{ask_domain, ask_domain_with, site_cert, site_cert_with};
 use crate::domain::config::{NodeConfig, SiteTemplate, SiteTheme, WebCert};
 use crate::domain::validate::{valid_label, valid_text};
 use crate::domain::{defaults, plan};
@@ -178,13 +178,17 @@ impl Menu<'_> {
         let site = self.loaded()?.config.site;
         Ok(Some(match i {
             0 => SiteAction::Info,
+            // An existing site's domain, entrance and certificate method
+            // are the defaults (Enter keeps them).
             1 => {
-                let domain = ask_domain(ui, "网站域名（已解析到本机）", "网站域名无效")?;
+                let current = site.as_ref().map_or("", |s| s.domain.as_str());
+                let prompt = "网站域名（已解析到本机）";
+                let domain = ask_domain_with(ui, prompt, current, "网站域名无效")?;
                 let current = site.as_ref().is_none_or(|s| s.https_entry);
                 let https_entry = ui.confirm("开启网站 HTTPS 443 入口?", current)?;
                 SiteAction::Enable {
                     domain,
-                    cert: site_cert(ui)?,
+                    cert: site_cert_with(ui, site.as_ref().map(|s| &s.cert))?,
                     https_entry,
                 }
             }

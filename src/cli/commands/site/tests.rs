@@ -123,6 +123,27 @@ fn enable_and_disable() {
             .unwrap();
         assert!(!req.config.site.unwrap().https_entry);
     }
+    // TCP 443 held by a non-REALITY inbound or by FRP: a closed entrance
+    // is planned with the site (never opened in between), an open one is
+    // refused.
+    let trojan = config(&[(VlessReality, 8443, XR), (Trojan, 443, SB)]);
+    let reality = config(&[(VlessReality, 8443, XR)]);
+    for (cfg, frp) in [(trojan, false), (reality, true)] {
+        let mut bench = Bench::installed(&cfg);
+        if frp {
+            bench.live.frp = vec![crate::domain::ports::Reservation {
+                start: 443,
+                end: 443,
+                transport: crate::domain::protocol::Transport::Tcp,
+                label: "frps".into(),
+            }];
+        }
+        let (req, _) = plan_change(&bench.session(), enable(false))
+            .unwrap()
+            .unwrap();
+        assert!(!req.config.site.unwrap().https_entry);
+        assert!(plan_change(&bench.session(), enable(true)).is_err());
+    }
     let bench = Bench::installed(&config(&[(Trojan, 443, SB)]));
     let err = plan_change(&bench.session(), enable(true)).unwrap_err();
     assert_eq!(

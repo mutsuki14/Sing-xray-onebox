@@ -15,7 +15,8 @@
 //! `Exit{0}` (a finished self-update) and `Exit{75}` end the process, so
 //! the replaced program never keeps running; EOF (or Ctrl+C) at a menu
 //! prompt itself — the main menu's or any submenu's, including the FRP and
-//! BBR menus the commands show ([`Menu::command_menu`]) — leaves with 130.
+//! BBR menus the commands show ([`Menu::command_menu`]) — leaves with 130,
+//! and so does SIGTERM or SIGHUP at any question.
 //! Under `-y` the menu picks `0) 退出` at once.
 //!
 //! Typed values reach dispatched command lines only after `--`, so an
@@ -186,11 +187,16 @@ impl<'a> Menu<'a> {
         })
     }
 
-    /// After an action: unwind when a (nested) menu prompt was cancelled,
-    /// else the [`outcome`](Menu::outcome) rules.
+    /// After an action: unwind when a (nested) menu prompt was cancelled
+    /// or SIGTERM/SIGHUP arrived at a question, else the
+    /// [`outcome`](Menu::outcome) rules.
     fn after(&self, result: Result<()>) -> Result<()> {
         if self.left.get() {
             return result.and(Err(Error::Cancelled));
+        }
+        if interrupt::terminating() {
+            self.left.set(true);
+            return crate::sys::signal::check();
         }
         self.outcome(result)
     }

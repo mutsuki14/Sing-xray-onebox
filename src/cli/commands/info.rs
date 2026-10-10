@@ -9,7 +9,8 @@
 //! Changes from v2 (spec B §2.6): the protocol lines became a table; the
 //! card shows the handshake target, certificate mode, Shadowsocks /
 //! ShadowTLS / Hysteria2 secrets and the clash API secret (the control
-//! panel key `docs/clients.md` refers to), and the core state.
+//! panel key `docs/clients.md` refers to), and the core state (a core
+//! whose service definition cannot be read says so instead of `已停止`).
 
 use crate::cli::args::{CommandSpec, Group, Matches, Root};
 use crate::cli::session::{with_system, Session};
@@ -47,7 +48,8 @@ const CLIENT_KINDS: [(&str, ClientFormat); 4] = [
 pub struct CoreState {
     pub core: Core,
     pub version: Option<String>,
-    pub running: bool,
+    /// `None`: the service definition exists but cannot be read.
+    pub running: Option<bool>,
 }
 
 /// The card for `cfg` with the cores' live state.
@@ -58,7 +60,7 @@ pub fn card(session: &Session, cfg: &NodeConfig) -> String {
         .map(|core| CoreState {
             core,
             version: cfg.versions.installed(core).map(str::to_owned),
-            running: session.live.running(core.service()),
+            running: session.live.running_checked(core.service()).ok(),
         })
         .collect();
     render(cfg, &cores, &session.ctx.paths.clients().to_string_lossy())
@@ -102,7 +104,11 @@ fn core_summary(cores: &[CoreState]) -> String {
         .iter()
         .map(|c| {
             let version = c.version.as_deref().unwrap_or("版本未知");
-            let state = if c.running { "运行中" } else { "已停止" };
+            let state = match c.running {
+                Some(true) => "运行中",
+                Some(false) => "已停止",
+                None => "服务状态无法读取",
+            };
             format!("{} {version}（{state}）", c.core.title())
         })
         .collect::<Vec<_>>()

@@ -88,6 +88,10 @@ pub trait Live {
     fn rng(&self) -> Box<dyn Random>;
     fn init(&self) -> InitSystem;
     fn running(&self, service: &str) -> bool;
+    /// [`Live::running`] for a status report: a service definition that
+    /// exists but cannot be read or parsed (no init system) is an error,
+    /// never "stopped".
+    fn running_checked(&self, service: &str) -> Result<bool>;
 }
 
 /// The real host, read through the context (paths under `system_root`).
@@ -119,6 +123,9 @@ impl Live for SystemLive<'_> {
     }
     fn running(&self, service: &str) -> bool {
         Services::detect(self.ctx).running(service)
+    }
+    fn running_checked(&self, service: &str) -> Result<bool> {
+        Services::detect(self.ctx).running_checked(service)
     }
 }
 

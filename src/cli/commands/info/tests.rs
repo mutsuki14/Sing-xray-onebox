@@ -26,12 +26,12 @@ fn card_snapshot() {
         CoreState {
             core: SB,
             version: None,
-            running: false,
+            running: Some(false),
         },
         CoreState {
             core: XR,
             version: Some("26.3.27".into()),
-            running: true,
+            running: Some(true),
         },
     ];
     let keys = cfg.creds.reality.clone().unwrap();
@@ -117,4 +117,13 @@ fn info_reads_the_installed_node() {
         "配置目录: {}",
         bench.ctx.paths.clients().display()
     )));
+    // A damaged service definition is not reported as stopped.
+    let bench = Bench::installed(&config(&[(VlessReality, 443, XR)]));
+    bench.live.set_unreadable("onebox-xray");
+    show(&bench.session()).unwrap();
+    let out = bench.output();
+    assert!(
+        out.contains("内核: Xray 版本未知（服务状态无法读取）"),
+        "{out}"
+    );
 }

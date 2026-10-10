@@ -196,8 +196,9 @@ pub fn plan_add(
     let facts = session.facts()?;
     let probe = LiveProbe(session.live);
     let env = facts.env(&probe, Some(cfg));
+    let base = site_entrance(cfg, &args.reality)?;
     let plan_with =
-        |opts: &AddOptions| plan::add(cfg, protocol, opts, &env, session.live.rng().as_mut());
+        |opts: &AddOptions| plan::add(&base, protocol, opts, &env, session.live.rng().as_mut());
     let mut next = plan_with(&opts)?;
     if opts.port.is_none() && session.ui().interactive() {
         let auto = next.inbound(protocol).map_or(0, |i| i.port);
@@ -218,8 +219,20 @@ pub fn plan_add(
     Ok(Some((req, protocol)))
 }
 
+/// `cfg` with `--site-https` already applied to its existing site, so the
+/// added protocol's port is planned with the requested entrance (a closed
+/// one does not reserve TCP 443). Without a site [`handshake_extras`]
+/// refuses the option.
+fn site_entrance(cfg: &NodeConfig, reality: &RealityArgs) -> Result<NodeConfig> {
+    match reality.site_https {
+        Some(on) if cfg.site.is_some() => plan::site_https(cfg, on),
+        _ => Ok(cfg.clone()),
+    }
+}
+
 /// The ShadowTLS half of `--sni`, `--reality-dest` after `--sni`, and
-/// `--site-https` for an existing site (the order of `sni`).
+/// `--site-https` for an existing site (the order of `sni`; repeated after
+/// [`site_entrance`], it fails when the site went away).
 fn handshake_extras(
     cfg: &NodeConfig,
     reality: &RealityArgs,

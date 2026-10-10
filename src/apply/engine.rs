@@ -42,6 +42,11 @@ use crate::sys::lock::FileLock;
 use crate::sys::signal::{self, SignalScope};
 use crate::ui::out;
 
+/// How the error of an apply that committed but could not clean up its
+/// journal starts (callers tell a committed apply from a rolled-back one
+/// by it).
+pub const COMMITTED_UNCLEAN: &str = "配置已提交，但事务清理失败";
+
 /// [`crate::apply::apply_locked`] with explicit feature hooks.
 pub fn apply_with(
     ctx: &Ctx,
@@ -75,11 +80,8 @@ fn run(ctx: &Ctx, lock: &FileLock, req: ApplyRequest, features: &dyn Features) -
     if let Err(error) = stages::run_all(&mut run) {
         return Err(failed(ctx, lock, &mut run.journal, error));
     }
-    transaction::finish(&ctx.paths).map_err(|e| {
-        Error::msg(format!(
-            "配置已提交，但事务清理失败: {e}；请执行 recover 清理"
-        ))
-    })?;
+    transaction::finish(&ctx.paths)
+        .map_err(|e| Error::msg(format!("{COMMITTED_UNCLEAN}: {e}；请执行 recover 清理")))?;
     out::ok(format!("{reason}完成"));
     Ok(())
 }
@@ -127,7 +129,7 @@ fn failed(ctx: &Ctx, lock: &FileLock, journal: &mut Journal, error: Error) -> Er
     // Without the generic "操作已取消" tail of a wrapped cancellation.
     let cause = error.report_text();
     let result = if *journal.phase() == Phase::Committed {
-        let message = format!("配置已提交，但事务清理失败: {cause}；请执行 recover 清理");
+        let message = format!("{COMMITTED_UNCLEAN}: {cause}；请执行 recover 清理");
         keep_cancellation(error, message)
     } else {
         out::warn(format!("{cause}；正在恢复原配置…"));

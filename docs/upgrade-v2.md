@@ -120,6 +120,7 @@ v2 对所有命令接受同一组选项（无关的选项被忽略，个别甚�
 - `add`、`del` 在 `-y` 下（或没有交互终端时）必须写出协议，例如 `onebox add tuic -y`，否则提示 `请指定要添加的协议，例如 onebox add tuic` 或 `请指定要删除的协议，例如 onebox del tuic`（v2 的 `add -y` 默认添加 `vless-reality`，`del -y` 删除列表中的第一个协议）。
 - `add … --sni` 要求添加后的节点启用了 REALITY 或 ShadowTLS，否则提示 `没有启用 REALITY 或 ShadowTLS`（v2 不检查，直接保存该域名）。
 - `service 名称 reload` 不再支持，请用 `restart`。
+- 无 init 环境下 `service 名称 status` 需要 root（要读取只有 root 可读的服务定义）；systemd / OpenRC 上与 v2 相同，不需要 root。
 - 两个内核都在使用时 `update all 版本` 被拒绝（版本号只能用于单个内核）；`update 内核` 指定当前未使用的内核时报错。
 - `probe merge` 至少需要两份输入。
 - 对已启用的订阅执行 `subscription enable` 时保持当前模式，省略的选项沿用当前值（v2 重新推断模式并把省略的选项恢复默认，只改端口也可能把 HTTPS 订阅改成 HTTP 明文）；更换模式必须写 `--mode`，不写时给出其他模式的选项会报错（见 [subscription.md](subscription.md#三种入口)）。

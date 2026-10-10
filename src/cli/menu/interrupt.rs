@@ -8,8 +8,11 @@
 //! `[提示]` and goes back (a cancelled menu prompt still leaves with 130).
 //! The handlers are held only during questions: Ctrl+C while an action
 //! works keeps its usual effect (the action's own scope, or the default).
-//! A signal this wrapper turned into the error is cleared, so the next
-//! apply does not find it pending.
+//! A SIGINT this wrapper turned into the error is cleared, so the next
+//! apply does not find it pending. SIGTERM and SIGHUP (`kill`, a
+//! supervisor's stop, a closed terminal) are no request to go back: they
+//! stay pending, [`terminating`] tells the menu, and it leaves with 130 —
+//! as without the handlers, where they ended the process.
 
 use crate::error::{Error, Result};
 use crate::sys::signal::{self, SignalScope};
@@ -31,24 +34,34 @@ impl Interruptible {
 
     /// Ask `question` with the recording handlers installed; a signal
     /// received meanwhile (also one that arrived outside the blocking
-    /// read) cancels the question.
+    /// read) cancels the question: SIGINT only the action (cleared),
+    /// SIGTERM/SIGHUP the menu (left pending, see [`terminating`]).
     fn guarded<T>(&self, question: impl FnOnce(&dyn Prompter) -> Result<T>) -> Result<T> {
         let before = signal::received();
         // Without handlers the default disposition applies, as before.
         let scope = SignalScope::install().ok();
         let answer = question(self.inner.as_ref());
-        let interrupted =
-            scope.is_some() && signal::received() != before && signal::pending().is_some();
-        if interrupted {
+        let received =
+            signal::pending().filter(|_| scope.is_some() && signal::received() != before);
+        if received == Some(libc::SIGINT) {
             signal::clear();
         }
         drop(scope);
-        if interrupted {
+        match received {
             // Not the bare EOF form (`输入结束，操作已取消`).
-            return Err(Error::Cancelled.wrap(CANCELLED));
+            Some(libc::SIGINT) => Err(Error::Cancelled.wrap(CANCELLED)),
+            // Still pending: `操作被信号 N 中断`.
+            Some(_) => signal::check().and(answer),
+            None => answer,
         }
-        answer
     }
+}
+
+/// A SIGTERM or SIGHUP is pending: the menu must end (exit 130) instead of
+/// going back. Only [`Interruptible`] leaves one pending (applies and the
+/// other operations clear what they answered).
+pub fn terminating() -> bool {
+    signal::pending().is_some_and(|n| n != libc::SIGINT)
 }
 
 impl Prompter for Interruptible {
@@ -101,11 +114,11 @@ mod tests {
     use super::*;
     use crate::ui::ScriptedPrompter;
 
-    /// A terminal whose user presses Ctrl+C while the question is shown
-    /// (the answer typed before it is ignored).
-    struct CtrlC(ScriptedPrompter);
+    /// A terminal that receives signal `.1` while the question is shown
+    /// (the answer typed before it is ignored): Ctrl+C, `kill`.
+    struct Signalled(ScriptedPrompter, libc::c_int);
 
-    impl Prompter for CtrlC {
+    impl Prompter for Signalled {
         fn interactive(&self) -> bool {
             true
         }
@@ -117,7 +130,7 @@ mod tests {
             // must have its recording handler installed (else the test
             // process ends, which is the bug).
             unsafe {
-                libc::raise(libc::SIGINT);
+                libc::raise(self.1);
             }
             self.0.input(prompt, default)
         }
@@ -158,15 +171,33 @@ mod tests {
     fn ctrl_c_at_a_question_cancels_it_and_is_cleared() {
         let _signals = signal::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         signal::clear();
-        let inner = CtrlC(ScriptedPrompter::new(["typed", ""]));
+        let inner = Signalled(ScriptedPrompter::new(["typed", ""]), libc::SIGINT);
         let ui = Interruptible::new(Arc::new(inner));
         let err = ui.input("ShadowTLS-v3 端口", "8443").unwrap_err();
         assert!(err.is_cancelled());
         assert_eq!(err.exit_code(), 130);
         assert_eq!(err.report_text(), CANCELLED);
         assert_eq!(signal::pending(), None, "the next apply is not cancelled");
+        assert!(!terminating());
         // Questions without a signal answer normally.
         assert!(ui.confirm("继续？", true).unwrap());
         assert!(ui.interactive() && !ui.assume_yes());
+    }
+
+    /// `kill` (SIGTERM) at a question is no request to go back: it stays
+    /// pending so the menu ends with 130.
+    #[test]
+    fn sigterm_at_a_question_ends_the_menu() {
+        let _signals = signal::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        signal::clear();
+        let inner = Signalled(ScriptedPrompter::new(["typed"]), libc::SIGTERM);
+        let ui = Interruptible::new(Arc::new(inner));
+        let err = ui.input("ShadowTLS-v3 端口", "8443").unwrap_err();
+        assert!(err.is_cancelled());
+        assert_eq!(err.exit_code(), 130);
+        assert_eq!(err.report_text(), "操作被信号 15 中断");
+        assert_eq!(signal::pending(), Some(libc::SIGTERM));
+        assert!(terminating());
+        signal::clear();
     }
 }

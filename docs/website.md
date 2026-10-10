@@ -26,7 +26,7 @@ onebox site enable www.example.com --tls cf
 onebox site enable www.example.com --site-https off   # 不开放 HTTPS 443 入口
 ```
 
-交互方式：安装向导第 2 步或 `onebox sni` 中选择“自有域名一键建站”，输入域名和标题，选择是否开启 HTTPS 443 入口（默认开启）以及网站证书方式。`onebox sni` 的目标菜单默认“保持当前目标”（直接回车不改变 REALITY 目标，例如只更换 ShadowTLS 握手域名时）；已有网站时重新选择建站，域名、标题、443 入口与证书方式都默认沿用当前设置，修改标题会重新发布自动生成的主页（导入或手动修改过的主页会被拒绝，与 `onebox site title` 相同）。`onebox sni --reality-site` 与 `add … --reality-site` 对已有网站沿用原证书方式和 HTTPS 443 入口设置（可用 `--site-https on|off` 改变入口）；新建网站（包括 `install --reality-site`）的证书为 HTTP-01，入口默认开启，可加 `--site-https off` 保持关闭。需要其他证书方式时用 `onebox site enable 域名 --tls cf|custom`。`onebox site enable` 默认开启 HTTPS 443 入口，加 `--site-https off` 则保持关闭（443 不会被短暂开放）。`--reality-site` 不能与 `--sni`、`--reality-dest` 同时使用。切换后客户端需要更新 SNI（重新导入配置或刷新订阅）。
+交互方式：安装向导第 2 步或 `onebox sni` 中选择“自有域名一键建站”，输入域名和标题，选择是否开启 HTTPS 443 入口（默认开启）以及网站证书方式。`onebox sni` 的目标菜单默认“保持当前目标”（直接回车不改变 REALITY 目标，例如只更换 ShadowTLS 握手域名时）；已有网站时重新选择建站，域名、标题、443 入口与证书方式都默认沿用当前设置，修改标题会重新发布自动生成的主页（导入或手动修改过的主页会被拒绝，与 `onebox site title` 相同）；菜单 **5) 自有域名网站 → 启用网站** 同样以当前网站的域名、443 入口与证书方式为默认值。`onebox sni --reality-site` 与 `add … --reality-site` 对已有网站沿用原证书方式和 HTTPS 443 入口设置（可用 `--site-https on|off` 改变入口）；新建网站（包括 `install --reality-site`）的证书为 HTTP-01，入口默认开启，可加 `--site-https off` 保持关闭。需要其他证书方式时用 `onebox site enable 域名 --tls cf|custom`。`onebox site enable` 默认开启 HTTPS 443 入口，加 `--site-https off` 则保持关闭（443 不会被短暂开放；入口关闭的网站不占用 TCP 443，即使 443 已被其他协议、FRP 或独立订阅使用也能启用）。`--reality-site` 不能与 `--sni`、`--reality-dest` 同时使用。切换后客户端需要更新 SNI（重新导入配置或刷新订阅）。
 
 ## 流量如何处理
 
