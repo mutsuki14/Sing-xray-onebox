@@ -146,7 +146,13 @@ pub fn ensure_as(ctx: &Ctx, command: &str, package: &str, root: bool) -> Result<
 /// [`ensure()`] for `(command, package)` pairs, in order, sharing one
 /// package-index refresh.
 pub fn ensure_all(ctx: &Ctx, wanted: &[(&str, &str)]) -> Result<()> {
-    let mut installer = Installer::new(ctx);
+    ensure_all_as(ctx, wanted, os::is_root())
+}
+
+/// [`ensure_all`] with the caller's root status (a CLI session carries its
+/// own, so tests do not depend on who runs them).
+pub fn ensure_all_as(ctx: &Ctx, wanted: &[(&str, &str)], root: bool) -> Result<()> {
+    let mut installer = Installer::with_root(ctx, root);
     wanted
         .iter()
         .try_for_each(|(command, package)| installer.ensure(command, package))

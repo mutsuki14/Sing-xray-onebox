@@ -365,7 +365,7 @@ pub fn install(session: &Session, args: &InstallArgs) -> Result<()> {
     {
         return Ok(());
     }
-    crate::host::pkg::ensure_all(session.ctx, &PREREQUISITES)?;
+    crate::host::pkg::ensure_all_as(session.ctx, &PREREQUISITES, session.is_root)?;
     let previous = previous.map(|l| l.config);
     let planned = if session.ui().interactive() {
         crate::cli::wizard::run(session, args, previous.as_ref())?
