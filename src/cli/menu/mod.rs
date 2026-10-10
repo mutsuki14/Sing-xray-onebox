@@ -15,7 +15,7 @@
 //! `Exit{0}` (a finished self-update) and `Exit{75}` end the process, so
 //! the replaced program never keeps running; EOF (or Ctrl+C) at a menu
 //! prompt itself — the main menu's or any submenu's, including the FRP and
-//! BBR menus the commands show ([`Menu::command_menu`]) — leaves with 130,
+//! BBR menus the commands show (`Menu::command_menu`) — leaves with 130,
 //! and so does SIGTERM or SIGHUP at any question.
 //! Under `-y` the menu picks `0) 退出` at once.
 //!
