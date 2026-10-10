@@ -613,3 +613,110 @@ fn typed_values_are_never_options() {
         "{err}"
     );
 }
+
+/// A terminal that receives `signal` when the question `at` is asked
+/// (Ctrl+C, `kill`); every answer comes from `inner`.
+struct SignalAt {
+    inner: Arc<crate::ui::ScriptedPrompter>,
+    at: &'static str,
+    signal: libc::c_int,
+}
+
+impl SignalAt {
+    fn raise_at(&self, prompt: &str) {
+        if prompt == self.at {
+            // SAFETY: raising a cancellation signal while the menu's
+            // prompter holds its recording handler.
+            unsafe {
+                libc::raise(self.signal);
+            }
+        }
+    }
+}
+
+impl crate::ui::Prompter for SignalAt {
+    fn interactive(&self) -> bool {
+        true
+    }
+    fn assume_yes(&self) -> bool {
+        false
+    }
+    fn input(&self, prompt: &str, default: &str) -> Result<String> {
+        self.raise_at(prompt);
+        self.inner.input(prompt, default)
+    }
+    fn input_with(
+        &self,
+        prompt: &str,
+        default: &str,
+        check: &dyn Fn(&str) -> Result<String>,
+    ) -> Result<String> {
+        self.raise_at(prompt);
+        self.inner.input_with(prompt, default, check)
+    }
+    fn confirm(&self, prompt: &str, default: bool) -> Result<bool> {
+        self.raise_at(prompt);
+        self.inner.confirm(prompt, default)
+    }
+    fn select(
+        &self,
+        title: &str,
+        items: &[String],
+        default: usize,
+        back: bool,
+    ) -> Result<Option<usize>> {
+        self.inner.select(title, items, default, back)
+    }
+    fn select_many(&self, title: &str, items: &[String], default: &[usize]) -> Result<Vec<usize>> {
+        self.inner.select_many(title, items, default)
+    }
+    fn secret(&self, prompt: &str) -> Result<String> {
+        self.inner.secret(prompt)
+    }
+}
+
+/// At an action's question Ctrl+C cancels only the action (back to the
+/// submenu), but SIGTERM — `kill`, a supervisor's stop — ends the menu
+/// with 130, as it did without the menu's handlers.
+#[test]
+fn only_ctrl_c_at_a_question_returns_to_the_menu() {
+    let _signals = crate::sys::signal::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::sys::signal::clear();
+    // 自有域名网站 → 修改标题, signalled there; then 返回, 退出.
+    // (signal, answers, menu ends cancelled)
+    let cases: [(libc::c_int, &[&str], bool); 2] = [
+        (libc::SIGINT, &["5", "7", "typed", "0", "0"], false),
+        (libc::SIGTERM, &["5", "7", "typed"], true),
+    ];
+    for (signal, answers, ends) in cases {
+        let bench = Bench::installed(&with_site(node(), "www.example.com", true));
+        bench.answers(answers);
+        let ui = SignalAt {
+            inner: bench.ui.clone(),
+            at: "网站标题",
+            signal,
+        };
+        let ctx = Ctx {
+            ui: Arc::new(interrupt::Interruptible::new(Arc::new(ui))),
+            ..bench.ctx.clone()
+        };
+        let session =
+            Session::new(&ctx, &bench.engine, &bench.live, true).with_printer(&bench.printed);
+        let calls = Calls::default();
+        let result = Menu::new(&session, &calls).main();
+        assert_eq!(bench.ui.remaining(), 0, "{signal}");
+        assert!(bench.engine.calls().is_empty(), "{signal}");
+        if ends {
+            let err = result.unwrap_err();
+            assert_eq!(err.exit_code(), 130);
+            assert_eq!(err.report_text(), "操作被信号 15 中断");
+            assert!(bench.notes().is_empty(), "{:?}", bench.notes());
+        } else {
+            result.unwrap();
+            assert_eq!(bench.notes(), ["[提示] 操作已取消"]);
+        }
+        crate::sys::signal::clear();
+    }
+}
