@@ -206,7 +206,7 @@ fn a_cleanup_interrupted_after_the_rename_leaves_only_a_stage() {
     assert!(load(&f.paths).unwrap().is_none());
     assert_eq!(notice(&f.paths), None);
     assert!(!discard_orphan(&f.paths).unwrap());
-    assert_eq!(stages(&f.paths), [stage.clone()]);
+    assert_eq!(stages(&f.paths), std::slice::from_ref(&stage));
     create(&f.paths, "y", before(), &targets(&f.paths)).unwrap();
     assert!(!stage.exists());
     assert!(stages(&f.paths).is_empty());
