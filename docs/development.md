@@ -135,7 +135,7 @@ Xray 客户端配置的校验需要 `geosite.dat` / `geoip.dat`，放在 `ONEBOX
 
 不要不加过滤地在开发机上运行 `cargo test -- --include-ignored`：其余被忽略的测试会访问 github.com（真实下载）、读取本机真实状态（`bbr` 状态）、向测试进程发送信号，或者需要额外条件——可用的 nginx（`ONEBOX_NGINX_BIN`、PATH 或 `/usr/sbin/nginx`，nginx 与网站配置测试找不到时会失败）（无 init 进程管理识别 nginx 也用 `ONEBOX_NGINX_BIN`）、`ONEBOX_TEST_XRAY_ZIP` / `ONEBOX_TEST_SINGBOX_TGZ`（真实安装包解压）、`nft` 与 CAP_NET_ADMIN（端口跳跃脚本），以及在独立网络命名空间中设置 `ONEBOX_TEST_NETNS=1`（防火墙，例如 `unshare -n <测试程序> real_firewall --ignored`）。这些测试适合在容器或 CI 中运行。
 
-`ONEBOX_TEST_REQUIRE_FULL=1` 是 CI 的约定：查找真实工具的测试都使用共享的 `sys::testenv`（`tool`、`have`、`skip`），在缺少变量、工具、文件或权限时直接失败而不是跳过。
+`ONEBOX_TEST_REQUIRE_FULL=1` 是 CI 的约定：查找真实工具的测试都使用共享的 `sys::testenv`（`tool`、`have`、`flag`、`skip`），在缺少变量、工具、文件或权限时直接失败而不是跳过。防火墙测试的 `ONEBOX_TEST_NETNS=1` 开关也是如此，所以 CI 的主测试用 `--skip real_firewall_in_private_netns` 排除它，再单独在 `unshare -n` 创建的独立网络命名空间中运行它。
 
 ### 黑盒测试（Python）
 

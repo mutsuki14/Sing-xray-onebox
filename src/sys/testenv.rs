@@ -42,6 +42,21 @@ fn tool_in(var: &str, env: Env) -> Option<PathBuf> {
     path
 }
 
+/// The opt-in switch `var=1` of a test that must never run by accident
+/// (one that changes the current network namespace). Anything else: skip
+/// (returns `false`).
+pub fn flag(var: &str) -> bool {
+    flag_in(var, &process)
+}
+
+fn flag_in(var: &str, env: Env) -> bool {
+    let on = env(var).is_some_and(|v| v == "1");
+    if !on {
+        skip_in(&format!("未设置 {var}=1"), env);
+    }
+    on
+}
+
 /// Whether a program runs (tests that need curl/openssl skip without it).
 pub fn have(program: &str) -> bool {
     let probe = if program == "openssl" {
@@ -91,6 +106,29 @@ mod tests {
             };
             let got = std::panic::catch_unwind(|| tool_in("ONEBOX_TEST_XRAY", &env)).map_err(drop);
             let want = want.map(|path| path.map(PathBuf::from));
+            assert_eq!(got, want, "{value:?} {full:?}");
+        }
+    }
+
+    #[test]
+    fn unset_switches_skip_unless_ci_requires_them() {
+        // (ONEBOX_TEST_NETNS, ONEBOX_TEST_REQUIRE_FULL, result; `Err`: fails)
+        type Switch = (Option<&'static str>, Option<&'static str>, Result<bool, ()>);
+        let cases: [Switch; 6] = [
+            (Some("1"), None, Ok(true)),
+            (Some("1"), Some("1"), Ok(true)),
+            (None, None, Ok(false)),
+            (Some("yes"), Some("0"), Ok(false)),
+            (None, Some("1"), Err(())),
+            (Some("0"), Some("1"), Err(())),
+        ];
+        for (value, full, want) in cases {
+            let env = move |key: &str| match key {
+                "ONEBOX_TEST_NETNS" => value.map(OsString::from),
+                REQUIRE_FULL => full.map(OsString::from),
+                _ => None,
+            };
+            let got = std::panic::catch_unwind(|| flag_in("ONEBOX_TEST_NETNS", &env)).map_err(drop);
             assert_eq!(got, want, "{value:?} {full:?}");
         }
     }

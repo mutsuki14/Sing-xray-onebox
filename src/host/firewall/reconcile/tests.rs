@@ -407,11 +407,12 @@ fn explicit_ledger_paths_are_honoured() {
 /// End-to-end against the real iptables-nft / nft of the host. Destructive
 /// for the current network namespace, so it only runs when
 /// `ONEBOX_TEST_NETNS=1` says the test binary was started in a private one
-/// (`unshare -n <test-binary> real_firewall --ignored`).
+/// (`unshare -n <test-binary> real_firewall --ignored`); otherwise it skips,
+/// or fails under `ONEBOX_TEST_REQUIRE_FULL=1` (CI runs it in its own step).
 #[test]
 #[ignore]
 fn real_firewall_in_private_netns() {
-    if std::env::var("ONEBOX_TEST_NETNS").as_deref() != Ok("1") {
+    if !crate::sys::testenv::flag("ONEBOX_TEST_NETNS") {
         return;
     }
     use crate::domain::config::PortRange;

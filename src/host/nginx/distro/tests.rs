@@ -156,15 +156,39 @@ impl Host {
 
     /// rpm: `nginx` owns `owned`; `rpm -V` prints `verify`.
     fn rpm(&self, owned: &[&str], verify: &str) -> &Self {
-        let list: String = owned.iter().map(|p| format!("{p}\n")).collect();
-        let code = i32::from(!verify.is_empty());
+        self.rpm_packages(&[("nginx", owned)], verify)
+    }
+
+    /// rpm: the installed `packages` (name, files), the first owning
+    /// `nginx.conf`; any other package is not installed. `rpm -V` prints
+    /// `verify`.
+    fn rpm_packages(&self, packages: &[(&str, &[&str])], verify: &str) -> &Self {
+        let owner = format!("{}\n", packages[0].0);
         self.exec
             .provide("rpm")
-            .on("rpm", &["-qf"], Output::success("nginx\n"))
-            .on("rpm", &["-ql", "nginx"], Output::success(list))
+            .on("rpm", &["-qf"], Output::success(owner));
+        for (package, files) in packages {
+            let list: String = files.iter().map(|p| format!("{p}\n")).collect();
+            self.exec
+                .on("rpm", &["-ql", package], Output::success(list));
+        }
+        let code = i32::from(!verify.is_empty());
+        self.exec
+            .on_fn(
+                |c| c.program == "rpm" && c.args.first().is_some_and(|a| a == "-ql"),
+                |c| {
+                    let package = c.args.last().map_or("", String::as_str);
+                    let text = format!("package {package} is not installed\n");
+                    Ok(Output {
+                        code: 1,
+                        stdout: text,
+                        stderr: String::new(),
+                    })
+                },
+            )
             .on(
                 "rpm",
-                &["-V", "nginx"],
+                &["-V"],
                 Output {
                     code,
                     stdout: verify.into(),
@@ -490,6 +514,117 @@ fn rpm_verification() {
         .file("/etc/nginx/conf.d/app.conf", "server {}")
         .rpm(&owned, "");
     assert!(!h.neutralized(), "conf.d entry not owned by the package");
+}
+
+/// Fedora / EL9: `nginx-core` owns `nginx.conf`, the main `nginx` package
+/// the pages below its root (several are links into the distro's logo
+/// packages, which `rpm -V` checks as links).
+#[test]
+fn split_rpm_packages_serve_the_main_package_pages() {
+    const HTML: &str = "/usr/share/nginx/html";
+    const PAGES: [&str; 7] = [
+        "/usr/share/nginx/html/404.html",
+        "/usr/share/nginx/html/50x.html",
+        "/usr/share/nginx/html/icons/poweredby.png",
+        "/usr/share/nginx/html/index.html",
+        "/usr/share/nginx/html/nginx-logo.png",
+        "/usr/share/nginx/html/poweredby.png",
+        "/usr/share/nginx/html/system_noindex_logo.png",
+    ];
+    let core: &[&str] = &[MAIN_CONF, "/etc/nginx/mime.types", "/usr/sbin/nginx"];
+    let mut main = vec!["/usr/bin/nginx-upgrade", "/usr/share/nginx/html/icons"];
+    main.extend(PAGES);
+    // The untouched packages; the include directories (nginx-filesystem's)
+    // are empty.
+    let el9 = || {
+        let h = host(InitSystem::Systemd, true);
+        h.file(MAIN_CONF, RHEL_CONF)
+            .file(&format!("{HTML}/404.html"), "404")
+            .file(&format!("{HTML}/50x.html"), "50x")
+            .file(&format!("{HTML}/nginx-logo.png"), "logo")
+            .link(&format!("{HTML}/index.html"), "../../testpage/index.html")
+            .link(&format!("{HTML}/poweredby.png"), "nginx-logo.png")
+            .link(
+                &format!("{HTML}/icons/poweredby.png"),
+                "../../../pixmaps/poweredby.png",
+            )
+            .link(
+                &format!("{HTML}/system_noindex_logo.png"),
+                "../../pixmaps/system-noindex-logo.png",
+            );
+        for dir in ["/etc/nginx/conf.d", "/etc/nginx/default.d"] {
+            fs::create_dir_all(h.ctx.paths.system(dir)).unwrap();
+        }
+        h
+    };
+
+    let h = el9();
+    h.rpm_packages(&[("nginx-core", core), ("nginx", &main)], "");
+    let history = h.history();
+    assert_eq!(
+        &history[1..5],
+        [
+            "rpm -qf --queryformat %{NAME}\\n /etc/nginx/nginx.conf",
+            "rpm -ql nginx-core",
+            "rpm -ql nginx",
+            "rpm -V nginx-core nginx",
+        ]
+    );
+    assert_eq!(history.last().map(String::as_str), Some(DISABLE));
+
+    // (case, own page added, `rpm -V` output, neutralized)
+    let cases: [(&str, Option<&str>, &str, bool); 5] = [
+        (
+            "another file of the packages differs",
+            None,
+            ".M.......  c /etc/nginx/mime.types\n",
+            true,
+        ),
+        (
+            "edited page of the main package",
+            None,
+            "S.5....T.    /usr/share/nginx/html/50x.html\n",
+            false,
+        ),
+        (
+            "relinked index page",
+            None,
+            "....L....    /usr/share/nginx/html/index.html\n",
+            false,
+        ),
+        (
+            "edited nginx.conf of the core package",
+            None,
+            "S.5....T.  c /etc/nginx/nginx.conf\n",
+            false,
+        ),
+        (
+            "own page beside the welcome pages",
+            Some("shop.html"),
+            "",
+            false,
+        ),
+    ];
+    for (case, page, verify, neutralized) in cases {
+        let h = el9();
+        if let Some(page) = page {
+            h.file(&format!("{HTML}/{page}"), "shop");
+        }
+        h.rpm_packages(&[("nginx-core", core), ("nginx", &main)], verify);
+        assert_eq!(h.neutralized(), neutralized, "{case}");
+    }
+
+    // `nginx-core` alone: pages left on disk are nobody's, an empty root
+    // (the directory is nginx-filesystem's) serves nothing.
+    let h = el9();
+    h.rpm_packages(&[("nginx-core", core)], "");
+    assert!(!h.neutralized(), "pages without the main package");
+    assert!(h.exec.history().iter().any(|c| c == "rpm -V nginx-core"));
+    let h = host(InitSystem::Systemd, true);
+    h.file(MAIN_CONF, RHEL_CONF)
+        .rpm_packages(&[("nginx-core", core)], "");
+    fs::create_dir_all(h.ctx.paths.system(HTML)).unwrap();
+    assert!(h.neutralized(), "empty root");
 }
 
 // ---- helpers --------------------------------------------------------------
