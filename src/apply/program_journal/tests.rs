@@ -114,6 +114,13 @@ impl Fixture {
         image
     }
 
+    /// A process image that is the restored (old) manager.
+    fn restored_image(&self) -> PathBuf {
+        let image = self.paths().root.parent().unwrap().join("restored-image");
+        file(&image, 0o755, OLD);
+        image
+    }
+
     fn regens(&self) -> Vec<Cmd> {
         self.exec
             .calls()
@@ -221,14 +228,20 @@ fn committed_record_only_cleans_up() {
     assert!(journal_path(fx.paths()).exists());
 }
 
+/// What [`failing_regen_exec`] records: the units running now, and for
+/// every command whether INT/TERM/HUP were blocked while it ran.
+type Running = Arc<std::sync::Mutex<Vec<String>>>;
+type Masks = Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
 /// systemd units for the three node services; `running` follows the
-/// `systemctl start`/`stop` calls, `onebox-subscription` starts at boot,
-/// `onebox regen` answers `regen`, everything else of a recovery succeeds.
+/// `systemctl start`/`stop` calls, `enabled` start at boot, `onebox regen`
+/// answers `regen`, everything else of a recovery succeeds.
 fn failing_regen_exec(
     paths: &Paths,
     running: &[&str],
+    enabled: &[&'static str],
     regen: impl Fn() -> Output + Send + Sync + 'static,
-) -> (Arc<FakeExec>, Arc<std::sync::Mutex<Vec<String>>>) {
+) -> (Arc<FakeExec>, Running, Masks) {
     mkdir(&paths.system("/run/systemd/system"), 0o755);
     for name in [svc::XRAY, svc::SITE, svc::SUBSCRIPTION] {
         file(
@@ -241,6 +254,17 @@ fn failing_regen_exec(
         running.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
     ));
     let exec = Arc::new(FakeExec::new());
+    let masks = Masks::default();
+    let probes = masks.clone();
+    let enabled = enabled.to_vec();
+    exec.on_fn(
+        move |c| {
+            let blocked = crate::sys::signal::cancel_blocked();
+            probes.lock().unwrap().push((c.display(), blocked));
+            false
+        },
+        |_| unreachable!("a probe never matches"),
+    );
     let units = state.clone();
     exec.on_fn(
         |c| c.program == "systemctl",
@@ -257,7 +281,9 @@ fn failing_regen_exec(
                     Output::success("")
                 }
                 Some("is-active") if units.contains(&name) => Output::success(""),
-                Some("is-enabled") if name == svc::SUBSCRIPTION => Output::success("enabled"),
+                Some("is-enabled") if enabled.iter().any(|e| *e == name) => {
+                    Output::success("enabled")
+                }
                 Some("is-active" | "is-enabled") => Output::failure(3, ""),
                 _ => Output::success(""),
             })
@@ -269,7 +295,7 @@ fn failing_regen_exec(
         &["net-apply"],
         Output::success("[警告] 规则提示\n"),
     );
-    (exec, state)
+    (exec, state, masks)
 }
 
 #[test]
@@ -280,18 +306,23 @@ fn a_failed_regeneration_brings_the_restored_node_back_and_finishes_the_record()
     // The child's rollback restarted the cores but left the worker to us.
     let stderr =
         "[1/14] 准备…\n[警告] 证书将在 3 天后过期\n[错误] 配置未应用，已恢复原状态: 证书续期失败\n";
-    let (exec, running) = failing_regen_exec(fx.paths(), &[svc::XRAY, svc::SITE], move || {
-        Output::failure(1, stderr)
-    });
+    let (exec, running, _) = failing_regen_exec(
+        fx.paths(),
+        &[svc::XRAY, svc::SITE],
+        &[svc::SUBSCRIPTION],
+        move || Output::failure(1, stderr),
+    );
     let ctx = Ctx {
         exec: exec.clone(),
         ..fx.ctx.clone()
     };
-    let err = recover_with(&ctx, &fx.lock, &fx.stale_image()).unwrap_err();
+    let err = recover_with(&ctx, &fx.lock, &fx.restored_image()).unwrap_err();
     assert!(restored_only(&err), "{err}");
+    assert!(matches!(err, Error::Msg(_)), "{err:?}");
     assert_eq!(
         err.to_string(),
-        "原程序与配置已恢复并已重新启动服务，但恢复后的管理程序重新生成配置失败: \
+        "原程序与配置已恢复并已重新启动 onebox-subscription、onebox-site、onebox-xray，\
+         但恢复后的管理程序重新生成配置失败: \
          onebox 执行失败 (1): 配置未应用，已恢复原状态: 证书续期失败；\
          排除问题后执行 onebox regen"
     );
@@ -336,17 +367,145 @@ fn a_failed_regeneration_brings_the_restored_node_back_and_finishes_the_record()
     assert_eq!(exec.calls().len(), before);
 }
 
+/// The same failure in a process that is not the restored manager (a menu
+/// still running the replaced image): exit code 75 ends the menu before
+/// its next apply installs that image over the restored manager, and the
+/// error is still the restored-only one.
+#[test]
+fn a_failed_regeneration_in_the_replaced_process_ends_it_with_exit_75() {
+    let fx = Fixture::new(true);
+    let (_, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
+    fx.replace_and_regenerate();
+    let (exec, _, _) = failing_regen_exec(fx.paths(), &[svc::XRAY], &[svc::XRAY], || {
+        Output::failure(1, "[错误] 证书续期失败")
+    });
+    let ctx = Ctx {
+        exec: exec.clone(),
+        ..fx.ctx.clone()
+    };
+    let err = recover_with(&ctx, &fx.lock, &fx.stale_image()).unwrap_err();
+    assert!(restored_only(&err), "{err}");
+    match &err {
+        Error::Exit { code, message } => {
+            assert_eq!(*code, crate::error::EXIT_STALE_PROCESS);
+            assert_eq!(
+                message,
+                &format!(
+                    "原程序与配置已恢复并已重新启动 onebox-xray，\
+                     但恢复后的管理程序重新生成配置失败: onebox 执行失败 (1): 证书续期失败；\
+                     排除问题后执行 onebox regen；{STALE_TAIL}"
+                )
+            );
+        }
+        other => panic!("expected exit 75, got {other:?}"),
+    }
+    fx.assert_restored(&work);
+}
+
+/// A retried recovery (the record already `recovering`) finds every node
+/// service stopped by the attempt that failed after stopping them: when
+/// its regeneration fails, what starts at boot is started again — not only
+/// the worker — and the error says exactly what was started.
+#[test]
+fn a_retried_recovery_whose_regeneration_fails_restarts_what_starts_at_boot() {
+    let fx = Fixture::new(true);
+    let (_, work) = fx.prepare(VERSION, ProgramPhase::Recovering);
+    fx.replace_and_regenerate();
+    let (exec, running, _) = failing_regen_exec(
+        fx.paths(),
+        &[],
+        &[svc::XRAY, svc::SITE, svc::SUBSCRIPTION],
+        || Output::failure(1, "[错误] 证书续期失败"),
+    );
+    let ctx = Ctx {
+        exec: exec.clone(),
+        ..fx.ctx.clone()
+    };
+    let err = recover_with(&ctx, &fx.lock, &fx.restored_image()).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "原程序与配置已恢复并已重新启动 onebox-subscription、onebox-site、onebox-xray，\
+         但恢复后的管理程序重新生成配置失败: onebox 执行失败 (1): 证书续期失败；\
+         排除问题后执行 onebox regen"
+    );
+    let mut now = running.lock().unwrap().clone();
+    now.sort();
+    assert_eq!(now, [svc::SITE, svc::SUBSCRIPTION, svc::XRAY]);
+    fx.assert_restored(&work);
+    // Nothing that ran or starts at boot: nothing is claimed as started.
+    let fx = Fixture::new(true);
+    fx.prepare(VERSION, ProgramPhase::Recovering);
+    fx.replace_and_regenerate();
+    let (exec, running, _) = failing_regen_exec(fx.paths(), &[], &[], || {
+        Output::failure(1, "[错误] 证书续期失败")
+    });
+    let ctx = Ctx {
+        exec,
+        ..fx.ctx.clone()
+    };
+    let err = recover_with(&ctx, &fx.lock, &fx.restored_image()).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("原程序与配置已恢复，但恢复后的管理程序重新生成配置失败"),
+        "{err}"
+    );
+    assert!(running.lock().unwrap().is_empty());
+}
+
+/// INT/TERM/HUP stay blocked from the first stop to the outcome (the
+/// restored manager's regen, the restarts and its net-apply included), so
+/// a Ctrl+C or a hang-up cannot leave the node stopped half-way; the mask
+/// is restored afterwards.
+#[test]
+fn the_recovery_runs_with_cancellation_signals_blocked() {
+    let fx = Fixture::new(true);
+    fx.prepare(VERSION, ProgramPhase::Replaced);
+    fx.replace_and_regenerate();
+    let (exec, _, masks) = failing_regen_exec(fx.paths(), &[svc::XRAY], &[], || {
+        Output::failure(1, "[错误] 证书续期失败")
+    });
+    let ctx = Ctx {
+        exec,
+        ..fx.ctx.clone()
+    };
+    assert!(!crate::sys::signal::cancel_blocked());
+    let err = recover_with(&ctx, &fx.lock, &fx.restored_image()).unwrap_err();
+    assert!(restored_only(&err), "{err}");
+    assert!(
+        !crate::sys::signal::cancel_blocked(),
+        "the mask is restored"
+    );
+    let masks = masks.lock().unwrap().clone();
+    for needle in [
+        "systemctl stop onebox-xray",
+        " regen",
+        "systemctl start onebox-xray",
+        " net-apply",
+    ] {
+        let seen: Vec<bool> = masks
+            .iter()
+            .filter(|(line, _)| line.contains(needle))
+            .map(|(_, blocked)| *blocked)
+            .collect();
+        assert!(
+            !seen.is_empty() && seen.iter().all(|b| *b),
+            "{needle}: {masks:?}"
+        );
+    }
+}
+
 #[test]
 fn a_failed_regeneration_that_left_a_node_journal_keeps_the_record() {
     let fx = Fixture::new(true);
     let (_, work) = fx.prepare(VERSION, ProgramPhase::Replaced);
     fx.replace_and_regenerate();
     let transaction = fx.paths().transaction();
-    let (exec, running) = failing_regen_exec(fx.paths(), &[svc::XRAY], move || {
-        // Its own rollback could not finish: the node journal stays.
-        fs::create_dir_all(&transaction).unwrap();
-        Output::failure(1, "[错误] 配置失败: x；恢复未完成: y")
-    });
+    let (exec, running, _) =
+        failing_regen_exec(fx.paths(), &[svc::XRAY], &[svc::SUBSCRIPTION], move || {
+            // Its own rollback could not finish: the node journal stays.
+            fs::create_dir_all(&transaction).unwrap();
+            Output::failure(1, "[错误] 配置失败: x；恢复未完成: y")
+        });
     let ctx = Ctx {
         exec: exec.clone(),
         ..fx.ctx.clone()

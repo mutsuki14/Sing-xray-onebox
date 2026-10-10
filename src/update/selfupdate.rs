@@ -472,23 +472,28 @@ pub fn child_output(output: &Output) -> Option<String> {
 /// The error of a failed swap (G §5.2): `recovery` is `None` once the
 /// update was committed (only the cleanup failed), else the result of
 /// `apply::recover_locked`. A recovery that ended with exit code 75 —
-/// even one wrapped in context — succeeded in a stale process.
+/// even one wrapped in context — succeeded in a stale process; a
+/// restored-only one keeps that code too.
 pub fn failure(error: Error, recovery: Option<Result<()>>, work: &Path) -> Error {
     match recovery {
         None => Error::msg(format!(
             "程序更新已提交，但恢复记录清理失败: {error}；请执行 recover 完成清理"
         )),
         Some(Ok(())) => Error::msg(format!("更新失败，已恢复原程序: {error}")),
+        // Program and configuration restored, record gone; only the restored
+        // manager's regen failed (nothing to retry).
+        Some(Err(e)) if journal::restored_only(&e) => {
+            let message = format!("更新失败: {error}；{}", e.report_text());
+            match exit_within(&e) {
+                Some(EXIT_STALE_PROCESS) => Error::exit(EXIT_STALE_PROCESS, message),
+                _ => Error::msg(message),
+            }
+        }
         // Recovered, but this process is not the restored manager.
         Some(Err(e)) if exit_within(&e) == Some(EXIT_STALE_PROCESS) => Error::exit(
             EXIT_STALE_PROCESS,
             format!("更新失败，已恢复原程序: {error}；请重新执行命令以使用恢复后的程序"),
         ),
-        // Program and configuration restored, record gone; only the restored
-        // manager's regen failed (nothing to retry).
-        Some(Err(e)) if journal::restored_only(&e) => {
-            Error::msg(format!("更新失败: {error}；{}", e.report_text()))
-        }
         Some(Err(recovery)) => Error::msg(format!(
             "更新失败: {error}；恢复需要重试: {recovery}；备份: {}",
             work.display()

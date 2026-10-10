@@ -676,7 +676,7 @@ fn a_successful_regen_repeats_the_childs_output_and_warnings() {
 #[test]
 fn failure_messages() {
     let work = Path::new("/usr/local/bin/.onebox-update-0123");
-    let cases: [(Option<Result<()>>, i32, &str); 5] = [
+    let cases: [(Option<Result<()>>, i32, &str); 6] = [
         (
             None,
             1,
@@ -696,11 +696,26 @@ fn failure_messages() {
         // Restored and finished; only the restored manager's regen failed.
         (
             Some(Err(Error::msg(format!(
-                "{}并已重新启动服务，但再坏；排除问题后执行 onebox regen",
+                "{}并已重新启动 onebox-xray，但再坏；排除问题后执行 onebox regen",
                 journal::RESTORED_ONLY
             )))),
             1,
-            "更新失败: 坏了；原程序与配置已恢复并已重新启动服务，但再坏；排除问题后执行 onebox regen",
+            "更新失败: 坏了；原程序与配置已恢复并已重新启动 onebox-xray，但再坏；排除问题后执行 onebox regen",
+        ),
+        // The same in a process that is not the restored manager: exit 75,
+        // and the restored-only text is kept.
+        (
+            Some(Err(Error::exit(
+                75,
+                format!(
+                    "{}，但再坏；排除问题后执行 onebox regen；{}",
+                    journal::RESTORED_ONLY,
+                    journal::STALE_TAIL
+                ),
+            ))),
+            75,
+            "更新失败: 坏了；原程序与配置已恢复，但再坏；排除问题后执行 onebox regen；\
+             当前进程仍是被替换版本，请重新执行命令以使用恢复后的程序",
         ),
     ];
     for (recovery, code, text) in cases {

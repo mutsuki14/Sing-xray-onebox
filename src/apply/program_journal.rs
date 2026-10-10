@@ -23,11 +23,13 @@
 //! a 2.x manager, drop the node's v3 crontab lines), let the restored
 //! manager `regen` under our lock, remove the journal, and report exit
 //! code 75 when this process is not the restored binary. When that `regen`
-//! fails (and leaves no node journal behind), the services the recovery
-//! stopped are started again from the restored files, the journal is
+//! fails (and leaves no node journal behind), the services that ran or
+//! start at boot are started again from the restored files, the journal is
 //! removed and the restored manager's `net-apply` restores the rules: the
-//! error ([`RESTORED_ONLY`]…) asks for `onebox regen` once the cause is
-//! fixed.
+//! error ([`RESTORED_ONLY`]…) names what was started and asks for `onebox
+//! regen` once the cause is fixed — with exit code 75 too when this process
+//! is not the restored binary. INT/TERM/HUP are blocked from the moment the
+//! journal is marked `recovering` until the outcome is known.
 //!
 //! Changes from v2:
 //! - v3 writes `version: 2` (same fields): version-1 journals were written
@@ -54,13 +56,17 @@
 //!   kept, which made every later recovery (each apply, renewal and boot)
 //!   stop the node again and fail the same way;
 //! - an unreadable running image counts as "not the restored binary" (exit
-//!   75) instead of failing the finished recovery.
+//!   75) instead of failing the finished recovery;
+//! - the recovery runs with INT/TERM/HUP blocked (v2 blocked them only in
+//!   the updater, so a recovery run by `recover`, an apply or boot could be
+//!   stopped by a Ctrl+C or a hang-up after it had stopped the node and
+//!   cleared its rules).
 
 use crate::apply::recover::keep_cancellation;
 use crate::apply::rollback::START_ORDER;
 use crate::apply::snapshot::{self, node_allowlist, v2_node_allowlist, Allowlist, Snapshot};
 use crate::ctx::Ctx;
-use crate::error::{Context, Error, Result};
+use crate::error::{Context, Error, Result, EXIT_STALE_PROCESS};
 use crate::host::cron::{self, Crontab, Scope};
 use crate::host::service::{self as svc, Services};
 use crate::host::{firewall, hop};
@@ -72,6 +78,7 @@ use crate::sys::fs::{
 };
 use crate::sys::lock::FileLock;
 use crate::sys::rand::to_hex;
+use crate::sys::signal::BlockSignals;
 use crate::ui::out;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -104,6 +111,8 @@ pub const REGEN_FAILED: &str = "恢复后的管理程序重新生成配置失败
 pub const RESTORED_ONLY: &str = "原程序与配置已恢复";
 pub const STALE_PROCESS: &str =
     "自更新恢复已完成；当前进程仍是被替换版本，请重新执行命令以使用恢复后的程序";
+/// Appended to a [`RESTORED_ONLY`] error reported with exit code 75.
+pub const STALE_TAIL: &str = "当前进程仍是被替换版本，请重新执行命令以使用恢复后的程序";
 const INVALID: &str = "自更新恢复记录无效";
 /// Recovery stopped because owned network rules could not be removed (v2).
 pub const RULES_LEFT: &str = "部分规则未清理，已保留台账";
@@ -425,6 +434,13 @@ fn recover_with(ctx: &Ctx, lock: &FileLock, running_image: &Path) -> Result<()> 
         ensure!(committed, "已提交的自更新程序不匹配，保留恢复记录");
         return journal.finish(&ctx.paths);
     }
+    // From here on the node is changed: INT/TERM/HUP wait until the
+    // recovery is over (as for a rollback), so a Ctrl+C, a SIGTERM or the
+    // hang-up of a dropped SSH session cannot leave it with its services
+    // stopped and its rules cleared, half-way through. Untimed children
+    // (firewall commands, the restored manager) run out of the terminal's
+    // reach meanwhile (`sys::exec`).
+    let _blocked = BlockSignals::new();
     journal.set_phase(&ctx.paths, ProgramPhase::Recovering)?;
     let services = Services::detect(ctx);
     let mut stopped = Vec::new();
@@ -441,17 +457,35 @@ fn recover_with(ctx: &Ctx, lock: &FileLock, running_image: &Path) -> Result<()> 
             retire_v3_cron(ctx)?;
         }
         if let Err(e) = regenerate(ctx, lock) {
-            return Err(restart_restored(
-                ctx, lock, &journal, &services, &stopped, e,
-            ));
+            let error = restart_restored(ctx, lock, &journal, &services, &stopped, e);
+            return Err(stale_restored(error, &journal, running_image));
         }
     }
     journal.finish(&ctx.paths)?;
     out::ok(RECOVERED);
     if journal.old_existed && !image_matches(running_image, &journal.old_sha256) {
-        return Err(Error::exit(crate::error::EXIT_STALE_PROCESS, STALE_PROCESS));
+        return Err(Error::exit(EXIT_STALE_PROCESS, STALE_PROCESS));
     }
     Ok(())
+}
+
+/// A [`restart_restored`] error with exit code 75 when this process is not
+/// the restored manager (still [`restored_only`]): the record is gone, so
+/// a menu running the replaced image must end like after a successful
+/// recovery — its next apply would otherwise install that image over the
+/// restored manager (`install_self` only refuses to replace a newer one,
+/// and the replaced image is usually the newer one).
+fn stale_restored(error: Error, journal: &ProgramJournal, running_image: &Path) -> Error {
+    if !restored_only(&error)
+        || !journal.old_existed
+        || image_matches(running_image, &journal.old_sha256)
+    {
+        return error;
+    }
+    Error::exit(
+        EXIT_STALE_PROCESS,
+        format!("{}；{STALE_TAIL}", error.report_text()),
+    )
 }
 
 fn is_regular(path: &Path) -> bool {
@@ -459,16 +493,17 @@ fn is_regular(path: &Path) -> bool {
 }
 
 /// The node services to bring back should the restored manager's `regen`
-/// fail: those running now, and the subscription worker when it starts at
-/// boot — a self-update child's rollback leaves the worker stopped for the
-/// parent to start with the restored manager (G6).
+/// fail: those running now and those that start at boot (what a reboot
+/// would start). Running alone is not enough: a self-update child's
+/// rollback leaves the worker stopped for the parent to start with the
+/// restored manager (G6), and a retried recovery finds every service
+/// stopped by the attempt that failed after stopping them.
 fn to_restart(services: &Services) -> Vec<&'static str> {
     START_ORDER
         .into_iter()
         .filter(|name| {
             services.exists(name)
-                && (services.running(name)
-                    || (*name == svc::SUBSCRIPTION && services.enabled(name).unwrap_or(false)))
+                && (services.running(name) || services.enabled(name).unwrap_or(false))
         })
         .collect()
 }
@@ -538,7 +573,9 @@ fn retire_v3_cron(ctx: &Ctx) -> Result<()> {
 /// (an SSH session dropped during `update-script`) would turn the final
 /// stdout write of a regen that applied into a failure (EIO), and the
 /// whole recovery into one that repeats. Its warnings are shown afterwards
-/// (best effort); a failure carries its last line.
+/// (best effort); a failure carries its last line. It runs while the
+/// recovery blocks the cancellation signals, so in its own process group:
+/// a Ctrl+C or a hang-up waits for it instead of cancelling it half-way.
 fn regenerate(ctx: &Ctx, lock: &FileLock) -> Result<()> {
     out::info(REGENERATING);
     let output = run_restored(ctx, lock, "regen").context(REGEN_FAILED)?;
@@ -605,9 +642,10 @@ fn last_line(output: &Output) -> String {
 /// made every later recovery stop it again and fail the same way), the
 /// services this recovery stopped are started again, the record is
 /// finished, and the restored manager's `net-apply` puts the firewall rules
-/// and hops back. The error says so and asks for `onebox regen` once the
-/// cause is fixed. When that regen left a node journal its own rollback
-/// could not finish, nothing is started and the record stays for a retry.
+/// and hops back. The error names the services it started (and what it
+/// could not do) and asks for `onebox regen` once the cause is fixed. When
+/// that regen left a node journal its own rollback could not finish,
+/// nothing is started and the record stays for a retry.
 fn restart_restored(
     ctx: &Ctx,
     lock: &FileLock,
@@ -621,17 +659,19 @@ fn restart_restored(
         return error;
     }
     let mut missed = Vec::new();
+    let mut started = Vec::new();
     // The snapshot put the old units back; the failed regen may not have
     // reloaded them.
     if let Err(e) = services.daemon_reload() {
         missed.push(format!("重新加载服务定义: {e}"));
     }
     for name in stopped {
-        if let Err(e) = services
+        match services
             .start(name)
             .and_then(|()| services.wait_running(name, svc::WAIT_RUNNING))
         {
-            missed.push(format!("启动 {name}: {e}"));
+            Ok(()) => started.push(*name),
+            Err(e) => missed.push(format!("启动 {name}: {e}")),
         }
     }
     if let Err(e) = journal.finish(&ctx.paths) {
@@ -643,11 +683,14 @@ fn restart_restored(
         Ok(output) => missed.push(format!("恢复防火墙规则与端口跳跃: {}", last_line(&output))),
         Err(e) => missed.push(format!("恢复防火墙规则与端口跳跃: {e}")),
     }
-    let mut message = if missed.is_empty() {
-        format!("{RESTORED_ONLY}并已重新启动服务，但{cause}")
-    } else {
-        format!("{RESTORED_ONLY}，但{cause}；未完成: {}", missed.join("; "))
-    };
+    let mut message = RESTORED_ONLY.to_owned();
+    if !started.is_empty() {
+        message.push_str(&format!("并已重新启动 {}", started.join("、")));
+    }
+    message.push_str(&format!("，但{cause}"));
+    if !missed.is_empty() {
+        message.push_str(&format!("；未完成: {}", missed.join("; ")));
+    }
     message.push_str("；排除问题后执行 onebox regen");
     keep_cancellation(error, message)
 }
