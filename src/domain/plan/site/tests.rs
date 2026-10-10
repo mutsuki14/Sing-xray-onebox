@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::fixtures::{config, with_site, ADDR};
-use crate::domain::ports::FnProbe;
+use crate::domain::ports::{FnProbe, Reservation};
 use crate::domain::protocol::Core::{Singbox as SB, Xray as XR};
 use Protocol::*;
 
@@ -23,11 +23,11 @@ fn settings_do_not_outlive_the_site() {
     custom = site_theme(&custom, SiteTheme::Ocean).unwrap();
     let off = disable_site(&custom).unwrap();
     assert!(off.site.is_none());
-    let on = enable_site(&off, "www.example.com", WebCert::Http01, &env()).unwrap();
+    let on = enable_site(&off, "www.example.com", WebCert::Http01, true, &env()).unwrap();
     let s = on.site.unwrap();
     assert_eq!((s.title.as_str(), s.theme), ("山间手记", SiteTheme::Forest));
     // Re-targeting an active site keeps them.
-    let moved = enable_site(&custom, "new.example.com", WebCert::Http01, &env()).unwrap();
+    let moved = enable_site(&custom, "new.example.com", WebCert::Http01, true, &env()).unwrap();
     let s = moved.site.unwrap();
     assert_eq!((s.title.as_str(), s.theme), ("我的站", SiteTheme::Ocean));
 }
@@ -35,14 +35,21 @@ fn settings_do_not_outlive_the_site() {
 #[test]
 fn enable_and_disable() {
     let trojan = config(&[(Trojan, 443, SB)]);
-    let e = enable_site(&trojan, "www.example.com", WebCert::Http01, &env()).unwrap_err();
+    let e = enable_site(&trojan, "www.example.com", WebCert::Http01, true, &env()).unwrap_err();
     assert_eq!(
         e.to_string(),
         "自建 REALITY 网站需要先开启 REALITY 协议；独立订阅请用 subscription enable"
     );
-    let e = enable_site(&reality(), "localhost", WebCert::Http01, &env()).unwrap_err();
+    let e = enable_site(&reality(), "localhost", WebCert::Http01, true, &env()).unwrap_err();
     assert_eq!(e.to_string(), "自建站需要 REALITY 协议及有效域名");
-    let on = enable_site(&reality(), "WWW.Example.com", WebCert::Cloudflare, &env()).unwrap();
+    let on = enable_site(
+        &reality(),
+        "WWW.Example.com",
+        WebCert::Cloudflare,
+        true,
+        &env(),
+    )
+    .unwrap();
     let s = on.site_active().unwrap();
     assert_eq!(
         (s.domain.as_str(), s.https_entry),
@@ -64,6 +71,38 @@ fn enable_and_disable() {
         disable_site(&sub).unwrap_err().to_string(),
         "请先关闭订阅或将订阅切换为独立 HTTPS 站点"
     );
+}
+
+/// The entrance is validated as requested: a closed one does not need TCP
+/// 443, so it can be planned while a non-REALITY inbound, FRP or the
+/// standalone subscription holds that port (the open one cannot).
+#[test]
+fn a_closed_entrance_leaves_tcp_443_alone() {
+    let frp = [Reservation {
+        start: 443,
+        end: 443,
+        transport: Transport::Tcp,
+        label: "frps".into(),
+    }];
+    let mut standalone = config(&[(VlessReality, 8443, XR)]);
+    standalone.subscription = Some(crate::domain::fixtures::standalone_subscription(
+        "sub.example.com",
+        443,
+        WebCert::Cloudflare,
+    ));
+    // (node, FRP reservations)
+    let cases: [(NodeConfig, &[Reservation]); 3] = [
+        (config(&[(VlessReality, 8443, XR), (Trojan, 443, SB)]), &[]),
+        (config(&[(VlessReality, 8443, XR)]), &frp),
+        (standalone, &[]),
+    ];
+    for (cfg, frp) in cases {
+        let env = PlanEnv { frp, ..env() };
+        let closed = enable_site(&cfg, "www.example.com", WebCert::Http01, false, &env);
+        let site = closed.unwrap().site.unwrap();
+        assert!(!site.https_entry);
+        assert!(enable_site(&cfg, "www.example.com", WebCert::Http01, true, &env).is_err());
+    }
 }
 
 #[test]

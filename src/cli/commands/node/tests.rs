@@ -174,6 +174,52 @@ fn add_errors() {
     assert!(bench.engine.calls().is_empty());
 }
 
+/// `--site-https` is applied before the port is planned: closing the open
+/// entrance frees TCP 443 for the added non-REALITY protocol, opening a
+/// closed one claims it.
+#[test]
+fn add_plans_the_port_with_the_requested_site_entrance() {
+    let base = config(&[(VlessReality, 8443, XR)]);
+    // (entrance before, command line, accepted; accepted ones close it)
+    let cases = [
+        (
+            true,
+            "add trojan --port 443 --site-https off --tls self",
+            true,
+        ),
+        (true, "add trojan --port 443 --tls self", false),
+        (
+            false,
+            "add trojan --port 443 --site-https on --tls self",
+            false,
+        ),
+        (
+            true,
+            "add trojan --port 2053 --site-https off --tls self",
+            true,
+        ),
+    ];
+    for (open, line, accepted) in cases {
+        let cfg = with_site(base.clone(), "www.example.com", open);
+        let bench = Bench::installed(&cfg);
+        bench.unattended();
+        let args = add_args(&cfg, line);
+        let planned = plan_add(&bench.session(), Some(Trojan), &args);
+        match planned {
+            Ok(Some((req, _))) => {
+                assert!(accepted, "{line}");
+                assert_eq!(
+                    port_of(&req.config, Trojan),
+                    args.port_for(Trojan).unwrap().unwrap()
+                );
+                assert!(!req.config.site.unwrap().https_entry, "{line}");
+            }
+            Ok(None) => panic!("{line}: nothing planned"),
+            Err(e) => assert!(!accepted, "{line}: {e}"),
+        }
+    }
+}
+
 #[test]
 fn first_reality_inbound_asks_for_a_target() {
     let bench = Bench::installed(&config(&[(Trojan, 443, SB)]));

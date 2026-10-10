@@ -268,9 +268,10 @@ fn change(session: &Session, cfg: &NodeConfig, action: SiteAction) -> Result<Opt
             let facts = session.facts()?;
             let probe = LiveProbe(session.live);
             let env = facts.env(&probe, Some(cfg));
-            // One plan: a closed entrance is never opened in between.
-            let next = plan::enable_site(cfg, &domain, cert, &env)?;
-            Change::config(plan::site_https(&next, https_entry)?, "启用网站")
+            // One plan, validated with the requested entrance: a closed
+            // one is never opened in between, nor does it need TCP 443.
+            let next = plan::enable_site(cfg, &domain, cert, https_entry, &env)?;
+            Change::config(next, "启用网站")
         }
         SiteAction::Disable => Change::config(plan::disable_site(cfg)?, "关闭网站"),
         SiteAction::Https(on) => Change::config(plan::site_https(cfg, on)?, "修改网站入口"),
