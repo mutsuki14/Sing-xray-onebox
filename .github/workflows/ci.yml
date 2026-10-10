@@ -194,15 +194,34 @@ jobs:
           printf '%s\n' "${tools[@]}" "${files[@]}" ONEBOX_TEST_REQUIRE_FULL=1 > "$RUNNER_TEMP/real-tools.env"
       - name: Unit, ignored and real-process Rust tests (root, one thread)
         # --all-targets leaves out doctests (lint runs them): --include-ignored
-        # would otherwise try to run `ignore` code blocks.
+        # would otherwise try to run `ignore` code blocks. The real firewall
+        # test changes the network namespace it runs in: it has its own step.
         run: |
           set -euo pipefail
           mapfile -t tools < "$RUNNER_TEMP/real-tools.env"
           sudo -E env PATH="$PATH" RUSTUP_HOME="$(rustup show home)" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-            "${tools[@]}" cargo test --locked --all-targets --no-fail-fast -- --include-ignored --test-threads=1
+            "${tools[@]}" cargo test --locked --all-targets --no-fail-fast -- --include-ignored --test-threads=1 \
+            --skip real_firewall_in_private_netns
       - name: Return build outputs to the runner user
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" target "${CARGO_HOME:-$HOME/.cargo}"
+      - name: Real iptables-nft / nft firewall test in a private network namespace (root)
+        if: ${{ !cancelled() && steps.paths.outcome == 'success' }}
+        run: |
+          # The library's test binary runs alone under `unshare -n`, so the rules
+          # it creates and flushes never touch the runner's own namespace. A
+          # renamed test must fail here, not pass as "0 passed".
+          set -euo pipefail
+          bins=$(cargo test --locked --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test) | .executable')
+          if [[ $(wc -l <<<"$bins") -ne 1 || ! -x "$bins" ]]; then
+            echo "::error::expected one library test binary, found: $bins"
+            exit 1
+          fi
+          sudo env ONEBOX_TEST_REQUIRE_FULL=1 ONEBOX_TEST_NETNS=1 unshare --net "$bins" \
+            host::firewall::reconcile::tests::real_firewall_in_private_netns --exact --ignored \
+            | tee "$RUNNER_TEMP/real-firewall.log"
+          grep -q '^test result: ok\. 1 passed' "$RUNNER_TEMP/real-firewall.log"
       - name: Black-box suites (tests/e2e/*.py, root)
         if: ${{ !cancelled() && steps.paths.outcome == 'success' }}
         run: |

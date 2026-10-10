@@ -700,10 +700,9 @@ fn real_cores_report_versions_and_check_configs() {
         (Core::Singbox, "ONEBOX_TEST_SINGBOX"),
         (Core::Xray, "ONEBOX_TEST_XRAY"),
     ] {
-        let Some(bin) = std::env::var_os(var) else {
+        let Some(bin) = crate::sys::testenv::tool(var) else {
             continue;
         };
-        let bin = PathBuf::from(bin);
         let version = installed_version(&ctx, &bin, core).unwrap();
         assert!(version_valid(&version), "{version}");
         check_config_with(&ctx, core, &bin, &ok).unwrap();
