@@ -9,6 +9,8 @@ use crate::domain::protocol::{Core, Protocol};
 use crate::host::init::InitSystem;
 use crate::sys::exec::Output;
 use crate::sys::lock::BUSY_MESSAGE;
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::Arc;
 
 fn lock(ctx: &Ctx) -> FileLock {
     FileLock::acquire(&ctx.paths.lock(), BUSY_MESSAGE).unwrap()
@@ -450,4 +452,104 @@ fn deferred_renewals_are_reported_unchanged() {
         m.last_error.as_deref(),
         Some(crate::cert::engine::RENEW_DEFERRED)
     );
+}
+
+/// The site pair is renewed, but `onebox-site` does not come back with it
+/// (restart = stop + start, so it may now be stopped): the old pair and
+/// metadata go back and the site is restarted again, so the target stays
+/// due and the next scheduled run deploys the pair acme.sh holds and
+/// restarts the site (v2 rolled back the whole apply).
+#[test]
+fn a_failed_restart_puts_the_previous_pair_back() {
+    if !have_openssl() {
+        return;
+    }
+    let cases = [
+        (1, "已恢复续期前的证书（下次续期时重试）"),
+        (
+            2,
+            "已恢复续期前的证书，但再次重启失败: 重启 onebox-site 失败",
+        ),
+    ];
+    for (failing, want) in cases {
+        let f = Fixture::new("renew-restart");
+        serve_release(&f.fake);
+        let left = Arc::new(AtomicUsize::new(failing));
+        f.fake
+            .on_fn(
+                |c| {
+                    c.program_name() == "systemctl"
+                        && c.args.first().is_some_and(|a| a == "restart")
+                },
+                move |_| {
+                    let fail = left
+                        .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                        .is_ok();
+                    Ok(match fail {
+                        true => Output::failure(1, "Job for onebox-site.service failed"),
+                        false => Output::success(""),
+                    })
+                },
+            )
+            .on("systemctl", &["is-active"], Output::success(""));
+        let engine = engine(&f.ctx, InitSystem::Systemd);
+        let cfg = with_site(
+            config(&[(Protocol::VlessReality, 443, Core::Xray)]),
+            "www.example.com",
+            false,
+        );
+        let site_dir = CertDir::site(&f.ctx.paths);
+        let (old_chain, old_key) =
+            f.ca.leaf(&f.dir.join("old"), &["www.example.com"], 10, false);
+        let names = ["www.example.com".to_owned()];
+        crate::cert::store::install_pair(
+            &f.ctx,
+            &site_dir,
+            &old_chain,
+            &old_key,
+            &names,
+            Trust::Public,
+        )
+        .unwrap();
+        let deployed = || {
+            let read = |p: std::path::PathBuf| std::fs::read(p).ok();
+            (
+                read(site_dir.cert()),
+                read(site_dir.key()),
+                read(site_dir.metadata_file()),
+            )
+        };
+        let before = deployed();
+        let fresh =
+            f.ca.leaf(&f.dir.join("new"), &["www.example.com"], 90, false);
+        let script = fake_acme(
+            &f.fake,
+            AcmeScript {
+                issue: Some(fresh),
+                ..AcmeScript::default()
+            },
+        );
+        let held = lock(&f.ctx);
+        let scheduled = opts(CertScopes::ALL, true, false);
+        let report = renew_all_with(&engine, &held, &cfg, &scheduled, None).unwrap();
+        assert_eq!(report.renewed, [CertScope::Site], "{failing}");
+        assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+        let (scope, message) = &report.failed[0];
+        assert_eq!(*scope, CertScope::Site);
+        let prefix = "网站证书已续期，但重启 onebox-site 失败: ";
+        assert!(message.starts_with(prefix), "{message}");
+        assert!(message.contains(want), "{message}");
+        assert_eq!(restarts(&f), ["systemctl restart onebox-site"; 2]);
+        assert_eq!(deployed(), before, "pair and metadata put back");
+
+        // The next run: acme.sh finds nothing due and holds the new pair,
+        // which is deployed now that the target is due again.
+        script.lock().unwrap().code = 2;
+        f.fake.clear_history();
+        let retry = renew_all_with(&engine, &held, &cfg, &scheduled, None).unwrap();
+        assert_eq!(retry.renewed, [CertScope::Site]);
+        assert!(retry.failed.is_empty(), "{:?}", retry.failed);
+        assert_eq!(restarts(&f), ["systemctl restart onebox-site"]);
+        assert_ne!(deployed().0, before.0);
+    }
 }

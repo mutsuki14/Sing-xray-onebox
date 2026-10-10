@@ -8,6 +8,15 @@
 //! `onebox-subscription-web`. HTTP-01 through the built-in responder opens
 //! the temporary firewall owner `acme` for TCP 80 around the acme.sh call.
 //!
+//! The renewal deploys outside any transaction, so the pair it replaces is
+//! kept: when a service does not come back with the new pair (restart or
+//! `wait_running` fails), the old pair and metadata are put back and the
+//! services restarted again, so the node serves what it served and the
+//! next run finds the target due and retries (as the FRP website renewal
+//! rolls back). Otherwise the new pair would stay deployed and recorded as
+//! a success, a stopped service would stay stopped, and no later run would
+//! touch the target for two months. The failure is reported either way.
+//!
 //! When the proxy certificate identity changes (the renewed pair needs
 //! pinning where the clients of the stored configuration do not pin, or
 //! the reverse, or the leaf SHA-256 changed while they pin), the report
@@ -22,7 +31,9 @@
 //! before it takes the lock, and passes them as `cf`, which only those
 //! targets use (and store for later scheduled renewals).
 //!
-//! Changes from v2: no full apply per renewal (G-8.1#4); one cron line for
+//! Changes from v2: no full apply per renewal (G-8.1#4) — a failed
+//! restart rolls back only the target's pair, where v2's apply rolled back
+//! everything; one cron line for
 //! every target instead of three racing for the lock (F-8.1#8); a failing
 //! target no longer hides the others; manual renewals are forced; a
 //! renewal acme.sh defers while the certificate expires within 30 days is
@@ -33,14 +44,14 @@ use super::engine::{Engine, RenewKind, Renewal, RENEW_DEFERRED};
 use super::hooks::{proxy_spec, served_by, subscription_acme_root, web_spec};
 use super::method::{CertSpec, Challenge};
 use super::openssl::{publicly_trusted, Trust};
-use super::store::CertDir;
+use super::store::{CertDir, SavedPair};
 use super::{CertScope, CertScopes};
 use crate::ctx::Ctx;
 use crate::domain::config::{NodeConfig, ProxyCertMode, SubscriptionMode};
 use crate::domain::protocol::Transport;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::host::firewall;
-use crate::host::service::{SITE, SUBSCRIPTION_WEB, WAIT_RUNNING};
+use crate::host::service::{Services, SITE, SUBSCRIPTION_WEB, WAIT_RUNNING};
 use crate::render::tls::TlsMaterial;
 use crate::sys::lock::FileLock;
 use crate::ui::out;
@@ -103,15 +114,15 @@ pub fn renew_all_with(
         let before = (target.scope == CertScope::Proxy).then(|| identity(engine, &target));
         let given = cf.filter(|_| lacks_credentials(engine, &target));
         let renewed = renew_target(engine, &target, opts, given, &mut report);
-        if let Some(before) = before.filter(|_| renewed) {
+        if let Some(before) = before.filter(|_| renewed.is_some()) {
             let after = identity(engine, &target);
             report.proxy_identity_changed = identity_changed(cfg, &before, &after);
             if report.proxy_identity_changed {
                 continue;
             }
         }
-        if renewed {
-            restart(engine, &target, &mut report);
+        if let Some(renewed) = renewed {
+            restart(engine, &target, renewed.previous.as_ref(), &mut report);
         }
     }
     Ok(report)
@@ -189,50 +200,60 @@ fn due(engine: &Engine, t: &Target, opts: &RenewOptions) -> bool {
     opts.force || engine.due(&t.dir, &t.spec).unwrap_or(true)
 }
 
-/// Renew one target; true when the deployed pair changed.
+/// A renewal that deployed a new pair.
+struct Renewed {
+    /// The pair it replaced (module docs); `None` when that could not be
+    /// read, so a failed restart cannot put it back.
+    previous: Option<SavedPair>,
+}
+
+/// Renew one target; `Some` when the deployed pair changed.
 fn renew_target(
     engine: &Engine,
     t: &Target,
     opts: &RenewOptions,
     cf: Option<&CfCredentials>,
     report: &mut RenewReport,
-) -> bool {
+) -> Option<Renewed> {
     let label = t.scope.label();
     if !due(engine, t, opts) {
         report.unchanged.push(t.scope);
         if !opts.scheduled {
             out::info(format!("{label}未到续期时间"));
         }
-        return false;
+        return None;
     }
     let kind = if opts.force {
         RenewKind::Forced
     } else {
         RenewKind::Scheduled
     };
+    // A pair that cannot be read back is still renewed (that may be what
+    // repairs it); only the rollback of a failed restart is lost.
+    let previous = SavedPair::save(&t.dir).ok();
     let result = with_acme_port(engine, &t.spec, || engine.renew(&t.dir, &t.spec, kind, cf));
     match result {
         Ok(Renewal::Changed) => {
             report.renewed.push(t.scope);
             out::ok(format!("{label}已续期"));
-            true
+            Some(Renewed { previous })
         }
         Ok(Renewal::Unchanged) => {
             report.unchanged.push(t.scope);
             if !opts.scheduled {
                 out::info(format!("{label}无需更换"));
             }
-            false
+            None
         }
         Ok(Renewal::Deferred) => {
             report.unchanged.push(t.scope);
             out::warn(format!("{label}未续期: {RENEW_DEFERRED}"));
-            false
+            None
         }
         Err(e) => {
             out::warn(format!("{label}续期失败: {e}"));
             report.failed.push((t.scope, e.to_string()));
-            false
+            None
         }
     }
 }
@@ -300,21 +321,53 @@ fn target(scope: CertScope, dir: CertDir, spec: CertSpec, services: Vec<&'static
     }
 }
 
-/// Restart the target's running services; a failure is reported.
-fn restart(engine: &Engine, t: &Target, report: &mut RenewReport) {
+/// Restart the target's running services. When one does not come back,
+/// `previous` is put back and the same services are restarted again
+/// (module docs); the failure is reported either way.
+fn restart(engine: &Engine, t: &Target, previous: Option<&SavedPair>, report: &mut RenewReport) {
     let services = engine.services();
-    for name in &t.services {
-        if !services.running(name) {
-            continue;
-        }
-        let result = services
-            .restart(name)
-            .and_then(|()| services.wait_running(name, WAIT_RUNNING));
-        if let Err(e) = result {
-            let message = format!("{}已续期，但重启 {name} 失败: {e}", t.scope.label());
-            out::warn(&message);
-            report.failed.push((t.scope, message));
-        }
+    // Chosen once: a failed restart leaves its service stopped, and the
+    // restart with the old pair must start it again.
+    let running: Vec<&str> = t
+        .services
+        .iter()
+        .copied()
+        .filter(|name| services.running(name))
+        .collect();
+    let Err(failure) = restart_all(&services, &running) else {
+        return;
+    };
+    let label = t.scope.label();
+    let rollback = match previous {
+        None => "未能恢复续期前的证书: 没有续期前的证书副本".to_owned(),
+        Some(saved) => match saved.restore() {
+            Err(e) => format!("未能恢复续期前的证书: {e}"),
+            Ok(()) => match restart_all(&services, &running) {
+                Ok(()) => "已恢复续期前的证书（下次续期时重试）".to_owned(),
+                Err(e) => format!("已恢复续期前的证书，但再次重启失败: {e}"),
+            },
+        },
+    };
+    let message = format!("{label}已续期，但{failure}；{rollback}");
+    out::warn(&message);
+    report.failed.push((t.scope, message));
+}
+
+/// Restart each of `names` and wait until it runs; the failures
+/// (`重启 {name} 失败: …`) are joined into one error.
+fn restart_all(services: &Services, names: &[&str]) -> Result<()> {
+    let failures: Vec<String> = names
+        .iter()
+        .filter_map(|name| {
+            let result = services
+                .restart(name)
+                .and_then(|()| services.wait_running(name, WAIT_RUNNING));
+            result.err().map(|e| format!("重启 {name} 失败: {e}"))
+        })
+        .collect();
+    match failures.is_empty() {
+        true => Ok(()),
+        false => Err(Error::msg(failures.join("，"))),
     }
 }
 
