@@ -23,7 +23,9 @@ mod exchange;
 mod tree;
 
 pub use exchange::rename_exchange;
-pub use tree::{copy_tree, remove_tree_contents, CopyLimits, CopyStats};
+pub use tree::{
+    copy_tree, copy_tree_at, open_dir_nofollow, remove_tree_contents, CopyLimits, CopyStats,
+};
 
 /// Name prefix of every temp file created by [`atomic_write`] and
 /// [`copy_file`]; [`sweep_stale`] with this prefix removes crash leftovers.

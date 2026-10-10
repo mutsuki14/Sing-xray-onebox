@@ -11,8 +11,13 @@
 //! filesystem lacks it). Sources may not contain symlinks, special files or
 //! hard links and are limited to 256 MiB; they are read through descriptors
 //! (`copy_tree`), so a source another user can write cannot redirect the
-//! copy by swapping a directory for a symlink midway. Modes are forced to
-//! 0755/0644. Publishing
+//! copy by swapping a directory for a symlink midway. An import source is
+//! checked, then pinned: opened without following a symlink anywhere in
+//! its canonical path (`open_dir_nofollow`) and copied from that
+//! descriptor, so swapping one of its ancestors for a symlink after the
+//! check (`/home/bob/www` → `/etc/onebox`) cannot publish a private
+//! directory of the same name; `index.html` is required again in the
+//! copy. Modes are forced to 0755/0644. Publishing
 //! only happens inside an apply, after the transaction snapshot, so an
 //! interruption is rolled back with everything else.
 //!
@@ -37,17 +42,18 @@
 //! - imports from inside the private configuration tree (`ROOT`, FRP root)
 //!   are refused, not only from `/etc` itself;
 //! - hard links in a source are refused and sources are copied through
-//!   descriptors, not by path (v2 copied whatever a swapped path named);
+//!   descriptors from the directory that was checked, not by path (v2
+//!   copied whatever a swapped path named);
 //! - error messages name the offending path.
 
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 use crate::sys::fs::{
-    atomic_write, copy_tree, ensure_dir, read_bounded, remove_file_if_exists,
-    remove_tree_if_exists, rename_exchange, sha256_hex, CopyLimits,
+    atomic_write, copy_tree, copy_tree_at, ensure_dir, open_dir_nofollow, read_bounded,
+    remove_file_if_exists, remove_tree_if_exists, rename_exchange, sha256_hex, CopyLimits,
 };
 use crate::sys::time::now;
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -61,6 +67,7 @@ const MAX_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CONTENT_ENTRIES: usize = 100_000;
 const LIMIT_MESSAGE: &str = "网站内容超过 256 MiB 或 100000 个文件";
 const INDEX_MAX: u64 = 16 * 1024 * 1024;
+const NEEDS_INDEX: &str = "网站需要 index.html";
 /// Directories never imported from (v2 list plus kernel trees).
 const SYSTEM_DIRS: [&str; 10] = [
     "/", "/etc", "/usr", "/var", "/root", "/home", "/proc", "/sys", "/dev", "/boot",
@@ -183,15 +190,17 @@ impl<'a> ContentStore<'a> {
             .join(format!(".content-{}", crate::sys::rand::hex(8)?));
         let result = ensure_dir(&source, 0o700)
             .and_then(|()| atomic_write(&source.join("index.html"), html.as_bytes(), 0o644))
-            .and_then(|()| self.publish(&source, true));
+            .and_then(|()| self.publish(&source, None, true));
         let _ = remove_tree_if_exists(&source);
         result
     }
 
-    /// Publish a local directory (`site import`).
+    /// Publish a local directory (`site import`): checked, pinned
+    /// ([`pin_import`]), then copied from the pinned directory.
     pub fn import(&self, source: &Path) -> Result<String> {
         let source = self.check_import(source)?;
-        self.publish(&source, false)
+        let pinned = pin_import(&source)?;
+        self.publish(&source, Some(&pinned), false)
     }
 
     /// Restore a content backup (`latest` = newest); returns the id of the
@@ -203,7 +212,7 @@ impl<'a> ContentStore<'a> {
                 .is_ok_and(|index| String::from_utf8_lossy(&hash).trim() == sha256_hex(&index)),
             Err(_) => false,
         };
-        self.publish(&backup.path, generated)
+        self.publish(&backup.path, None, generated)
     }
 
     /// Content backups, newest first.
@@ -286,29 +295,48 @@ impl<'a> ContentStore<'a> {
     }
 
     /// Stage `source`, back up the live root, swap them (module docs).
-    fn publish(&self, source: &Path, generated: bool) -> Result<String> {
+    /// `pinned` is the import source's directory ([`pin_import`]): the copy
+    /// reads it, whatever `source` names by now; the checks by path before
+    /// it only give early, clear messages.
+    fn publish(&self, source: &Path, pinned: Option<&File>, generated: bool) -> Result<String> {
         self.check_paths()?;
         scan(source, true)?;
-        if !fs::symlink_metadata(source.join("index.html")).is_ok_and(|m| m.is_file()) {
-            return Err(Error::msg("网站需要 index.html"));
+        if !has_index(source) {
+            return Err(Error::msg(NEEDS_INDEX));
         }
         let id = format!("{}-{}", now(), crate::sys::rand::hex(4)?);
         let stage = self.web_root().with_file_name(format!(".onebox-site-{id}"));
-        let result = self.publish_staged(source, &stage, &id, generated);
+        let result = self.publish_staged(source, pinned, &stage, &id, generated);
         let _ = remove_tree_if_exists(&stage);
         result?;
         self.prune()?;
         Ok(id)
     }
 
-    fn publish_staged(&self, source: &Path, stage: &Path, id: &str, generated: bool) -> Result<()> {
+    fn publish_staged(
+        &self,
+        source: &Path,
+        pinned: Option<&File>,
+        stage: &Path,
+        id: &str,
+        generated: bool,
+    ) -> Result<()> {
         let limits = CopyLimits::new(MAX_CONTENT_BYTES, MAX_CONTENT_ENTRIES).message(LIMIT_MESSAGE);
         // The source may be writable by another user: copy_tree reads it
         // through descriptors, so swapping its directories for symlinks
         // during the copy cannot reach outside it, and hard links (which
         // could name a file only root may read) are refused there as well.
         let from_source = limits.refuse_hard_links();
-        copy_tree(source, stage, &|p| top_level_skip(source, p), &from_source)?;
+        let skip = |p: &Path| top_level_skip(source, p);
+        match pinned {
+            Some(dir) => copy_tree_at(dir, source, stage, &skip, &from_source)?,
+            None => copy_tree(source, stage, &skip, &from_source)?,
+        };
+        // The source may have changed since the check: what counts is what
+        // was copied.
+        if !has_index(stage) {
+            return Err(Error::msg(NEEDS_INDEX));
+        }
         let live_challenges = self.web_root().join(".well-known");
         if live_challenges.is_dir() {
             copy_tree(
@@ -371,6 +399,20 @@ impl<'a> ContentStore<'a> {
         }
         Ok(())
     }
+}
+
+/// Open the checked import source `canonical` without following a symlink
+/// anywhere in its path ([`open_dir_nofollow`]). The descriptor stays on
+/// the directory that was checked: an ancestor another user owns swapped
+/// for a symlink afterwards cannot redirect the copy into a private
+/// directory of the same name, and a swap since the check is refused.
+fn pin_import(canonical: &Path) -> Result<File> {
+    open_dir_nofollow(canonical).map_err(|e| e.wrap("导入目录在检查期间被替换"))
+}
+
+/// `dir/index.html` is a regular file (not a symlink).
+fn has_index(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join("index.html")).is_ok_and(|m| m.is_file())
 }
 
 /// `<unix>-<8 hex>` → unix seconds.

@@ -211,6 +211,78 @@ fn unsafe_sources_leave_the_live_site_untouched() {
     assert!(err.starts_with("导入目录不存在或不是目录"), "{err}");
 }
 
+/// `site import /home/bob/www/site` where bob owns `/home/bob`: after the
+/// checks he swaps `www` for a symlink to the configuration root, whose
+/// `site/` holds keys. Before the source is pinned the swap is refused;
+/// after it, the copy still reads the directory that was checked.
+#[test]
+fn import_is_not_redirected_by_a_swapped_ancestor() {
+    let s = site();
+    let store = ContentStore::new(&s.paths);
+    store.prepare().unwrap();
+    store.ensure_default("live").unwrap();
+    let private = s.paths.site();
+    fs::write(private.join("index.html"), "secret").unwrap();
+    fs::write(private.join("key.pem"), "private").unwrap();
+    let home = fs::canonicalize(s.dir.path()).unwrap().join("home");
+    let swap = |www: &Path| {
+        fs::rename(www, www.with_extension("old")).unwrap();
+        std::os::unix::fs::symlink(&s.paths.root, www).unwrap();
+    };
+    for (n, pin_first) in [(0, false), (1, true)] {
+        let www = home.join(format!("bob{n}/www"));
+        let src = www.join("site");
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join("index.html"), "public").unwrap();
+        let checked = store.check_import(&src).unwrap();
+        if !pin_first {
+            swap(&www);
+            let err = pin_import(&checked).unwrap_err().to_string();
+            let want = format!(
+                "导入目录在检查期间被替换: 不允许符号链接: {}",
+                www.display()
+            );
+            assert_eq!(err, want);
+            continue;
+        }
+        let pinned = pin_import(&checked).unwrap();
+        swap(&www);
+        assert!(
+            checked.join("key.pem").exists(),
+            "the path names the keys now"
+        );
+        store.publish(&checked, Some(&pinned), false).unwrap();
+        assert_eq!(read(store.index()), "public");
+        assert!(store.web_root().join("assets").is_dir());
+        assert!(!store.web_root().join("key.pem").exists());
+    }
+}
+
+/// The source lost `index.html` between the check and the copy (the path
+/// still has one): the copy is refused and the live site stays.
+#[test]
+fn index_html_is_required_in_what_was_copied() {
+    let s = site();
+    let store = ContentStore::new(&s.paths);
+    store.prepare().unwrap();
+    store.ensure_default("live").unwrap();
+    let checked = upload(&s, "checked", "new");
+    let emptied = s.dir.join("emptied");
+    fs::create_dir_all(emptied.join("assets")).unwrap();
+    let pinned = pin_import(&fs::canonicalize(&emptied).unwrap()).unwrap();
+    let err = store.publish(&checked, Some(&pinned), false).unwrap_err();
+    assert_eq!(err.to_string(), NEEDS_INDEX);
+    assert_eq!(read(store.index()), "live");
+    assert!(store.backups().unwrap().is_empty());
+    assert!(fs::read_dir(s.paths.site_root.parent().unwrap())
+        .unwrap()
+        .all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".onebox-site-")));
+}
+
 #[test]
 fn templates_and_restores_keep_the_generated_marker() {
     let s = site();

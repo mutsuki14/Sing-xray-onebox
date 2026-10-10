@@ -5,7 +5,11 @@
 //! relative to its parent directory's descriptor with `O_NOFOLLOW`, so a
 //! directory swapped for a symlink while it is being copied (an import
 //! source writable by another local user) cannot redirect the rest of the
-//! walk outside the tree.
+//! walk outside the tree. The root itself is opened by path, where
+//! `O_NOFOLLOW` covers only the last component; a caller whose source path
+//! has ancestors another user controls pins the root first with
+//! [`open_dir_nofollow`] (no symlink anywhere in the path) and copies from
+//! that descriptor with [`copy_tree_at`].
 
 use super::{atomic_write_with, ensure_dir, fsync_dir, not_found, symlink_error, MODE_MASK};
 use crate::error::{Error, Result};
@@ -96,6 +100,59 @@ pub fn copy_tree(
     };
     copy.entry(None, src.as_os_str(), src, dst, true)?;
     Ok(copy.stats)
+}
+
+/// [`copy_tree`] from the directory `root` was opened on (by
+/// [`open_dir_nofollow`]), whatever its path `src` names by now; `src` only
+/// serves `skip`, the nesting check and messages.
+pub fn copy_tree_at(
+    root: &File,
+    src: &Path,
+    dst: &Path,
+    skip: &dyn Fn(&Path) -> bool,
+    limits: &CopyLimits,
+) -> Result<CopyStats> {
+    check_not_nested(src, dst, skip)?;
+    let mut copy = TreeCopy {
+        skip,
+        limits,
+        stats: CopyStats::default(),
+    };
+    copy.entry(Some(root), OsStr::new("."), src, dst, true)?;
+    Ok(copy.stats)
+}
+
+/// Open the directory at the absolute `path` one component at a time from
+/// `/`, each relative to its parent's descriptor with `O_NOFOLLOW`: a
+/// symlink anywhere in the path is refused (`不允许符号链接: {where}`), not
+/// only as its last component, which is all `O_NOFOLLOW` on a whole path
+/// covers. The `O_PATH` descriptor stays on the directory the path named
+/// while it was opened, whatever is renamed or swapped later; `path`
+/// should be canonical (a `..` component is refused).
+pub fn open_dir_nofollow(path: &Path) -> Result<File> {
+    if !path.is_absolute() {
+        return Err(Error::msg(format!("需要绝对路径: {}", path.display())));
+    }
+    let mut walked = PathBuf::new();
+    let mut dir: Option<File> = None;
+    for component in path.components() {
+        let name = match component {
+            Component::RootDir => OsStr::new("/"),
+            Component::Normal(name) => name,
+            _ => return Err(Error::msg(format!("需要规范路径: {}", path.display()))),
+        };
+        walked.push(name);
+        let next = open_at(dir.as_ref(), name, libc::O_PATH).map_err(|e| Error::io(&walked, e))?;
+        let meta = next.metadata().map_err(|e| Error::io(&walked, e))?;
+        if meta.file_type().is_symlink() {
+            return Err(symlink_error(&walked));
+        }
+        if !meta.is_dir() {
+            return Err(Error::msg(format!("不是目录: {}", walked.display())));
+        }
+        dir = Some(next);
+    }
+    dir.ok_or_else(|| Error::msg(format!("需要绝对路径: {}", path.display())))
 }
 
 struct TreeCopy<'a> {

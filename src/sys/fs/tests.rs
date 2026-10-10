@@ -332,6 +332,62 @@ fn tree_copy_is_not_redirected_by_swaps_during_the_copy() {
     }
 }
 
+/// A source whose ancestor another user owns: `open_dir_nofollow` refuses
+/// a symlink anywhere in the path (where `O_NOFOLLOW` alone covers only
+/// the last component), and `copy_tree_at` keeps reading the directory it
+/// pinned after that ancestor is swapped for a symlink to a private tree.
+#[test]
+fn pinned_copies_ignore_swapped_ancestors() {
+    let dir = tmp();
+    let base = fs::canonicalize(dir.path()).unwrap();
+    fs::create_dir_all(base.join("secret/site")).unwrap();
+    fs::write(base.join("secret/site/key.pem"), b"private").unwrap();
+    fs::create_dir_all(base.join("home/www/site")).unwrap();
+    fs::write(base.join("home/www/site/index.html"), b"public").unwrap();
+    fs::write(base.join("home/file"), b"").unwrap();
+    symlink(base.join("secret"), base.join("home/alias")).unwrap();
+    symlink(base.join("secret/site"), base.join("home/last")).unwrap();
+    let cases: [(PathBuf, &str); 5] = [
+        (base.join("home/alias/site"), "不允许符号链接: "),
+        (base.join("home/last"), "不允许符号链接: "),
+        (base.join("home/file/site"), "不是目录: "),
+        (base.join("home/www/../www/site"), "需要规范路径: "),
+        (PathBuf::from("home/www/site"), "需要绝对路径: "),
+    ];
+    for (path, want) in cases {
+        let err = open_dir_nofollow(&path).unwrap_err().to_string();
+        assert!(err.starts_with(want), "{}: {err}", path.display());
+    }
+    let err = open_dir_nofollow(&base.join("home/alias/site")).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("不允许符号链接: {}", base.join("home/alias").display())
+    );
+
+    let src = base.join("home/www/site");
+    let pinned = open_dir_nofollow(&src).unwrap();
+    fs::rename(base.join("home/www"), base.join("home/www.old")).unwrap();
+    symlink(base.join("secret"), base.join("home/www")).unwrap();
+    // By path, the source now names the private tree.
+    assert!(src.join("key.pem").exists());
+    let none = |_: &Path| false;
+    let dst = base.join("dst");
+    let stats = copy_tree_at(&pinned, &src, &dst, &none, &CopyLimits::UNLIMITED).unwrap();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(fs::read(dst.join("index.html")).unwrap(), b"public");
+    assert!(!dst.join("key.pem").exists());
+    // `skip` and messages still see paths below `src`.
+    let skip = |p: &Path| p == src.join("index.html");
+    let skipped = copy_tree_at(
+        &pinned,
+        &src,
+        &base.join("dst2"),
+        &skip,
+        &CopyLimits::UNLIMITED,
+    );
+    assert_eq!(skipped.unwrap().entries, 0);
+}
+
 #[test]
 fn tree_copy_refuses_hard_links_when_asked() {
     let dir = tmp();
