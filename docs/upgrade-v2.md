@@ -117,6 +117,8 @@ v2 对所有命令接受同一组选项（无关的选项被忽略，个别甚�
 - 已安装时 `install -y` 必须加 `--force`。
 - `--preset N` 与 `--protocols` 同时使用时 `N` 必须为 7；`--site-title` 需要配合 `--reality-site`；`--cert` / `--key` 需要配合 `--tls custom`。
 - `cert set` 在 `-y` 下必须给出 `--tls`（v2 静默选择自签证书）。
+- `add`、`del` 在 `-y` 下（或没有交互终端时）必须写出协议，例如 `onebox add tuic -y`，否则提示 `请指定要添加的协议，例如 onebox add tuic` 或 `请指定要删除的协议，例如 onebox del tuic`（v2 的 `add -y` 默认添加 `vless-reality`，`del -y` 删除列表中的第一个协议）。
+- `add … --sni` 要求添加后的节点启用了 REALITY 或 ShadowTLS，否则提示 `没有启用 REALITY 或 ShadowTLS`（v2 不检查，直接保存该域名）。
 - `service 名称 reload` 不再支持，请用 `restart`。
 - 两个内核都在使用时 `update all 版本` 被拒绝（版本号只能用于单个内核）；`update 内核` 指定当前未使用的内核时报错。
 - `probe merge` 至少需要两份输入。
