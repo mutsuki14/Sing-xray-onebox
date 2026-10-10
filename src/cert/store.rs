@@ -147,6 +147,45 @@ impl CertDir {
     }
 }
 
+/// A directory's deployed pair and metadata as they were before a renewal,
+/// which deploys outside any transaction (`None`: the file did not exist):
+/// put back when what should follow the renewal fails, so the node serves
+/// the old pair again and the next renewal finds it due and retries.
+pub struct SavedPair {
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl SavedPair {
+    pub fn save(dir: &CertDir) -> Result<SavedPair> {
+        // Key before certificate, as pairs are deployed.
+        let files = [dir.key(), dir.cert(), dir.metadata_file()]
+            .into_iter()
+            .map(|path| {
+                let bytes = match std::fs::symlink_metadata(&path) {
+                    Ok(_) => Some(read_bounded(&path, PEM_MAX_BYTES)?),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(Error::io(&path, e)),
+                };
+                Ok((path, bytes))
+            })
+            .collect::<Result<_>>()?;
+        Ok(SavedPair { files })
+    }
+
+    /// Write the saved files back (0600); those that did not exist are removed.
+    pub fn restore(&self) -> Result<()> {
+        for (path, bytes) in &self.files {
+            match bytes {
+                Some(bytes) => atomic_write(path, bytes, 0o600)?,
+                None => {
+                    remove_file_if_exists(path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `certificate.json` (v2 shape; fields serialize in this order).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Metadata {

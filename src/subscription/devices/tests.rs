@@ -323,6 +323,42 @@ fn a_node_still_in_v2_state_refuses_device_changes() {
     assert!(list(&ctx.paths).unwrap().is_empty());
 }
 
+/// Revoking never needs the configuration: a state.json that cannot be
+/// read or parsed is not taken for a v2 node (the worker serves on
+/// regardless), so a leaked device can still be revoked at once.
+#[test]
+fn an_unreadable_state_json_does_not_block_revoking() {
+    let node = Node::new("sub-dev-bad-state");
+    let ctx = &node.ctx;
+    std::fs::create_dir_all(&ctx.paths.root).unwrap();
+    let state = ctx.paths.state();
+    let target = node.dir.join("elsewhere.json");
+    std::fs::write(&target, r#"{"values":{}}"#).unwrap();
+    let id = "00000000000000aa";
+    let lock = node.lock();
+    let cases: [(&str, Option<&str>); 5] = [
+        ("truncated", Some(r#"{"values":"#)),
+        ("not json", Some("garbage")),
+        ("unknown object", Some(r#"{"foo":1}"#)),
+        ("not an object", Some("[1,2]")),
+        ("symlink", None),
+    ];
+    for (label, content) in cases {
+        let _ = std::fs::remove_file(&state);
+        match content {
+            Some(text) => std::fs::write(&state, text).unwrap(),
+            None => std::os::unix::fs::symlink(&target, &state).unwrap(),
+        }
+        assert!(
+            crate::state::StateStore::is_v2_at(&ctx.paths).is_err(),
+            "{label}"
+        );
+        DeviceStore::write(&ctx.paths, &[device(id, "phone", TOKEN)]).unwrap();
+        revoke(ctx, &lock, id).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(list(&ctx.paths).unwrap().is_empty(), "{label}");
+    }
+}
+
 #[test]
 fn a_foreign_lock_is_refused() {
     let node = Node::new("sub-dev-foreign");

@@ -302,7 +302,10 @@ pub fn record_endpoint(ctx: &Ctx, lock: &FileLock, endpoint: &str) -> Result<()>
 }
 
 /// The caller holds the node lock, no transaction is pending, and the node
-/// is no longer a v2 node ([`V2_NODE`]).
+/// is not a v2 node ([`V2_NODE`]). Only a `state.json` positively in v2
+/// shape counts: one that cannot be read or parsed does not (the worker's
+/// own check, `server::v2_state`, reads it the same way), so revoking a
+/// leaked device, which never needs the configuration, still works there.
 fn guard(ctx: &Ctx, lock: &FileLock) -> Result<()> {
     lock.verify(&ctx.paths.lock())?;
     ensure!(
@@ -310,7 +313,7 @@ fn guard(ctx: &Ctx, lock: &FileLock) -> Result<()> {
         "{PENDING}"
     );
     ensure!(
-        !crate::state::StateStore::is_v2_at(&ctx.paths)?,
+        !crate::state::StateStore::is_v2_at(&ctx.paths).unwrap_or(false),
         "{V2_NODE}"
     );
     Ok(())

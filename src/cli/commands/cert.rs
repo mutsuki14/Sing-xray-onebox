@@ -30,6 +30,7 @@
 use crate::apply::engine::COMMITTED_UNCLEAN;
 use crate::apply::journal;
 use crate::cert::cloudflare::{self, CfCredentials};
+use crate::cert::store::SavedPair;
 use crate::cert::{self, CertDir, CertScopes, RenewOptions, RenewReport};
 use crate::cli::args::{ArgSpec, CommandSpec, Group, Matches, OptSpec, Root};
 use crate::cli::options as opt;
@@ -41,7 +42,6 @@ use crate::domain::plan;
 use crate::error::{Error, Result};
 use crate::host::service::WAIT_RUNNING;
 use crate::state::{Loaded, StateStore};
-use crate::sys::fs::{atomic_write, read_bounded, remove_file_if_exists};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
 
@@ -322,42 +322,6 @@ fn outcome(ctx: &Ctx, loaded: &Loaded, error: &Error) -> Outcome {
     match std::fs::symlink_metadata(journal::dir(&ctx.paths)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Outcome::Unchanged,
         _ => Outcome::Pending,
-    }
-}
-
-/// The deployed proxy pair and its metadata (`None`: the file did not
-/// exist), as they were before a renewal.
-struct SavedPair {
-    files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
-}
-
-impl SavedPair {
-    fn save(dir: &CertDir) -> Result<SavedPair> {
-        // Key before certificate, as pairs are deployed.
-        let files = [dir.key(), dir.cert(), dir.metadata_file()]
-            .into_iter()
-            .map(|path| {
-                let bytes = match std::fs::symlink_metadata(&path) {
-                    Ok(_) => Some(read_bounded(&path, cert::store::PEM_MAX_BYTES)?),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(e) => return Err(Error::io(&path, e)),
-                };
-                Ok((path, bytes))
-            })
-            .collect::<Result<_>>()?;
-        Ok(SavedPair { files })
-    }
-
-    fn restore(&self) -> Result<()> {
-        for (path, bytes) in &self.files {
-            match bytes {
-                Some(bytes) => atomic_write(path, bytes, 0o600)?,
-                None => {
-                    remove_file_if_exists(path)?;
-                }
-            }
-        }
-        Ok(())
     }
 }
 
