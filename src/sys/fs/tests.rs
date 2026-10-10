@@ -332,6 +332,59 @@ fn tree_copy_is_not_redirected_by_swaps_during_the_copy() {
     }
 }
 
+/// An import source is checked by its canonical path, then a parent
+/// directory is swapped for a symlink to a private tree before the copy
+/// opens the root: with path symlinks refused the copy fails instead of
+/// reading the private tree. Snapshots (the default) still follow them.
+#[test]
+fn tree_copy_refuses_a_swapped_parent_when_asked() {
+    let dir = tmp();
+    let base = fs::canonicalize(dir.path()).unwrap();
+    fs::create_dir_all(base.join("www/site")).unwrap();
+    fs::write(base.join("www/site/index.html"), b"public").unwrap();
+    fs::create_dir_all(base.join("secret/site")).unwrap();
+    fs::write(base.join("secret/site/key"), b"private").unwrap();
+    fs::rename(base.join("www"), base.join("real")).unwrap();
+    symlink(base.join("secret"), base.join("www")).unwrap();
+    symlink(base.join("secret/site"), base.join("last")).unwrap();
+    let none = |_: &Path| false;
+    let strict = CopyLimits::UNLIMITED.refuse_path_symlinks();
+    // (source, Ok(copied file) or Err(symlink named in the message))
+    let cases = [
+        ("www/site", Err("www")),
+        ("www/site/", Err("www")),
+        ("last", Err("last")),
+        ("real/site", Ok("index.html")),
+        ("real/../real/site", Ok("index.html")),
+    ];
+    for (i, (source, expected)) in cases.into_iter().enumerate() {
+        let dst = base.join(format!("dst{i}"));
+        let result = copy_tree(&base.join(source), &dst, &none, &strict);
+        match expected {
+            Ok(file) => {
+                result.unwrap();
+                assert_eq!(fs::read(dst.join(file)).unwrap(), b"public", "{source}");
+            }
+            Err(link) => {
+                let err = result.unwrap_err().to_string();
+                assert_eq!(
+                    err,
+                    format!("不允许符号链接: {}", base.join(link).display())
+                );
+                assert!(!dst.exists(), "{source}");
+            }
+        }
+    }
+    copy_tree(
+        &base.join("www/site"),
+        &base.join("followed"),
+        &none,
+        &CopyLimits::UNLIMITED,
+    )
+    .unwrap();
+    assert_eq!(fs::read(base.join("followed/key")).unwrap(), b"private");
+}
+
 #[test]
 fn tree_copy_refuses_hard_links_when_asked() {
     let dir = tmp();
