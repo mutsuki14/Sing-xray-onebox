@@ -40,7 +40,10 @@
 //!   listed as an unfinished step (v2 lost their record with the restore);
 //! - a failed service stop or firewall clear no longer skips restoring the
 //!   files (v2 returned before the restore);
-//! - a cancellation keeps exit code 130 through the rollback message.
+//! - a cancellation keeps exit code 130 through the rollback message;
+//! - a finished journal is renamed away before it is deleted, and a journal
+//!   directory without `journal.json` is removed by the next recovery
+//!   instead of blocking every FRP command (`journal::remove`).
 
 use super::journal::{self, Before, Journal, Phase, SERVICES};
 use super::model::{self, MANAGED_FILE};
@@ -308,10 +311,16 @@ pub enum Recovery {
 }
 
 /// Finish an interrupted transaction: a finished journal is removed, any
-/// other one rolled back. The journal stays (an error) only when the
-/// rollback could not restore the files.
+/// other one rolled back. A journal directory without `journal.json` (a
+/// cleanup an earlier version interrupted) is removed with a warning. The
+/// journal stays (an error) only when the rollback could not restore the
+/// files.
 pub fn recover(rt: &Runtime, lock: &FileLock) -> Result<Recovery> {
     let paths = rt.paths();
+    if journal::discard_orphan(paths)? {
+        out::warn("已删除缺少 journal.json 的 FRP 事务目录（上次事务结束后的清理被中断）");
+        return Ok(Recovery::Nothing);
+    }
     let Some(mut journal) = journal::load(paths)? else {
         return Ok(Recovery::Nothing);
     };

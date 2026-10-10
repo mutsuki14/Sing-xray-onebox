@@ -57,7 +57,7 @@ onebox subscription add phone         # 新建设备，显示令牌与各格式 
 onebox subscription reset 设备ID       # 换新令牌，旧链接立即失效
 onebox subscription revoke 设备ID      # 撤销设备
 onebox subscription publish           # 立即重新生成并发布
-onebox subscription renew             # 续期 HTTPS 订阅证书（site 模式即续期网站证书；ip 模式无需）
+onebox subscription renew             # 立即强制续期 HTTPS 订阅证书（site 模式即续期网站证书；ip 模式无需）
 onebox subscription disable           # 停止全部订阅访问（设备保留）
 ```
 

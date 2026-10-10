@@ -520,6 +520,49 @@ fn eof_at_a_submenu_prompt_exits() {
     assert!(prompts[2].starts_with("探测配置\n  本机探测配置 尚未生成\n 1) 导出本机探测配置"));
 }
 
+/// The FRP and BBR menus are the `frps` / `bbr` commands' own: they keep
+/// their items' cancellations, so a cancellation they return was at their
+/// menu prompt and leaves the whole menu with 130 like a native submenu's
+/// (README); their errors still return to the menu that opened them.
+#[test]
+fn eof_at_the_frp_or_bbr_menu_prompt_exits() {
+    // (installed, answers up to the entry, its command line, menus to back out of)
+    let cases: [(bool, &[&str], &str, &[&str]); 4] = [
+        (true, &["9"], "frps", &["0"]),
+        (true, &["7", "12"], "bbr", &["0", "0"]),
+        (false, &["3"], "frps", &["0"]),
+        (false, &["4"], "bbr", &["0"]),
+    ];
+    for (installed, path, line, back) in cases {
+        let bench = || {
+            if installed {
+                Bench::installed(&node())
+            } else {
+                Bench::new()
+            }
+        };
+        let cancelled = bench();
+        let calls = Calls::default();
+        calls.fail_on(line, || Error::Cancelled);
+        let err = menu_run(&cancelled, &calls, path).unwrap_err();
+        assert!(err.is_cancelled(), "{line}: {err}");
+        assert_eq!(err.exit_code(), 130);
+        assert_eq!(calls.lines(), [line]);
+        assert!(cancelled.notes().is_empty(), "{:?}", cancelled.notes());
+        assert_eq!(
+            cancelled.ui.prompts().len(),
+            path.len(),
+            "{line}: no menu is shown again"
+        );
+
+        let failed = bench();
+        let calls = Calls::default();
+        calls.fail_on(line, || Error::msg("失败"));
+        menu_run(&failed, &calls, &[path, back].concat()).unwrap();
+        assert_eq!(failed.notes(), ["[错误] 失败"], "{line}");
+    }
+}
+
 #[test]
 fn probe_bundles_export_list_and_merge() {
     let bench = Bench::installed(&node());

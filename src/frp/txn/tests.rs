@@ -141,6 +141,54 @@ fn finished_journals_are_only_cleaned_up() {
 }
 
 #[test]
+fn a_journal_directory_without_its_journal_is_removed_by_the_next_recovery() {
+    // A cleanup done in place (earlier versions) that died after removing
+    // `journal.json`: the next recovery removes the rest, touching nothing
+    // else, instead of refusing forever with "FRP 事务日志不完整".
+    let h = FakeHost::new();
+    let rt = h.runtime();
+    let paths = rt.paths();
+    crate::frp::runtime::mkdirs(paths).unwrap();
+    fs::write(paths.frp_root.join("frps.toml"), "new").unwrap();
+    let lock = rt.lock().unwrap();
+    let mut journal = journal::create(
+        paths,
+        "配置",
+        journal::Before::default(),
+        &journal::targets(paths),
+    )
+    .unwrap();
+    journal.set_phase(paths, Phase::RolledBack).unwrap();
+    fs::remove_file(journal::dir(paths).join(journal::JOURNAL_FILE)).unwrap();
+    assert!(files_dir(paths).is_dir());
+    assert_eq!(journal::notice(paths).as_deref(), Some(journal::PENDING));
+    h.clear_history();
+    assert_eq!(recover(&rt, &lock).unwrap(), Recovery::Nothing);
+    assert!(h.history().is_empty(), "{:?}", h.history());
+    assert!(!journal::exists(paths));
+    assert_eq!(journal::notice(paths), None);
+    assert_eq!(
+        fs::read_to_string(paths.frp_root.join("frps.toml")).unwrap(),
+        "new"
+    );
+    assert!(!recover_locked(&rt, &lock).unwrap());
+    // FRP transactions work again and leave no staging directory behind.
+    Txn::run(&rt, &lock, "配置", &journal::targets(paths), |_| Ok(())).unwrap();
+    assert!(!journal::exists(paths));
+    let parent = journal::dir(paths).parent().unwrap().to_path_buf();
+    let stages = fs::read_dir(&parent)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(journal::STAGE_PREFIX)
+        })
+        .count();
+    assert_eq!(stages, 0);
+}
+
+#[test]
 fn a_finalized_journal_keeps_the_change() {
     // The commit record could not be written (full disk) and the process
     // ended: the journal says `finalize`, and recovery keeps the change.

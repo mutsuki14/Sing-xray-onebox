@@ -52,6 +52,9 @@ const CONFIRM_ROTATE_CA: &str = "轮换私有 CA 会使所有已导出的客户�
 const CONFIRM_UNINSTALL: &str = "卸载 FRP、独立配置与证书？已导出配置将失效";
 const NOT_INSTALLED_INFO: &str = "尚未安装 FRP；运行 onebox frps install";
 const LOG_LINES: usize = 80;
+/// A manual `renew` forces the website certificate: the help must not read
+/// like a due check, or repeated runs hit the Let's Encrypt rate limits.
+const RENEW_SUMMARY: &str = "立即强制续期网站证书并检查控制证书（--cron 只续期 30 天内到期的）";
 
 /// One `frps` operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -248,9 +251,10 @@ pub const COMMAND: CommandSpec = CommandSpec::new("frps", Group::Feature, "独�
         sub("update", "更新 frps 到指定版本或 latest", Root::Required).args(&[
             ArgSpec::optional("版本", "如 0.72.0；默认 latest"),
         ]),
-        sub("renew", "检查并续期控制证书与网站证书", Root::Required).options(&[
-            OptSpec::flag("cron", "计划任务调用：只续期到期的网站证书"),
-        ]),
+        sub("renew", RENEW_SUMMARY, Root::Required).options(&[OptSpec::flag(
+            "cron",
+            "计划任务调用：只续期到期的网站证书（30 天内到期，或自备证书已更新）",
+        )]),
         sub("rotate-token", "轮换 token（所有旧客户端失效）", Root::Required),
         sub(
             "rotate-ca",

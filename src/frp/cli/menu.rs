@@ -1,7 +1,9 @@
 //! The interactive FRP menu (G41): v2's eleven items as a numbered list
 //! with `0) 返回`, headed by the current state. Items run the same
 //! [`Action`]s as the command line; errors and cancellations of an item
-//! stay in the menu, only cancelling the menu prompt itself leaves (130).
+//! stay in the menu, only cancelling the menu prompt itself leaves (130) —
+//! opened from the main menu, that leaves the main menu too
+//! (`cli::menu::Menu::command_menu`).
 
 use super::{Action, Session};
 use crate::error::{Error, Result};

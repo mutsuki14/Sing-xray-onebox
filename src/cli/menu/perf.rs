@@ -55,7 +55,7 @@ impl Menu<'_> {
             8 => self.bench(),
             9 => self.failover(),
             10 => self.dispatch(&["reality-check"]),
-            _ => self.dispatch(&["bbr"]),
+            _ => self.command_menu(&["bbr"]),
         })
     }
 
