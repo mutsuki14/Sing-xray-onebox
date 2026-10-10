@@ -331,6 +331,14 @@ pub fn cloudflare_for(ctx: &Ctx, cfg: &NodeConfig) -> Result<Option<CfCredential
 /// `subscription disable`: planned and credentials resolved without the
 /// lock, like `enable` (the apply refuses if state.json changed since).
 pub fn disable(ctx: &Ctx) -> Result<()> {
+    disable_with(ctx, &apply::apply_locked)
+}
+
+/// [`disable`] with the apply under the lock injected.
+fn disable_with(
+    ctx: &Ctx,
+    apply_locked: &dyn Fn(&Ctx, &FileLock, ApplyRequest) -> Result<()>,
+) -> Result<()> {
     let loaded = StateStore::load_required(ctx)?;
     if loaded.config.subscription.is_none() {
         // Still finish a journal left behind, as every command does.
@@ -343,7 +351,7 @@ pub fn disable(ctx: &Ctx) -> Result<()> {
     req.intents.cloudflare = cloudflare_for(ctx, &req.config)?;
     let lock = node_lock(ctx)?;
     apply::recover_locked(ctx, &lock)?;
-    apply::apply_locked(ctx, &lock, req)?;
+    apply_locked(ctx, &lock, req)?;
     if let Some(old) = endpoint::endpoint(&loaded.config) {
         // Best effort: without it the next enable only reports the entry
         // as changed (the subscription is disabled either way).

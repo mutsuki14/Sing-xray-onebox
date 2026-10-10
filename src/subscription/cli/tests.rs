@@ -271,6 +271,54 @@ fn reenabling_compares_with_the_endpoint_recorded_at_disable() {
     }
 }
 
+/// `disable` itself records, after its apply and under the same lock, the
+/// endpoint the devices' URLs carry, so the next `enable` of the same entry
+/// says the URLs still work; a failed apply records nothing, and disabling
+/// a disabled subscription applies nothing and keeps the record.
+#[test]
+fn disable_records_the_endpoint_for_the_next_enable() {
+    let node = Node::new("sub-cli-disable");
+    let ctx = &node.ctx;
+    let enabled = ip(8448);
+    let old = endpoint::endpoint(&enabled).unwrap();
+    node.save(&enabled);
+    DeviceStore::write(&ctx.paths, &[device("00000000000000aa", "phone", TOKEN)]).unwrap();
+    let recorded = || {
+        DeviceStore::load(&ctx.paths)
+            .unwrap()
+            .endpoint()
+            .map(str::to_owned)
+    };
+
+    let failing =
+        |_: &Ctx, _: &FileLock, _: ApplyRequest| -> Result<()> { Err(Error::msg("应用失败")) };
+    let err = disable_with(ctx, &failing).unwrap_err();
+    assert_eq!(err.to_string(), "应用失败");
+    assert_eq!(recorded(), None);
+
+    // What the engine commits: the planned configuration.
+    let commit = |ctx: &Ctx, lock: &FileLock, req: ApplyRequest| -> Result<()> {
+        lock.verify(&ctx.paths.lock())?;
+        StateStore::save(ctx, &req.config)
+    };
+    disable_with(ctx, &commit).unwrap();
+    let disabled = StateStore::load_required(ctx).unwrap().config;
+    assert!(disabled.subscription.is_none());
+    assert_eq!(recorded().as_deref(), Some(&*old));
+    assert_eq!(devices::list(&ctx.paths).unwrap().len(), 1, "devices kept");
+    let published = published_endpoint(ctx, &disabled);
+    assert_eq!(published.as_deref(), Some(&*old));
+    assert_eq!(
+        endpoint::enabled_message(published.as_deref(), &enabled),
+        endpoint::UNCHANGED
+    );
+
+    let refused =
+        |_: &Ctx, _: &FileLock, _: ApplyRequest| -> Result<()> { Err(Error::msg("不应应用")) };
+    disable_with(ctx, &refused).unwrap();
+    assert_eq!(recorded().as_deref(), Some(&*old));
+}
+
 #[test]
 fn cloudflare_credentials_are_resolved_before_the_apply() {
     let node = Node::new("sub-cli-cf");
