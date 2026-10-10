@@ -162,9 +162,15 @@ fn a_journal_of_a_running_operation_is_a_warning() {
         )
     );
     drop(held);
-    let check = journal_now(&paths);
-    assert_eq!(check.status, CheckStatus::Fail, "{check:?}");
-    assert!(check.detail.starts_with("事务记录无法读取: "), "{check:?}");
+    // Left behind by an interrupted cleanup: `recover` removes it.
+    assert_eq!(
+        journal_now(&paths),
+        Check::fail(
+            JOURNAL,
+            format!("事务记录无法读取: {}", journal::ORPHAN_MESSAGE)
+        )
+    );
+    assert!(journal_now(&paths).detail.contains("执行 onebox recover"));
 }
 
 #[test]

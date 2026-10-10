@@ -127,7 +127,7 @@ fn a_journal_directory_without_its_journal_is_removed_by_the_next_recovery() {
     fs::remove_file(journal::dir(host.paths()).join(journal::JOURNAL_FILE)).unwrap();
     assert!(journal::files_dir(host.paths()).is_dir());
     let err = journal::pending(host.paths()).unwrap_err().to_string();
-    assert!(err.contains("事务日志不完整"), "{err}");
+    assert_eq!(err, journal::ORPHAN_MESSAGE, "names the remedy");
     host.exec.clear_history();
     assert_eq!(
         recover_all(&host.ctx, &host.lock).unwrap(),

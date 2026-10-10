@@ -347,8 +347,9 @@ fn load_distinguishes_absent_incomplete_and_oversized() {
     let paths = Paths::isolated(dir_.path());
     assert_eq!(load(&paths).unwrap(), None);
     fs::create_dir_all(dir(&paths)).unwrap();
-    let err = load(&paths).unwrap_err().to_string();
-    assert!(err.starts_with("事务日志不完整，未执行任何恢复"), "{err}");
+    // Without journal.json: the remedy is named (recover removes it).
+    assert_eq!(load(&paths).unwrap_err().to_string(), ORPHAN_MESSAGE);
+    assert!(ORPHAN_MESSAGE.ends_with("执行 onebox recover 清理"));
     let path = dir(&paths).join(JOURNAL_FILE);
     fs::File::create(&path)
         .unwrap()

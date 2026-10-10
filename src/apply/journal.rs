@@ -35,7 +35,10 @@
 //!   warning;
 //! - [`pending`] reports both journals for the operations that must not run
 //!   while a recovery is due (backup, doctor, uninstall, device changes) and
-//!   treats a corrupt journal as an error, never as "nothing pending".
+//!   treats a corrupt journal as an error, never as "nothing pending";
+//! - a journal directory without `journal.json` (an interrupted cleanup,
+//!   which `recover` now removes) is reported as such, with the remedy
+//!   ([`ORPHAN_MESSAGE`]), instead of v2's bare `事务日志不完整，未执行任何恢复`.
 
 use crate::apply::program_journal;
 use crate::apply::snapshot::{self, node_allowlist, v2_node_allowlist, Allowlist, Snapshot};
@@ -559,8 +562,16 @@ fn incomplete(e: impl std::fmt::Display) -> Error {
     Error::msg(format!("事务日志不完整，未执行任何恢复: {e}"))
 }
 
+/// Why a journal directory without `journal.json` is reported, with the
+/// remedy: `recover` (and every apply, boot or backup) removes it
+/// (`transaction::discard_orphan`), so `doctor` must not leave the
+/// administrator with a bare "incomplete journal".
+pub const ORPHAN_MESSAGE: &str =
+    "事务日志不完整：事务目录缺少 journal.json（上次事务结束后的清理被中断）；执行 onebox recover 清理";
+
 /// The pending journal, `None` when there is none. A journal directory
-/// without a readable, valid journal is an error.
+/// without a readable, valid journal is an error ([`ORPHAN_MESSAGE`] when
+/// `journal.json` is missing).
 pub fn load(paths: &Paths) -> Result<Option<Journal>> {
     let dir = dir(paths);
     match fs::symlink_metadata(&dir) {
@@ -572,7 +583,11 @@ pub fn load(paths: &Paths) -> Result<Option<Journal>> {
         Ok(_) => {}
     }
     let path = dir.join(JOURNAL_FILE);
-    let meta = fs::symlink_metadata(&path).map_err(|e| incomplete(Error::io(&path, e)))?;
+    let meta = match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => bail!("{ORPHAN_MESSAGE}"),
+        Err(e) => return Err(incomplete(Error::io(&path, e))),
+        Ok(meta) => meta,
+    };
     ensure!(meta.len() <= MAX_BYTES, "事务日志过大");
     let bytes = read_bounded(&path, MAX_BYTES).map_err(incomplete)?;
     parse(&bytes).map(Some)
