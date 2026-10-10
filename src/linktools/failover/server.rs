@@ -90,7 +90,7 @@ impl Slots {
 
     pub fn try_take(&self) -> Option<Slot<'_>> {
         self.live
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < self.max).then_some(n + 1)
             })
             .ok()

@@ -483,7 +483,7 @@ fn a_failed_restart_puts_the_previous_pair_back() {
                 },
                 move |_| {
                     let fail = left
-                        .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                        .try_update(SeqCst, SeqCst, |n| n.checked_sub(1))
                         .is_ok();
                     Ok(match fail {
                         true => Output::failure(1, "Job for onebox-site.service failed"),

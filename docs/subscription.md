@@ -43,7 +43,7 @@ onebox subscription enable --mode standalone --domain sub.example.com \
 | `--tls cf\|http\|custom` | 仅 `standalone` 模式：证书方式，默认 `cf`（已启用时默认沿用当前方式）；`custom` 需同时给出 `--cert`、`--key` |
 | `--name 名称` | 首个设备的名称，默认 `default` |
 
-- `ip` 模式的地址默认取节点的连接地址（当它是 IP 时），否则取检测到的公网 IPv4、IPv6；必须是 IP 字面量（不含端口、路径）。该端口由 Onebox 自己的订阅服务直接提供（不需要 nginx），在本机所有地址上监听（支持 IPv6 时为双栈 `[::]`，否则 `0.0.0.0`），便于 NAT 环境使用；`--address` 只决定链接中显示的地址。v2 在 ip 模式下另起一个 nginx（`onebox-subscription-web`）转发，v3 不再需要，升级后会自动移除。
+- `ip` 模式的地址默认取节点的连接地址（当它是 IP 时），否则取检测到的公网 IPv4、IPv6；必须是 IP 字面量（不含端口、路径）。该端口由 Onebox 自己的订阅服务直接提供（不需要 nginx），在本机所有地址上监听（支持 IPv6 时同时监听 `[::]` 与 `0.0.0.0`，否则只监听 `0.0.0.0`），便于 NAT 环境使用；`--address` 只决定链接中显示的地址。v2 在 ip 模式下另起一个 nginx（`onebox-subscription-web`）转发，v3 不再需要，升级后会自动移除。
 - `standalone` 会检查端口占用并申请证书，不接管已有服务；域名需事先解析到本机。端口允许时可用 `--port 443`。已启用自有域名网站时 TCP 80 由网站占用，`standalone` 请用 `cf` 或 `custom` 证书（或直接改用 `site`）。
 - `--mode site` 忽略 `--domain`、`--port`、`--tls`、`--cert`、`--key`，并提示已忽略哪些选项。
 - 首次启用会创建设备 `default`（或 `--name` 指定的名称）并显示其链接。`ip` 和 `standalone` 需要在云安全组放行所用的 TCP 端口（HTTP-01 另需 80）；本机防火墙由程序放行。

@@ -124,7 +124,7 @@ fn journal_lines_must_have_an_exact_known_shape() {
         lines::boot("onebox-xray").replace("service onebox-xray start", "service onebox-site start"),
         format!("17 4 * * * {exe} cert renew proxy --cron >/dev/null 2>&1; id # onebox-native-cert-proxy"),
         format!("17 4 * * * {exe} cert renew site --cron >/dev/null 2>&1 # onebox-native-cert-proxy"),
-        format!("17 4 * * * /tmp/x cert renew proxy --cron >/dev/null 2>&1 # onebox-native-cert-proxy"),
+        "17 4 * * * /tmp/x cert renew proxy --cron >/dev/null 2>&1 # onebox-native-cert-proxy".to_owned(),
         lines::v2_boot("onebox-xray").replace(" start ", " start; id "),
         lines::v2_boot("onebox-xray").replace("env ONEBOX_DIR", "env LD_PRELOAD='/x' ONEBOX_DIR"),
         lines::v2_frp(true).replace("frps renew --cron", "frps start"),

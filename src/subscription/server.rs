@@ -1,8 +1,8 @@
 //! `onebox subscription serve`: the subscription worker.
 //!
 //! Listener (G13): ip mode → TCP on the configured port on every address
-//! (`[::]` dual-stack, plus `0.0.0.0` when IPv6 sockets are v6-only;
-//! `0.0.0.0` alone without IPv6); site and standalone mode → the unix
+//! (`[::]` v6-only plus `0.0.0.0` with IPv6, `0.0.0.0` alone without:
+//! `sys::net::bind_tcp_all`, independent of `net.ipv6.bindv6only`); site and standalone mode → the unix
 //! socket `RUN/subscription.sock` behind nginx (0660, group of the nginx
 //! worker; a stale socket is replaced, a live one or a non-socket refused).
 //! The listener comes from `ROOT/subscription/listener.json`, which the
@@ -41,7 +41,7 @@ use crate::sys::fs::{atomic_write, read_bounded, remove_file_if_exists};
 use crate::sys::rand::OsRandom;
 use serde::{Deserialize, Serialize};
 use std::io::{self, ErrorKind};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+use std::net::TcpListener;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -187,20 +187,8 @@ impl Acceptor for UnixListener {
 
 /// Bind the TCP listeners for `port` (family rules in the module docs).
 pub fn bind_tcp(port: u16, system_root: &Path) -> Result<Vec<TcpListener>> {
-    let failed = |e: io::Error| Error::msg(format!("订阅端口 {port} 无法监听: {e}"));
-    let v4 = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
-    if !crate::sys::net::ipv6_available(system_root) {
-        return Ok(vec![TcpListener::bind(v4).map_err(failed)?]);
-    }
-    let v6 = TcpListener::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))).map_err(failed)?;
-    let v6only = std::fs::read_to_string(system_root.join("proc/sys/net/ipv6/bindv6only"))
-        .is_ok_and(|s| s.trim() == "1");
-    if !v6only {
-        return Ok(vec![v6]);
-    }
-    let bound = v6.local_addr().map_or(port, |a| a.port());
-    let v4 = SocketAddr::from((Ipv4Addr::UNSPECIFIED, bound));
-    Ok(vec![v6, TcpListener::bind(v4).map_err(failed)?])
+    crate::sys::net::bind_tcp_all(port, system_root)
+        .map_err(|e| Error::msg(format!("订阅端口 {port} 无法监听: {e}")))
 }
 
 /// Bind `RUN/subscription.sock`: 0660, owned by root and the group of the

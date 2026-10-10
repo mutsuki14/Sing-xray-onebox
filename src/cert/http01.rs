@@ -3,8 +3,8 @@
 //! Serves exactly `GET`/`HEAD /.well-known/acme-challenge/<token>` from a
 //! webroot (the files acme.sh `--webroot` writes) on TCP 80 while one
 //! acme.sh call runs; every other request gets `404`. It binds `[::]`
-//! (dual-stack) when the host has IPv6, plus `0.0.0.0` when IPv6 sockets
-//! are v6-only (`net.ipv6.bindv6only=1`); without IPv6 only `0.0.0.0`.
+//! (v6-only) plus `0.0.0.0` when the host has IPv6, only `0.0.0.0`
+//! without (`sys::net::bind_tcp_all`, whatever `net.ipv6.bindv6only` says).
 //!
 //! Bounds: requests are parsed with `httparse` from at most 8 KiB of
 //! headers; the request head must be complete 5 s after `accept` and the
@@ -28,7 +28,7 @@
 use crate::error::{Error, Result};
 use crate::sys::fs::read_bounded;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -140,26 +140,13 @@ impl Drop for Responder {
 
 /// The listening sockets (see the module docs for the family rules).
 fn bind(port: u16, system_root: &Path) -> Result<Vec<TcpListener>> {
-    let busy = |e: std::io::Error| {
+    crate::sys::net::bind_tcp_all(port, system_root).map_err(|e| {
         if e.kind() == ErrorKind::AddrInUse || e.kind() == ErrorKind::PermissionDenied {
             Error::msg(PORT_BUSY)
         } else {
             Error::msg(format!("{PORT_BUSY}: {e}"))
         }
-    };
-    let v4 = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
-    if !crate::sys::net::ipv6_available(system_root) {
-        return Ok(vec![TcpListener::bind(v4).map_err(busy)?]);
-    }
-    let v6 = TcpListener::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))).map_err(busy)?;
-    let bound = v6.local_addr().map_or(port, |a| a.port());
-    let v6only = std::fs::read_to_string(system_root.join("proc/sys/net/ipv6/bindv6only"))
-        .is_ok_and(|s| s.trim() == "1");
-    if !v6only {
-        return Ok(vec![v6]);
-    }
-    let v4 = TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, bound))).map_err(busy)?;
-    Ok(vec![v6, v4])
+    })
 }
 
 struct Server {

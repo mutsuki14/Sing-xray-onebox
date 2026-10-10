@@ -110,7 +110,7 @@ pub(crate) mod testing {
             let refuse = name == self.name
                 && self
                     .left
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                     .is_ok();
             if refuse {
                 self.refused.fetch_add(1, Ordering::SeqCst);

@@ -171,24 +171,27 @@ fn tcp_listeners_follow_the_address_family() {
         .unwrap_err()
         .to_string()
         .starts_with(&format!("订阅端口 {busy} 无法监听")));
-    if TcpListener::bind("[::1]:0").is_err() {
-        return;
-    }
+    // A root with IPv6: a v6-only `[::]` plus `0.0.0.0` on one port,
+    // whatever `bindv6only` says (the sysctl no longer decides); a kernel
+    // without IPv6 sockets falls back to the IPv4 listener.
+    let kernel_ipv6 = TcpListener::bind("[::]:0").is_ok();
     let proc = root.join("proc");
     std::fs::create_dir_all(proc.join("net")).unwrap();
     std::fs::write(proc.join("net/if_inet6"), "").unwrap();
     std::fs::create_dir_all(proc.join("sys/net/ipv6")).unwrap();
-    std::fs::write(proc.join("sys/net/ipv6/bindv6only"), "1\n").unwrap();
-    let split = bind_tcp(0, root).unwrap();
-    assert_eq!(
-        split.len(),
-        2,
-        "v6-only sockets need a separate IPv4 listener"
-    );
-    assert_eq!(
-        split[0].local_addr().unwrap().port(),
-        split[1].local_addr().unwrap().port()
-    );
+    for bindv6only in ["0\n", "1\n"] {
+        std::fs::write(proc.join("sys/net/ipv6/bindv6only"), bindv6only).unwrap();
+        let listeners = bind_tcp(0, root).unwrap();
+        let addrs: Vec<_> = listeners.iter().map(|l| l.local_addr().unwrap()).collect();
+        if kernel_ipv6 {
+            assert_eq!(addrs.len(), 2, "{bindv6only:?}: {addrs:?}");
+            assert!(addrs[0].is_ipv6() && addrs[1].is_ipv4(), "{addrs:?}");
+            assert_eq!(addrs[0].port(), addrs[1].port());
+        } else {
+            assert_eq!(addrs.len(), 1, "{addrs:?}");
+            assert!(addrs[0].is_ipv4());
+        }
+    }
 }
 
 fn serve_files(node: &Node) {

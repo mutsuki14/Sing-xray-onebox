@@ -11,7 +11,9 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::sys::exec::Cmd;
 use std::collections::BTreeSet;
-use std::net::{IpAddr, TcpListener, UdpSocket};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::time::Duration;
 
@@ -75,6 +77,87 @@ pub fn ipv6_available(system_root: &Path) -> bool {
         && std::fs::read_to_string(system_root.join("proc/sys/net/ipv6/conf/all/disable_ipv6"))
             .map(|s| s.trim() != "1")
             .unwrap_or(true)
+}
+
+/// TCP listeners on every address for `port` (0 = any free port): without
+/// IPv6 one on `0.0.0.0`; with IPv6 one on `[::]` made v6-only explicitly
+/// plus one on `0.0.0.0` with the port the first got. Setting
+/// `IPV6_V6ONLY` on the socket makes the pair independent of the host's
+/// `net.ipv6.bindv6only` (relying on the sysctl failed when the value read
+/// and the kernel's behaviour differed). A kernel that refuses IPv6
+/// sockets although `ipv6_available` said yes gets the IPv4 listener only.
+pub fn bind_tcp_all(port: u16, system_root: &Path) -> io::Result<Vec<TcpListener>> {
+    let v4 = |port: u16| TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)));
+    if !ipv6_available(system_root) {
+        return Ok(vec![v4(port)?]);
+    }
+    let v6 = match bind_v6only(port) {
+        Ok(listener) => listener,
+        Err(e) if e.raw_os_error() == Some(libc::EAFNOSUPPORT) => return Ok(vec![v4(port)?]),
+        Err(e) => return Err(e),
+    };
+    let bound = v6.local_addr()?.port();
+    Ok(vec![v6, v4(bound)?])
+}
+
+/// A listening `[::]:port` socket with `IPV6_V6ONLY` and `SO_REUSEADDR`
+/// (what `TcpListener::bind` sets), close-on-exec.
+fn bind_v6only(port: u16) -> io::Result<TcpListener> {
+    // SAFETY: plain socket(2); the descriptor is owned right away.
+    let raw = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a fresh, valid descriptor nobody else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    set_flag(&fd, libc::SOL_SOCKET, libc::SO_REUSEADDR)?;
+    set_flag(&fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY)?;
+    let addr = libc::sockaddr_in6 {
+        sin6_family: libc::AF_INET6 as libc::sa_family_t,
+        sin6_port: port.to_be(),
+        sin6_flowinfo: 0,
+        sin6_addr: libc::in6_addr {
+            s6_addr: Ipv6Addr::UNSPECIFIED.octets(),
+        },
+        sin6_scope_id: 0,
+    };
+    use std::os::fd::AsRawFd;
+    // SAFETY: `addr` is a valid sockaddr_in6 and its exact size is passed.
+    let bound = unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            (&addr as *const libc::sockaddr_in6).cast(),
+            std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+        )
+    };
+    if bound != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: listen(2) on our own bound socket.
+    if unsafe { libc::listen(fd.as_raw_fd(), 128) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(TcpListener::from(fd))
+}
+
+fn set_flag(fd: &OwnedFd, level: libc::c_int, name: libc::c_int) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let on: libc::c_int = 1;
+    // SAFETY: setsockopt(2) with a pointer to a live c_int and its size.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            level,
+            name,
+            (&on as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// The host's global unicast addresses as sorted, unique `ip/32` and
