@@ -192,7 +192,7 @@ impl Redactor {
     /// leaves and the numbers under credential-like keys, a `KEY=value` file
     /// (FRP's v1 `state.conf`) its values. Identifiers that also make up
     /// doctor's own wording (protocol and core ids, `onebox`, `true`, the
-    /// values of [`VOCABULARY_KEYS`]) are kept. `false` when `text` is
+    /// values of `VOCABULARY_KEYS`) are kept. `false` when `text` is
     /// neither format: the caller must then not show the load error at all.
     pub fn add_raw(&mut self, text: &str) -> bool {
         if let Ok(doc) = serde_json::from_str::<Value>(text) {

@@ -27,7 +27,7 @@
 //! plaintext warning on stderr.
 //!
 //! Changes from v2: see [`super::request`] (option rules) and
-//! [`super::endpoint`] (URL block); `disable` of a disabled subscription
+//! [`mod@super::endpoint`] (URL block); `disable` of a disabled subscription
 //! applies nothing; `publish` is a transaction with the stored
 //! configuration as before; `renew` never runs an apply.
 
@@ -417,7 +417,7 @@ pub fn publish_request(ctx: &Ctx) -> Result<ApplyRequest> {
     Ok(req)
 }
 
-/// `subscription renew [--cron]` (see [`super::renew`]).
+/// `subscription renew [--cron]` (see [`super::renew()`]).
 pub fn renew_now(ctx: &Ctx, scheduled: bool) -> Result<()> {
     let Some(loaded) = StateStore::load(ctx)? else {
         return Ok(());

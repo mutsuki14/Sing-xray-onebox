@@ -378,6 +378,19 @@ impl Proc {
         }
     }
 
+    /// A timed run's deadline passed: SIGTERM the group, give it up to
+    /// `grace` to exit and close its output pipes, then SIGKILL whatever is
+    /// left of it (members ignoring SIGTERM or no longer holding the pipes).
+    pub(super) fn terminate_group(&mut self, grace: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + grace;
+        self.signal_group(libc::SIGTERM);
+        if self.wait_exit(grace)? {
+            self.drain(deadline.saturating_duration_since(Instant::now()));
+        }
+        self.signal_group(libc::SIGKILL);
+        Ok(())
+    }
+
     /// Once the leader has exited (or been killed): wait up to `drain` for
     /// the output pipes to close; if members of its group still hold them,
     /// kill the group and wait briefly again; then reap the leader.

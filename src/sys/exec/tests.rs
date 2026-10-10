@@ -202,6 +202,45 @@ fn timeout_kills_the_whole_group() {
     );
 }
 
+/// At the deadline the group gets SIGTERM first: a command that cleans up
+/// on it finishes its trap; one ignoring it is killed once the grace has
+/// passed, background members included. The timeout is reported the same.
+#[test]
+fn timeouts_give_the_group_a_sigterm_grace() {
+    let _g = signal_guard();
+    let limit = Duration::from_millis(500);
+    // (script, stdout after the pid line, killed only after the grace)
+    let cases = [
+        (
+            "trap 'echo cleaned; exit 3' TERM; sleep 30 & echo $!; wait",
+            "cleaned\n",
+            false,
+        ),
+        ("trap '' TERM; sleep 30 & echo $!; wait", "", true),
+    ];
+    for (script, cleanup, stubborn) in cases {
+        let started = Instant::now();
+        let out = run(&sh(script).timeout(limit));
+        let elapsed = started.elapsed();
+        assert_eq!(out.code, TIMEOUT_EXIT, "{script}");
+        assert_eq!(out.stderr, "命令超时（0.5 秒）");
+        let (pid, rest) = out.stdout.split_once('\n').unwrap();
+        assert_eq!(rest, cleanup, "{script}");
+        let grace = limit + super::system::TIMEOUT_GRACE;
+        if stubborn {
+            assert!(elapsed >= grace, "killed before the grace: {elapsed:?}");
+        } else {
+            assert!(elapsed < grace, "waited for the grace: {elapsed:?}");
+        }
+        assert!(elapsed < grace + Duration::from_secs(3), "took {elapsed:?}");
+        let background: u32 = pid.parse().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(3), || dead(background)),
+            "background sleep survived the timeout: {script}"
+        );
+    }
+}
+
 #[test]
 fn timeout_bounds_output_held_open_by_background_children() {
     // The direct child exits at once, but a background sleep keeps its

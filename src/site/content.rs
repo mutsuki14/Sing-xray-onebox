@@ -11,10 +11,14 @@
 //! filesystem lacks it). Sources may not contain symlinks, special files or
 //! hard links and are limited to 256 MiB; they are read through descriptors
 //! (`copy_tree`), so a source another user can write cannot redirect the
-//! copy by swapping a directory for a symlink midway. Modes are forced to
-//! 0755/0644. Publishing
-//! only happens inside an apply, after the transaction snapshot, so an
-//! interruption is rolled back with everything else.
+//! copy by swapping a directory for a symlink midway. An import source is
+//! named by its canonical path (`check_import`), which is opened without
+//! following any symlink and must still be canonical when the apply runs,
+//! so swapping one of its parent directories cannot redirect it either;
+//! `index.html` is checked in the staged copy. Modes are forced to
+//! 0755/0644. Publishing only happens inside an apply, after the
+//! transaction snapshot, so an interruption is rolled back with everything
+//! else.
 //!
 //! `index.sha256` holds the SHA-256 of a generated `index.html`; while it
 //! matches, the homepage counts as generated (`site title` may replace it);
@@ -37,7 +41,8 @@
 //! - imports from inside the private configuration tree (`ROOT`, FRP root)
 //!   are refused, not only from `/etc` itself;
 //! - hard links in a source are refused and sources are copied through
-//!   descriptors, not by path (v2 copied whatever a swapped path named);
+//!   descriptors, not by path, from a path free of symlinks (v2 copied
+//!   whatever a swapped path named);
 //! - error messages name the offending path.
 
 use crate::error::{Error, Result};
@@ -61,6 +66,7 @@ const MAX_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CONTENT_ENTRIES: usize = 100_000;
 const LIMIT_MESSAGE: &str = "网站内容超过 256 MiB 或 100000 个文件";
 const INDEX_MAX: u64 = 16 * 1024 * 1024;
+const NO_INDEX: &str = "网站需要 index.html";
 /// Directories never imported from (v2 list plus kernel trees).
 const SYSTEM_DIRS: [&str; 10] = [
     "/", "/etc", "/usr", "/var", "/root", "/home", "/proc", "/sys", "/dev", "/boot",
@@ -183,15 +189,23 @@ impl<'a> ContentStore<'a> {
             .join(format!(".content-{}", crate::sys::rand::hex(8)?));
         let result = ensure_dir(&source, 0o700)
             .and_then(|()| atomic_write(&source.join("index.html"), html.as_bytes(), 0o644))
-            .and_then(|()| self.publish(&source, true));
+            .and_then(|()| self.publish(&source, true, false));
         let _ = remove_tree_if_exists(&source);
         result
     }
 
-    /// Publish a local directory (`site import`).
+    /// Publish a local directory (`site import`): `source` is the path
+    /// [`check_import`](Self::check_import) returned when the CLI checked
+    /// it. Checked again here and refused unless it is still canonical: a
+    /// symlink in it now means one of its directories was swapped since.
     pub fn import(&self, source: &Path) -> Result<String> {
-        let source = self.check_import(source)?;
-        self.publish(&source, false)
+        if self.check_import(source)? != source {
+            return Err(Error::msg(format!(
+                "导入目录在检查后被替换: {}",
+                source.display()
+            )));
+        }
+        self.publish(source, false, true)
     }
 
     /// Restore a content backup (`latest` = newest); returns the id of the
@@ -203,7 +217,7 @@ impl<'a> ContentStore<'a> {
                 .is_ok_and(|index| String::from_utf8_lossy(&hash).trim() == sha256_hex(&index)),
             Err(_) => false,
         };
-        self.publish(&backup.path, generated)
+        self.publish(&backup.path, generated, false)
     }
 
     /// Content backups, newest first.
@@ -286,29 +300,47 @@ impl<'a> ContentStore<'a> {
     }
 
     /// Stage `source`, back up the live root, swap them (module docs).
-    fn publish(&self, source: &Path, generated: bool) -> Result<String> {
+    /// `imported`: `source` is a canonical import source another user may
+    /// write, opened without following any symlink in its path.
+    fn publish(&self, source: &Path, generated: bool, imported: bool) -> Result<String> {
         self.check_paths()?;
         scan(source, true)?;
-        if !fs::symlink_metadata(source.join("index.html")).is_ok_and(|m| m.is_file()) {
-            return Err(Error::msg("网站需要 index.html"));
+        if !has_index(source) {
+            return Err(Error::msg(NO_INDEX));
         }
         let id = format!("{}-{}", now(), crate::sys::rand::hex(4)?);
         let stage = self.web_root().with_file_name(format!(".onebox-site-{id}"));
-        let result = self.publish_staged(source, &stage, &id, generated);
+        let result = self.publish_staged(source, &stage, &id, generated, imported);
         let _ = remove_tree_if_exists(&stage);
         result?;
         self.prune()?;
         Ok(id)
     }
 
-    fn publish_staged(&self, source: &Path, stage: &Path, id: &str, generated: bool) -> Result<()> {
+    fn publish_staged(
+        &self,
+        source: &Path,
+        stage: &Path,
+        id: &str,
+        generated: bool,
+        imported: bool,
+    ) -> Result<()> {
         let limits = CopyLimits::new(MAX_CONTENT_BYTES, MAX_CONTENT_ENTRIES).message(LIMIT_MESSAGE);
         // The source may be writable by another user: copy_tree reads it
         // through descriptors, so swapping its directories for symlinks
-        // during the copy cannot reach outside it, and hard links (which
-        // could name a file only root may read) are refused there as well.
-        let from_source = limits.refuse_hard_links();
+        // during the copy cannot reach outside it, an import source's
+        // canonical path is opened without following any symlink (a swapped
+        // parent), and hard links (which could name a file only root may
+        // read) are refused there as well.
+        let mut from_source = limits.refuse_hard_links();
+        if imported {
+            from_source = from_source.refuse_path_symlinks();
+        }
         copy_tree(source, stage, &|p| top_level_skip(source, p), &from_source)?;
+        // The check in `publish` went by path; this is what gets published.
+        if !has_index(stage) {
+            return Err(Error::msg(NO_INDEX));
+        }
         let live_challenges = self.web_root().join(".well-known");
         if live_challenges.is_dir() {
             copy_tree(
@@ -371,6 +403,11 @@ impl<'a> ContentStore<'a> {
         }
         Ok(())
     }
+}
+
+/// Whether `dir` holds a regular `index.html` (not a symlink).
+fn has_index(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join("index.html")).is_ok_and(|m| m.is_file())
 }
 
 /// `<unix>-<8 hex>` → unix seconds.

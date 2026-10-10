@@ -11,7 +11,8 @@
 //! instead of a bare `No such file or directory`) or the missing working
 //! directory; signal deaths report 128 + signal instead of a flat 128;
 //! commands may carry a timeout that bounds the whole run (including output
-//! held open by background grandchildren) and kills the whole process group;
+//! held open by background grandchildren) and then terminates the whole
+//! process group (SIGTERM, SIGKILL after a grace);
 //! supervised children ([`Exec::spawn`]) run in their own session and are
 //! killed with their group when dropped; `which` also searches [`SAFE_PATH`]
 //! because cron and sudo often run us without the sbin directories; while
@@ -129,11 +130,12 @@ impl Cmd {
         self
     }
     /// Bound the whole run by `timeout`: when it expires the command's
-    /// process group is killed and the output has code 124; when the command
-    /// exits in time but background processes it left in its group still
-    /// hold its output pipes at the deadline, they are killed. Timed
-    /// commands run in their own process group, so they must not read from
-    /// the terminal; a terminal Ctrl+C is forwarded to them.
+    /// process group gets SIGTERM, is killed after a short grace (5 s) for
+    /// cleaning up, and the output has code 124; when the command exits in
+    /// time but background processes it left in its group still hold its
+    /// output pipes at the deadline, they are killed. Timed commands run in
+    /// their own process group, so they must not read from the terminal; a
+    /// terminal Ctrl+C is forwarded to them.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self

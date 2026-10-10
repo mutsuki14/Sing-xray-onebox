@@ -224,7 +224,7 @@ pub fn operation_running(paths: &Paths) -> bool {
 
 /// Whether an FRP operation (install, configure, renewal, uninstall,
 /// recovery) runs right now: the FRP journal exists and another process
-/// holds the FRP lock, probed like [`operation_running`]. Its journal is
+/// holds the FRP lock, probed like `operation_running`. Its journal is
 /// then not one to recover, and what it stops or swaps on purpose is no
 /// fault: the FRP lines are downgraded like the node's ([`downgrade`]).
 pub fn frp_operation_running(paths: &Paths) -> bool {

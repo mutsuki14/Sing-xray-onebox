@@ -5,7 +5,10 @@
 //! relative to its parent directory's descriptor with `O_NOFOLLOW`, so a
 //! directory swapped for a symlink while it is being copied (an import
 //! source writable by another local user) cannot redirect the rest of the
-//! walk outside the tree.
+//! walk outside the tree. For such a source the root itself is reached the
+//! same way, component by component from `/`
+//! ([`CopyLimits::refuse_path_symlinks`]), so swapping one of its parent
+//! directories cannot redirect the copy either.
 
 use super::{atomic_write_with, ensure_dir, fsync_dir, not_found, symlink_error, MODE_MASK};
 use crate::error::{Error, Result};
@@ -30,6 +33,10 @@ pub struct CopyLimits {
     /// Whether files with more than one hard link are copied. An untrusted
     /// source (`site import`) may link a file only root can read.
     pub hard_links: bool,
+    /// Whether symlinks in the directories leading to the source are
+    /// followed. An untrusted source is given by its canonical path, so a
+    /// symlink on the way means a parent was swapped (`site import`).
+    pub path_symlinks: bool,
 }
 
 impl CopyLimits {
@@ -41,6 +48,7 @@ impl CopyLimits {
             max_entries,
             message: None,
             hard_links: true,
+            path_symlinks: true,
         }
     }
 
@@ -53,6 +61,13 @@ impl CopyLimits {
     /// Refuse files with more than one hard link (`不允许硬链接: {path}`).
     pub const fn refuse_hard_links(mut self) -> CopyLimits {
         self.hard_links = false;
+        self
+    }
+
+    /// Open the source without following a symlink anywhere in its path,
+    /// not only in its last component (`不允许符号链接: {path}`).
+    pub const fn refuse_path_symlinks(mut self) -> CopyLimits {
+        self.path_symlinks = false;
         self
     }
 
@@ -78,10 +93,10 @@ pub struct CopyStats {
 /// tree are refused (hard links too when `limits` says so), and so is a
 /// `dst` inside `src` unless it lies in a skipped subtree (a snapshot staged
 /// in `ROOT/.transaction`). The source is read through descriptors (module
-/// docs): `src` itself is opened by path without following a final symlink,
-/// everything below it relative to its parent. `limits` is enforced while
-/// copying; on any error `dst` may be partially populated and the caller
-/// removes it.
+/// docs): `src` itself is opened by path without following a final symlink
+/// (nor any other when `limits` refuses path symlinks), everything below it
+/// relative to its parent. `limits` is enforced while copying; on any error
+/// `dst` may be partially populated and the caller removes it.
 pub fn copy_tree(
     src: &Path,
     dst: &Path,
@@ -94,8 +109,63 @@ pub fn copy_tree(
         limits,
         stats: CopyStats::default(),
     };
-    copy.entry(None, src.as_os_str(), src, dst, true)?;
+    if limits.path_symlinks {
+        copy.entry(None, src.as_os_str(), src, dst, true)?;
+    } else {
+        let (parent, name) = open_parent_nofollow(src)?;
+        copy.entry(Some(&parent), &name, src, dst, true)?;
+    }
     Ok(copy.stats)
+}
+
+/// Open the directory holding `path`'s last component without following a
+/// symlink on the way: each component is opened `O_PATH | O_DIRECTORY |
+/// O_NOFOLLOW` relative to the one before, starting at `/` (or the working
+/// directory for a relative path). Returns it with the last component's
+/// name (`.` when `path` is `/` or ends in `..`).
+fn open_parent_nofollow(path: &Path) -> Result<(File, OsString)> {
+    let mut components: Vec<Component> = path.components().collect();
+    let name = match components.last() {
+        Some(Component::Normal(name)) => {
+            let name = name.to_os_string();
+            components.pop();
+            name
+        }
+        Some(_) => OsString::from("."),
+        None => return Err(Error::msg("复制源路径为空")),
+    };
+    let start = if path.is_absolute() { "/" } else { "." };
+    let mut dir = open_at(None, OsStr::new(start), libc::O_PATH | libc::O_DIRECTORY)
+        .map_err(|e| Error::io(Path::new(start), e))?;
+    let mut walked = if path.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        PathBuf::new()
+    };
+    for component in components {
+        let next = match component {
+            Component::Normal(name) => name,
+            Component::ParentDir => OsStr::new(".."),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => continue,
+        };
+        walked.push(next);
+        dir = match open_at(Some(&dir), next, libc::O_PATH | libc::O_DIRECTORY) {
+            Ok(opened) => opened,
+            // O_NOFOLLOW with O_DIRECTORY reports a symlink as ENOTDIR (or
+            // ELOOP); tell the two apart for the message.
+            Err(e) => {
+                let symlink = open_at(Some(&dir), next, libc::O_PATH)
+                    .and_then(|probe| probe.metadata())
+                    .is_ok_and(|meta| meta.file_type().is_symlink());
+                return Err(if symlink {
+                    symlink_error(&walked)
+                } else {
+                    Error::io(&walked, e)
+                });
+            }
+        };
+    }
+    Ok((dir, name))
 }
 
 struct TreeCopy<'a> {

@@ -45,7 +45,7 @@ const _: () = assert!(LOCK_WAIT.as_secs() + 3600 <= ONESHOT_TIMEOUT.as_secs());
 /// How often boot retries the node lock meanwhile.
 pub const LOCK_POLL: Duration = Duration::from_millis(200);
 
-/// [`crate::apply::boot`] with explicit feature hooks.
+/// [`crate::apply::boot()`] with explicit feature hooks.
 pub fn boot_with(ctx: &Ctx, features: &dyn Features) -> Result<()> {
     let lock = boot_lock(&ctx.paths, LOCK_WAIT)?;
     recover::settle_signal(boot_locked(ctx, &lock, features))

@@ -695,7 +695,7 @@ fn restart_restored(
     keep_cancellation(error, message)
 }
 
-/// Whether a recovery error is [`restart_restored`]'s: the old manager and
+/// Whether a recovery error is `restart_restored`'s: the old manager and
 /// configuration are back and the record is gone; only regenerating failed.
 pub fn restored_only(error: &Error) -> bool {
     error.report_text().starts_with(RESTORED_ONLY)

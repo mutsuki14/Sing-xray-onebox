@@ -17,6 +17,13 @@ use std::time::{Duration, Instant};
 /// After forwarding a cancellation signal to a timed child's group, how long
 /// it may clean up before the group is killed.
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
+/// At a timed child's deadline its group gets SIGTERM, then this long to
+/// clean up (locks, temporary files) before it is killed; short in tests.
+pub(super) const TIMEOUT_GRACE: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(5)
+};
 /// SIGTERM → SIGKILL grace for a dropped supervised child (spec D).
 const DROP_GRACE: Duration = Duration::from_millis(500);
 /// Output kept per stream of a supervised child (the tail).
@@ -163,10 +170,11 @@ enum Outcome {
     Cancelled(i32),
 }
 
-/// A command with a timeout: it runs in its own process group, which is
-/// killed at the deadline. Output still held open by the group at the
-/// deadline does not extend the run. New cancellation signals are forwarded
-/// to the group; without a `SignalScope` owner the run then fails with
+/// A command with a timeout: it runs in its own process group, which gets
+/// SIGTERM at the deadline and SIGKILL once [`TIMEOUT_GRACE`] has passed.
+/// Output still held open by the group at the deadline does not extend the
+/// run beyond that. New cancellation signals are forwarded to the group;
+/// without a `SignalScope` owner the run then fails with
 /// `Error::Cancelled` (the user pressed Ctrl+C), with one the output is
 /// returned and the owner cancels at its next safe point.
 fn run_timed(cmd: &Cmd, setup: ChildSetup, limit: Duration) -> Result<Output> {
@@ -178,6 +186,9 @@ fn run_timed(cmd: &Cmd, setup: ChildSetup, limit: Duration) -> Result<Output> {
     let deadline = Instant::now() + limit;
     let io_error = |e| Error::io(PathBuf::from(&cmd.program), e);
     let outcome = watch(&proc, deadline, start).map_err(io_error)?;
+    if let Outcome::TimedOut = outcome {
+        proc.terminate_group(TIMEOUT_GRACE).map_err(io_error)?;
+    }
     let drain = match outcome {
         Outcome::Exited => deadline
             .saturating_duration_since(Instant::now())
@@ -203,9 +214,9 @@ fn run_timed(cmd: &Cmd, setup: ChildSetup, limit: Duration) -> Result<Output> {
     }
 }
 
-/// Wait for a timed child until it exits, the deadline passes (group killed)
-/// or a new cancellation signal arrives (forwarded; the group is killed if
-/// it does not exit within [`CANCEL_GRACE`]).
+/// Wait for a timed child until it exits, the deadline passes (the caller
+/// terminates the group) or a new cancellation signal arrives (forwarded;
+/// the group is killed if it does not exit within [`CANCEL_GRACE`]).
 fn watch(proc: &Proc, deadline: Instant, start: signal::Received) -> io::Result<Outcome> {
     loop {
         if proc.exited()? {
@@ -213,7 +224,6 @@ fn watch(proc: &Proc, deadline: Instant, start: signal::Received) -> io::Result<
         }
         let now = Instant::now();
         if now >= deadline {
-            proc.signal_group(libc::SIGKILL);
             return Ok(Outcome::TimedOut);
         }
         let seen = signal::received();

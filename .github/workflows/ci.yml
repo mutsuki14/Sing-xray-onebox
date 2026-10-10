@@ -42,6 +42,10 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --all-targets --locked
       - run: cargo test --doc --locked
+      - name: Rustdoc without warnings (broken or private intra-doc links)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
       # The script checks below also run when a Rust step failed.
       - name: Install busybox so the launcher is also tested with its ash and applets (Alpine)
         if: ${{ !cancelled() }}

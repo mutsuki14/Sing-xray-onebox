@@ -21,13 +21,14 @@ fn mode(path: impl AsRef<Path>) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// An upload directory with `index.html` = `text` (and extra files).
+/// An upload directory with `index.html` = `text` (and extra files), by
+/// its canonical path (what `check_import` hands the apply).
 fn upload(s: &Site, name: &str, text: &str) -> PathBuf {
     let dir = s.dir.join(name);
     fs::create_dir_all(dir.join("assets")).unwrap();
     fs::write(dir.join("index.html"), text).unwrap();
     fs::write(dir.join("assets/app.css"), "body{}").unwrap();
-    dir
+    fs::canonicalize(dir).unwrap()
 }
 
 #[test]
@@ -209,6 +210,38 @@ fn unsafe_sources_leave_the_live_site_untouched() {
         .unwrap_err()
         .to_string();
     assert!(err.starts_with("导入目录不存在或不是目录"), "{err}");
+}
+
+/// The import source's parent is writable by another user, who swaps it
+/// for a symlink to a private tree (with its own `index.html`): after the
+/// CLI checked the source, and while the apply copies it. Neither may
+/// publish the private tree.
+#[test]
+fn imports_refuse_a_swapped_parent_directory() {
+    let s = site();
+    let store = ContentStore::new(&s.paths);
+    store.prepare().unwrap();
+    store.ensure_default("live").unwrap();
+    let src = upload(&s, "alice/site", "public");
+    let alice = src.parent().unwrap().to_path_buf();
+    let secret = upload(&s, "secret/site", "private");
+    assert_eq!(store.check_import(&src).unwrap(), src, "the CLI's check");
+    fs::rename(&alice, alice.with_file_name("real")).unwrap();
+    std::os::unix::fs::symlink(secret.parent().unwrap(), &alice).unwrap();
+
+    let err = store.import(&src).unwrap_err().to_string();
+    assert_eq!(err, format!("导入目录在检查后被替换: {}", src.display()));
+    // Swapped after the apply's own checks (which went by path and saw the
+    // private tree): the copy opens the canonical path without symlinks.
+    let err = store.publish(&src, false, true).unwrap_err().to_string();
+    assert_eq!(err, format!("不允许符号链接: {}", alice.display()));
+    assert_eq!(read(store.index()), "live");
+    assert!(store.backups().unwrap().is_empty());
+
+    fs::remove_file(&alice).unwrap();
+    fs::rename(alice.with_file_name("real"), &alice).unwrap();
+    store.import(&src).unwrap();
+    assert_eq!(read(store.index()), "public");
 }
 
 #[test]

@@ -1,9 +1,9 @@
 //! The transactional apply engine for node changes: journal, snapshot,
 //! ordered stages, rollback, recovery and the boot-time network restore.
 //!
-//! Entry points ([`apply`], [`apply_locked`], [`recover`], [`recover_locked`],
-//! [`boot`]) live in `request.rs`; [`engine`] drives one apply,
-//! [`stages`](self) holds the stage table, [`rollback`] and [`recover`]
+//! Entry points ([`apply`], [`apply_locked`], [`recover()`], [`recover_locked`],
+//! [`boot()`]) live in `request.rs`; [`engine`] drives one apply,
+//! [`stages`](self) holds the stage table, [`rollback`] and [`mod@recover`]
 //! undo interrupted ones, [`network`] the firewall/hop rules shared by all
 //! of them, [`features`] the seam to certificates, website and subscription.
 //!

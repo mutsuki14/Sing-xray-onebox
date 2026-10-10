@@ -4,7 +4,7 @@
 //! Trust chain (shared with the proxy cores, H-8.1#5): release metadata
 //! from api.github.com, the canonical asset URL, the API `digest` or the
 //! release's `frp_sha256_checksums.txt` fetched directly from github.com
-//! ([`download_asset`]), then extraction of the one `frps` member
+//! ([`download_asset`](crate::host::fetch::download_asset)), then extraction of the one `frps` member
 //! ([`extract_tar_gz`]) and `frps -v` == the release version.
 //!
 //! Changes from v2:
