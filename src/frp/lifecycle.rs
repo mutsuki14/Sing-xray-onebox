@@ -35,8 +35,9 @@
 //!   new pair the web nginx could not load (`nginx -t` or its restart
 //!   failed) still rolls the whole renewal back, as in v2, so the next run
 //!   retries instead of finding the pair not due;
-//! - `renew --cron` prints nothing unless a certificate changed or
-//!   something failed (v2 printed its summary line every night);
+//! - `renew --cron` leaves out its closing line unless a certificate
+//!   changed (v2 printed it every night); errors, the state's warnings and
+//!   the skipped HTTP-01 renewal of a stopped website are still printed;
 //! - manual renewals renew the website certificate even when not due
 //!   (scheduled ones only when due), and custom website certificates are
 //!   redeployed when their source files changed;
@@ -369,8 +370,8 @@ fn website(
 
 /// Check (and when due renew) the control and website certificates;
 /// returns whether one of them changed. `scheduled` = run by cron: website
-/// certificates only when due, and silent unless a certificate changed or
-/// something failed.
+/// certificates only when due, and no closing line unless a certificate
+/// changed (errors and notices are printed either way).
 pub fn renew(rt: &Runtime, lock: &FileLock, scheduled: bool) -> Result<bool> {
     check_paths(rt.paths())?;
     recover_locked(rt, lock)?;
@@ -390,8 +391,8 @@ pub fn renew(rt: &Runtime, lock: &FileLock, scheduled: bool) -> Result<bool> {
 }
 
 /// Whether a committed renewal prints its closing line: always when run by
-/// hand, from cron only when a certificate changed (its log stays empty on
-/// the other nights; failures are errors either way).
+/// hand, from cron only when a certificate changed (failures are errors
+/// either way).
 fn announced(scheduled: bool, changed: bool) -> bool {
     !scheduled || changed
 }

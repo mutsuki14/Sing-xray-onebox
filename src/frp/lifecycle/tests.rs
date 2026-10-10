@@ -523,7 +523,7 @@ fn renew_restarts_frps_only_when_the_control_certificate_changed() {
 }
 
 #[test]
-fn scheduled_renewals_are_silent_unless_a_certificate_changed() {
+fn scheduled_renewals_close_only_when_a_certificate_changed() {
     for (scheduled, changed, printed) in [
         (false, false, true),
         (false, true, true),
