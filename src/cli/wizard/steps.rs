@@ -435,7 +435,17 @@ pub fn cert_label(mode: &ProxyCertMode) -> String {
 
 /// A validated, lower-cased domain.
 pub fn ask_domain(ui: &dyn Prompter, prompt: &str, invalid: &str) -> Result<String> {
-    ui.input_with(prompt, "", &|answer: &str| {
+    ask_domain_with(ui, prompt, "", invalid)
+}
+
+/// [`ask_domain`] with `current` as the Enter default.
+pub fn ask_domain_with(
+    ui: &dyn Prompter,
+    prompt: &str,
+    current: &str,
+    invalid: &str,
+) -> Result<String> {
+    ui.input_with(prompt, current, &|answer: &str| {
         plan::normalize_domain(answer, invalid)
     })
 }

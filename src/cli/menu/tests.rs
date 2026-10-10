@@ -483,6 +483,38 @@ fn site_enable_asks_for_the_entrance() {
     assert!(!site.https_entry, "closed from the start");
 }
 
+/// 启用网站 on an existing site: Enter keeps its domain, entrance and
+/// certificate method (a custom pair defaults to its files).
+#[test]
+fn site_enable_defaults_to_the_existing_site() {
+    use crate::domain::config::WebCert;
+    let dir = crate::sys::fs::TempDir::new("menu-site-cert").unwrap();
+    let (cert, key) = (dir.join("fullchain.pem"), dir.join("key.pem"));
+    std::fs::write(&cert, "CERT").unwrap();
+    std::fs::write(&key, "KEY").unwrap();
+    let custom = WebCert::Custom { cert, key };
+    // (certificate, Enter at every question of 启用网站 — the token is
+    // asked before the apply)
+    let mut cases: Vec<(WebCert, &[&str])> =
+        vec![(custom, &["5", "2", "", "", "", "", "", "0", "0"])];
+    if std::env::var_os("CF_Token").is_none() {
+        let answers: &[&str] = &["5", "2", "", "", "", "fake-token-0123", "", "0", "0"];
+        cases.push((WebCert::Cloudflare, answers));
+    }
+    for (method, answers) in cases {
+        let mut cfg = with_site(node(), "www.example.com", false);
+        if let Some(site) = cfg.site.as_mut() {
+            site.cert = method.clone();
+        }
+        let bench = Bench::installed(&cfg);
+        menu_run(&bench, &Calls::default(), answers).unwrap();
+        let site = bench.engine.single().config.site.unwrap();
+        assert_eq!(site.domain, "www.example.com");
+        assert!(!site.https_entry, "kept closed");
+        assert_eq!(site.cert, method);
+    }
+}
+
 #[test]
 fn helpers() {
     assert_eq!(backup_id("latest").unwrap(), "latest");
