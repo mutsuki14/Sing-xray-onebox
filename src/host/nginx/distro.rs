@@ -15,8 +15,10 @@
 //! the package's too: shipped unchanged (dpkg `*.md5sums`, `rpm -V`), or a
 //! copy of its welcome page (Debian's postinst copies
 //! `/usr/share/nginx/html/index.html` to
-//! `/var/www/html/index.nginx-debian.html`). A configuration without an
-//! absolute, variable-free `root` counts as configured.
+//! `/var/www/html/index.nginx-debian.html`). Fedora and EL9 ship those
+//! pages in the main `nginx` package and `nginx.conf` in `nginx-core`, so
+//! both packages count there. A configuration without an absolute,
+//! variable-free `root` counts as configured.
 
 use crate::ctx::Ctx;
 use crate::host::init::InitSystem;
@@ -39,6 +41,11 @@ const INCLUDE_DIRS: [&str; 5] = [
 const DPKG_PACKAGES: [&str; 2] = ["nginx-common", "nginx"];
 /// dpkg's checksum lists of the files a package shipped (`{package}.md5sums`).
 const DPKG_INFO: &str = "/var/lib/dpkg/info";
+/// Fedora and EL9 split nginx: `nginx-core` owns the binary and
+/// `nginx.conf`, the main `nginx` package the pages its default server
+/// serves (`%files core` and `%files` of the spec).
+const RPM_CORE: &str = "nginx-core";
+const RPM_MAIN: &str = "nginx";
 /// Where the packages keep their welcome page (with a trailing slash).
 const WELCOME_DIR: &str = "/usr/share/nginx/html/";
 /// Symlink hops followed when resolving an include entry.
@@ -261,8 +268,9 @@ enum PackageFiles {
         conffiles: HashMap<String, String>,
         shipped: HashMap<String, String>,
     },
-    /// rpm: files of the package owning `nginx.conf`, and those `rpm -V`
-    /// reports as differing.
+    /// rpm: files of the package owning `nginx.conf` (and of the main
+    /// package when that is `nginx-core`), and those `rpm -V` reports as
+    /// differing.
     Rpm {
         owned: HashSet<String>,
         changed: HashSet<String>,
@@ -376,21 +384,38 @@ fn rpm(ctx: &Ctx) -> Option<PackageFiles> {
     if !valid {
         return None;
     }
+    let mut packages = vec![name];
+    let mut owned = rpm_list(ctx, name)?;
+    // The pages of a split package. Without the main package installed (or
+    // listable) they are nobody's, which only ever means "configured".
+    if name == RPM_CORE {
+        if let Some(pages) = rpm_list(ctx, RPM_MAIN) {
+            owned.extend(pages);
+            packages.push(RPM_MAIN);
+        }
+    }
+    // `rpm -V` exits 1 when anything differs; its lines are what counts.
+    let verify = ctx
+        .run(&query(Cmd::new("rpm").arg("-V").args(packages)))
+        .ok()?;
+    let changed = parse_rpm_verify(&verify.stdout)?;
+    Some(PackageFiles::Rpm { owned, changed })
+}
+
+/// The absolute paths `rpm -ql` lists for an installed package.
+fn rpm_list(ctx: &Ctx, package: &str) -> Option<HashSet<String>> {
     let list = ctx
-        .run(&query(Cmd::new("rpm").args(["-ql", name])))
+        .run(&query(Cmd::new("rpm").args(["-ql", package])))
         .ok()
         .filter(|o| o.ok())?;
-    let owned = list
+    let files = list
         .stdout
         .lines()
         .map(str::trim)
         .filter(|l| l.starts_with('/'))
         .map(str::to_owned)
         .collect();
-    // `rpm -V` exits 1 when anything differs; its lines are what counts.
-    let verify = ctx.run(&query(Cmd::new("rpm").args(["-V", name]))).ok()?;
-    let changed = parse_rpm_verify(&verify.stdout)?;
-    Some(PackageFiles::Rpm { owned, changed })
+    Some(files)
 }
 
 /// Paths named by `rpm -V` lines (`S.5....T.  c /etc/nginx/nginx.conf`,
