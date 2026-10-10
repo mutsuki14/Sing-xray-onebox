@@ -151,7 +151,10 @@ fn root_policy_table() {
         ("restart", true),
         ("log", false),
         ("logs xray", false),
-        ("service onebox-site", true),
+        // `service … status` needs root only without an init system
+        // (checked when it runs).
+        ("service onebox-site", false),
+        ("service onebox-site status", false),
         ("service onebox-site log", false),
         ("service onebox-site restart", true),
         ("tune", true),

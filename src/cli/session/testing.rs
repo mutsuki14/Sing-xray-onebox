@@ -110,6 +110,8 @@ pub struct FakeLive {
     pub ipv6_addr: Option<IpAddr>,
     pub now: u64,
     pub running: Mutex<Vec<String>>,
+    /// Services whose definition exists but cannot be read.
+    pub unreadable: Mutex<Vec<String>>,
 }
 
 impl Default for FakeLive {
@@ -123,6 +125,7 @@ impl Default for FakeLive {
             ipv6_addr: None,
             now: 1_700_000_000,
             running: Mutex::new(Vec::new()),
+            unreadable: Mutex::new(Vec::new()),
         }
     }
 }
@@ -133,6 +136,11 @@ impl FakeLive {
     }
     pub fn set_running(&self, service: &str) {
         lock(&self.running).push(service.to_owned());
+    }
+    /// `service`'s definition exists but is damaged (as a truncated no-init
+    /// spec): it reads as stopped, and a status report fails.
+    pub fn set_unreadable(&self, service: &str) {
+        lock(&self.unreadable).push(service.to_owned());
     }
 }
 
@@ -166,6 +174,12 @@ impl Live for FakeLive {
     }
     fn running(&self, service: &str) -> bool {
         lock(&self.running).iter().any(|s| s == service)
+    }
+    fn running_checked(&self, service: &str) -> Result<bool> {
+        if lock(&self.unreadable).iter().any(|s| s == service) {
+            return Err(Error::msg("JSON 无效: EOF while parsing a string"));
+        }
+        Ok(self.running(service))
     }
 }
 

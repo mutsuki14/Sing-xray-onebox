@@ -395,6 +395,8 @@ fn no_init_status_never_reports_an_unreadable_spec_as_stopped() {
     fs::create_dir_all(spec.parent().unwrap()).unwrap();
     fs::write(&spec, "{ damaged").unwrap();
     assert!(services.status_line(XRAY_NAME).is_err());
+    assert!(services.running_checked(XRAY_NAME).is_err());
+    assert!(!services.running(XRAY_NAME));
 }
 
 #[test]

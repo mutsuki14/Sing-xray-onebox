@@ -420,11 +420,11 @@ impl<'a> Services<'a> {
         }
     }
 
-    /// `{name}: 运行中` / `{name}: 已停止`. Without an init system the
-    /// state comes from the saved spec: one that is missing means stopped,
-    /// but one that exists and cannot be read or parsed (EACCES for a
-    /// non-root user, a damaged file) is an error, never "stopped".
-    pub fn status_line(&self, name: &str) -> Result<String> {
+    /// [`Services::running`] for a status report. Without an init system
+    /// the state comes from the saved spec: one that is missing means
+    /// stopped, but one that exists and cannot be read or parsed (EACCES
+    /// for a non-root user, a damaged file) is an error, never "stopped".
+    pub fn running_checked(&self, name: &str) -> Result<bool> {
         validate_name(name)?;
         if self.init == InitSystem::None {
             if let Err(e) = self.load(name) {
@@ -435,7 +435,12 @@ impl<'a> Services<'a> {
                 }
             }
         }
-        let state = if self.running(name) {
+        Ok(self.running(name))
+    }
+
+    /// `{name}: 运行中` / `{name}: 已停止` ([`Services::running_checked`]).
+    pub fn status_line(&self, name: &str) -> Result<String> {
+        let state = if self.running_checked(name)? {
             "运行中"
         } else {
             "已停止"

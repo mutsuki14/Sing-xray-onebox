@@ -8,10 +8,12 @@
 //! for it because concurrent `@reboot` lines (no-init autostart) start
 //! services while `net-apply` may hold it. A service whose own start takes
 //! that lock (`onebox-network`, `onebox-frps`) is started without it.
-//! `status` and `log` take no lock; `status` needs root (the node state and,
-//! without an init system, the service specs live in root-only
-//! directories — a spec that cannot be read is an error, never `已停止`),
-//! `log` does not.
+//! `status` and `log` take no lock. `service NAME status` needs root only
+//! without an init system (the service specs live in a root-only
+//! directory; under systemd and OpenRC it only asks the service manager,
+//! as in v2); `onebox status` always does (it reads the root-only node
+//! state). Either reports a spec that exists but cannot be read as an
+//! error, never `已停止`. `log` needs no root.
 //!
 //! A started daemon must be running within [`WAIT_RUNNING`]; a oneshot
 //! (`onebox-network`) has no process once it finished, so its start
@@ -29,6 +31,7 @@ use crate::cli::session::{with_system, Session};
 use crate::ctx::Ctx;
 use crate::domain::protocol::Core;
 use crate::error::{Error, Result};
+use crate::host::init::InitSystem;
 use crate::host::service::{validate_name, Scope, ServiceDef, ServiceKind, Services, WAIT_RUNNING};
 use crate::sys::lock::{FileLock, BUSY_MESSAGE};
 use std::time::Duration;
@@ -70,9 +73,15 @@ impl Action {
         matches!(self, Action::Status | Action::Log)
     }
 
-    /// Only `log` runs without root (`status` reads root-only state).
-    pub fn needs_root(self) -> bool {
-        self != Action::Log
+    /// Whether `service NAME ACTION` needs root under `init`: every change
+    /// does; `status` only without an init system (it reads the saved spec
+    /// in a root-only directory); `log` never.
+    pub fn needs_root(self, init: InitSystem) -> bool {
+        match self {
+            Action::Log => false,
+            Action::Status => init == InitSystem::None,
+            _ => true,
+        }
     }
 
     fn done(self) -> &'static str {
@@ -125,10 +134,12 @@ pub const HOP_CLEAR: CommandSpec =
     CommandSpec::new("hop-clear", Group::Hidden, "清除 Hysteria2 端口跳跃规则")
         .handler(hop_clear_command);
 
+/// Changes need root before anything runs; whether `status` does depends
+/// on the init system, which [`service`] checks.
 fn service_needs_root(m: &Matches) -> bool {
     m.positional(1)
         .map_or(Ok(Action::Status), Action::parse)
-        .is_ok_and(Action::needs_root)
+        .is_ok_and(|a| !a.read_only())
 }
 
 fn cores_command(ctx: &Ctx, m: &Matches) -> Result<()> {
@@ -137,25 +148,26 @@ fn cores_command(ctx: &Ctx, m: &Matches) -> Result<()> {
 }
 
 /// `start|stop|restart|status` for every core the node uses (root: even
-/// `status` reads the root-only node state).
+/// `status` reads the root-only node state). A core whose service
+/// definition cannot be read fails `status` instead of reading `已停止`.
 pub fn cores(session: &Session, action: Action) -> Result<()> {
     session.require_root()?;
     let loaded = session.load()?;
     let services = session.services();
     if action == Action::Status {
-        let lines: Vec<String> = loaded
+        let lines = loaded
             .config
             .cores()
             .into_iter()
             .map(|core| {
-                let state = if session.live.running(core.service()) {
-                    "运行中"
-                } else {
-                    "已停止"
-                };
-                format!("{core}: {state}")
+                let running = session
+                    .live
+                    .running_checked(core.service())
+                    .map_err(|e| e.wrap(format!("{core}: 无法读取服务状态")))?;
+                let state = if running { "运行中" } else { "已停止" };
+                Ok(format!("{core}: {state}"))
             })
-            .collect();
+            .collect::<Result<Vec<String>>>()?;
         return session.data(&lines.join("\n"));
     }
     let _lock = node_lock(session, action)?;
@@ -236,7 +248,7 @@ fn service_command(ctx: &Ctx, m: &Matches) -> Result<()> {
 pub fn service(session: &Session, name: &str, action: Action) -> Result<()> {
     validate_name(name)?;
     let services = session.services();
-    if action.needs_root() {
+    if action.needs_root(services.init()) {
         session.require_root()?;
     }
     if action.read_only() {

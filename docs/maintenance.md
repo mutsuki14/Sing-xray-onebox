@@ -11,7 +11,7 @@ onebox service onebox-site restart   # 单独控制某个 Onebox 服务
 onebox service onebox-site log
 ```
 
-`service 服务名 [操作]` 支持的操作：`start`、`stop`、`restart`、`enable`、`disable`、`remove`、`status`（默认）、`log`。服务没有 `reload`，请用 `restart`。`onebox status` 与 `service … status` 要读取只有 root 可读的节点状态文件或服务定义，都需要 root；服务定义无法读取或已损坏时报错，而不是显示 `已停止`。`log` 与 `service … log` 不需要 root（能否读到日志取决于系统日志的权限）。`start` 遇到正在进行的配置变更时会等待其结束（最长 5 分钟）再启动，并确认服务已经运行。
+`service 服务名 [操作]` 支持的操作：`start`、`stop`、`restart`、`enable`、`disable`、`remove`、`status`（默认）、`log`。服务没有 `reload`，请用 `restart`。`onebox status` 要读取只有 root 可读的节点状态文件，需要 root；`service … status` 在 systemd / OpenRC 上只询问服务管理器，不需要 root（与 v2 相同），无 init 环境要读取只有 root 可读的服务定义，需要 root。两者在服务定义无法读取或已损坏时都报错，而不是显示 `已停止`；`onebox info` 的内核状态此时显示 `服务状态无法读取`。`log` 与 `service … log` 不需要 root（能否读到日志取决于系统日志的权限）。`start` 遇到正在进行的配置变更时会等待其结束（最长 5 分钟）再启动，并确认服务已经运行。
 
 日志位置：systemd 上来自 `journalctl`；OpenRC 和无 init 环境写入 `/var/log/onebox/<服务名>.log`（FRP 服务写入 `/var/log/onebox-frp/`）。
 

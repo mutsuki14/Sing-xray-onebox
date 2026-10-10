@@ -40,14 +40,26 @@ fn actions() {
 
 #[test]
 fn root_policy() {
-    // `status` reads root-only state (node state, no-init service specs).
-    assert!(root("service onebox-site"));
-    assert!(root("service onebox-site status"));
+    // `service … status` needs root only without an init system (checked
+    // by `service`); `status` reads the root-only node state.
+    assert!(!root("service onebox-site"));
+    assert!(!root("service onebox-site status"));
     assert!(!root("service onebox-site log"));
     assert!(root("service onebox-site restart"));
     assert!(root("status"));
     assert!(!root("log xray"));
     assert!(root("start"));
+    // (action, init, root needed)
+    for (action, init, needed) in [
+        (Action::Status, InitSystem::Systemd, false),
+        (Action::Status, InitSystem::Openrc, false),
+        (Action::Status, InitSystem::None, true),
+        (Action::Log, InitSystem::None, false),
+        (Action::Stop, InitSystem::Systemd, true),
+        (Action::Start, InitSystem::None, true),
+    ] {
+        assert_eq!(action.needs_root(init), needed, "{action:?} {init:?}");
+    }
 }
 
 #[test]
@@ -69,11 +81,16 @@ fn service_status_and_log_are_read_only() {
     assert!(!bench.ctx.paths.lock().exists(), "no lock taken");
     let err = service(&bench.session(), "nginx", Action::Status).unwrap_err();
     assert_eq!(err.to_string(), "服务名无效");
-    // Status reads root-only state: refused, never a silent 已停止.
-    for action in [Action::Status, Action::Stop] {
-        let err = service(&bench.session(), "onebox-site", action).unwrap_err();
-        assert_eq!(err.to_string(), "此操作需要 root 权限", "{action:?}");
-    }
+    // Under systemd a non-root user may ask for the status (v2), not change it.
+    service(&bench.session(), "onebox-site", Action::Status).unwrap();
+    assert!(bench.output().ends_with("line 2\nonebox-site: 运行中"));
+    let err = service(&bench.session(), "onebox-site", Action::Stop).unwrap_err();
+    assert_eq!(err.to_string(), "此操作需要 root 权限");
+    // Without an init system the status reads root-only specs: refused,
+    // never a silent 已停止; `onebox status` reads the node state.
+    bench.live.init = InitSystem::None;
+    let err = service(&bench.session(), "onebox-site", Action::Status).unwrap_err();
+    assert_eq!(err.to_string(), "此操作需要 root 权限");
     let err = cores(&bench.session(), Action::Status).unwrap_err();
     assert_eq!(err.to_string(), "此操作需要 root 权限");
 }
@@ -154,6 +171,15 @@ fn proxy_cores() {
     bench.live.set_running("onebox-xray");
     cores(&bench.session(), Action::Status).unwrap();
     assert_eq!(bench.output(), "singbox: 已停止\nxray: 运行中");
+    // A damaged service definition fails the status, never 已停止.
+    let broken = Bench::installed(&config(&[(VlessReality, 443, XR), (Tuic, 443, SB)]));
+    broken.live.set_unreadable("onebox-xray");
+    let err = cores(&broken.session(), Action::Status).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "xray: 无法读取服务状态: JSON 无效: EOF while parsing a string"
+    );
+    assert_eq!(broken.output(), "", "no partial status");
     for name in ["onebox-sing-box", "onebox-xray"] {
         bench
             .exec
