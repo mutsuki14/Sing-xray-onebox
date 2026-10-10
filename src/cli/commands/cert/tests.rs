@@ -299,6 +299,125 @@ fn a_failed_republish_puts_the_previous_pair_back() {
     );
 }
 
+/// An engine whose republishing apply fails after it committed (and
+/// changed `state.json`) and/or kept its journal, as `apply_locked` can.
+struct Failing {
+    message: String,
+    commits: bool,
+    keeps_journal: bool,
+}
+
+impl crate::cli::session::Engine for Failing {
+    fn apply(&self, ctx: &Ctx, req: crate::apply::ApplyRequest) -> Result<()> {
+        self.apply_locked(
+            ctx,
+            &FileLock::acquire(&ctx.paths.lock(), BUSY_MESSAGE)?,
+            req,
+        )
+    }
+    fn apply_locked(
+        &self,
+        ctx: &Ctx,
+        _lock: &FileLock,
+        req: crate::apply::ApplyRequest,
+    ) -> Result<()> {
+        if self.commits {
+            let mut cfg = req.config;
+            cfg.node_name = "committed".into();
+            crate::state::StateStore::save(ctx, &cfg)?;
+        }
+        if self.keeps_journal {
+            std::fs::create_dir_all(journal::dir(&ctx.paths))?;
+        }
+        Err(Error::msg(self.message.clone()))
+    }
+    fn recover(&self, _ctx: &Ctx) -> Result<()> {
+        Ok(())
+    }
+    fn recover_locked(&self, _ctx: &Ctx, _lock: &FileLock) -> Result<()> {
+        Ok(())
+    }
+    fn boot(&self, _ctx: &Ctx) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The previous pair goes back only after a clean rollback: an apply that
+/// committed already published the new pins, and a kept journal restores
+/// the new pair on recovery (its snapshot was taken after the renewal) —
+/// `ROOT/tls` keeps the new pair, nothing is restarted, and the error says
+/// what to do.
+#[test]
+fn a_failed_republish_keeps_the_new_pair_unless_rolled_back() {
+    let _guard = serial();
+    let committed = format!("{COMMITTED_UNCLEAN}: 重命名失败；请执行 recover 清理");
+    let unfinished = "配置失败: 内核启动失败；恢复未完成: 端口被占用；\
+                      事务日志保留于 /etc/onebox/.transaction，请执行 recover";
+    let rolled_back = "配置未应用，已恢复原状态: 内核启动失败";
+    let cases = [
+        // (error, commits, keeps journal, expected error, pair restored)
+        (
+            rolled_back,
+            false,
+            false,
+            format!("{PAIR_RESTORED}: {rolled_back}"),
+            true,
+        ),
+        (committed.as_str(), false, true, committed.clone(), false),
+        (committed.as_str(), false, false, committed.clone(), false),
+        // A commit seen in state.json, whatever the error says.
+        ("注入故障", true, false, "注入故障".to_owned(), false),
+        (
+            unfinished,
+            false,
+            true,
+            format!("{REPUBLISH_PENDING}: {unfinished}"),
+            false,
+        ),
+    ];
+    for (message, commits, keeps_journal, expected, restored) in cases {
+        let bench = Bench::installed(&trojan());
+        let dir = CertDir::proxy(&bench.ctx.paths);
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.key(), "OLD KEY").unwrap();
+        std::fs::write(dir.cert(), "OLD CERT").unwrap();
+        bench.live.set_running("onebox-sing-box");
+        bench
+            .exec
+            .on(
+                "systemctl",
+                &["restart", "onebox-sing-box"],
+                crate::sys::exec::Output::success(""),
+            )
+            .on(
+                "systemctl",
+                &["is-active", "--quiet", "onebox-sing-box"],
+                crate::sys::exec::Output::success(""),
+            );
+        let engine = Failing {
+            message: message.to_owned(),
+            commits,
+            keeps_journal,
+        };
+        let session =
+            Session::new(&bench.ctx, &engine, &bench.live, true).with_printer(&bench.printed);
+        let err = renew_with(&session, CertScopes::ALL, true, rotating).unwrap_err();
+        assert_eq!(err.to_string(), expected, "{message}");
+        let key = std::fs::read_to_string(dir.key()).unwrap();
+        assert_eq!(
+            key,
+            if restored { "OLD KEY" } else { "NEW KEY" },
+            "{message}"
+        );
+        let restarted = bench
+            .exec
+            .history()
+            .iter()
+            .any(|c| c == "systemctl restart onebox-sing-box");
+        assert_eq!(restarted, restored, "{message}");
+    }
+}
+
 #[test]
 fn renewal_needs_root_and_a_free_lock() {
     let _guard = serial();
