@@ -280,8 +280,10 @@ fn cancel_set() -> libc::sigset_t {
 
 /// Blocks INT/TERM/HUP for the calling thread until dropped, for sections
 /// that must not be interrupted half-way (binary replacement). Signals that
-/// arrive meanwhile are delivered when the guard drops. Children are not
-/// affected: `sys::exec` resets the mask before exec.
+/// arrive meanwhile are delivered when the guard drops. Children do not
+/// inherit the mask (`sys::exec` resets it before exec), but untimed ones
+/// started meanwhile get their own process group ([`cancel_blocked`]), so
+/// the terminal's Ctrl+C or hang-up does not reach them either.
 pub struct BlockSignals {
     previous: libc::sigset_t,
 }
@@ -310,6 +312,23 @@ impl Drop for BlockSignals {
         unsafe {
             libc::pthread_sigmask(libc::SIG_SETMASK, &self.previous, std::ptr::null_mut());
         }
+    }
+}
+
+/// Whether INT, TERM and HUP are all blocked in the calling thread (a
+/// [`BlockSignals`] section): `sys::exec` then keeps untimed children out
+/// of the terminal's process group as well.
+pub fn cancel_blocked() -> bool {
+    // SAFETY: a null new set only reads this thread's mask into `current`,
+    // a zero-initialised plain-data struct.
+    unsafe {
+        let mut current: libc::sigset_t = std::mem::zeroed();
+        if libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut current) != 0 {
+            return false;
+        }
+        CANCEL_SIGNALS
+            .iter()
+            .all(|sig| libc::sigismember(&current, *sig) == 1)
     }
 }
 

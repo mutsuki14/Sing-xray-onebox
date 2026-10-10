@@ -38,7 +38,9 @@
 //!   warning (same for a v2 old state that cannot be migrated, and for an
 //!   old state.json the apply could not read);
 //! - INT/TERM/HUP are blocked for the whole rollback, so a second Ctrl+C
-//!   or SIGTERM cannot abort it half-way through `rollback-stop`;
+//!   or SIGTERM cannot abort it half-way through `rollback-stop`; its
+//!   untimed firewall and hop commands then run in their own process group
+//!   (`sys::exec`), out of reach of the terminal's Ctrl+C and hang-up;
 //! - under a lock inherited from a self-update parent, `onebox-subscription`
 //!   is not started: the parent restores its own manager and starts it (G6);
 //! - one canonical service order everywhere (B-9.1#24).

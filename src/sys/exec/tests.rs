@@ -137,6 +137,56 @@ fn children_start_with_an_empty_signal_mask() {
     assert_eq!(u64::from_str_radix(&blocked, 16).unwrap(), 0);
 }
 
+/// The child's own pid and process group, from its `/proc/self/stat`.
+fn pid_and_group(cmd: Cmd) -> (i32, i32) {
+    let out = run(&cmd.arg("/proc/self/stat"));
+    assert!(out.ok(), "{}", out.stderr);
+    let pid = out.stdout.split(' ').next().unwrap().parse().unwrap();
+    // After the command name: state, ppid, pgrp.
+    let (_, rest) = out.stdout.rsplit_once(") ").unwrap();
+    let group = rest.split(' ').nth(2).unwrap().parse().unwrap();
+    (pid, group)
+}
+
+/// While INT/TERM/HUP are blocked (a rollback), untimed children leave the
+/// terminal's process group as timed ones do: a Ctrl+C or a hang-up there
+/// must not kill a firewall command half-way. Otherwise, and for a
+/// foreground child, they stay in ours.
+#[test]
+fn untimed_children_leave_our_group_while_signals_are_blocked() {
+    let _g = signal_guard();
+    // SAFETY: getpgrp has no preconditions.
+    let ours = unsafe { libc::getpgrp() };
+    // (signals blocked, foreground, timed, own group)
+    let cases = [
+        (false, false, false, false),
+        (true, false, false, true),
+        (true, true, false, false),
+        (false, false, true, true),
+        (true, true, true, true),
+    ];
+    for (blocked, foreground, timed, own) in cases {
+        let _block = blocked.then(|| crate::sys::signal::BlockSignals::new().unwrap());
+        let mut cmd = Cmd::new("cat");
+        if foreground {
+            cmd = cmd.foreground();
+        }
+        if timed {
+            cmd = cmd.timeout(Duration::from_secs(10));
+        }
+        let (pid, group) = pid_and_group(cmd);
+        let case = (blocked, foreground, timed);
+        if own {
+            assert_eq!(group, pid, "{case:?}");
+        } else {
+            assert_eq!(group, ours, "{case:?}");
+        }
+    }
+    // A child reading the terminal stays in the foreground group.
+    let _block = crate::sys::signal::BlockSignals::new().unwrap();
+    assert_eq!(pid_and_group(Cmd::new("cat").stdin_inherit()).1, ours);
+}
+
 #[test]
 fn timeout_kills_the_whole_group() {
     let _g = signal_guard();

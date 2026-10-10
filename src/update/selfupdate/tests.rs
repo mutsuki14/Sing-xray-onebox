@@ -456,6 +456,8 @@ fn successful_update_walks_the_journal_phases() {
     assert_eq!(regen.cmd.args, ["regen"]);
     assert_eq!(regen.cmd.stdin, Stdin::Null);
     assert!(!regen.cmd.stream, "output is captured");
+    // Interruptible from the terminal although the swap blocks signals.
+    assert!(regen.cmd.foreground);
     assert!(regen.cmd.env.contains(&(
         "ONEBOX_DIR".into(),
         fx.paths().root.to_string_lossy().into()

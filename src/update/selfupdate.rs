@@ -395,7 +395,10 @@ fn regenerate(ctx: &Ctx, lock: &FileLock) -> Result<ChildReport> {
         .service_env()
         .into_iter()
         .fold(Cmd::new(exe).arg("regen"), |cmd, (k, v)| cmd.env(k, v))
-        .inherit_lock(lock.raw_fd());
+        .inherit_lock(lock.raw_fd())
+        // Still interruptible from the terminal although the swap blocks
+        // the cancellation signals: the child rolls itself back.
+        .foreground();
     let output = ctx.run(&cmd).context("无法运行新版本程序")?;
     if output.ok() {
         return Ok(child_report(&output));

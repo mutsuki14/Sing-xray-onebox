@@ -127,8 +127,10 @@ fn hand_edited_onebox_crontab_lines_never_make_a_failed_apply_unrecoverable() {
 
 /// A second Ctrl+C or SIGTERM must not abort a rollback half-way (every
 /// unit stopped and disabled): the rollback runs with INT/TERM/HUP blocked,
-/// so no new signal is forwarded to its service-manager commands, while
-/// the forward stages stay cancellable.
+/// so no new signal is forwarded to its service-manager commands, and its
+/// untimed firewall commands run in their own process group (which
+/// `SystemExec` does while the signals are blocked, see
+/// `sys::exec::tests`), while the forward stages stay cancellable.
 #[test]
 fn rollbacks_run_with_cancellation_signals_blocked() {
     use crate::apply::harness::cancel_signals_blocked;
@@ -137,6 +139,8 @@ fn rollbacks_run_with_cancellation_signals_blocked() {
     // Run by the forward path (configure-services) and by rollback-files.
     host.probe_signal_mask("systemctl daemon-reload");
     host.probe_signal_mask("systemctl stop onebox-sing-box");
+    // Forward open-ports, then rollback-services' re-applied old rules.
+    host.probe_signal_mask("-I INPUT 1");
     host.features
         .inject(Fault::Fail(Checkpoint::Stage(Phase::StartCores)));
     let text = err_text(&host.apply(big_change(&host)).unwrap_err());
@@ -146,6 +150,9 @@ fn rollbacks_run_with_cancellation_signals_blocked() {
     assert_eq!(reloads.last(), Some(&true), "{reloads:?}");
     let stops = host.masks_seen("systemctl stop onebox-sing-box");
     assert!(stops.contains(&true), "rollback-stop: {stops:?}");
+    let inserts = host.masks_seen("-I INPUT 1");
+    assert_eq!(inserts.first(), Some(&false), "{inserts:?}");
+    assert_eq!(inserts.last(), Some(&true), "{inserts:?}");
     assert!(!cancel_signals_blocked(), "the mask is restored");
     assert_eq!(before.diff(&host.world()), Vec::<String>::new());
     // The same in a recovery of a crashed apply.

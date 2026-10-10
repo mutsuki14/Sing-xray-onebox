@@ -32,7 +32,7 @@ impl Exec for SystemExec {
             other => other,
         };
         let setup = ChildSetup {
-            new_group: cmd.timeout.is_some(),
+            new_group: cmd.timeout.is_some() || shielded(cmd),
             new_session: false,
             lock_fd,
             nofile: cmd.nofile,
@@ -94,6 +94,16 @@ impl Exec for SystemExec {
         let path = std::env::var_os("PATH").unwrap_or_default();
         which_in(program, &path)
     }
+}
+
+/// Whether an untimed child gets its own process group because the caller
+/// blocks the cancellation signals ([`Cmd::foreground`]). In our group it
+/// would still receive the terminal's Ctrl+C and the hang-up of a dropped
+/// SSH session with its mask reset — a firewall command of a rollback
+/// killed half-way, the rest of its rules skipped. A child reading the
+/// terminal stays in the foreground group (in another one it would stop).
+fn shielded(cmd: &Cmd) -> bool {
+    !cmd.foreground && cmd.stdin != super::Stdin::Inherit && signal::cancel_blocked()
 }
 
 /// The PATH the child will see: its own `PATH` entry, else ours unless the

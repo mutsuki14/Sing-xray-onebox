@@ -14,7 +14,11 @@
 //! held open by background grandchildren) and kills the whole process group;
 //! supervised children ([`Exec::spawn`]) run in their own session and are
 //! killed with their group when dropped; `which` also searches [`SAFE_PATH`]
-//! because cron and sudo often run us without the sbin directories.
+//! because cron and sudo often run us without the sbin directories; while
+//! the caller blocks the cancellation signals, untimed children run in
+//! their own process group too ([`Cmd::foreground`] opts out), so the
+//! terminal's signals cannot kill them in the middle of a section that
+//! must not be interrupted.
 
 mod fake;
 mod proc;
@@ -63,6 +67,9 @@ pub struct Cmd {
     /// Raise the child's open-files soft limit to this value (and its hard
     /// limit when allowed); see [`Cmd::nofile_limit`].
     pub nofile: Option<u64>,
+    /// Keep an untimed child in our process group even while the caller
+    /// blocks the cancellation signals; see [`Cmd::foreground`].
+    pub foreground: bool,
 }
 
 impl Cmd {
@@ -150,6 +157,17 @@ impl Cmd {
     /// Never fails the spawn.
     pub fn nofile_limit(mut self, limit: u64) -> Self {
         self.nofile = Some(limit);
+        self
+    }
+    /// While the calling thread blocks INT/TERM/HUP (a critical section
+    /// under [`BlockSignals`](crate::sys::signal::BlockSignals)), untimed
+    /// children run in their own process group, so a terminal Ctrl+C or a
+    /// hang-up cannot kill a firewall command half-way through a rollback
+    /// either. This keeps the child in our (the terminal's) group instead:
+    /// for a child that handles cancellation itself and should still be
+    /// interruptible from the terminal (the self-update child `regen`).
+    pub fn foreground(mut self) -> Self {
+        self.foreground = true;
         self
     }
     /// Program file name for messages (`/usr/bin/nginx` → `nginx`).

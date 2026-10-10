@@ -34,16 +34,10 @@ pub type Faults = Arc<Mutex<Vec<CommandFault>>>;
 /// itself runs as usual).
 pub type MaskProbes = Arc<Mutex<Vec<(String, Vec<bool>)>>>;
 
-/// Whether INT, TERM and HUP are all blocked in the calling thread.
+/// Whether INT, TERM and HUP are all blocked in the calling thread (then
+/// `SystemExec` also runs an untimed command in its own process group).
 pub fn cancel_signals_blocked() -> bool {
-    // SAFETY: queries this thread's mask into a zeroed sigset.
-    unsafe {
-        let mut current: libc::sigset_t = std::mem::zeroed();
-        libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut current);
-        [libc::SIGINT, libc::SIGTERM, libc::SIGHUP]
-            .iter()
-            .all(|s| libc::sigismember(&current, *s) == 1)
-    }
+    crate::sys::signal::cancel_blocked()
 }
 
 /// A rule that never matches: it only records the signal mask of probed
