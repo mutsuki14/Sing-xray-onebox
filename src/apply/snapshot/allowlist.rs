@@ -82,7 +82,7 @@ fn plain_name(name: &str) -> bool {
 pub enum TargetRule {
     /// Exactly this path; symlink checks start at its parent.
     Exact(PathBuf),
-    /// A direct child of `dir` with a plain name (see [`plain_name`]).
+    /// A direct child of `dir` with a plain name (see `plain_name`).
     Child { dir: PathBuf },
     /// `{home}/{domain}_ecc/{domain}.conf` (a retired acme.sh deployment);
     /// symlink checks start at `home`.

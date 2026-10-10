@@ -14,12 +14,12 @@
 //! (frps.toml, nginx.conf, client bundle, summary), [`ca`], [`preflight`],
 //! [`release`], [`journal`] + [`txn`] (transactions and recovery),
 //! [`runtime`] (host effects), [`lifecycle`] (operations), [`cli`]
-//! (command tree, handlers, menu), [`checks`] (doctor).
+//! (command tree, handlers, menu), [`mod@checks`] (doctor).
 //!
 //! Public entry points used by other packages: [`COMMAND`] (the `frps`
 //! tree for the registry), [`menu`] (G41), [`net_apply`] (the
 //! `onebox-frps` pre-start hook), [`recover`] (`onebox recover`, after the
-//! node journal), [`checks`] (`onebox doctor`), and the leaf
+//! node journal), [`checks()`] (`onebox doctor`), and the leaf
 //! [`model::installed`] / [`model::reservations`].
 //!
 //! Changes from v2 (details in each module): H-8.1#1 a fresh `--tls cf`

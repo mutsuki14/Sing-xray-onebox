@@ -4,7 +4,7 @@
 //! - [`archive`]: the format, validation and the in-transaction placement of
 //!   a backup's files (a leaf the apply engine calls);
 //! - [`store`]: create (under the node lock), list and rotate (keep 5);
-//! - [`restore`]: restore through `apply` with `Intents.restore_backup`;
+//! - [`mod@restore`]: restore through `apply` with `Intents.restore_backup`;
 //! - [`cli`]: `backup [标签]`, `backups`, `restore [ID|latest]`, `recover`.
 //!
 //! Nothing here prompts (G12); the restore confirmation is the CLI's.

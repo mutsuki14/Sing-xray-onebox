@@ -106,7 +106,7 @@ fn atomic_write_with(
     Ok(())
 }
 
-/// Replace `path` atomically with `bytes` (see [`atomic_write_with`]).
+/// Replace `path` atomically with `bytes` (see `atomic_write_with`).
 /// Missing parents are created with mode 0700.
 pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     atomic_write_with(path, mode, |file| file.write_all(bytes))

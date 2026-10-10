@@ -404,7 +404,7 @@ pub enum Http01Responder {
 
 /// The responder for proxy HTTP-01 challenges, `None` when the proxy
 /// certificate is not issued over HTTP-01. This is the contract behind the
-/// `AcmeHttp80` sharing rule in [`compatible`]: the certificate stage must
+/// `AcmeHttp80` sharing rule in `compatible`: the certificate stage must
 /// not start the built-in responder while an Onebox nginx owns port 80.
 pub fn proxy_http01_responder(cfg: &NodeConfig) -> Option<Http01Responder> {
     if !acme_http01(cfg) {

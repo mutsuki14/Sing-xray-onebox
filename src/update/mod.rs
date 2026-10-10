@@ -1,7 +1,7 @@
 //! Self-update of the manager (journal compatible with v2) and proxy core
 //! updates (spec G §1.2, §2.8–2.11, §5.2–5.4).
 //!
-//! - [`channel`]: the update channel (`stable` / `testing`) and the saved
+//! - [`mod@channel`]: the update channel (`stable` / `testing`) and the saved
 //!   preference `ROOT/update-channel`;
 //! - [`release`]: the manager's GitHub release for a channel, its asset for
 //!   this CPU and the version report printed before anything happens;

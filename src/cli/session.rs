@@ -1,8 +1,8 @@
 //! What every command handler works with: the context, the apply engine,
 //! live host facts and whether we run as root. All of it is injectable, so
 //! handlers and menus are tested end to end without root, network or the
-//! real transaction engine (tests use [`testing::Recorder`] and
-//! [`testing::FakeLive`]).
+//! real transaction engine (tests use `testing::Recorder` and
+//! `testing::FakeLive`).
 //!
 //! The shared rules of node mutations live here too:
 //! - every `ApplyRequest` is built from the loaded state with

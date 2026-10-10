@@ -64,6 +64,7 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
 cargo test --doc --locked
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked   # 文档注释里的链接不能失效或指向私有项
 sh -n onebox.sh && bash -n tests/bootstrap.sh
 LC_ALL=C.UTF-8 shellcheck -S warning onebox.sh scripts/check-version.sh tests/bootstrap.sh
 bash tests/bootstrap.sh                    # 引导脚本的离线测试（假 uname / curl / onebox）

@@ -26,7 +26,7 @@ const NAMED_SCHEDULES: [&str; 8] = [
 ///
 /// The job runs the managed executable with the fixed PATH and the service
 /// variables (`ONEBOX_INIT` = `init`), appending its output to `log`; the
-/// line recreates the log directory first (see [`command`]). Plain
+/// line recreates the log directory first (see `command`). Plain
 /// arguments stay bare, others are single-quoted; every `%` of the command
 /// is escaped (cron would turn it into a newline).
 pub fn line(

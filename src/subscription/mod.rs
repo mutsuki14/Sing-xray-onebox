@@ -16,8 +16,8 @@
 //!   `onebox-subscription-web` nginx.
 //! - [`lifecycle`]: the apply hooks (prepare, certificates, services,
 //!   publish) re-exported below with the signatures the apply engine uses.
-//! - [`endpoint`]: URLs and texts; [`request`] + [`cli`]: the commands;
-//!   [`renew`]: certificate renewal without an apply; [`checks`]: doctor.
+//! - [`mod@endpoint`]: URLs and texts; [`request`] + [`cli`]: the commands;
+//!   [`mod@renew`]: certificate renewal without an apply; [`mod@checks`]: doctor.
 //!
 //! Files under `ROOT/subscription/` (all inside the apply snapshot):
 //! `devices.json`, `published.json`, `listener.json`, `nginx.conf`
